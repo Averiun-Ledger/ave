@@ -20,7 +20,7 @@ use crate::{
         request::EventRequest,
     }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata
 };
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message,
 };
@@ -793,7 +793,7 @@ mod tests {
     use identity::{
         Blake3Hasher, DigestIdentifier, KeyPair, Signed, hash_borsh
     };
-    use rush::{ActorPath, ActorRef, SystemRef};
+    use ave_actors::{ActorPath, ActorRef, SystemRef};
     use serde_json::json;
     use test_log::test;
 

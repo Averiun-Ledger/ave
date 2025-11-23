@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use identity::PublicKey;
 use network::ComunicateInfo;
-use rush::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 

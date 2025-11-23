@@ -30,11 +30,11 @@ use crate::{
 use identity::{DigestIdentifier, PublicKey, Signature, keys::KeyPair};
 
 use async_trait::async_trait;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
     Message, Response, Sink,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 
 pub mod nodekey;
@@ -355,7 +355,7 @@ impl Actor for Node {
 
     async fn pre_start(
         &mut self,
-        ctx: &mut rush::ActorContext<Self>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Self::build_compilation_dir(ctx).await?;
         // Start store
@@ -451,7 +451,7 @@ impl Handler<Node> for Node {
         &mut self,
         _sender: ActorPath,
         msg: NodeMessage,
-        ctx: &mut rush::ActorContext<Node>,
+        ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
             NodeMessage::UpDistributor(subject_id) => {
@@ -837,7 +837,7 @@ impl Handler<Node> for Node {
                 ))
             }
             NodeMessage::IsAuthorized(subject_id) => {
-                let auth: Option<rush::ActorRef<Auth>> =
+                let auth: Option<ave_actors::ActorRef<Auth>> =
                     ctx.get_child("auth").await;
                 let authorized_subjects = if let Some(auth) = auth {
                     let res = match auth.ask(AuthMessage::GetAuths).await {

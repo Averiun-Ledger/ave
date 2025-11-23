@@ -20,7 +20,7 @@ identity = { package = "ave-identity", path = "../identity"}
 json-patch = { version = "4.0.0" }
 lazy_static = { workspace = true }
 memsecurity = { version = "3.5.2", features = ["encryption"]}
-rush = { workspace = true }
+ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -50,6 +50,6 @@ network = { package = "ave-network", path = "../network", features = ["test"]}
 
 [features]
 default = ["sqlite", "ext-sqlite"]
-rocksdb = ["rush/rocksdb"]
-sqlite = ["rush/sqlite"]
+rocksdb = ["ave-actors/rocksdb"]
+sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["rusqlite"]

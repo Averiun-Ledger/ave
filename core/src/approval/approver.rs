@@ -18,12 +18,12 @@ use crate::{
 use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
 use network::ComunicateInfo;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     CustomIntervalStrategy, Event, Handler, Message, RetryActor, RetryMessage,
     Strategy,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 

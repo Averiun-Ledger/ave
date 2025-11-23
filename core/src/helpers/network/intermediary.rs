@@ -21,7 +21,7 @@ use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
-use rush::{ActorError, ActorPath, ActorRef, SystemRef};
+use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
 use serde::Deserialize;
 use std::io::Cursor;
 use tokio::sync::mpsc;

@@ -3,11 +3,11 @@ use identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh
 };
 use network::ComunicateInfo;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message,
 };
-use rush::{
+use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -909,7 +909,7 @@ impl Handler<RequestManager> for RequestManager {
         &mut self,
         _sender: ActorPath,
         msg: RequestManagerMessage,
-        ctx: &mut rush::ActorContext<RequestManager>,
+        ctx: &mut ave_actors::ActorContext<RequestManager>,
     ) -> Result<(), ActorError> {
         match msg {
             RequestManagerMessage::Reboot { governance_id } => {

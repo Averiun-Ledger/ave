@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
     Strategy,

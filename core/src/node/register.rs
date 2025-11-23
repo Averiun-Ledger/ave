@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{error, warn};
@@ -114,7 +114,7 @@ impl Handler<Register> for Register {
         &mut self,
         _sender: ActorPath,
         msg: RegisterMessage,
-        ctx: &mut rush::ActorContext<Register>,
+        ctx: &mut ave_actors::ActorContext<Register>,
     ) -> Result<RegisterResponse, ActorError> {
         match msg {
             RegisterMessage::GetGovs { active } => {

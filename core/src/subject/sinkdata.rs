@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use async_trait::async_trait;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
@@ -208,7 +208,7 @@ impl Handler<SinkData> for SinkData {
         &mut self,
         _sender: ActorPath,
         msg: SinkDataMessage,
-        ctx: &mut rush::ActorContext<SinkData>,
+        ctx: &mut ave_actors::ActorContext<SinkData>,
     ) -> Result<SinkDataResponse, ActorError> {
         self.on_event(
             SinkDataEvent {

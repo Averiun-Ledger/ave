@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -75,7 +75,7 @@ impl Actor for RelationShip {
 
     async fn pre_start(
         &mut self,
-        ctx: &mut rush::ActorContext<Self>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.init_store("relation_ship", None, false, ctx).await
     }
@@ -94,7 +94,7 @@ impl Handler<RelationShip> for RelationShip {
         &mut self,
         _sender: ActorPath,
         msg: RelationShipMessage,
-        ctx: &mut rush::ActorContext<RelationShip>,
+        ctx: &mut ave_actors::ActorContext<RelationShip>,
     ) -> Result<RelationShipResponse, ActorError> {
         match msg {
             RelationShipMessage::GetSubjectsCount(owner_schema) => {

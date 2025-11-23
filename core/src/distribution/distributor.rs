@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
     Strategy,

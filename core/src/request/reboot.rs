@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use identity::DigestIdentifier;
-use rush::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -30,7 +30,7 @@ impl Reboot {
 
     async fn update_event_sn(
         &mut self,
-        ctx: &mut rush::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         self.sn_event =
             match get_last_event(ctx, &self.governance_id.to_string()).await {
@@ -48,7 +48,7 @@ impl Reboot {
 
     async fn update_ledger_sn(
         &mut self,
-        ctx: &mut rush::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         let metadata =
             get_metadata(ctx, &self.governance_id.to_string()).await?;
@@ -59,7 +59,7 @@ impl Reboot {
 
     async fn sleep(
         &self,
-        ctx: &mut rush::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         let actor = ctx.reference().await;
         if let Some(actor) = actor {
@@ -85,9 +85,9 @@ impl Reboot {
     }
 
     async fn finish(
-        ctx: &mut rush::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
-        let request_actor: Option<rush::ActorRef<RequestManager>> =
+        let request_actor: Option<ave_actors::ActorRef<RequestManager>> =
             ctx.parent().await;
 
         if let Some(request_actor) = request_actor {
@@ -123,7 +123,7 @@ impl Actor for Reboot {
 
     async fn pre_start(
         &mut self,
-        _ctx: &mut rush::ActorContext<Self>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -142,7 +142,7 @@ impl Handler<Reboot> for Reboot {
         &mut self,
         _sender: ActorPath,
         msg: RebootMessage,
-        ctx: &mut rush::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         match msg {
             RebootMessage::Init => {

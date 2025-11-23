@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey, Signed};
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message,
 };
@@ -85,7 +85,7 @@ impl Actor for ManualDistribution {
 
     async fn pre_start(
         &mut self,
-        _ctx: &mut rush::ActorContext<Self>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -104,7 +104,7 @@ impl Handler<ManualDistribution> for ManualDistribution {
         &mut self,
         _sender: ActorPath,
         msg: ManualDistributionMessage,
-        ctx: &mut rush::ActorContext<ManualDistribution>,
+        ctx: &mut ave_actors::ActorContext<ManualDistribution>,
     ) -> Result<(), ActorError> {
         match msg {
             ManualDistributionMessage::Update(subject_id) => {

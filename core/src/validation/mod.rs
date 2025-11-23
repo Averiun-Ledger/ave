@@ -21,7 +21,7 @@ use crate::{
     request::manager::{RequestManager, RequestManagerMessage},
     subject::Metadata,
 };
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message,
 };
@@ -560,7 +560,7 @@ pub mod tests {
     use identity::{
         Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh, keys::Ed25519Signer
     };
-    use rush::{ActorPath, ActorRef, Sink, SystemRef};
+    use ave_actors::{ActorPath, ActorRef, Sink, SystemRef};
 
     use crate::{
         CreateRequest, EOLRequest, EventRequest, Governance,  Node,

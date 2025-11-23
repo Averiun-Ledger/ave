@@ -50,7 +50,7 @@ use crate::{
 
 use event::LedgerEvent;
 use identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message, Response, Sink,
 };
@@ -60,7 +60,7 @@ use std::ops::Deref;
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
-use rush::{
+use ave_actors::{
     FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -1736,7 +1736,7 @@ impl Subject {
     ) -> Result<(), ActorError> {
         let tranfer_register_path =
             ActorPath::from("/user/node/transfer_register");
-        let transfer_register_actor: Option<rush::ActorRef<TransferRegister>> =
+        let transfer_register_actor: Option<ave_actors::ActorRef<TransferRegister>> =
             ctx.system().get_actor(&tranfer_register_path).await;
 
         let Some(transfer_register_actor) = transfer_register_actor else {
@@ -2994,7 +2994,7 @@ mod tests {
 
     use event::LedgerEventMessage;
     use identity::{Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer};
-    use rush::SystemRef;
+    use ave_actors::SystemRef;
     use serde_json::{Value, json};
     use test_log::test;
 

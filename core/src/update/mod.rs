@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message,
 };

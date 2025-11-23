@@ -3,11 +3,11 @@ use identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh
 };
 use manager::{RequestManager, RequestManagerMessage};
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message, Response, Sink,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use tracing::{error, info};
@@ -61,7 +61,7 @@ impl RequestHandler {
         subject_id: &str,
     ) -> Result<(), ActorError> {
         let request_path = ActorPath::from("/user/request");
-        let request_actor: Option<rush::ActorRef<RequestHandler>> =
+        let request_actor: Option<ave_actors::ActorRef<RequestHandler>> =
             ctx.system().get_actor(&request_path).await;
 
         if let Some(request_actor) = request_actor {
@@ -121,7 +121,7 @@ impl RequestHandler {
         };
 
         let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<rush::ActorRef<Node>> =
+        let node_actor: Option<ave_actors::ActorRef<Node>> =
             ctx.system().get_actor(&node_path).await;
 
         let response = if let Some(node_actor) = node_actor {
@@ -370,7 +370,7 @@ impl Handler<RequestHandler> for RequestHandler {
         &mut self,
         _sender: ActorPath,
         msg: RequestHandlerMessage,
-        ctx: &mut rush::ActorContext<RequestHandler>,
+        ctx: &mut ave_actors::ActorContext<RequestHandler>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
             RequestHandlerMessage::AbortRequest {

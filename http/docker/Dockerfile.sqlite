@@ -28,11 +28,11 @@ COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 
-COPY ./rush-rs/actor/Cargo.toml ./rush-rs/actor/Cargo.toml
-COPY ./rush-rs/databases/rocksdb_db/Cargo.toml ./rush-rs/databases/rocksdb_db/Cargo.toml
-COPY ./rush-rs/databases/sqlite_db/Cargo.toml ./rush-rs/databases/sqlite_db/Cargo.toml
-COPY ./rush-rs/store/Cargo.toml ./rush-rs/store/Cargo.toml
-COPY ./rush-rs/Cargo.toml ./rush-rs/Cargo.toml
+COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
 
 # Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
@@ -42,11 +42,11 @@ COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
 COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
 
-COPY ./rush-rs/actor/src ./rush-rs/actor/src
-COPY ./rush-rs/databases/rocksdb_db/src ./rush-rs/databases/rocksdb_db/src
-COPY ./rush-rs/databases/sqlite_db/src ./rush-rs/databases/sqlite_db/src
-COPY ./rush-rs/store/src ./rush-rs/store/src
-COPY ./rush-rs/src ./rush-rs/src
+COPY ./ave-actors/actor/src ./ave-actors/actor/src
+COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
+COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
+COPY ./ave-actors/store/src ./ave-actors/store/src
+COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
 RUN cargo build --target x86_64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
@@ -98,11 +98,11 @@ COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 
-COPY ./rush-rs/actor/Cargo.toml ./rush-rs/actor/Cargo.toml
-COPY ./rush-rs/databases/rocksdb_db/Cargo.toml ./rush-rs/databases/rocksdb_db/Cargo.toml
-COPY ./rush-rs/databases/sqlite_db/Cargo.toml ./rush-rs/databases/sqlite_db/Cargo.toml
-COPY ./rush-rs/store/Cargo.toml ./rush-rs/store/Cargo.toml
-COPY ./rush-rs/Cargo.toml ./rush-rs/Cargo.toml
+COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
 
 # Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
@@ -112,11 +112,11 @@ COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
 COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
 
-COPY ./rush-rs/actor/src ./rush-rs/actor/src
-COPY ./rush-rs/databases/rocksdb_db/src ./rush-rs/databases/rocksdb_db/src
-COPY ./rush-rs/databases/sqlite_db/src ./rush-rs/databases/sqlite_db/src
-COPY ./rush-rs/store/src ./rush-rs/store/src
-COPY ./rush-rs/src ./rush-rs/src
+COPY ./ave-actors/actor/src ./ave-actors/actor/src
+COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
+COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
+COPY ./ave-actors/store/src ./ave-actors/store/src
+COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
 RUN cargo build --target aarch64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"

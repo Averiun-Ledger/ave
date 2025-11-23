@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     Message,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -92,7 +92,7 @@ impl Actor for DBManager {
 
     async fn pre_start(
         &mut self,
-        ctx: &mut rush::ActorContext<Self>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.init_store("db_manager", None, false, ctx).await
     }
@@ -111,7 +111,7 @@ impl Handler<DBManager> for DBManager {
         &mut self,
         _sender: ActorPath,
         msg: DBManagerMessage,
-        ctx: &mut rush::ActorContext<DBManager>,
+        ctx: &mut ave_actors::ActorContext<DBManager>,
     ) -> Result<(), ActorError> {
         let Some(helper): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await

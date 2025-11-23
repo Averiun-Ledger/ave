@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{PublicKey, TimeStamp};
-use rush::{Actor, ActorContext, ActorError, ActorPath, Handler};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 

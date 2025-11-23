@@ -1,4 +1,4 @@
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
 };
 
@@ -70,7 +70,7 @@ impl Actor for Monitor {
 
     async fn pre_start(
         &mut self,
-        _ctx: &mut rush::ActorContext<Self>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -89,7 +89,7 @@ impl Handler<Monitor> for Monitor {
         &mut self,
         _sender: ActorPath,
         msg: MonitorMessage,
-        _ctx: &mut rush::ActorContext<Monitor>,
+        _ctx: &mut ave_actors::ActorContext<Monitor>,
     ) -> Result<MonitorResponse, ActorError> {
         match msg {
             MonitorMessage::Network(event) => {

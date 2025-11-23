@@ -28,7 +28,7 @@ use identity::{DigestIdentifier, PublicKey, TimeStamp};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
     Strategy,

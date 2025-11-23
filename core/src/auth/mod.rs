@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
     Message, Response,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
 use tracing::{error, warn};
@@ -196,7 +196,7 @@ impl Handler<Auth> for Auth {
         &mut self,
         _sender: ActorPath,
         msg: AuthMessage,
-        ctx: &mut rush::ActorContext<Auth>,
+        ctx: &mut ave_actors::ActorContext<Auth>,
     ) -> Result<AuthResponse, ActorError> {
         match msg {
             AuthMessage::CheckTransfer { subject_id } => {

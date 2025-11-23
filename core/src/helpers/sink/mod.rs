@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::Client;
-use rush::Subscriber;
+use ave_actors::Subscriber;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};

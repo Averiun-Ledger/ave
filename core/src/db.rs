@@ -4,11 +4,11 @@
 use crate::{config::AveDbConfig};
 
 #[cfg(feature = "sqlite")]
-use rush::SqliteManager;
-use rush::{ActorContext, ActorError, EncryptedKey};
-use rush::{Collection, DbManager, PersistentActor, State, StoreError};
+use ave_actors::SqliteManager;
+use ave_actors::{ActorContext, ActorError, EncryptedKey};
+use ave_actors::{Collection, DbManager, PersistentActor, State, StoreError};
 #[cfg(feature = "rocksdb")]
-use rush::{RocksDbManager, RocksDbStore};
+use ave_actors::{RocksDbManager, RocksDbStore};
 
 use async_trait::async_trait;
 
@@ -81,7 +81,7 @@ pub enum DbCollection {
     #[cfg(feature = "rocksdb")]
     RocksDb(RocksDbStore),
     #[cfg(feature = "sqlite")]
-    SQLite(rush::SqliteCollection),
+    SQLite(ave_actors::SqliteCollection),
 }
 
 impl Collection for DbCollection {

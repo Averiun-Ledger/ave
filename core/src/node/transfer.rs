@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 use crate::model::common::emit_fail;
 use async_trait::async_trait;
 use identity::PublicKey;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 

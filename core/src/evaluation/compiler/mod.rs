@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
 use serde::{Deserialize, Serialize};

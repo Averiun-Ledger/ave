@@ -1,6 +1,6 @@
 use identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
-use rush::Message;
+use ave_actors::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::{

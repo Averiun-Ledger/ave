@@ -14,7 +14,7 @@ use model::{
     RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas, RolesGov,
     RolesSchema, SchemaKeyCreators, SignersType, WitnessesData,
 };
-use rush::ActorError;
+use ave_actors::ActorError;
 
 pub use model::{Member, Quorum, Role, Schema};
 

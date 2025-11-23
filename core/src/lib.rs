@@ -39,7 +39,7 @@ use model::ValueWrapper;
 use model::event::Event;
 use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
-use rush::{ActorPath, ActorRef, Sink};
+use ave_actors::{ActorPath, ActorRef, Sink};
 use tokio::sync::RwLock;
 
 pub use network::MonitorNetworkState;

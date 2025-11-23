@@ -22,7 +22,7 @@ use std::{
 };
 
 use identity::{KeyPair};
-use rush::ActorRef;
+use ave_actors::ActorRef;
 
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm,

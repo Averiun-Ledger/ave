@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use identity::PublicKey;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
 };
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,7 @@ impl Actor for Query {
 
     async fn pre_start(
         &mut self,
-        _ctx: &mut rush::ActorContext<Self>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -101,7 +101,7 @@ impl Handler<Query> for Query {
         &mut self,
         _sender: ActorPath,
         msg: QueryMessage,
-        ctx: &mut rush::ActorContext<Query>,
+        ctx: &mut ave_actors::ActorContext<Query>,
     ) -> Result<QueryResponse, ActorError> {
         let Some(helper): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await

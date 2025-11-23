@@ -2,7 +2,7 @@ use rand::rng;
 use rand::seq::IteratorRandom;
 use std::collections::{HashMap, HashSet};
 
-use rush::{Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler};
 
 use identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
@@ -197,7 +197,7 @@ where
     A: Actor + Handler<A>,
 {
     let node_path = ActorPath::from("/user/node");
-    let node_actor: Option<rush::ActorRef<Node>> =
+    let node_actor: Option<ave_actors::ActorRef<Node>> =
         ctx.system().get_actor(&node_path).await;
 
     let response = if let Some(node_actor) = node_actor {
@@ -225,7 +225,7 @@ where
     A: Actor + Handler<A>,
 {
     let node_path = ActorPath::from("/user/node");
-    let node_actor: Option<rush::ActorRef<Node>> =
+    let node_actor: Option<ave_actors::ActorRef<Node>> =
         ctx.system().get_actor(&node_path).await;
 
     let response = if let Some(node_actor) = node_actor {
@@ -254,7 +254,7 @@ where
     A: Actor + Handler<A>,
 {
     let tranfer_register_path = ActorPath::from("/user/node/transfer_register");
-    let transfer_register_actor: Option<rush::ActorRef<TransferRegister>> =
+    let transfer_register_actor: Option<ave_actors::ActorRef<TransferRegister>> =
         ctx.system().get_actor(&tranfer_register_path).await;
 
     let response =

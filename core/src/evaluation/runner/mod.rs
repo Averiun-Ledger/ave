@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use borsh::{BorshDeserialize, to_vec};
 use identity::PublicKey;
 use json_patch::diff;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };

@@ -1,5 +1,5 @@
 use identity::hash_borsh;
-use rush::{ActorSystem, SystemRef, EncryptedKey};
+use ave_actors::{ActorSystem, SystemRef, EncryptedKey};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 

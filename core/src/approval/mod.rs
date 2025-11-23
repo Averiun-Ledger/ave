@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use identity::{PublicKey, Signed};
 use request::ApprovalReq;
 use response::ApprovalRes;
-use rush::{Actor, ActorContext, ActorError, ChildAction, Handler, Message};
-use rush::{ActorPath, ActorRef, Event};
-use rush::{LightPersistence, PersistentActor};
+use ave_actors::{Actor, ActorContext, ActorError, ChildAction, Handler, Message};
+use ave_actors::{ActorPath, ActorRef, Event};
+use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 

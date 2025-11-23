@@ -46,7 +46,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-rush = { workspace = true }
+ave-actors = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

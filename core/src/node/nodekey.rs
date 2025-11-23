@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use identity::PublicKey;
-use rush::{
+use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
 };
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ impl Actor for NodeKey {
 
     async fn pre_start(
         &mut self,
-        _ctx: &mut rush::ActorContext<Self>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -57,7 +57,7 @@ impl Handler<NodeKey> for NodeKey {
         &mut self,
         _sender: ActorPath,
         msg: NodeKeyMessage,
-        _ctx: &mut rush::ActorContext<NodeKey>,
+        _ctx: &mut ave_actors::ActorContext<NodeKey>,
     ) -> Result<NodeKeyResponse, ActorError> {
         match msg {
             NodeKeyMessage::GetPublicKey => {
