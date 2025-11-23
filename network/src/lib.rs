@@ -17,11 +17,11 @@ use std::fmt::{self, Debug};
 
 pub use control_list::Config as ControlListConfig;
 pub use error::Error;
-use identity::identifier::KeyIdentifier;
+use identity::PublicKey;
 pub use libp2p::{
     PeerId,
     identity::{
-        PublicKey, ed25519::PublicKey as PublicKeyEd25519,
+        PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519,
         secp256k1::PublicKey as PublicKeysecp256k1,
     },
 };
@@ -155,9 +155,9 @@ pub struct ComunicateInfo {
     /// The request version.
     pub version: u64,
     /// The sender key identifier.
-    pub sender: KeyIdentifier,
+    pub sender: PublicKey,
     /// The receiver key identifier.
-    pub reciver: KeyIdentifier,
+    pub receiver: PublicKey,
     /// The receiver actor.
-    pub reciver_actor: String,
+    pub receiver_actor: String,
 }

@@ -1,4 +1,4 @@
-use tell::{
+use ave_tell::{
     InboundFailure, InboundTellId, OutboundFailure, OutboundTellId,
     ProtocolSupport,
 };
@@ -98,7 +98,7 @@ async fn test_inbound_failure() {
     futures::future::select(server_task, client_task).await;
 }
 
-async fn wait_no_events(swarm: &mut Swarm<tell::Behaviour<TestCodec>>) {
+async fn wait_no_events(swarm: &mut Swarm<ave_tell::Behaviour<TestCodec>>) {
     loop {
         if let Ok(ev) =
             swarm.select_next_some().await.try_into_behaviour_event()
@@ -110,11 +110,11 @@ async fn wait_no_events(swarm: &mut Swarm<tell::Behaviour<TestCodec>>) {
 }
 
 async fn wait_outbound_failure(
-    swarm: &mut Swarm<tell::Behaviour<TestCodec>>,
+    swarm: &mut Swarm<ave_tell::Behaviour<TestCodec>>,
 ) -> Result<(PeerId, OutboundTellId, OutboundFailure)> {
     loop {
         match swarm.select_next_some().await.try_into_behaviour_event() {
-            Ok(tell::Event::OutboundFailure {
+            Ok(ave_tell::Event::OutboundFailure {
                 peer_id,
                 outbound_id,
                 error,
@@ -128,11 +128,11 @@ async fn wait_outbound_failure(
 }
 
 async fn wait_inbound_failure(
-    swarm: &mut Swarm<tell::Behaviour<TestCodec>>,
+    swarm: &mut Swarm<ave_tell::Behaviour<TestCodec>>,
 ) -> Result<(PeerId, InboundTellId, InboundFailure)> {
     loop {
         match swarm.select_next_some().await.try_into_behaviour_event() {
-            Ok(tell::Event::InboundFailure {
+            Ok(ave_tell::Event::InboundFailure {
                 peer_id,
                 inbound_id,
                 error,
@@ -147,22 +147,22 @@ async fn wait_inbound_failure(
 
 fn new_swarm_with_timeout(
     timeout: Duration,
-) -> (PeerId, Swarm<tell::Behaviour<TestCodec>>) {
+) -> (PeerId, Swarm<ave_tell::Behaviour<TestCodec>>) {
     let protocols = iter::once((
         StreamProtocol::new("/test/1"),
         ProtocolSupport::InboundOutbound,
     ));
-    let cfg = tell::Config::default().with_message_timeout(timeout);
+    let cfg = ave_tell::Config::default().with_message_timeout(timeout);
 
     let swarm = Swarm::new_ephemeral(|_| {
-        tell::Behaviour::<TestCodec>::new(protocols, cfg)
+        ave_tell::Behaviour::<TestCodec>::new(protocols, cfg)
     });
     let peed_id = *swarm.local_peer_id();
 
     (peed_id, swarm)
 }
 
-fn new_swarm() -> (PeerId, Swarm<tell::Behaviour<TestCodec>>) {
+fn new_swarm() -> (PeerId, Swarm<ave_tell::Behaviour<TestCodec>>) {
     new_swarm_with_timeout(Duration::from_millis(100))
 }
 
@@ -197,7 +197,7 @@ impl TryFrom<u8> for Action {
 }
 
 #[async_trait::async_trait]
-impl tell::Codec for TestCodec {
+impl ave_tell::Codec for TestCodec {
     type Protocol = StreamProtocol;
     type Message = Action;
 

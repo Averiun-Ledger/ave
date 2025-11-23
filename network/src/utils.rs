@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-const TARGET_UTILS: &str = "KoreNetwork-Utils";
+const TARGET_UTILS: &str = "AveNetwork-Utils";
 
 pub enum ScheduleType {
     Discover,

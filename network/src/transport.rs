@@ -23,7 +23,7 @@ use libp2p::core::transport::memory;
 #[cfg(not(feature = "test"))]
 use libp2p::tcp::{self, Config};
 
-pub type KoreTransport = Boxed<(PeerId, StreamMuxerBox)>;
+pub type AveTransport = Boxed<(PeerId, StreamMuxerBox)>;
 
 /// Builds the transport.
 ///
@@ -44,7 +44,7 @@ pub type KoreTransport = Boxed<(PeerId, StreamMuxerBox)>;
 pub fn build_transport(
     registry: &mut Registry,
     keys: &Keypair,
-) -> Result<KoreTransport, Error> {
+) -> Result<AveTransport, Error> {
     // Allow TCP transport.
     // port_reuse(true) for use the same port to send / receive communication.
     #[cfg(not(feature = "test"))]

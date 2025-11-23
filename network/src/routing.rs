@@ -800,7 +800,7 @@ mod tests {
             Behaviour::new(
                 PeerId::from_public_key(&key_pair.public()),
                 config,
-                StreamProtocol::new("/kore/routing/1.0.0"),
+                StreamProtocol::new("/ave/routing/1.0.0"),
                 NodeType::Bootstrap,
             )
         });

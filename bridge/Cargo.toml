@@ -1,0 +1,43 @@
+[package]
+name = "ave-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+core = { package = "ave-core", path = "../core", default-features = false}
+network = { package = "ave-network", path = "../network" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+prometheus-client = { workspace = true}
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal"] }
+tokio-util = { workspace = true }
+identity = { package = "ave-identity", path = "../identity"}
+pkcs8 = { version = "0.10.2", features = ["encryption"]}
+borsh = { workspace = true }
+config = { workspace = true }
+clap = { version = "4.5.35", features = ["derive"] }
+axum = { version = "0.8.1", optional = true }
+tracing = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serial_test = { workspace = true }
+
+[features]
+default = ["prometheus", "sqlite", "ext-sqlite"]
+rocksdb = ["core/rocksdb"]
+sqlite = ["core/sqlite"]
+ext-sqlite = ["core/ext-sqlite"]
+prometheus = ["axum"]
+
+[lib]
+bench = false

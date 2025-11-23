@@ -1,0 +1,141 @@
+# Dockerfile optimizado con cross-compilation nativa para SQLite
+# Este Dockerfile usa cross-compilation en lugar de emulación para ARM64
+
+# ============================================================================
+# Etapa base común para ambas arquitecturas
+# ============================================================================
+FROM rust:1.90-slim-bullseye AS base
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    pkg-config libssl-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# Etapa de compilación para AMD64 (nativa)
+# ============================================================================
+FROM base AS builder-amd64
+RUN rustup target add x86_64-unknown-linux-gnu
+
+ARG FEATURES=""
+ENV CARGO_FEATURES=$FEATURES
+
+# Copiar archivos de configuración primero para aprovechar el cache de Docker
+COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
+COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
+COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
+COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
+COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
+COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
+COPY ./ave/Cargo.toml ./ave/Cargo.toml
+
+COPY ./rush-rs/actor/Cargo.toml ./rush-rs/actor/Cargo.toml
+COPY ./rush-rs/databases/rocksdb_db/Cargo.toml ./rush-rs/databases/rocksdb_db/Cargo.toml
+COPY ./rush-rs/databases/sqlite_db/Cargo.toml ./rush-rs/databases/sqlite_db/Cargo.toml
+COPY ./rush-rs/store/Cargo.toml ./rush-rs/store/Cargo.toml
+COPY ./rush-rs/Cargo.toml ./rush-rs/Cargo.toml
+
+# Copiar archivos fuente
+COPY ./ave/http/src ./ave/http/src
+COPY ./ave/identity/src ./ave/identity/src
+COPY ./ave/core/src ./ave/core/src
+COPY ./ave/bridge/src ./ave/bridge/src
+COPY ./ave/network/src ./ave/network/src
+COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
+
+COPY ./rush-rs/actor/src ./rush-rs/actor/src
+COPY ./rush-rs/databases/rocksdb_db/src ./rush-rs/databases/rocksdb_db/src
+COPY ./rush-rs/databases/sqlite_db/src ./rush-rs/databases/sqlite_db/src
+COPY ./rush-rs/store/src ./rush-rs/store/src
+COPY ./rush-rs/src ./rush-rs/src
+
+WORKDIR /ave/http
+RUN cargo build --target x86_64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
+
+# ============================================================================
+# Etapa de compilación para ARM64 (cross-compilation NATIVA)
+# ============================================================================
+FROM base AS builder-arm64
+
+# Instalar herramientas de cross-compilation para ARM64
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && apt-get install --no-install-recommends -y \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    libssl-dev:arm64 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configurar el linker para ARM64
+RUN rustup target add aarch64-unknown-linux-gnu && \
+    mkdir -p ~/.cargo && \
+    echo '[target.aarch64-unknown-linux-gnu]' > ~/.cargo/config.toml && \
+    echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml && \
+    echo 'rustflags = ["-C", "link-arg=-lgcc"]' >> ~/.cargo/config.toml
+
+ARG FEATURES=""
+ENV CARGO_FEATURES=$FEATURES
+
+# Variables de entorno para cross-compilation
+ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+
+# Variables para OpenSSL ARM64
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+
+# Copiar archivos de configuración primero
+COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
+COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
+COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
+COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
+COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
+COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
+COPY ./ave/Cargo.toml ./ave/Cargo.toml
+
+COPY ./rush-rs/actor/Cargo.toml ./rush-rs/actor/Cargo.toml
+COPY ./rush-rs/databases/rocksdb_db/Cargo.toml ./rush-rs/databases/rocksdb_db/Cargo.toml
+COPY ./rush-rs/databases/sqlite_db/Cargo.toml ./rush-rs/databases/sqlite_db/Cargo.toml
+COPY ./rush-rs/store/Cargo.toml ./rush-rs/store/Cargo.toml
+COPY ./rush-rs/Cargo.toml ./rush-rs/Cargo.toml
+
+# Copiar archivos fuente
+COPY ./ave/http/src ./ave/http/src
+COPY ./ave/identity/src ./ave/identity/src
+COPY ./ave/core/src ./ave/core/src
+COPY ./ave/bridge/src ./ave/bridge/src
+COPY ./ave/network/src ./ave/network/src
+COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
+
+COPY ./rush-rs/actor/src ./rush-rs/actor/src
+COPY ./rush-rs/databases/rocksdb_db/src ./rush-rs/databases/rocksdb_db/src
+COPY ./rush-rs/databases/sqlite_db/src ./rush-rs/databases/sqlite_db/src
+COPY ./rush-rs/store/src ./rush-rs/store/src
+COPY ./rush-rs/src ./rush-rs/src
+
+WORKDIR /ave/http
+RUN cargo build --target aarch64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
+
+# ============================================================================
+# Imágenes finales
+# ============================================================================
+FROM --platform=linux/amd64 rust:1.90-slim-bullseye AS amd64
+RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/http /usr/local/bin/http
+RUN rustup target add wasm32-unknown-unknown
+CMD ["http"]
+
+FROM --platform=linux/arm64 rust:1.90-slim-bullseye AS arm64
+RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/http /usr/local/bin/http
+RUN rustup target add wasm32-unknown-unknown
+CMD ["http"]

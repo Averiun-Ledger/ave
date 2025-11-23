@@ -1,106 +1,138 @@
 #!/bin/bash
 
-# ===================== Configuración =====================
-# Runner por defecto. Para nextest: export RUNNER="cargo nextest run"
+# ===================== Configuration =====================
 RUNNER="${RUNNER:-cargo}"
-
-# Flags comunes para los tests (p.ej. --all-targets, --doc)
 BASE_FLAGS="${BASE_FLAGS:---all-targets}"
-
-# Flags de instalación de cargo-hack
 INSTALL_FLAGS="${INSTALL_FLAGS:---locked}"
-
-# Directorio de logs de cada ejecución
 LOG_DIR="${LOG_DIR:-target/test-logs}"
 
-# Matriz de combinaciones por paquete:
-# Formato por línea: <paquete>|<combo1>;<combo2>;...
-# - Cada combo son flags añadidos después de `-p <paquete>`
-# - Deja vacío tras el '|' si no quieres combos extra para ese paquete
+# OPTIMIZATION: Run tests in parallel
+PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
+
+# Matrix of combinations per package
 read -r -d '' MATRIX <<'EOF'
-identity|--all-features
-tell|--all-features
-network|--all-features
-kore-base|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
-kore-bridge|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
-kore-http|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
+ave-identity|--all-features
+ave-tell|--all-features
+ave-network|--all-features
+ave-core|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
+ave-bridge|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
+ave-http|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
 EOF
-# =========================================================
 
-# ======== Estado global para el resumen =========
-SUCCESSES=()           # etiquetas OK
-FAIL_LABELS=()         # etiquetas fallidas
-FAIL_DETAILS=()        # detalles por índice (resumen + lista de tests)
+# Global state
+SUCCESSES=()
+FAIL_LABELS=()
+FAIL_DETAILS=()
+FAIL_LOGS=()
 EXIT_CODE=0
+START_TIME=$(date +%s)
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
 
-# ======== Colores / banner (desactivados si NO_COLOR) ========
+# Colors
 if [ -n "${NO_COLOR:-}" ]; then
   BOLD=""; DIM=""; RED=""; GREEN=""; CYAN=""; YELLOW=""; RESET=""
+  BLUE=""; MAGENTA=""
 else
   BOLD=$'\033[1m'
   DIM=$'\033[2m'
   RED=$'\033[31m'
   GREEN=$'\033[32m'
   YELLOW=$'\033[33m'
+  BLUE=$'\033[34m'
+  MAGENTA=$'\033[35m'
   CYAN=$'\033[36m'
   RESET=$'\033[0m'
 fi
 
+# ======== Simplified UI functions ========
+
+print_header() {
+  echo
+  echo "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo "${BOLD}${CYAN}  $1${RESET}"
+  echo "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo
+}
+
 banner() {
-  # $1 = título principal
-  # $2 = subtítulo
   local title="$1"
   local subtitle="$2"
-  local line="======================================================================="
   echo
-  echo "${CYAN}${line}${RESET}"
-  printf "${BOLD}▶ %s${RESET}\n" "$title"
+  echo "${CYAN}▶${RESET} ${BOLD}${MAGENTA}${title}${RESET}"
   if [ -n "$subtitle" ]; then
-    printf "${DIM}   %s${RESET}\n" "$subtitle"
+    echo "  ${DIM}${subtitle}${RESET}"
   fi
-  echo "${CYAN}${line}${RESET}"
 }
 
-# ======== Utilidades ========
+print_result() {
+  local status="$1"
+  local logfile="$2"
+
+  if [ "$status" = "OK" ]; then
+    echo "  ${GREEN}✔ PASSED${RESET} ${DIM}(log: ${logfile})${RESET}"
+  else
+    echo "  ${RED}✖ FAILED${RESET} ${YELLOW}(exit: $status)${RESET} ${DIM}(log: ${logfile})${RESET}"
+  fi
+}
+
+# ======== Utilities ========
+
 ensure_tools() {
+  print_header "CHECKING TOOLS"
+
   if ! command -v cargo >/dev/null 2>&1; then
-    echo "Error: 'cargo' no está en PATH." >&2
+    echo "${RED}✖ Error: cargo not found${RESET}" >&2
     exit 1
   fi
+  echo "${GREEN}✔${RESET} cargo: $(cargo --version)"
+
   if ! cargo hack --version >/dev/null 2>&1; then
-    echo "Instalando cargo-hack..."
+    echo "${YELLOW}⚠ Installing cargo-hack...${RESET}"
     cargo install cargo-hack ${INSTALL_FLAGS}
     export PATH="$HOME/.cargo/bin:$PATH"
-    cargo hack --version >/dev/null 2>&1 || {
-      echo "No pude invocar 'cargo hack' tras la instalación. Revisa tu PATH." >&2
-      exit 2
-    }
-  else
-    echo "cargo-hack OK: $(cargo hack --version)"
   fi
+  echo "${GREEN}✔${RESET} cargo-hack: $(cargo hack --version)"
+
+  # Disable sccache for better performance
+  unset RUSTC_WRAPPER
+  echo "${BLUE}ℹ${RESET} sccache: DISABLED (better performance without cache)"
+
   mkdir -p "${LOG_DIR}"
+  echo "${GREEN}✔${RESET} Log directory: ${LOG_DIR}"
+  echo "${BLUE}⚡${RESET} Parallel jobs: ${PARALLEL_JOBS}"
 }
 
-# Normaliza espacios en un combo para usarlo como clave
 normalize_combo() {
   echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]]\{1,\}/ /g'
 }
 
-# Extrae lista de tests fallidos desde el log (formato libtest)
 extract_failures() {
-  # $1 = ruta del log
   awk '
-    /^failures:\s*$/ { in=1; next }
+    /^failures:[[:space:]]*$/ { in=1; next }
     in && NF==0 { in=0 }
     in { sub(/^[[:space:]]+/, "", $0); print $0 }
-  ' "$1"
+  ' "$1" 2>/dev/null || echo ""
 }
 
-# Ejecuta un comando de test, muestra banner, guarda log y clasifica resultado
+extract_test_stats() {
+  local total_passed=0
+  local total_failed=0
+
+  # Sum ALL "test result:" lines (unittests, integration tests, doctests)
+  while IFS= read -r line; do
+    local passed failed
+    passed=$(echo "$line" | grep -oP '\d+(?= passed)' || echo "0")
+    failed=$(echo "$line" | grep -oP '\d+(?= failed)' || echo "0")
+    total_passed=$((total_passed + passed))
+    total_failed=$((total_failed + failed))
+  done < <(grep -E 'test result:' "$1" 2>/dev/null)
+
+  echo "passed:$total_passed failed:$total_failed"
+}
+
 run_step() {
-  # $1 = label
-  # $2 = subtitle
-  shift 0
   local label="$1"; shift
   local subtitle="$1"; shift
 
@@ -111,30 +143,54 @@ run_step() {
   local logfile="${LOG_DIR}/$(date +%Y%m%d_%H%M%S)_${safe}.log"
 
   if "$@" > >(tee "${logfile}") 2>&1; then
-    echo "${GREEN}✔ OK${RESET}  (${logfile})"
+    print_result "OK" "${logfile}"
     SUCCESSES+=("${label} | ${subtitle}")
+
+    local stats
+    stats=$(extract_test_stats "${logfile}")
+    local passed failed
+    passed=$(echo "$stats" | cut -d: -f2 | cut -d' ' -f1)
+    failed=$(echo "$stats" | cut -d: -f3)
+    PASSED_TESTS=$((PASSED_TESTS + passed))
+    TOTAL_TESTS=$((TOTAL_TESTS + passed + failed))
   else
     local rc=$?
-    echo "${RED}✖ FALLÓ (rc=${rc})${RESET}  (${logfile})"
+    print_result "$rc" "${logfile}"
 
     local summary
-    summary="$(grep -E 'test result:' "${logfile}" | tail -1 || true)"
+    summary="$(grep -E 'test result:' "${logfile}" | tail -1 || echo "")"
 
-    local failed
-    failed="$(extract_failures "${logfile}")"
+    local failed_list
+    failed_list="$(extract_failures "${logfile}")"
 
     local details=""
-    if [ -n "${summary}" ]; then details+="${summary}"$'\n'; fi
-    if [ -n "${failed}" ]; then details+="failed tests:"$'\n'"${failed}"; fi
-    if [ -z "${details}" ]; then details="(no pude extraer nombres de tests; mira el log)"; fi
+    if [ -n "${summary}" ]; then
+      details+="${summary}"$'\n'
+    fi
+    if [ -n "${failed_list}" ]; then
+      details+="Failed tests:"$'\n'"${failed_list}"
+    fi
+    if [ -z "${details}" ]; then
+      details="(See log for details)"
+    fi
 
     FAIL_LABELS+=("${label} | ${subtitle}")
     FAIL_DETAILS+=("${details}")
+    FAIL_LOGS+=("${logfile}")
     EXIT_CODE=1
+
+    local stats
+    stats=$(extract_test_stats "${logfile}")
+    local passed failed
+    passed=$(echo "$stats" | cut -d: -f2 | cut -d' ' -f1)
+    failed=$(echo "$stats" | cut -d: -f3)
+    PASSED_TESTS=$((PASSED_TESTS + passed))
+    FAILED_TESTS=$((FAILED_TESTS + failed))
+    TOTAL_TESTS=$((TOTAL_TESTS + passed + failed))
   fi
+  echo
 }
 
-# Filtra el MATRIX si pasas nombres de paquetes como argumentos
 filter_matrix_lines() {
   if [[ "$#" -eq 0 ]]; then
     echo "${MATRIX}"
@@ -155,13 +211,10 @@ filter_matrix_lines() {
   echo "${filtered}"
 }
 
-# Agrupa paquetes por combo (bash 3.2: arrays paralelas)
-GROUP_KEYS=()  # combos normalizados
-GROUP_PKGS=()  # lista de pkgs (separados por espacio)
+GROUP_KEYS=()
+GROUP_PKGS=()
 
 add_to_group() {
-  # $1 = combo (normalizado)
-  # $2 = pkg
   local key="$1"
   local pkg="$2"
   local i
@@ -178,7 +231,6 @@ add_to_group() {
   GROUP_PKGS+=("${pkg}")
 }
 
-# Construye grupos a partir del MATRIX (y filtro opcional de paquetes)
 build_groups() {
   local lines
   lines="$(filter_matrix_lines "$@")"
@@ -200,20 +252,22 @@ build_groups() {
   done <<< "${lines}"
 }
 
-# Precompila (una vez por grupo) y luego ejecuta tests por paquete (informe individual)
 run_groups() {
-  local i
+  local total_groups=${#GROUP_KEYS[@]}
+  local current_group=0
+
+  print_header "RUNNING TESTS"
+
   for ((i=0; i<${#GROUP_KEYS[@]}; i++)); do
     local key="${GROUP_KEYS[$i]}"
     local pkgs="${GROUP_PKGS[$i]}"
+    current_group=$((current_group + 1))
 
-    # ===== Precompilación única del grupo =====
-    # Construimos comando para compilar tests sin ejecutarlos
-    local pre_label="precompile"
-    local pre_sub="pkgs: $(echo "${pkgs}" | tr ' ' ',')  | combo: ${key}  ${BASE_FLAGS}  (--no-run)"
+    # ===== Pre-compilation with parallel optimization =====
+    local pre_label="🔧 PRE-COMPILATION [${current_group}/${total_groups}]"
+    local pre_sub="Packages: $(echo "${pkgs}" | tr ' ' ', ') | Flags: ${key} ${BASE_FLAGS}"
     local pre_cmd=()
 
-    # Usamos cargo hack para pasar varios -p a la vez
     pre_cmd=(cargo hack test)
     local p
     for p in ${pkgs}; do pre_cmd+=(-p "$p"); done
@@ -223,21 +277,26 @@ run_groups() {
     local base_arr=( $BASE_FLAGS )
     pre_cmd+=("${key_arr[@]}")
     if [[ -n "${BASE_FLAGS}" ]]; then pre_cmd+=("${base_arr[@]}"); fi
+
+    # OPTIMIZATION: Add parallelization flags
+    pre_cmd+=(-j "${PARALLEL_JOBS}")
     pre_cmd+=(--no-run)
 
     run_step "${pre_label}" "${pre_sub}" "${pre_cmd[@]}"
 
-    # ===== Ejecución individual por paquete (informe por paquete) =====
+    # ===== Individual execution per package =====
+    local pkg_count=0
+    local total_pkgs=$(echo "${pkgs}" | wc -w)
+
     for p in ${pkgs}; do
-      local label="${p}"
-      local subtitle="[${key}] ${BASE_FLAGS}"
+      pkg_count=$((pkg_count + 1))
+      local label="📦 ${p} [${pkg_count}/${total_pkgs}]"
+      local subtitle="Flags: ${key} ${BASE_FLAGS}"
       local cmd=()
 
-      # Elegimos runner para la ejecución (no para precompilación)
       if [[ "${RUNNER}" == "cargo" ]]; then
         cmd=(cargo test -p "${p}")
       else
-        # RUNNER="cargo nextest run" u otro
         # shellcheck disable=SC2206
         cmd=( ${RUNNER} -p "${p}" )
       fi
@@ -245,37 +304,91 @@ run_groups() {
       cmd+=("${key_arr[@]}")
       if [[ -n "${BASE_FLAGS}" ]]; then cmd+=("${base_arr[@]}"); fi
 
+      # OPTIMIZATION: Tests in parallel
+      cmd+=(-j "${PARALLEL_JOBS}")
+
       run_step "${label}" "${subtitle}" "${cmd[@]}"
     done
   done
 }
 
+format_duration() {
+  local duration=$1
+  local hours=$((duration / 3600))
+  local minutes=$(((duration % 3600) / 60))
+  local seconds=$((duration % 60))
+
+  if [ $hours -gt 0 ]; then
+    printf "%dh %dm %ds" $hours $minutes $seconds
+  elif [ $minutes -gt 0 ]; then
+    printf "%dm %ds" $minutes $seconds
+  else
+    printf "%ds" $seconds
+  fi
+}
+
 print_summary() {
+  local end_time=$(date +%s)
+  local duration=$((end_time - START_TIME))
+
   echo
-  echo "${BOLD}==================== RESUMEN ====================${RESET}"
+  print_header "FINAL SUMMARY"
+
+  # Statistics
+  echo "${BOLD}Statistics:${RESET}"
+  echo "  ${GREEN}✔${RESET} Successful tests:  ${#SUCCESSES[@]}"
+  echo "  ${RED}✖${RESET} Failed tests:      ${#FAIL_LABELS[@]}"
+  echo "  ${BLUE}⧗${RESET} Total duration:    $(format_duration $duration)"
+  echo "  ${MAGENTA}Σ${RESET} Tests executed:    $TOTAL_TESTS"
+
+  if [ $TOTAL_TESTS -gt 0 ]; then
+    local success_rate=$((PASSED_TESTS * 100 / TOTAL_TESTS))
+    echo "  ${YELLOW}%${RESET} Success rate:      ${success_rate}%"
+  fi
+  echo
+
+  # Successful tests
   if [ "${#SUCCESSES[@]}" -gt 0 ]; then
-    echo "${GREEN}✔ OK (${#SUCCESSES[@]}):${RESET}"
+    echo "${BOLD}${GREEN}✔ SUCCESSFUL TESTS (${#SUCCESSES[@]}):${RESET}"
     local s
     for s in "${SUCCESSES[@]}"; do
-      echo "  - ${s}"
+      echo "  ${DIM}•${RESET} $s"
     done
+    echo
   fi
+
+  # Failed tests
   if [ "${#FAIL_LABELS[@]}" -gt 0 ]; then
-    echo "${RED}✖ FALLÓ (${#FAIL_LABELS[@]}):${RESET}"
-    local i
+    echo "${BOLD}${RED}✖ FAILED TESTS (${#FAIL_LABELS[@]}):${RESET}"
     for ((i=0; i<${#FAIL_LABELS[@]}; i++)); do
-      echo "  - ${FAIL_LABELS[$i]}"
-      echo "${FAIL_DETAILS[$i]}" | sed 's/^/      /'
+      echo
+      echo "  ${RED}⚠${RESET} ${BOLD}${FAIL_LABELS[$i]}${RESET}"
+      echo "     ${DIM}Log: ${FAIL_LOGS[$i]}${RESET}"
+      echo "     ${FAIL_DETAILS[$i]}" | sed 's/^/     /'
     done
+    echo
   fi
-  echo "${DIM}Logs en: ${LOG_DIR}${RESET}"
-  echo "${BOLD}=================================================${RESET}"
+
+  echo "${DIM}Logs saved in: ${LOG_DIR}${RESET}"
+  echo
+
+  # Final result
+  if [ "${EXIT_CODE}" -eq 0 ]; then
+    echo "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo "${GREEN}${BOLD}  ✔ ALL TESTS PASSED${RESET}"
+    echo "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  else
+    echo "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo "${RED}${BOLD}  ✖ SOME TESTS FAILED${RESET}"
+    echo "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  fi
   echo
 }
 
 main() {
+  print_header "AVE TEST SUITE"
   ensure_tools
-  build_groups "$@"   # opcional: pasa nombres de paquetes para filtrar
+  build_groups "$@"
   run_groups
   print_summary
   exit "${EXIT_CODE}"

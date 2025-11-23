@@ -22,7 +22,7 @@ use tracing::{error, info, warn};
 
 use crate::{RoutingNode, utils::request_update_lists};
 
-const TARGET_CONTROL_LIST: &str = "KoreNetwork-Control-list";
+const TARGET_CONTROL_LIST: &str = "AveNetwork-Control-list";
 
 /// Configuration for the control list behaviour.
 #[derive(Clone, Debug, Deserialize, Default)]

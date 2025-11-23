@@ -61,7 +61,7 @@ impl Behaviour {
             NodeType::Bootstrap | NodeType::Addressable => {
                 Some(binary::Behaviour::new(
                     iter::once((
-                        StreamProtocol::new("/kore/tell/1.0.0"),
+                        StreamProtocol::new("/Ave/tell/1.0.0"),
                         TellProtocol::InboundOutbound,
                     )),
                     config.tell,
@@ -70,7 +70,7 @@ impl Behaviour {
             NodeType::Ephemeral => None,
         };
 
-        let protocol_reqres = StreamProtocol::new("/kore/reqres/1.0.0");
+        let protocol_reqres = StreamProtocol::new("/ave/reqres/1.0.0");
         stream_protocols.insert(protocol_reqres.clone());
         stream_protocols.insert(StreamProtocol::new("/ipfs/id/1.0.0"));
 
@@ -100,15 +100,15 @@ impl Behaviour {
                 routing: routing::Behaviour::new(
                     PeerId::from_public_key(public_key),
                     config_routing,
-                    StreamProtocol::new("/kore/routing/1.0.0"),
+                    StreamProtocol::new("/ave/routing/1.0.0"),
                     config.node_type,
                 ),
                 identify: identify::Behaviour::new(
                     identify::Config::new(
-                        "/kore/1.0.0".to_owned(),
+                        "/ave/1.0.0".to_owned(),
                         public_key.clone(),
                     )
-                    .with_agent_version("kore/0.8.0".to_string()),
+                    .with_agent_version("ave/0.8.0".to_string()),
                 ),
                 tell: Toggle::from(tell),
                 req_res: request_response::cbor::Behaviour::new(

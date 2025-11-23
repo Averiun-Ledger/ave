@@ -21,15 +21,12 @@ use std::{
     time::Duration,
 };
 
-use identity::{
-    identifier::derive::KeyDerivator,
-    keys::{KeyMaterial, KeyPair},
-};
+use identity::{KeyPair};
 use rush::ActorRef;
 
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm,
-    identity::{Keypair, ed25519, secp256k1},
+    identity::{Keypair, ed25519},
     request_response::{self, ResponseChannel},
     swarm::{self, DialError, SwarmEvent, dial_opts::DialOpts},
 };
@@ -49,7 +46,7 @@ use tracing::{error, info, trace, warn};
 
 use std::collections::{HashMap, VecDeque};
 
-const TARGET_WORKER: &str = "KoreNetwork-Worker";
+const TARGET_WORKER: &str = "AveNetwork-Worker";
 
 /// Main network worker. Must be polled in order for the network to advance.
 ///
@@ -126,38 +123,35 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     /// Create a new `NetworkWorker`.
     pub fn new(
         registry: &mut Registry,
-        keys: KeyPair,
+        keys: &KeyPair,
         config: Config,
         monitor: Option<ActorRef<Monitor>>,
-        keyderivator: KeyDerivator,
         cancel: CancellationToken,
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(TARGET_WORKER, "Creating network");
         let (command_sender, command_receiver) = mpsc::channel(100000);
 
-        // Prepare the network crypto key.
-        let key = match keyderivator {
-            KeyDerivator::Ed25519 => {
-                let sk =
-                    ed25519::SecretKey::try_from_bytes(keys.secret_key_bytes())
-                        .map_err(|e| {
-                            Error::Worker(format!(
-                                "Invalid Ed25518 secret key {}",
-                                e
-                            ))
-                        })?;
+        let key = match keys {
+            KeyPair::Ed25519(ed25519_signer) => {
+                let sk_bytes =
+                    ed25519_signer.secret_key_bytes().map_err(|e| {
+                        Error::Worker(format!(
+                            "Can not obtain Ed25518 secret key {}",
+                            e
+                        ))
+                    })?;
+
+                let sk = ed25519::SecretKey::try_from_bytes(sk_bytes).map_err(
+                    |e| {
+                        Error::Worker(format!(
+                            "Invalid Ed25518 secret key {}",
+                            e
+                        ))
+                    },
+                )?;
+
                 let kp = ed25519::Keypair::from(sk);
-                Keypair::from(kp)
-            }
-            KeyDerivator::Secp256k1 => {
-                let sk = secp256k1::SecretKey::try_from_bytes(
-                    keys.secret_key_bytes(),
-                )
-                .map_err(|e| {
-                    Error::Worker(format!("Invalid Secp256k1 secret key {}", e))
-                })?;
-                let kp = secp256k1::Keypair::from(sk);
                 Keypair::from(kp)
             }
         };
@@ -503,7 +497,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     /// Run connection to bootstrap node.
     pub async fn run_connection(&mut self) -> Result<(), Error> {
         info!(TARGET_WORKER, "Running connection loop");
-        // If is the first node of kore network.
+        // If is the first node of ave network.
         if self.node_type == NodeType::Bootstrap && self.boot_nodes.is_empty() {
             self.change_state(NetworkState::Running).await;
             Ok(())
@@ -525,7 +519,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                             error!(
                                 TARGET_WORKER,
-                                "Can't connect to kore network"
+                                "Can't connect to ave network"
                             );
                             self.change_state(NetworkState::Disconnected).await;
                         } else {
@@ -596,7 +590,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     }
                     NetworkState::Disconnected => {
                         return Err(Error::Network(
-                            "Can't connect to kore network".to_owned(),
+                            "Can't connect to ave network".to_owned(),
                         ));
                     }
                     _ => {}
@@ -878,7 +872,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .cloned()
             .collect::<HashSet<StreamProtocol>>();
 
-        protocol_version == "/kore/1.0.0"
+        protocol_version == "/ave/1.0.0"
             && self.protocols.is_subset(&supp_protocols)
     }
 
@@ -1309,7 +1303,7 @@ mod tests {
     use serde::Deserialize;
     use test_log::test;
 
-    use identity::keys::KeyPair;
+    use identity::keys::{Ed25519Signer, KeyPair};
 
     use serial_test::serial;
 
@@ -1330,18 +1324,10 @@ mod tests {
             node_type,
             vec![memory_addr],
         );
-        let keys = KeyPair::default();
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let mut registry = Registry::default();
 
-        NetworkWorker::new(
-            &mut registry,
-            keys,
-            config,
-            None,
-            KeyDerivator::Ed25519,
-            token,
-        )
-        .unwrap()
+        NetworkWorker::new(&mut registry, &keys, config, None, token).unwrap()
     }
 
     // Create a config
@@ -1385,7 +1371,7 @@ mod tests {
         if let Err(e) = node.run_connection().await {
             assert_eq!(
                 e.to_string(),
-                "Network error: Can't connect to kore network"
+                "Network error: Can't connect to ave network"
             );
         };
 
@@ -1420,7 +1406,7 @@ mod tests {
         if let Err(e) = node.run_connection().await {
             assert_eq!(
                 e.to_string(),
-                "Network error: Can't connect to kore network"
+                "Network error: Can't connect to ave network"
             );
         };
 
