@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey, Signed};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message,
+    Message, NotPersistentActor,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
@@ -76,6 +76,8 @@ pub enum ManualDistributionMessage {
 }
 
 impl Message for ManualDistributionMessage {}
+
+impl NotPersistentActor for ManualDistribution {}
 
 #[async_trait]
 impl Actor for ManualDistribution {

@@ -1,22 +1,23 @@
 use async_trait::async_trait;
-use identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh
-};
-use manager::{RequestManager, RequestManagerMessage};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+};
+use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use tracing::{error, info};
 use types::ReqManInitMessage;
 
 use crate::HASH_ALGORITHM;
+use crate::request::manager::InitRequestManager;
+use crate::subject::CreateSubjectData;
 use crate::{
-    CreateRequest, EventRequest, Node, NodeMessage,
-    NodeResponse,
+    CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
     approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
     db::Storable,
     governance::{Governance, model::CreatorQuantity},
@@ -25,7 +26,6 @@ use crate::{
         Namespace,
         common::{get_gov, get_metadata, get_quantity, subject_owner},
     },
-    subject::CreateSubjectData,
 };
 
 pub mod manager;
@@ -48,14 +48,6 @@ pub struct RequestHandler {
 }
 
 impl RequestHandler {
-    pub fn new(node_key: PublicKey) -> Self {
-        RequestHandler {
-            node_key,
-            handling: HashMap::new(),
-            in_queue: HashMap::new(),
-        }
-    }
-
     async fn queued_event(
         ctx: &mut ActorContext<RequestHandler>,
         subject_id: &str,
@@ -333,15 +325,16 @@ impl Actor for RequestHandler {
         };
 
         for (subject_id, (request_id, request)) in self.handling.clone() {
-            let request_manager = RequestManager::new(
-                self.node_key.clone(),
-                request_id.clone(),
+            let request_manager_init = InitRequestManager {
+                our_key: self.node_key.clone(),
+                id: request_id.clone(),
                 subject_id,
                 request,
-                ReqManInitMessage::Validate,
-            );
+                command: ReqManInitMessage::Validate,
+            };
             let request_manager_actor =
-                ctx.create_child(&request_id, request_manager).await?;
+                ctx.create_child(&request_id, RequestManager::initial(request_manager_init)).await?;
+
             let sink = Sink::new(
                 request_manager_actor.subscribe(),
                 ext_db.get_request_manager(),
@@ -1016,16 +1009,19 @@ impl Handler<RequestHandler> for RequestHandler {
                     ),
                 };
 
-                let request_manager = RequestManager::new(
-                    self.node_key.clone(),
-                    request_id.clone(),
-                    subject_id.clone(),
-                    event.clone(),
+                let request_manager_init = InitRequestManager {
+                    our_key: self.node_key.clone(),
+                    id: request_id.clone(),
+                    subject_id: subject_id.clone(),
+                    request: event.clone(),
                     command,
-                );
+                };
 
                 let request_actor = match ctx
-                    .create_child(&request_id.clone(), request_manager)
+                    .create_child(
+                        &request_id.clone(),
+                        RequestManager::initial(request_manager_init),
+                    )
                     .await
                 {
                     Ok(request_actor) => request_actor,
@@ -1145,6 +1141,15 @@ impl Storable for RequestHandler {}
 #[async_trait]
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
+    type InitParams = PublicKey;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        RequestHandler {
+            node_key: params,
+            handling: HashMap::new(),
+            in_queue: HashMap::new(),
+        }
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

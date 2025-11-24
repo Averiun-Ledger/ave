@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use identity::PublicKey;
 use network::ComunicateInfo;
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -46,6 +46,8 @@ pub enum ValidationSchemaMessage {
 }
 
 impl Message for ValidationSchemaMessage {}
+
+impl NotPersistentActor for ValidationSchema {}
 
 #[async_trait]
 impl Actor for ValidationSchema {

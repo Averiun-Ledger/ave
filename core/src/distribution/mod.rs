@@ -5,7 +5,7 @@ use distributor::{Distributor, DistributorMessage};
 use identity::{PublicKey, Signed};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message,
+    Message, NotPersistentActor,
 };
 use tracing::{error, warn};
 
@@ -140,6 +140,8 @@ pub enum DistributionMessage {
 }
 
 impl Message for DistributionMessage {}
+
+impl NotPersistentActor for Distribution {}
 
 #[async_trait]
 impl Handler<Distribution> for Distribution {

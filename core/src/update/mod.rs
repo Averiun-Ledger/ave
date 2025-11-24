@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message,
+    Message, NotPersistentActor,
 };
 
 use async_trait::async_trait;
@@ -175,6 +175,8 @@ impl Actor for Update {
         Ok(())
     }
 }
+
+impl NotPersistentActor for Update {}
 
 #[async_trait]
 impl Handler<Update> for Update {

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use identity::PublicKey;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,8 @@ pub enum NodeKeyResponse {
 }
 
 impl Response for NodeKeyResponse {}
+
+impl NotPersistentActor for NodeKey {}
 
 #[async_trait]
 impl Actor for NodeKey {

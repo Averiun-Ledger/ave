@@ -29,9 +29,7 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
-    Strategy,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
 };
 use tracing::{error, warn};
 
@@ -223,6 +221,8 @@ pub enum ValidatorMessage {
 
 impl Message for ValidatorMessage {}
 
+impl NotPersistentActor for Validator {}
+
 #[async_trait]
 impl Actor for Validator {
     type Event = ();
@@ -339,7 +339,7 @@ impl Handler<Validator> for Validator {
                 let retry_actor = RetryActor::new(target, message, strategy);
 
                 let retry = match ctx
-                    .create_child::<RetryActor<RetryNetwork>>(
+                    .create_child::<RetryActor<RetryNetwork>, _>(
                         "retry",
                         retry_actor,
                     )

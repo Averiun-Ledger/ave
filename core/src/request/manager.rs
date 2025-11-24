@@ -1,8 +1,4 @@
 use async_trait::async_trait;
-use identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh
-};
-use network::ComunicateInfo;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message,
@@ -10,6 +6,10 @@ use ave_actors::{
 use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
+use identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+};
+use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
@@ -17,9 +17,9 @@ use tracing::{error, info, warn};
 use crate::HASH_ALGORITHM;
 use crate::subject::SignedLedger;
 use crate::{
-    ActorMessage, Event as AveEvent, EventRequest, 
-    NetworkMessage, Subject, SubjectMessage, SubjectResponse,
-    Validation, ValidationInfo, ValidationMessage, ValueWrapper,
+    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Subject,
+    SubjectMessage, SubjectResponse, Validation, ValidationInfo,
+    ValidationMessage, ValueWrapper,
     approval::{Approval, ApprovalMessage},
     auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
     db::Storable,
@@ -66,24 +66,15 @@ pub struct RequestManager {
     command: ReqManInitMessage,
 }
 
+pub struct InitRequestManager {
+    pub our_key: PublicKey,
+    pub id: String,
+    pub subject_id: String,
+    pub request: Signed<EventRequest>,
+    pub command: ReqManInitMessage,
+}
+
 impl RequestManager {
-    pub fn new(
-        our_key: PublicKey,
-        id: String,
-        subject_id: String,
-        request: Signed<EventRequest>,
-        command: ReqManInitMessage,
-    ) -> Self {
-        RequestManager {
-            our_key,
-            id,
-            state: RequestManagerState::Starting,
-            subject_id,
-            request,
-            version: 0,
-            command,
-        }
-    }
     async fn send_validation(
         &self,
         ctx: &mut ActorContext<RequestManager>,
@@ -314,7 +305,13 @@ impl RequestManager {
                 };
                 (
                     LedgerValue::Error(e),
-                    hash_borsh(&*hash.hasher(), &val_info.metadata.properties).map_err(|e| Error::Hash(format!("Error converting state to hash: {}", e)))?,
+                    hash_borsh(&*hash.hasher(), &val_info.metadata.properties)
+                        .map_err(|e| {
+                            Error::Hash(format!(
+                                "Error converting state to hash: {}",
+                                e
+                            ))
+                        })?,
                 )
             }
         };
@@ -616,7 +613,7 @@ impl RequestManager {
         } else {
             hash_borsh(&*hash.hasher(), &metadata.properties).map_err(|e| {
                 ActorError::FunctionalFail(format!(
-                    "Can not obtain hash id for metadata propierties: {}",
+                    "Can not obtain hash id for metadata properties: {}",
                     e
                 ))
             })?
@@ -915,9 +912,8 @@ impl Handler<RequestManager> for RequestManager {
             RequestManagerMessage::Reboot { governance_id } => {
                 info!(TARGET_MANAGER, "Init reboot {}", self.id);
                 if let RequestManagerState::Reboot = self.state.clone() {
-                    let reboot = Reboot::new(governance_id);
                     let reboot_actor =
-                        match ctx.create_child("reboot", reboot).await {
+                        match ctx.create_child("reboot", Reboot::new(governance_id)).await {
                             Ok(actor) => actor,
                             Err(e) => {
                                 error!(
@@ -1591,7 +1587,46 @@ impl Handler<RequestManager> for RequestManager {
 #[async_trait]
 impl PersistentActor for RequestManager {
     type Persistence = LightPersistence;
+    type InitParams = InitRequestManager;
 
+    fn create_initial(params: Self::InitParams) -> Self {
+        let Self::InitParams {
+            our_key,
+            id,
+            subject_id,
+            request,
+            command,
+        } = params;
+
+        RequestManager {
+            our_key,
+            id,
+            state: RequestManagerState::Starting,
+            subject_id,
+            request,
+            version: 0,
+            command,
+        }
+    }
+    /*
+        pub fn new(
+        our_key: PublicKey,
+        id: String,
+        subject_id: String,
+        request: Signed<EventRequest>,
+        command: ReqManInitMessage,
+    ) -> Self {
+        RequestManager {
+            our_key,
+            id,
+            state: RequestManagerState::Starting,
+            subject_id,
+            request,
+            version: 0,
+            command,
+        }
+    }
+     */
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {

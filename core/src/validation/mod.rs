@@ -23,7 +23,7 @@ use crate::{
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message,
+    Message, NotPersistentActor,
 };
 
 use async_trait::async_trait;
@@ -238,6 +238,8 @@ pub enum ValidationMessage {
 }
 
 impl Message for ValidationMessage {}
+
+impl NotPersistentActor for Validation {}
 
 #[async_trait]
 impl Actor for Validation {
@@ -560,7 +562,7 @@ pub mod tests {
     use identity::{
         Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh, keys::Ed25519Signer
     };
-    use ave_actors::{ActorPath, ActorRef, Sink, SystemRef};
+    use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
 
     use crate::{
         CreateRequest, EOLRequest, EventRequest, Governance,  Node,
@@ -590,12 +592,10 @@ pub mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, ..) = create_system().await;
 
-        let node = Node::new(node_keys.clone()).unwrap();
-        let node_actor = system.create_root_actor("node", node).await.unwrap();
+        let node_actor = system.create_root_actor("node", Node::initial(node_keys.clone())).await.unwrap();
 
-        let request = RequestHandler::new(node_keys.public_key());
         let request_actor =
-            system.create_root_actor("request", request).await.unwrap();
+            system.create_root_actor("request", RequestHandler::initial(node_keys.public_key())).await.unwrap();
 
         let query_actor = system
             .create_root_actor("query", Query::new(node_keys.public_key()))

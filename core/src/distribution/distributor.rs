@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
-    Strategy,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
 };
 
 use crate::{
@@ -664,6 +662,8 @@ pub enum DistributorMessage {
 
 impl Message for DistributorMessage {}
 
+impl NotPersistentActor for Distributor {}
+
 #[async_trait]
 impl Handler<Distributor> for Distributor {
     async fn handle_message(
@@ -1070,7 +1070,7 @@ impl Handler<Distributor> for Distributor {
                 let retry_actor = RetryActor::new(target, message, strategy);
 
                 let retry = match ctx
-                    .create_child::<RetryActor<RetryNetwork>>(
+                    .create_child::<RetryActor<RetryNetwork>, _>(
                         "retry",
                         retry_actor,
                     )

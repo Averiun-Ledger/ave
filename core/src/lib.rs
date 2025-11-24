@@ -39,7 +39,7 @@ use model::ValueWrapper;
 use model::event::Event;
 use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
-use ave_actors::{ActorPath, ActorRef, Sink};
+use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
 use tokio::sync::RwLock;
 
 pub use network::MonitorNetworkState;
@@ -158,9 +158,8 @@ impl Api {
             let _ = worker.run().await;
         });
 
-        let node = Node::new(keys.clone())?;
         let node_actor =
-            system.create_root_actor("node", node).await.map_err(|e| {
+            system.create_root_actor("node", Node::initial(keys.clone())).await.map_err(|e| {
                 let e = format!("Can not get node actor: {}", e);
                 error!(TARGET_API, "Init system, {}", e);
                 Error::System(e.to_owned())
@@ -193,9 +192,8 @@ impl Api {
             return Err(Error::System(e.to_owned()));
         };
 
-        let request = RequestHandler::new(keys.public_key());
         let request_actor = system
-            .create_root_actor("request", request)
+            .create_root_actor("request", RequestHandler::initial(keys.public_key()))
             .await
             .map_err(|e| {
                 let e = format!("Can not get request actor: {}", e);

@@ -5,7 +5,7 @@ use crate::{
     CreateRequest, Error, EventRequestType, Governance, Node,
     approval::{
         Approval,
-        approver::{Approver, VotationType},
+        approver::{Approver, InitApprover, VotationType},
     },
     auth::WitnessesAuth,
     config::Config,
@@ -48,21 +48,21 @@ use crate::{
     },
 };
 
-use event::LedgerEvent;
-use identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message, Response, Sink,
 };
+use event::LedgerEvent;
+use identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
 
 use std::ops::Deref;
 
 use async_trait::async_trait;
-use borsh::{BorshDeserialize, BorshSerialize};
-use json_patch::{Patch, patch};
 use ave_actors::{
     FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
+use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
 use sinkdata::{SinkData, SinkDataMessage};
@@ -85,6 +85,27 @@ pub struct CreateSubjectData {
     pub creator: PublicKey,
     pub genesis_gov_version: u64,
     pub value: ValueWrapper,
+}
+
+impl From<CreateSubjectData> for Subject {
+    fn from(value: CreateSubjectData) -> Self {
+        Subject {
+            name: value.create_req.name,
+            description: value.create_req.description,
+            subject_id: value.subject_id,
+            governance_id: value.create_req.governance_id,
+            genesis_gov_version: value.genesis_gov_version,
+            namespace: value.create_req.namespace,
+            schema_id: value.create_req.schema_id,
+            owner: value.creator.clone(),
+            new_owner: None,
+            creator: value.creator,
+            last_event_hash: DigestIdentifier::default(),
+            active: true,
+            sn: 0,
+            properties: value.value,
+        }
+    }
 }
 
 /// Subject metadata.
@@ -151,25 +172,7 @@ pub struct Subject {
 }
 
 impl Subject {
-    pub fn new(data: CreateSubjectData) -> Self {
-        Subject {
-            name: data.create_req.name,
-            description: data.create_req.description,
-            subject_id: data.subject_id,
-            governance_id: data.create_req.governance_id,
-            genesis_gov_version: data.genesis_gov_version,
-            namespace: data.create_req.namespace,
-            schema_id: data.create_req.schema_id,
-            owner: data.creator.clone(),
-            new_owner: None,
-            creator: data.creator,
-            last_event_hash: DigestIdentifier::default(),
-            active: true,
-            sn: 0,
-            properties: data.value,
-        }
-    }
-
+    
     /// Creates a new `Subject` from an create event.
     ///
     /// # Arguments
@@ -213,8 +216,7 @@ impl Subject {
             Err(Error::Subject("Invalid create event request".to_string()))
         }
     }
-
-    async fn get_node_key(
+        async fn get_node_key(
         &self,
         ctx: &mut ActorContext<Subject>,
     ) -> Result<PublicKey, ActorError> {
@@ -454,15 +456,17 @@ impl Subject {
                 return Err(ActorError::NotHelper("config".to_owned()));
             };
 
-            // If we are a approver
-            let approver = Approver::new(
-                String::default(),
-                0,
-                our_key.clone(),
-                subject_id.to_string(),
-                VotationType::from(config.always_accept),
-            );
-            let approver_actor = ctx.create_child("approver", approver).await?;
+            let init_approver = InitApprover {
+                request_id: String::default(),
+                version: 0,
+                node: our_key.clone(),
+                subject_id: subject_id.to_string(),
+                pass_votation: VotationType::from(config.always_accept),
+            };
+
+            let approver_actor = ctx
+                .create_child("approver", Approver::initial(init_approver))
+                .await?;
 
             let sink =
                 Sink::new(approver_actor.subscribe(), ext_db.get_approver());
@@ -567,16 +571,17 @@ impl Subject {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
-                // If we are a approver
-                let approver = Approver::new(
-                    String::default(),
-                    0,
-                    our_key.clone(),
-                    subject_id.to_string(),
-                    VotationType::from(config.always_accept),
-                );
-                let approver_actor =
-                    ctx.create_child("approver", approver).await?;
+                let init_approver = InitApprover {
+                    request_id: String::default(),
+                    version: 0,
+                    node: our_key.clone(),
+                    subject_id: subject_id.to_string(),
+                    pass_votation: VotationType::from(config.always_accept),
+                };
+
+                let approver_actor = ctx
+                    .create_child("approver", Approver::initial(init_approver))
+                    .await?;
 
                 let sink = Sink::new(
                     approver_actor.subscribe(),
@@ -664,17 +669,20 @@ impl Subject {
         let evaluation = Evaluation::new(our_key.clone());
         ctx.create_child("evaluation", evaluation).await?;
 
-        let approval = Approval::new(our_key.clone());
-        ctx.create_child("approval", approval).await?;
+        ctx.create_child("approval", Approval::initial(our_key.clone()))
+            .await?;
 
-        let approver = Approver::new(
-            String::default(),
-            0,
-            our_key.clone(),
-            subject_id.to_string(),
-            VotationType::from(config.always_accept),
-        );
-        let approver_actor = ctx.create_child("approver", approver).await?;
+        let init_approver = InitApprover {
+            request_id: String::default(),
+            version: 0,
+            node: our_key.clone(),
+            subject_id: subject_id.to_string(),
+            pass_votation: VotationType::from(config.always_accept),
+        };
+
+        let approver_actor = ctx
+            .create_child("approver", Approver::initial(init_approver))
+            .await?;
 
         let sink = Sink::new(approver_actor.subscribe(), ext_db.get_approver());
         ctx.system().run_sink(sink).await;
@@ -1231,7 +1239,7 @@ impl Subject {
         &self,
         event: SignedLedger,
     ) -> Result<(), Error> {
-        if let EventRequest::Create(event_req) =
+        let is_gov = if let EventRequest::Create(event_req) =
             event.content.event_request.content.clone()
         {
             if let Some(name) = event_req.name
@@ -1253,6 +1261,8 @@ impl Subject {
             {
                 return Err(Error::Subject("In create event, governance_id must be empty, namespace must be empty and gov version must be 0".to_owned()));
             }
+
+            event_req.schema_id == "governance"
         } else {
             return Err(Error::Subject(
                 "First event is not a create event".to_owned(),
@@ -1301,7 +1311,7 @@ impl Subject {
             event.content.appr_success,
             event.content.appr_required,
             event.content.vali_success,
-            self.governance_id.is_empty(),
+            is_gov,
         )? {
             Ok(())
         } else {
@@ -1736,8 +1746,9 @@ impl Subject {
     ) -> Result<(), ActorError> {
         let tranfer_register_path =
             ActorPath::from("/user/node/transfer_register");
-        let transfer_register_actor: Option<ave_actors::ActorRef<TransferRegister>> =
-            ctx.system().get_actor(&tranfer_register_path).await;
+        let transfer_register_actor: Option<
+            ave_actors::ActorRef<TransferRegister>,
+        > = ctx.system().get_actor(&tranfer_register_path).await;
 
         let Some(transfer_register_actor) = transfer_register_actor else {
             return Err(ActorError::NotFound(tranfer_register_path));
@@ -2278,8 +2289,8 @@ impl Subject {
             .map_err(|e| {
                 Error::Subject(format!("Failed to extract event patch: {}", e))
             })?;
-        let mut propierties = (*self.properties).clone();
-        let Ok(()) = patch(&mut propierties, &patch_json) else {
+        let mut properties = (*self.properties).clone();
+        let Ok(()) = patch(&mut properties, &patch_json) else {
             return Err(Error::Subject(
                 "Failed to apply event patch".to_owned(),
             ));
@@ -2287,7 +2298,7 @@ impl Subject {
 
         let hash_state_after_patch = hash_borsh(
             &*state_hash.algorithm().hasher(),
-            &ValueWrapper(propierties),
+            &ValueWrapper(properties),
         )
         .map_err(|e| {
             Error::Subject(format!(
@@ -2419,9 +2430,12 @@ impl Actor for Subject {
             return Err(ActorError::NotHelper("sink".to_owned()));
         };
 
-        let ledger_event = LedgerEvent::new(self.governance_id.is_empty());
-        let ledger_event_actor =
-            ctx.create_child("ledger_event", ledger_event).await?;
+        let ledger_event_actor = ctx
+            .create_child(
+                "ledger_event",
+                LedgerEvent::initial(self.governance_id.is_empty()),
+            )
+            .await?;
 
         let sink = Sink::new(
             ledger_event_actor.subscribe(),
@@ -2429,8 +2443,8 @@ impl Actor for Subject {
         );
         ctx.system().run_sink(sink).await;
 
-        let vali_data = ValiData::default();
-        let vali_data_actor = ctx.create_child("vali_data", vali_data).await?;
+        let vali_data_actor =
+            ctx.create_child("vali_data", ValiData::initial(())).await?;
         let sink =
             Sink::new(vali_data_actor.subscribe(), ext_db.get_vali_data());
         ctx.system().run_sink(sink).await;
@@ -2638,15 +2652,29 @@ impl Handler<Subject> for Subject {
 #[async_trait]
 impl PersistentActor for Subject {
     type Persistence = FullPersistence;
+    type InitParams = Option<Self>;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        params.unwrap_or_default()
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+        let is_gov = {
+            match &event.content.event_request.content {
+                EventRequest::Create(create_event) => {
+                    create_event.governance_id.is_empty()
+                }
+                _ => self.governance_id.is_empty(),
+            }
+        };
+
         let valid_event = match verify_protocols_state(
             EventRequestType::from(event.content.event_request.content.clone()),
             event.content.eval_success,
             event.content.appr_success,
             event.content.appr_required,
             event.content.vali_success,
-            self.governance_id.is_empty(),
+            is_gov,
         ) {
             Ok(is_ok) => is_ok,
             Err(e) => {
@@ -2659,7 +2687,7 @@ impl PersistentActor for Subject {
 
         if valid_event {
             match &event.content.event_request.content {
-                EventRequest::Create(_start_request) => {
+                EventRequest::Create(create_event) => {
                     let last_event_hash = hash_borsh(
                         &*event.signature.content_hash.algorithm().hasher(),
                         &event,
@@ -2673,23 +2701,44 @@ impl PersistentActor for Subject {
                         ActorError::Functional(error)
                     })?;
 
-                    if self.schema_id != "governance" {
-                        let propierties = match event.content.value.clone() {
-                            LedgerValue::Patch(value_wrapper) => value_wrapper,
-                            LedgerValue::Error(e) => {
-                                let error = format!(
-                                    "Apply, event value can not be an error if protocols was successful: {:?}",
-                                    e
-                                );
-                                error!(TARGET_SUBJECT, error);
-                                return Err(ActorError::Functional(error));
-                            }
-                        };
+                    let properties = if create_event.schema_id == "governance" {
+                        let gov = Governance::new(
+                            event
+                                .content
+                                .event_request
+                                .signature
+                                .signer
+                                .clone(),
+                        );
+                        gov.to_value_wrapper().map_err(|e| {
+                            ActorError::Functional(e.to_string())
+                        })?
+                    } else if let LedgerValue::Patch(init_state) =
+                        event.content.value.clone()
+                    {
+                        init_state
+                    } else {
+                        let e = "Can not create subject, ledgerValue is not a patch";
+                        return Err(ActorError::Functional(e.to_string()));
+                    };
 
-                        self.properties = propierties;
-                    }
-
+                    self.name = create_event.name.clone();
+                    self.description = create_event.description.clone();
+                    self.subject_id = event.content.subject_id.clone();
+                    self.governance_id = create_event.governance_id.clone();
+                    self.genesis_gov_version = event.content.gov_version;
+                    self.namespace = create_event.namespace.clone();
+                    self.schema_id = create_event.schema_id.clone();
                     self.last_event_hash = last_event_hash;
+                    self.owner =
+                        event.content.event_request.signature.signer.clone();
+                    self.creator =
+                        event.content.event_request.signature.signer.clone();
+                    self.new_owner = None;
+                    self.sn = 0;
+                    self.active = true;
+                    self.properties = properties;
+
                     return Ok(());
                 }
                 EventRequest::Fact(_fact_request) => {
@@ -2725,7 +2774,7 @@ impl PersistentActor for Subject {
                     Ok(gov) => gov,
                     Err(e) => {
                         let error = format!(
-                            "Apply, Governance_id is empty but can not convert propierties in governance data: {}",
+                            "Apply, Governance_id is empty but can not convert properties in governance data: {}",
                             e
                         );
                         error!(TARGET_SUBJECT, error);
@@ -2774,7 +2823,7 @@ mod tests {
 
     use std::{
         collections::HashSet,
-        time::{Duration, Instant},
+        time::Instant,
     };
 
     use super::*;
@@ -2782,8 +2831,7 @@ mod tests {
     use crate::{
         FactRequest,
         model::{
-            event::Event as AveEvent,
-            request::tests::create_start_request_mock,
+            event::Event as AveEvent, request::tests::create_start_request_mock,
         },
         node::NodeResponse,
         system::tests::create_system,
@@ -2792,14 +2840,11 @@ mod tests {
     async fn create_subject_and_ledger_event(
         system: SystemRef,
         node_keys: KeyPair,
-    ) -> (
-        ActorRef<Subject>,
-        ActorRef<LedgerEvent>,
-        Subject,
-        Signed<Ledger>,
-    ) {
-        let node = Node::new(node_keys.clone()).unwrap();
-        let node_actor = system.create_root_actor("node", node).await.unwrap();
+    ) -> (ActorRef<Subject>, ActorRef<LedgerEvent>, Signed<Ledger>) {
+        let node_actor = system
+            .create_root_actor("node", Node::initial(node_keys.clone()))
+            .await
+            .unwrap();
         let request = create_start_request_mock("issuer", node_keys.clone());
         let event = AveEvent::from_create_request(
             &request,
@@ -2824,16 +2869,10 @@ mod tests {
             signature: signature_event,
         };
 
-        let subject = Subject::from_event(
-            &signed_ledger,
-            Governance::new(signed_ledger.signature.signer.clone())
-                .to_value_wrapper()
-                .unwrap(),
-        )
-        .unwrap();
-
         let response = node_actor
-            .ask(NodeMessage::CreateNewSubjectLedger(SignedLedger(signed_ledger.clone())))
+            .ask(NodeMessage::CreateNewSubjectLedger(SignedLedger(
+                signed_ledger.clone(),
+            )))
             .await
             .unwrap();
 
@@ -2844,7 +2883,7 @@ mod tests {
         let subject_actor = system
             .get_actor(&ActorPath::from(format!(
                 "user/node/{}",
-                subject.subject_id
+                signed_ledger.content.subject_id
             )))
             .await
             .unwrap();
@@ -2852,7 +2891,7 @@ mod tests {
         let ledger_event_actor: Option<ActorRef<LedgerEvent>> = system
             .get_actor(&ActorPath::from(format!(
                 "user/node/{}/ledger_event",
-                subject.subject_id
+                signed_ledger.content.subject_id
             )))
             .await;
 
@@ -2882,7 +2921,7 @@ mod tests {
             panic!("Invalid response");
         }
 
-        (subject_actor, ledger_event_actor, subject, signed_ledger)
+        (subject_actor, ledger_event_actor, signed_ledger)
     }
 
     fn create_n_fact_events(
@@ -2890,7 +2929,7 @@ mod tests {
         n: u64,
         keys: KeyPair,
         subject_id: DigestIdentifier,
-        mut subject_propierties: Value,
+        mut subject_properties: Value,
     ) -> Vec<SignedLedger> {
         let mut vec = vec![];
 
@@ -2923,11 +2962,11 @@ mod tests {
             let patch_json =
                 serde_json::from_value::<Patch>(patch_event_req.clone())
                     .unwrap();
-            patch(&mut subject_propierties, &patch_json).unwrap();
+            patch(&mut subject_properties, &patch_json).unwrap();
 
             let state_hash = hash_borsh(
                 &Blake3Hasher,
-                &ValueWrapper(subject_propierties.clone()),
+                &ValueWrapper(subject_properties.clone()),
             )
             .unwrap();
 
@@ -2992,90 +3031,13 @@ mod tests {
         }
     }
 
-    use event::LedgerEventMessage;
-    use identity::{Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer};
     use ave_actors::SystemRef;
+    use event::LedgerEventMessage;
+    use identity::{
+        Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer,
+    };
     use serde_json::{Value, json};
     use test_log::test;
-
-    #[test(tokio::test)]
-    async fn test_subject() {
-        let (system, ..) = create_system().await;
-        let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-        let node = Node::new(node_keys.clone()).unwrap();
-        let node_actor = system.create_root_actor("node", node).await.unwrap();
-        let request = create_start_request_mock("issuer", node_keys.clone());
-        let event = AveEvent::from_create_request(
-            &request,
-            0,
-            &Governance::new(node_keys.public_key())
-                .to_value_wrapper()
-                .unwrap(),
-        )
-        .unwrap();
-        let ledger = Ledger::from(event);
-        let signature = Signature::new(&ledger, &node_keys).unwrap();
-        let signed_ledger = Signed {
-            content: ledger,
-            signature,
-        };
-
-        let subject = Subject::from_event(
-            &signed_ledger,
-            Governance::new(signed_ledger.signature.signer.clone())
-                .to_value_wrapper()
-                .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(subject.namespace, Namespace::from("namespace"));
-        let actor_id = subject.subject_id.to_string();
-        node_actor
-            .ask(NodeMessage::CreateNewSubjectLedger(SignedLedger(signed_ledger.clone())))
-            .await
-            .unwrap();
-
-        let subject_actor = system
-            .get_actor::<Subject>(&ActorPath::from(format!(
-                "/user/node/{}",
-                subject.subject_id
-            )))
-            .await
-            .unwrap();
-
-        let path = subject_actor.path().clone();
-
-        let response = subject_actor
-            .ask(SubjectMessage::GetMetadata)
-            .await
-            .unwrap();
-        if let SubjectResponse::Metadata(metadata) = response {
-            assert_eq!(metadata.namespace, Namespace::from("namespace"));
-        } else {
-            panic!("Invalid response");
-        }
-
-        subject_actor.ask_stop().await.unwrap();
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let subject_actor = system.get_actor::<Subject>(&path).await;
-        assert!(subject_actor.is_none());
-
-        let subject_actor = system
-            .create_root_actor(&actor_id, Subject::default())
-            .await
-            .unwrap();
-
-        let response = subject_actor
-            .ask(SubjectMessage::GetMetadata)
-            .await
-            .unwrap();
-        if let SubjectResponse::Metadata(metadata) = response {
-            assert_eq!(metadata.namespace, Namespace::from("namespace"));
-        } else {
-            panic!("Invalid response");
-        }
-    }
 
     #[test]
     fn test_serialize_deserialize() {
@@ -3086,8 +3048,7 @@ mod tests {
             .unwrap();
 
         let request = create_start_request_mock("issuer", node_keys.clone());
-        let event =
-            AveEvent::from_create_request(&request, 0, &value).unwrap();
+        let event = AveEvent::from_create_request(&request, 0, &value).unwrap();
 
         let ledger = Ledger::from(event);
 
@@ -3123,7 +3084,7 @@ mod tests {
         let (system, ..) = create_system().await;
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        let (subject_actor, _ledger_event_actor, _subject, _signed_ledger) =
+        let (subject_actor, _ledger_event_actor, _signed_ledger) =
             create_subject_and_ledger_event(system, node_keys.clone()).await;
 
         let response = subject_actor
@@ -3157,8 +3118,16 @@ mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, ..) = create_system().await;
 
-        let (subject_actor, _ledger_event_actor, subject, signed_ledger) =
+        let (subject_actor, _ledger_event_actor, signed_ledger) =
             create_subject_and_ledger_event(system, node_keys.clone()).await;
+
+        let res = subject_actor
+            .ask(SubjectMessage::GetMetadata)
+            .await
+            .unwrap();
+        let SubjectResponse::Metadata(metadata) = res else {
+            panic!("Invalid response")
+        };
 
         let hash_pre_event = hash_borsh(&Blake3Hasher, &signed_ledger).unwrap();
 
@@ -3169,8 +3138,8 @@ mod tests {
                     hash_pre_event,
                     1000,
                     node_keys,
-                    subject.subject_id,
-                    subject.properties.0,
+                    metadata.subject_id,
+                    metadata.properties.0,
                 ),
             })
             .await

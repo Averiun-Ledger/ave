@@ -4,8 +4,7 @@ use crate::model::common::emit_fail;
 use async_trait::async_trait;
 use identity::PublicKey;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
@@ -130,6 +129,11 @@ impl Handler<TransferRegister> for TransferRegister {
 #[async_trait]
 impl PersistentActor for TransferRegister {
     type Persistence = LightPersistence;
+    type InitParams = ();
+
+    fn create_initial(_params: Self::InitParams) -> Self {
+        Self::default()
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {

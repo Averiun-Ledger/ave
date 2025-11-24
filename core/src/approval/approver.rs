@@ -113,26 +113,15 @@ pub struct Approver {
     info: Option<ComunicateInfo>,
 }
 
-impl Approver {
-    pub fn new(
-        request_id: String,
-        version: u64,
-        node: PublicKey,
-        subject_id: String,
-        pass_votation: VotationType,
-    ) -> Self {
-        Approver {
-            node,
-            request_id,
-            version,
-            subject_id,
-            pass_votation,
-            state: None,
-            request: None,
-            info: None,
-        }
-    }
+pub struct InitApprover {
+    pub request_id: String,
+    pub version: u64,
+    pub node: PublicKey,
+    pub subject_id: String,
+    pub pass_votation: VotationType,
+}
 
+impl Approver {
     async fn check_governance(
         &self,
         ctx: &mut ActorContext<Approver>,
@@ -581,7 +570,7 @@ impl Handler<Approver> for Approver {
                 let retry_actor = RetryActor::new(target, message, strategy);
 
                 let Ok(retry) = ctx
-                    .create_child::<RetryActor<RetryNetwork>>(
+                    .create_child::<RetryActor<RetryNetwork>, _>(
                         "retry",
                         retry_actor,
                     )
@@ -924,6 +913,21 @@ impl Handler<Approver> for Approver {
 #[async_trait]
 impl PersistentActor for Approver {
     type Persistence = LightPersistence;
+    type InitParams = InitApprover;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        let Self::InitParams {
+            node,
+            request_id,
+            version,
+            subject_id,
+            pass_votation,
+        } = params;
+
+        Self { node, request_id, version, subject_id, pass_votation, state: None,
+            request: None,
+            info: None, }
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {

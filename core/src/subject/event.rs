@@ -25,15 +25,6 @@ pub struct LedgerEvent {
     pub last_event: Option<Signed<AveEvent>>,
 }
 
-impl LedgerEvent {
-    pub fn new(is_gov: bool) -> Self {
-        Self {
-            is_gov,
-            last_event: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum LedgerEventMessage {
     UpdateLastEvent { event: Box<Signed<AveEvent>> },
@@ -186,6 +177,14 @@ impl Handler<LedgerEvent> for LedgerEvent {
 #[async_trait]
 impl PersistentActor for LedgerEvent {
     type Persistence = LightPersistence;
+    type InitParams = bool;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        Self {
+            is_gov: params,
+            last_event: None,
+        }
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         self.last_event = Some(event.event.clone());

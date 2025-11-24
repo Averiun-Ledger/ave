@@ -208,6 +208,11 @@ impl Handler<Register> for Register {
 #[async_trait]
 impl PersistentActor for Register {
     type Persistence = LightPersistence;
+    type InitParams = ();
+
+    fn create_initial(_params: Self::InitParams) -> Self {
+        Register::default()
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

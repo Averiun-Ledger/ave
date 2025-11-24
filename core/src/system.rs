@@ -1,5 +1,5 @@
 use identity::hash_borsh;
-use ave_actors::{ActorSystem, SystemRef, EncryptedKey};
+use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -57,9 +57,8 @@ pub async fn system(
 
     system.add_helper("encrypted_key", encrypted_key).await;
 
-    let db_manager = DBManager::new(config.garbage_collector);
     let db_manager_actor = system
-        .create_root_actor("db_manager", db_manager)
+        .create_root_actor("db_manager", DBManager::initial(config.garbage_collector))
         .await
         .map_err(|e| Error::System(e.to_string()))?;
 

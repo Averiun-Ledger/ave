@@ -69,13 +69,6 @@ pub struct Auth {
 }
 
 impl Auth {
-    pub fn new(key: PublicKey) -> Self {
-        Self {
-            our_node: key,
-            auth: HashMap::new(),
-        }
-    }
-
     async fn create_req_schema(
         ctx: &mut ActorContext<Auth>,
         subject_id: DigestIdentifier,
@@ -471,6 +464,14 @@ impl Handler<Auth> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
+    type InitParams = PublicKey;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        Self {
+            our_node: params,
+            auth: HashMap::new(),
+        }
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

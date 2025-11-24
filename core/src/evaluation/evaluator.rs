@@ -22,9 +22,7 @@ use json_patch::diff;
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    FixedIntervalStrategy, Handler, Message, RetryActor, RetryMessage,
-    Strategy,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
 };
 
 use serde_json::Value;
@@ -463,6 +461,8 @@ impl Actor for Evaluator {
     type Response = ();
 }
 
+impl NotPersistentActor for Evaluator {}
+
 #[async_trait]
 impl Handler<Evaluator> for Evaluator {
     async fn handle_message(
@@ -602,7 +602,7 @@ impl Handler<Evaluator> for Evaluator {
                 let retry_actor = RetryActor::new(target, message, strategy);
 
                 let retry = match ctx
-                    .create_child::<RetryActor<RetryNetwork>>(
+                    .create_child::<RetryActor<RetryNetwork>, _>(
                         "retry",
                         retry_actor,
                     )

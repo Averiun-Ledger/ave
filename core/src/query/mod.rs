@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use identity::PublicKey;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
 };
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
@@ -73,6 +73,8 @@ pub enum QueryResponse {
 }
 
 impl Response for QueryResponse {}
+
+impl NotPersistentActor for Query {}
 
 #[async_trait]
 impl Actor for Query {

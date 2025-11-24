@@ -11,6 +11,7 @@ use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
+use crate::approval::approver::InitApprover;
 use crate::evaluation::response::EvalLedgerResponse;
 use crate::governance::model::ProtocolTypes;
 use crate::model::SignTypesNode;
@@ -139,17 +140,19 @@ impl Approval {
                 return Err(ActorError::NotFound(approver_path));
             }
         } else {
+            let init_approver = InitApprover {
+                request_id: request_id.to_owned(),
+                version,
+                node: signer.clone(),
+                subject_id: approval_req.content.subject_id.to_string(),
+                pass_votation: VotationType::Manual
+            };
+            
             // Create Approvers child
             let Ok(child) = ctx
                 .create_child(
                     &signer.to_string(),
-                    Approver::new(
-                        request_id.to_owned(),
-                        version,
-                        signer.clone(),
-                        approval_req.content.subject_id.to_string(),
-                        VotationType::Manual,
-                    ),
+                    Approver::initial(init_approver)
                 )
                 .await
             else {
@@ -488,6 +491,11 @@ impl Handler<Approval> for Approval {
 #[async_trait]
 impl PersistentActor for Approval {
     type Persistence = LightPersistence;
+    type InitParams = PublicKey;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        Self { node_key: params, ..Default::default()}
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {

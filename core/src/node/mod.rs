@@ -20,10 +20,7 @@ use crate::{
     governance::Governance,
     helpers::db::ExternalDB,
     manual_distribution::ManualDistribution,
-    model::{
-        Namespace, SignTypesNode,
-        event::LedgerValue,
-    },
+    model::{Namespace, SignTypesNode, ValueWrapper, event::LedgerValue},
     subject::{CreateSubjectData, SignedLedger},
 };
 
@@ -85,17 +82,6 @@ pub struct Node {
 }
 
 impl Node {
-    /// Creates a new node.
-    pub fn new(kp: KeyPair) -> Result<Self, Error> {
-        Ok(Self {
-            owner: kp,
-            owned_subjects: HashMap::new(),
-            known_subjects: HashMap::new(),
-            transfer_subjects: HashMap::new(),
-            temporal_subjects: HashMap::new(),
-        })
-    }
-
     /// Gets the node's owner identifier.
     ///
     /// # Returns
@@ -216,7 +202,7 @@ impl Node {
 
         for (subject, _) in self.owned_subjects.clone() {
             let subject_actor =
-                ctx.create_child(&subject, Subject::default()).await?;
+                ctx.create_child(&subject, Subject::initial(None)).await?;
             let sink =
                 Sink::new(subject_actor.subscribe(), ext_db.get_subject());
             ctx.system().run_sink(sink).await;
@@ -240,7 +226,7 @@ impl Node {
 
             if data.governance_id.is_none() || i_new_owner {
                 let subject_actor =
-                    ctx.create_child(&subject, Subject::default()).await?;
+                    ctx.create_child(&subject, Subject::initial(None)).await?;
                 let sink =
                     Sink::new(subject_actor.subscribe(), ext_db.get_subject());
                 ctx.system().run_sink(sink).await;
@@ -361,7 +347,7 @@ impl Actor for Node {
         // Start store
         self.init_store("node", None, true, ctx).await?;
 
-        ctx.create_child("register", Register::default()).await?;
+        ctx.create_child("register", Register::initial(())).await?;
 
         ctx.create_child("key", NodeKey::new(self.owner())).await?;
 
@@ -373,7 +359,8 @@ impl Actor for Node {
 
         self.create_subjects(ctx).await?;
 
-        ctx.create_child("auth", Auth::new(self.owner())).await?;
+        ctx.create_child("auth", Auth::initial(self.owner()))
+            .await?;
 
         ctx.create_child(
             "distributor",
@@ -382,10 +369,10 @@ impl Actor for Node {
             },
         )
         .await?;
-        ctx.create_child("relation_ship", RelationShip::default())
+        ctx.create_child("relation_ship", RelationShip::initial(()))
             .await?;
 
-        ctx.create_child("transfer_register", TransferRegister::default())
+        ctx.create_child("transfer_register", TransferRegister::initial(()))
             .await?;
 
         Ok(())
@@ -402,6 +389,17 @@ impl Actor for Node {
 #[async_trait]
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
+    type InitParams = KeyPair;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        Self {
+            owner: params,
+            owned_subjects: HashMap::new(),
+            known_subjects: HashMap::new(),
+            temporal_subjects: HashMap::new(),
+            transfer_subjects: HashMap::new(),
+        }
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
@@ -482,8 +480,9 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
-                let subject_actor =
-                    ctx.create_child(&subject_id, Subject::default()).await?;
+                let subject_actor = ctx
+                    .create_child(&subject_id, Subject::initial(None))
+                    .await?;
                 if !light {
                     let sink = Sink::new(
                         subject_actor.subscribe(),
@@ -667,7 +666,7 @@ impl Handler<Node> for Node {
                 let subject_actor = ctx
                     .create_child(
                         &format!("{}", ledger.content.subject_id),
-                        subject.clone(),
+                        Subject::initial(Some(subject.clone())),
                     )
                     .await
                     .map_err(|e| ActorError::Functional(e.to_string()))?;
@@ -724,10 +723,10 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
-                let subject = Subject::new(data.clone());
+                let subject = Subject::from(data.clone());
 
                 let child = ctx
-                    .create_child(&format!("{}", data.subject_id), subject)
+                    .create_child(&format!("{}", data.subject_id), Subject::initial(Some(subject)))
                     .await?;
 
                 let sink = Sink::new(child.subscribe(), ext_db.get_subject());

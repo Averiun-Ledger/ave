@@ -160,6 +160,11 @@ impl Handler<RelationShip> for RelationShip {
 #[async_trait]
 impl PersistentActor for RelationShip {
     type Persistence = LightPersistence;
+    type InitParams = ();
+
+    fn create_initial(_params: Self::InitParams) -> Self {
+        Self::default()
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use identity::DigestIdentifier;
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -114,6 +114,8 @@ pub enum RebootMessage {
 }
 
 impl Message for RebootMessage {}
+
+impl NotPersistentActor for Reboot {}
 
 #[async_trait]
 impl Actor for Reboot {

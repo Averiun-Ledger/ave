@@ -2,8 +2,7 @@ use std::fmt::Display;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -165,6 +164,8 @@ impl SinkDataMessage {
 }
 
 impl Message for SinkDataMessage {}
+
+impl NotPersistentActor for SinkData {}
 
 #[derive(Debug, Clone)]
 pub enum SinkDataResponse {

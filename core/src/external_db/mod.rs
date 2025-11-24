@@ -29,13 +29,6 @@ pub struct DBManager {
 }
 
 impl DBManager {
-    pub fn new(time: Duration) -> Self {
-        Self {
-            time,
-            delete_req: vec![],
-        }
-    }
-
     async fn delete(
         &self,
         delete: DeleteTypes,
@@ -194,6 +187,14 @@ impl Handler<DBManager> for DBManager {
 #[async_trait]
 impl PersistentActor for DBManager {
     type Persistence = LightPersistence;
+    type InitParams = Duration;
+
+    fn create_initial(params: Self::InitParams) -> Self {
+        Self {
+            time: params,
+            delete_req: vec![],
+        }
+    }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

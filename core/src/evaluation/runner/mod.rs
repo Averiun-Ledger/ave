@@ -5,8 +5,7 @@ use borsh::{BorshDeserialize, to_vec};
 use identity::PublicKey;
 use json_patch::diff;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
 };
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
@@ -1128,6 +1127,8 @@ impl Actor for Runner {
     type Message = RunnerMessage;
     type Response = RunnerResponse;
 }
+
+impl NotPersistentActor for Runner {}
 
 #[async_trait]
 impl Handler<Runner> for Runner {

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{PublicKey, TimeStamp};
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, NotPersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -39,6 +39,8 @@ impl Actor for RetryNetwork {
     type Message = NetworkMessage;
     type Response = ();
 }
+
+impl NotPersistentActor for RetryNetwork{}
 
 #[async_trait]
 impl Handler<RetryNetwork> for RetryNetwork {

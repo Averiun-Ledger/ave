@@ -1,5 +1,5 @@
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, Response,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
 };
 
 use crate::{Event as NetworkEvent, NetworkState};
@@ -50,6 +50,8 @@ pub enum MonitorMessage {
 }
 
 impl Message for MonitorMessage {}
+
+impl NotPersistentActor for Monitor {}
 
 /// Monitor actor responses
 #[derive(Debug, Clone)]

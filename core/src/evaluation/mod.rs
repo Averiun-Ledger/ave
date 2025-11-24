@@ -22,7 +22,7 @@ use crate::{
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
-    Handler, Message,
+    Handler, Message, NotPersistentActor,
 };
 
 use async_trait::async_trait;
@@ -283,6 +283,8 @@ pub enum EvaluationMessage {
 }
 
 impl Message for EvaluationMessage {}
+
+impl NotPersistentActor for Evaluation {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationEvent {}
@@ -1550,6 +1552,7 @@ mod tests {
             ledger_event_actor,
             subject_id,
         ) = create_subject().await;
+
 
         let fact_request = EventRequest::Fact(crate::FactRequest {
             subject_id,
