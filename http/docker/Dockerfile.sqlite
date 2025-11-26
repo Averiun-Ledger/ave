@@ -128,14 +128,14 @@ FROM --platform=linux/amd64 rust:1.90-slim-bullseye AS amd64
 RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/http /usr/local/bin/http
+COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 RUN rustup target add wasm32-unknown-unknown
-CMD ["http"]
+CMD ["ave-http"]
 
 FROM --platform=linux/arm64 rust:1.90-slim-bullseye AS arm64
 RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/http /usr/local/bin/http
+COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 RUN rustup target add wasm32-unknown-unknown
-CMD ["http"]
+CMD ["ave-http"]

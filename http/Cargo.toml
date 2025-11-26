@@ -23,6 +23,9 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 file-rotate = {  workspace = true }
 
+getrandom = { workspace = true }
+async-trait = "0.1"
+
 futures = { version = "0.3", default-features = false }
 
 reqwest = { version = "0.12.22"}

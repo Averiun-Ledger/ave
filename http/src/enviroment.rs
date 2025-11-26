@@ -19,3 +19,11 @@ pub fn build_https_private_key() -> String {
 pub fn build_doc() -> bool {
     env::var("AVE_HTTPS_DOC").unwrap_or_default() == "true"
 }
+
+pub fn build_auth_user() -> String {
+    env::var("AVE_AUTH_USER").unwrap_or("admin".to_owned())
+}
+
+pub fn build_auth_password() -> Option<String> {
+    env::var("AVE_AUTH_PASSWORD").ok()
+}

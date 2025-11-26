@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
+    auth::{self, ApiKeyAuth, AuthStore},
     enviroment::build_doc,
     error::Error,
     wrappers::{
@@ -20,6 +21,7 @@ use axum::{
 use bytes::Bytes;
 use bridge::{Bridge, model::BridgeSignedEventRequest};
 use serde::Deserialize;
+use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use utoipa::ToSchema;
 
@@ -88,6 +90,7 @@ use utoipa_rapidoc::RapiDoc;
     )
 )]
 async fn send_event_request(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
 ) -> Result<Json<RequestData>, Error> {
@@ -130,6 +133,7 @@ async fn send_event_request(
     )
 )]
 async fn get_request_state(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<RequestInfo>, Error> {
@@ -165,6 +169,7 @@ async fn get_request_state(
     )
 )]
 async fn get_approval(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<ApproveInfo>, Error> {
@@ -205,6 +210,7 @@ async fn get_approval(
     )
 )]
 async fn patch_approval(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(response): Json<String>,
@@ -246,6 +252,7 @@ async fn patch_approval(
     )
 )]
 async fn put_auth(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
@@ -283,6 +290,7 @@ async fn put_auth(
     )
 )]
 async fn get_all_auth_subjects(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<String>>, Error> {
     match bridge.get_all_auth_subjects().await {
@@ -324,6 +332,7 @@ async fn get_all_auth_subjects(
     )
 )]
 async fn get_witnesses_subject(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<Vec<String>>, Error> {
@@ -362,6 +371,7 @@ async fn get_witnesses_subject(
     )
 )]
 async fn delete_auth_subject(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -402,6 +412,7 @@ async fn delete_auth_subject(
     )
 )]
 async fn update_subject(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -437,6 +448,7 @@ async fn update_subject(
     )
 )]
 async fn check_transfer(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -476,6 +488,7 @@ async fn check_transfer(
     )
 )]
 async fn manual_distribution(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -523,6 +536,7 @@ async fn manual_distribution(
     )
 )]
 async fn get_all_govs(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, Error> {
@@ -572,6 +586,7 @@ async fn get_all_govs(
     )
 )]
 async fn get_all_subjects(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(governance_id): Path<String>,
     Query(parameters): Query<SubjectQuery>,
@@ -643,6 +658,7 @@ async fn get_all_subjects(
     )
 )]
 async fn get_events(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventsQuery>,
@@ -778,6 +794,7 @@ async fn get_events(
     )
 )]
 async fn get_state(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SubjectInfo>, Error> {
@@ -831,6 +848,7 @@ async fn get_state(
     )
 )]
 async fn get_signatures(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SignaturesInfo>, Error> {
@@ -866,6 +884,7 @@ async fn get_signatures(
     )
 )]
 async fn get_controller_id(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
     Json(bridge.controller_id())
@@ -896,6 +915,7 @@ async fn get_controller_id(
     )
 )]
 async fn get_peer_id(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
     Json(bridge.peer_id())
@@ -980,6 +1000,7 @@ async fn get_peer_id(
     )
 )]
 async fn get_config(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<ConfigAveHttp> {
     Json(ConfigAveHttp::from(bridge.config()))
@@ -1007,6 +1028,7 @@ async fn get_config(
     )
 )]
 async fn get_keys(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> impl IntoResponse {
     let keys_path = format!("{}/node_private.der", bridge.config().keys_path);
@@ -1090,6 +1112,7 @@ async fn get_keys(
     )
 )]
 async fn get_event_sn(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventSnQuery>,
@@ -1151,6 +1174,7 @@ async fn get_event_sn(
     )
 )]
 async fn get_first_or_end_events(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventFirstLastQuery>,
@@ -1199,6 +1223,7 @@ responses(
 )
 )]
 async fn get_pending_transfers(
+    _auth: ApiKeyAuth,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<TransferSubject>>, Error> {
     match bridge.get_pending_transfers().await {
@@ -1212,9 +1237,11 @@ async fn get_pending_transfers(
     }
 }
 
-pub fn build_routes(bridge: Bridge) -> Router {
+pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) -> Router {
     let bridge = Arc::new(bridge);
-    let routes = Router::new()
+
+    // Main routes (authentication optional based on auth_store presence)
+    let mut main_routes = Router::new()
         .route("/signatures/{subject_id}", get(get_signatures))
         .route("/state/{subject_id}", get(get_state))
         .route("/events/{subject_id}", get(get_events))
@@ -1246,12 +1273,22 @@ pub fn build_routes(bridge: Bridge) -> Router {
         .route("/pending-transfers", get(get_pending_transfers))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));
 
+    // Add auth extension if enabled
+    if let Some(store) = auth_store.clone() {
+        main_routes = main_routes.layer(Extension(store.clone()));
+
+        // Add login route only if auth is enabled
+        main_routes = main_routes
+            .route("/auth/login", post(auth::login));
+    }
+
+    // Add documentation if enabled
     if build_doc() {
-        Router::new().merge(routes).merge(
+        main_routes.merge(
             RapiDoc::with_openapi("/doc/aveapi.json", ApiDoc::openapi())
                 .path("/doc"),
         )
     } else {
-        Router::new().merge(routes)
+        main_routes
     }
 }

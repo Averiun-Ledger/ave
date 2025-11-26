@@ -12,8 +12,8 @@ use axum::{
 use axum_extra::extract::Host;
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use enviroment::{
-    build_address_http, build_address_https, build_https_cert,
-    build_https_private_key,
+    build_address_http, build_address_https, build_auth_password,
+    build_auth_user, build_https_cert, build_https_private_key,
 };
 use futures::future::join_all;
 use bridge::{
@@ -24,12 +24,15 @@ use bridge::{
         command::Args,
     },
 };
+use auth::AuthStore;
 use middleware::tower_trace;
 use server::build_routes;
-use tokio::net::TcpListener;
+use std::sync::Arc;
+use tokio::{net::TcpListener, sync::RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
+mod auth;
 mod enviroment;
 mod error;
 mod logging;
@@ -95,6 +98,17 @@ async fn main() {
     let config = build_config(args.env_config, &file_path).unwrap();
     let _log_handle = logging::init_logging(&config.logging).await;
 
+    // Initialize authentication store (optional)
+    let auth_store = if let Some(auth_password) = build_auth_password() {
+        let auth_user = build_auth_user();
+        let store = Arc::new(RwLock::new(AuthStore::new(auth_user.clone(), auth_password)));
+        info!(TARGET_HTTP, "Authentication system ENABLED for user: {}", auth_user);
+        Some(store)
+    } else {
+        info!(TARGET_HTTP, "Authentication system DISABLED - all endpoints are public");
+        None
+    };
+
     let (bridge, runners) =
         Bridge::build(config, &password, &password_sink, None)
             .await
@@ -130,7 +144,7 @@ async fn main() {
         axum_server::bind_rustls(https_address, tls)
             .handle(handle_clone)
             .serve(
-                tower_trace(build_routes(bridge))
+                tower_trace(build_routes(bridge, auth_store))
                     .layer(cors)
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -139,7 +153,7 @@ async fn main() {
     } else {
         axum::serve(
             listener_http,
-            tower_trace(build_routes(bridge))
+            tower_trace(build_routes(bridge, auth_store))
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )

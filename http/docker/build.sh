@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# docker run --privileged --rm tonistiigi/binfmt --install arm64
 set -e
 
 # === IMPORTANTE ===
@@ -8,7 +9,7 @@ export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 
 DOCKER_USERNAME="averiun"
 DOCKER_REPO="ave-http"
-TAG_ARRAY=("0.7.4-sqlite" "0.7.4-rocksdb")
+TAG_ARRAY=("0.7.5-sqlite" "0.7.5-rocksdb")
 DOCKERFILE_ARRAY=("./ave/http/docker/Dockerfile.sqlite" "./ave/http/docker/Dockerfile.rocksdb")
 FEATURES_ARRAY=("ext-sqlite sqlite prometheus" "ext-sqlite rocksdb prometheus")
 

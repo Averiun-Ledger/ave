@@ -1,4 +1,5 @@
 use crate::{
+    auth::handlers::{ErrorResponse as AuthErrorResponse, LoginRequest, LoginResponse},
     server::*,
     wrappers::{
         ApprovalReqInfo, ApproveInfo, Config, ConfirmRequestInfo,
@@ -40,6 +41,7 @@ use utoipa::OpenApi;
         )
     ),
     paths(
+        crate::auth::handlers::login,
         send_event_request,
         get_request_state,
         get_approval,
@@ -66,6 +68,9 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            LoginRequest,
+            LoginResponse,
+            AuthErrorResponse,
             SubjectQuery,
             GovQuery,
             EventsQuery,
@@ -110,6 +115,7 @@ use utoipa::OpenApi;
         )
     ),
     tags(
+        (name = "Authentication", description = "Authentication endpoints for obtaining API keys."),
         (name = "Auth", description = "Endpoints related to authorization."),
         (name = "Event", description = "Endpoints related to Events."),
         (name = "Update", description = "Endpoints related to Update."),

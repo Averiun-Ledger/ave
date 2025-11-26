@@ -44,7 +44,7 @@ impl Compiler {
     [dependencies]
     serde = { version = "1.0.219", features = ["derive"] }
     serde_json = "1.0.140"
-    ave-contract-sdk = { path = "/home/ale/dev/ave-contract-sdk" }
+    ave-contract-sdk = "0.6.0"
 
     [profile.release]
     strip = "debuginfo"
