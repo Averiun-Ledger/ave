@@ -12,8 +12,6 @@ use std::{
     str::FromStr,
 };
 
-const TARGET_WRAPPER: &str = "Ave-Model-Wrapper";
-
 /// Wrapper of serde_json::Value implementing serialization and deserialization with Borsh.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct ValueWrapper(pub Value);

@@ -180,7 +180,7 @@ impl Validator {
                     .collect();
                 let previous_signers = previous_signers?;
 
-                if actual_signers != previous_signers {
+                if !previous_signers.is_subset(&actual_signers) {
                     return Err(ActorError::Functional("The previous event received validations from validators who are not part of governance.".to_owned()));
                 }
             }

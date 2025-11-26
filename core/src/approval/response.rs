@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use super::request::ApprovalReq;
 
-const TARGET_RESPONSE: &str = "Ave-Approval-Response";
-
 #[derive(
     Debug,
     Clone,

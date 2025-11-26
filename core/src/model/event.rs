@@ -15,8 +15,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-const TARGET_EVENT: &str = "Ave-Model-Event";
-
 pub struct DataProofEvent {
     pub gov_version: u64,
     pub sn: u64,

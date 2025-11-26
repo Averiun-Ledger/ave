@@ -7,8 +7,6 @@ use crate::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-const TARGET_REQUEST: &str = "Ave-Validation-Request";
-
 /// A struct representing a validation request.
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,

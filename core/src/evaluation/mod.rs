@@ -735,7 +735,7 @@ impl Handler<Evaluation> for Evaluation {
                                 );
                                 error!(
                                     TARGET_EVALUATION,
-                                    "Response, can not get validation request: {}",
+                                    "Response, can not get evaluation request: {}",
                                     e
                                 );
                                 return Err(emit_fail(ctx, e).await);

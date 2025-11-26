@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 mod common;
 
+use ave_core::{approval::approver::ApprovalStateRes, auth::AuthWitness};
 use identity::{
     PublicKey,
     keys::{Ed25519Signer, KeyPair},
 };
-use ave_core::{approval::approver::ApprovalStateRes, auth::AuthWitness};
 
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
@@ -1698,5 +1698,413 @@ async fn test_change_schema() {
         json!({
             "data": "AveLedger"
         })
+    );
+}
+
+#[test(tokio::test)]
+// Definimos 2 validadores con Quorum 1, pero solo funciona uno.
+// Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
+// uno que esté o que no
+async fn test_gov_no_all_validators() {
+    let nodes =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45120)
+            .await;
+
+    let owner_governance = &nodes[0];
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![], "").await;
+
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "offline",
+                    "key": offline_controller
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "validator": [
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "policies": {
+            "governance": {
+               "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    },
+                    "validate": {
+                        "fixed": 1
+                    }
+               }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let user = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "user",
+                        "key": user
+                    }
+                ]
+            },
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner_governance, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, governance_id.to_string());
+    assert_eq!(state.governance_id, String::default());
+    assert_eq!(state.genesis_gov_version, 0);
+    assert_eq!(state.namespace, "");
+    assert_eq!(state.schema_id, "governance");
+    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.active, true);
+    assert_eq!(state.sn, 2);
+    assert_eq!(
+        state.properties,
+        json!({"members":{"Owner":owner_governance.controller_id(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner","offline"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+    );
+}
+
+#[test(tokio::test)]
+// Definimos 2 validadores con Quorum 1, pero solo funciona uno.
+// Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
+// uno que esté o que no
+// Algunos eventos fallan, por lo que la versión de la governanza no aumenta
+async fn test_gov_fail_no_all_validators() {
+    let nodes =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45130)
+            .await;
+
+    let owner_governance = &nodes[0];
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![], "").await;
+
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "offline",
+                    "key": offline_controller
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "validator": [
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "policies": {
+            "governance": {
+               "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    },
+                    "validate": {
+                        "fixed": 1
+                    }
+               }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let mut keys = vec![];
+    for i in 0..2 {
+        let user = if i % 2 != 0 {
+            let user = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                .public_key()
+                .to_string();
+
+            keys.push(user.clone());
+
+            user
+        } else {
+            String::default()
+        };
+
+        // add node bootstrap and ephemeral to governance
+        let json = json!({
+                "members": {
+                    "add": [
+                        {
+                            "name": format!("user{}", i),
+                            "key": user
+                        }
+                    ]
+                },
+        });
+
+        emit_fact(owner_governance, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    let state = get_subject(owner_governance, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, governance_id.to_string());
+    assert_eq!(state.governance_id, String::default());
+    assert_eq!(state.genesis_gov_version, 0);
+    assert_eq!(state.namespace, "");
+    assert_eq!(state.schema_id, "governance");
+    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.active, true);
+    assert_eq!(state.sn, 3);
+    assert_eq!(
+        state.properties,
+        json!({"members":{"Owner":owner_governance.controller_id(),"offline":offline_controller,"user1":keys[0]},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner","offline"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+    );
+}
+
+#[test(tokio::test)]
+// Definimos 2 evaluadores con Quorum 1, pero solo funciona uno.
+// Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
+// uno que esté o que no.
+async fn test_gov_no_all_evaluators() {
+    let nodes =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45140)
+            .await;
+
+    let owner_governance = &nodes[0];
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![], "").await;
+
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "offline",
+                    "key": offline_controller
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": [
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "policies": {
+            "governance": {
+               "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    },
+                    "validate": {
+                        "fixed": 1
+                    }
+               }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let user = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "user",
+                        "key": user
+                    }
+                ]
+            },
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner_governance, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, governance_id.to_string());
+    assert_eq!(state.governance_id, String::default());
+    assert_eq!(state.genesis_gov_version, 0);
+    assert_eq!(state.namespace, "");
+    assert_eq!(state.schema_id, "governance");
+    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.active, true);
+    assert_eq!(state.sn, 2);
+    assert_eq!(
+        state.properties,
+        json!({"members":{"Owner":owner_governance.controller_id(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+    );
+}
+
+#[test(tokio::test)]
+// Definimos 2 validadores con Quorum 1, pero solo funciona uno.
+// Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
+// uno que esté o que no
+// Algunos eventos fallan, por lo que la versión de la governanza no aumenta
+async fn test_gov_fail_no_all_evaluators() {
+    let nodes =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45150)
+            .await;
+
+    let owner_governance = &nodes[0];
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![], "").await;
+
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "offline",
+                    "key": offline_controller
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": [
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "policies": {
+            "governance": {
+               "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    },
+                    "validate": {
+                        "fixed": 1
+                    }
+               }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let mut keys = vec![];
+    for i in 0..2 {
+        let user = if i % 2 != 0 {
+            let user = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                .public_key()
+                .to_string();
+
+            keys.push(user.clone());
+
+            user
+        } else {
+            String::default()
+        };
+
+        // add node bootstrap and ephemeral to governance
+        let json = json!({
+                "members": {
+                    "add": [
+                        {
+                            "name": format!("user{}", i),
+                            "key": user
+                        }
+                    ]
+                },
+        });
+
+        emit_fact(owner_governance, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+    }
+
+    let state = get_subject(owner_governance, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, governance_id.to_string());
+    assert_eq!(state.governance_id, String::default());
+    assert_eq!(state.genesis_gov_version, 0);
+    assert_eq!(state.namespace, "");
+    assert_eq!(state.schema_id, "governance");
+    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.new_owner, None);
+    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.active, true);
+    assert_eq!(state.sn, 3);
+    assert_eq!(
+        state.properties,
+        json!({"members":{"Owner":owner_governance.controller_id(),"offline":offline_controller,"user1":keys[0]},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
     );
 }

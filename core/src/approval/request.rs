@@ -6,8 +6,6 @@ use identity::{DigestIdentifier, Signed};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-const TARGET_REQUEST: &str = "Ave-Approval-Request";
-
 /// A struct representing an approval request.
 #[derive(
     Debug,

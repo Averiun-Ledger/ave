@@ -20,7 +20,7 @@ use crate::{
     governance::Governance,
     helpers::db::ExternalDB,
     manual_distribution::ManualDistribution,
-    model::{Namespace, SignTypesNode, ValueWrapper, event::LedgerValue},
+    model::{Namespace, SignTypesNode, event::LedgerValue},
     subject::{CreateSubjectData, SignedLedger},
 };
 

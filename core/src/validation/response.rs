@@ -7,8 +7,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 
-const TARGET_RESPONSE: &str = "Ave-Validation-Response";
-
 /// A Enum representing a validation response.
 #[derive(
     Debug,

@@ -370,6 +370,8 @@ impl Handler<Validation> for Validation {
                     signature,
                 };
 
+                self.signed_vali_req = Some(signed_validation_req.clone());
+
                 let validators_quantity = self.quorum.get_signers(
                     self.validators_quantity,
                     signers.len() as u32,

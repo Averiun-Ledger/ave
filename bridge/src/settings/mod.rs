@@ -306,7 +306,6 @@ mod tests {
                 assert_eq!(boot_nodes[1].peer_id, node.peer_id);
                 assert_eq!(boot_nodes[1].address, node.address);
             } else {
-                println!("{}", node.peer_id);
                 panic!("Invalid peer_id");
             }
         }

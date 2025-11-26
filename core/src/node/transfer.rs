@@ -4,7 +4,7 @@ use crate::model::common::emit_fail;
 use async_trait::async_trait;
 use identity::PublicKey;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, Response
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
