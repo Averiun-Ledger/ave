@@ -4,6 +4,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{error, warn};
@@ -12,7 +13,7 @@ use crate::{db::Storable, model::common::emit_fail};
 
 const TARGET_REGISTER: &str = "Ave-Node-Register";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct RegisterDataSubj {
     pub subject_id: String,
     pub schema_id: String,
@@ -21,7 +22,7 @@ pub struct RegisterDataSubj {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct RegisterDataGov {
     pub active: bool,
     pub name: Option<String>,
@@ -36,7 +37,7 @@ pub struct GovsData {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
 pub struct Register {
     register_gov: HashMap<String, RegisterDataGov>,
     register_subj: HashMap<String, Vec<RegisterDataSubj>>,
@@ -73,7 +74,7 @@ pub enum RegisterResponse {
 
 impl Response for RegisterResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum RegisterEvent {
     RegisterGov {
         gov_id: String,

@@ -1,6 +1,7 @@
 //! # Governance model.
 //!
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::PublicKey;
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -1002,6 +1003,7 @@ impl fmt::Display for ProtocolTypes {
 /// Governance quorum.
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash, Eq,
+    BorshDeserialize, BorshSerialize
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Quorum {

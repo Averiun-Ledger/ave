@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use borsh::BorshSerialize;
+use borsh::{BorshDeserialize, BorshSerialize};
 use nodekey::NodeKey;
 use register::Register;
 use relationship::RelationShip;
@@ -41,7 +41,7 @@ pub mod transfer;
 
 const TARGET_NODE: &str = "Ave-Node";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TransferSubject {
     pub name: String,
     pub subject_id: String,
@@ -49,14 +49,14 @@ pub struct TransferSubject {
     pub actual_owner: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TransferData {
     pub name: String,
     pub new_owner: String,
     pub actual_owner: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SubjectData {
     pub owner: String,
     pub governance_id: Option<String>,
@@ -79,6 +79,40 @@ pub struct Node {
     temporal_subjects: HashMap<String, SubjectData>,
 
     transfer_subjects: HashMap<String, TransferData>,
+}
+
+// Manual Borsh implementation to skip the 'owner' field
+impl BorshSerialize for Node {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.owned_subjects, writer)?;
+        BorshSerialize::serialize(&self.known_subjects, writer)?;
+        BorshSerialize::serialize(&self.temporal_subjects, writer)?;
+        BorshSerialize::serialize(&self.transfer_subjects, writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Node {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let owned_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let known_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let temporal_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let transfer_subjects = HashMap::<String, TransferData>::deserialize_reader(reader)?;
+
+        // Create a default/placeholder KeyPair for 'owner'
+        // This will be replaced by the actual owner during actor initialization
+        let owner = KeyPair::default();
+
+        Ok(Self {
+            owner,
+            owned_subjects,
+            known_subjects,
+            temporal_subjects,
+            transfer_subjects,
+        })
+    }
 }
 
 impl Node {
@@ -307,7 +341,7 @@ pub enum NodeResponse {
 impl Response for NodeResponse {}
 
 /// Node event.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum NodeEvent {
     UpdateSubject {
         subject_id: String,
@@ -390,6 +424,13 @@ impl Actor for Node {
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
     type InitParams = KeyPair;
+
+    fn update(&mut self, state: Self) {
+        self.owned_subjects = state.owned_subjects;
+        self.known_subjects = state.known_subjects;
+        self.temporal_subjects = state.temporal_subjects;
+        self.transfer_subjects = state.transfer_subjects;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

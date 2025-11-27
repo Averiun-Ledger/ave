@@ -217,6 +217,7 @@ mod tests {
 
     use super::*;
 
+
     #[test]
     fn test_value_wrapper() {
         let value = Value::String("test".to_string());
@@ -234,13 +235,10 @@ mod tests {
         let value = Governance::new(PublicKey::default())
             .to_value_wrapper()
             .unwrap();
-        let bytes =
-            bincode::serde::encode_to_vec(value, bincode::config::standard())
-                .unwrap();
-        let wrapper = bincode::serde::decode_from_slice::<ValueWrapper, _>(
-            &bytes,
-            bincode::config::standard(),
-        );
-        wrapper.unwrap();
+        let bytes = borsh::to_vec(&value).unwrap();
+        let wrapper: ValueWrapper = borsh::from_slice(&bytes).unwrap();
+
+        assert_eq!(value, wrapper);
     }
+    
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::{model::common::emit_fail, subject::Metadata};
+use crate::{model::{common::emit_fail}, subject::Metadata};
 const TARGET_SINKDATA: &str = "Ave-Subject-Sinkdata";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

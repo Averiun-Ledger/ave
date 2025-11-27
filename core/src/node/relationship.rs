@@ -6,6 +6,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -15,7 +16,19 @@ use crate::{
 
 const TARGET_RELATIONSHIP: &str = "Ave-Node-RelationShip";
 
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    Hash,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct OwnerSchema {
     pub owner: String,
     pub gov: String,
@@ -28,7 +41,17 @@ pub enum DeleteTypes {
     Request { id: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    Default,
+    Eq,
+    PartialEq,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RelationShip {
     owner_subjects: HashMap<OwnerSchema, Vec<String>>,
 }
@@ -59,7 +82,9 @@ pub enum RelationShipResponse {
 
 impl Response for RelationShipResponse {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum RelationShipEvent {
     NewRegister { data: OwnerSchema, subject: String },
     DeleteSubject { data: OwnerSchema, subject: String },

@@ -12,6 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+borsh = { workspace = true }
 reqwest = { workspace = true }
 test-log = { workspace = true } 
 bs58 = { workspace = true }

@@ -6,6 +6,7 @@ use ave_actors::{
 use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
@@ -55,7 +56,7 @@ use super::{
     types::{ProtocolsResult, ReqManInitMessage, RequestManagerState},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct RequestManager {
     our_key: PublicKey,
     id: String,
@@ -865,7 +866,7 @@ pub enum RequestManagerMessage {
 
 impl Message for RequestManagerMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum RequestManagerEvent {
     UpdateState {
         id: String,
@@ -1608,25 +1609,7 @@ impl PersistentActor for RequestManager {
             command,
         }
     }
-    /*
-        pub fn new(
-        our_key: PublicKey,
-        id: String,
-        subject_id: String,
-        request: Signed<EventRequest>,
-        command: ReqManInitMessage,
-    ) -> Self {
-        RequestManager {
-            our_key,
-            id,
-            state: RequestManagerState::Starting,
-            subject_id,
-            request,
-            version: 0,
-            command,
-        }
-    }
-     */
+
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {

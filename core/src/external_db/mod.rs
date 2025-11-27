@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -6,6 +7,7 @@ use ave_actors::{
     Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -17,14 +19,42 @@ use crate::{
 
 const TARGET_EXTERNAL: &str = "Ave-ExternalDB";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub enum DeleteTypes {
     Request { id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DurationWrapper(Duration);
+
+impl Deref for DurationWrapper {
+    type Target = Duration;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl BorshSerialize for DurationWrapper {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        // Serialize Duration as seconds (u64) and nanoseconds (u32)
+        BorshSerialize::serialize(&self.0.as_secs(), writer)?;
+        BorshSerialize::serialize(&self.0.subsec_nanos(), writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for DurationWrapper {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let secs = u64::deserialize_reader(reader)?;
+        let nanos = u32::deserialize_reader(reader)?;
+        Ok(DurationWrapper(Duration::new(secs, nanos)))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
 pub struct DBManager {
-    time: Duration,
+    time: DurationWrapper,
     delete_req: Vec<DeleteTypes>,
 }
 
@@ -35,10 +65,10 @@ impl DBManager {
         our_ref: ActorRef<DBManager>,
         helper: ExternalDB,
     ) {
-        let time = self.time;
+        let time = self.time.clone();
 
         tokio::spawn(async move {
-            tokio::time::sleep(time).await;
+            tokio::time::sleep(*time).await;
             match delete.clone() {
                 DeleteTypes::Request { id } => {
                     if let Err(e) = helper.del_request(&id).await
@@ -69,7 +99,7 @@ pub enum DBManagerMessage {
 
 impl Message for DBManagerMessage {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum DBManagerEvent {
     DeleteReq(DeleteTypes),
     DeleteConfirm(DeleteTypes),
@@ -191,7 +221,7 @@ impl PersistentActor for DBManager {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            time: params,
+            time: DurationWrapper(params),
             delete_req: vec![],
         }
     }

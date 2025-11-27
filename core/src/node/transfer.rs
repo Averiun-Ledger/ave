@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::common::emit_fail;
 use async_trait::async_trait;
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::PublicKey;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, Response
@@ -14,7 +15,7 @@ use crate::db::Storable;
 
 const TARGET_TRANSFER: &str = "Ave-Node-TransferRegister";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
 pub struct TransferRegister {
     old_owners: HashMap<String, HashSet<PublicKey>>,
 }
@@ -34,7 +35,7 @@ pub enum TransferRegisterMessage {
 
 impl Message for TransferRegisterMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum TransferRegisterEvent {
     RegisterNewOldOwner {
         subject_id: String,

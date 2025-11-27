@@ -5,7 +5,7 @@ use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -321,14 +321,10 @@ impl Message for CompilerMessage {}
 
 impl NotPersistentActor for Compiler {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CompilerEvent {}
-
-impl Event for CompilerEvent {}
 
 #[async_trait]
 impl Actor for Compiler {
-    type Event = CompilerEvent;
+    type Event = ();
     type Message = CompilerMessage;
     type Response = ();
 }

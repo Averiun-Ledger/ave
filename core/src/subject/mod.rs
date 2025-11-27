@@ -139,7 +139,7 @@ pub struct Metadata {
 }
 
 /// Suject header
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
 pub struct Subject {
     /// The name of the subject.
     pub name: Option<String>,
@@ -3039,6 +3039,7 @@ mod tests {
     use serde_json::{Value, json};
     use test_log::test;
 
+    
     #[test]
     fn test_serialize_deserialize() {
         let node_keys = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
@@ -3066,16 +3067,8 @@ mod tests {
         )
         .unwrap();
 
-        let bytes = bincode::serde::encode_to_vec(
-            subject_a.clone(),
-            bincode::config::standard(),
-        )
-        .unwrap();
-        let (subject_b, _) = bincode::serde::decode_from_slice::<Subject, _>(
-            &bytes,
-            bincode::config::standard(),
-        )
-        .unwrap();
+        let bytes = borsh::to_vec(&subject_a).unwrap();
+        let subject_b: Subject = borsh::from_slice(&bytes).unwrap();
         assert_eq!(subject_a.subject_id, subject_b.subject_id);
     }
 

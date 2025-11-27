@@ -15,6 +15,7 @@ mod worker;
 
 use std::fmt::{self, Debug};
 
+use borsh::{BorshDeserialize, BorshSerialize};
 pub use control_list::Config as ControlListConfig;
 pub use error::Error;
 use identity::PublicKey;
@@ -148,7 +149,7 @@ where
 }
 
 /// Event enumeration for the Helper service.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
 pub struct ComunicateInfo {
     /// The request id.
     pub request_id: String,

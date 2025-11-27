@@ -8,6 +8,7 @@ use ave_actors::{
     Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -19,7 +20,7 @@ use crate::{
 
 const TARGET_EVENT: &str = "Ave-Subject-Event";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
 pub struct LedgerEvent {
     pub is_gov: bool,
     pub last_event: Option<Signed<AveEvent>>,
@@ -33,7 +34,7 @@ pub enum LedgerEventMessage {
 
 impl Message for LedgerEventMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct LedgerEventEvent {
     pub event: Signed<AveEvent>,
 }

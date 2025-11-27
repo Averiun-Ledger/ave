@@ -13,7 +13,6 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-bincode = { workspace = true }
 borsh = { workspace = true }
 generic-array = {version = "1.2.0", features = ["zeroize"] }
 identity = { package = "ave-identity", path = "../identity"}

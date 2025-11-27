@@ -27,6 +27,7 @@ use ave_actors::{
 };
 
 use async_trait::async_trait;
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{DigestIdentifier, PublicKey, Signed};
 use proof::ValidationProof;
 use request::ValidationReq;
@@ -40,7 +41,7 @@ use std::collections::HashSet;
 const TARGET_VALIDATION: &str = "Ave-Validation";
 
 /// A struct for passing validation information.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct ValidationInfo {
     pub metadata: Metadata,
     pub event_proof: Signed<ProofEvent>,

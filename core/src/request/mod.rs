@@ -4,6 +4,7 @@ use ave_actors::{
     Handler, Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
@@ -40,7 +41,7 @@ pub struct RequestData {
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct RequestHandler {
     node_key: PublicKey,
     handling: HashMap<String, (String, Signed<EventRequest>)>,
@@ -276,7 +277,7 @@ pub enum RequestHandlerResponse {
 
 impl Response for RequestHandlerResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum RequestHandlerEvent {
     EventToQueue {
         id: String,

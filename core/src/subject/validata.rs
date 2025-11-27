@@ -8,6 +8,7 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -15,7 +16,7 @@ use crate::db::Storable;
 
 const TARGET_VALIDATA: &str = "Ave-Subject-ValiData";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
 pub struct ValiData {
     last_proof: Option<ValidationProof>,
     prev_event_validation_response: Vec<ProtocolsSignatures>,
@@ -32,7 +33,7 @@ pub enum ValiDataMessage {
 
 impl Message for ValiDataMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct ValiDataEvent {
     pub last_proof: ValidationProof,
     pub prev_event_validation_response: Vec<ProtocolsSignatures>,

@@ -21,7 +21,7 @@ use crate::{
     }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     Handler, Message, NotPersistentActor,
 };
 
@@ -30,7 +30,6 @@ use evaluator::{Evaluator, EvaluatorMessage};
 use identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh};
 use request::{EvaluationReq, SubjectContext};
 use response::{EvalLedgerResponse, EvaluationRes, Response as EvalRes};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, warn};
 
@@ -286,14 +285,10 @@ impl Message for EvaluationMessage {}
 
 impl NotPersistentActor for Evaluation {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluationEvent {}
-
-impl Event for EvaluationEvent {}
 
 #[async_trait]
 impl Actor for Evaluation {
-    type Event = EvaluationEvent;
+    type Event = ();
     type Message = EvaluationMessage;
     type Response = ();
 }

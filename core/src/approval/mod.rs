@@ -2,12 +2,15 @@ use std::collections::HashSet;
 
 use approver::{Approver, ApproverMessage, VotationType};
 use async_trait::async_trait;
+use ave_actors::{
+    Actor, ActorContext, ActorError, ChildAction, Handler, Message,
+};
+use ave_actors::{ActorPath, ActorRef, Event};
+use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{PublicKey, Signed};
 use request::ApprovalReq;
 use response::ApprovalRes;
-use ave_actors::{Actor, ActorContext, ActorError, ChildAction, Handler, Message};
-use ave_actors::{ActorPath, ActorRef, Event};
-use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -32,7 +35,15 @@ pub mod response;
 
 const TARGET_APPROVAL: &str = "Ave-Approval";
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct Approval {
     node_key: PublicKey,
     // Quorum
@@ -145,14 +156,14 @@ impl Approval {
                 version,
                 node: signer.clone(),
                 subject_id: approval_req.content.subject_id.to_string(),
-                pass_votation: VotationType::Manual
+                pass_votation: VotationType::Manual,
             };
-            
+
             // Create Approvers child
             let Ok(child) = ctx
                 .create_child(
                     &signer.to_string(),
-                    Approver::initial(init_approver)
+                    Approver::initial(init_approver),
                 )
                 .await
             else {
@@ -219,7 +230,9 @@ pub enum ApprovalMessage {
 impl Message for ApprovalMessage {}
 
 //
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum ApprovalEvent {
     SafeState {
         request_id: String,
@@ -494,7 +507,10 @@ impl PersistentActor for Approval {
     type InitParams = PublicKey;
 
     fn create_initial(params: Self::InitParams) -> Self {
-        Self { node_key: params, ..Default::default()}
+        Self {
+            node_key: params,
+            ..Default::default()
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

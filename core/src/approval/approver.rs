@@ -16,14 +16,15 @@ use crate::{
     subject::Subject,
 };
 use async_trait::async_trait;
-use identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
-use network::ComunicateInfo;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
     CustomIntervalStrategy, Event, Handler, Message, RetryActor, RetryMessage,
     Strategy,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
+use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -60,7 +61,17 @@ impl Display for ApprovalStateRes {
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub enum ApprovalState {
     /// The approval entity is pending a response.
     #[default]
@@ -85,7 +96,16 @@ impl Display for ApprovalState {
     }
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Default,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub enum VotationType {
     #[default]
     Manual,
@@ -101,7 +121,9 @@ impl From<bool> for VotationType {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct Approver {
     node: PublicKey,
     request_id: String,
@@ -288,7 +310,9 @@ pub enum ApproverMessage {
 
 impl Message for ApproverMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum ApproverEvent {
     ChangeState {
         subject_id: String,
@@ -924,9 +948,16 @@ impl PersistentActor for Approver {
             pass_votation,
         } = params;
 
-        Self { node, request_id, version, subject_id, pass_votation, state: None,
+        Self {
+            node,
+            request_id,
+            version,
+            subject_id,
+            pass_votation,
+            state: None,
             request: None,
-            info: None, }
+            info: None,
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

@@ -643,7 +643,7 @@ mod tests {
         assert!(deserialized.is_empty());
         assert_eq!(deserialized.algorithm(), HashAlgorithm::Blake3);
     }
-
+    
     #[test]
     fn test_empty_digest_bincode() {
         let empty = DigestIdentifier::default();
@@ -653,30 +653,15 @@ mod tests {
         println!("String representation: '{}'", empty.to_string());
 
         // Should serialize with bincode
-        let bytes = bincode::serde::encode_to_vec(
-            &empty,
-            bincode::config::standard(),
-        ).unwrap();
+        let bytes = borsh::to_vec(&empty).unwrap();
 
         println!("Serialized length: {}", bytes.len());
         println!("Serialized bytes: {:?}", bytes);
 
         // Should deserialize with bincode
-        let result = bincode::serde::decode_from_slice::<DigestIdentifier, _>(
-            &bytes,
-            bincode::config::standard(),
-        );
-
-        match &result {
-            Ok((deserialized, _)) => {
-                println!("SUCCESS! Deserialized is_empty: {}", deserialized.is_empty());
-                assert!(deserialized.is_empty());
-                assert_eq!(deserialized.algorithm(), HashAlgorithm::Blake3);
-            },
-            Err(e) => {
-                println!("ERROR: {:?}", e);
-                panic!("Bincode deserialization failed");
-            }
-        }
+        let result: DigestIdentifier = borsh::from_slice(&bytes).unwrap();
+        
+        assert!(result.is_empty());
+        assert_eq!(result.algorithm(), HashAlgorithm::Blake3);
     }
 }

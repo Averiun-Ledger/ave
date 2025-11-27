@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use ave_actors::{
@@ -21,7 +22,7 @@ use crate::{
 
 const TARGET_AUTH: &str = "Ave-Auth";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum AuthWitness {
     One(PublicKey),
     Many(Vec<PublicKey>),
@@ -62,7 +63,7 @@ fn merge_options(
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
 pub struct Auth {
     our_node: PublicKey,
     auth: HashMap<String, AuthWitness>,
@@ -149,7 +150,7 @@ pub enum AuthResponse {
 
 impl Response for AuthResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum AuthEvent {
     NewAuth {
         subject_id: String,

@@ -26,10 +26,9 @@ rust-version = "1.90.0"
 async-trait = "0.1.88"
 bs58 = "0.5"
 base64 = "0.22"
-bincode = { version = "2.0.1", features = ["serde"] }
 blake2 = "0.10"
 blake3 = "1.8.2"
-borsh = { version = "1.5.7", features = ["std", "derive"] }
+borsh = { version = "1.6.0", features = ["std", "derive"] }
 ed25519-dalek = { version = "2", features = ["alloc", "pkcs8"] }
 either = "1.15.0"
 fnv = "1.0"

@@ -8,10 +8,11 @@ use crate::{
     validation::proof::ValidationProof,
 };
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use identity::Signed;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub enum RequestManagerState {
     Reboot,
     Starting,
@@ -34,7 +35,7 @@ pub enum RequestManagerState {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
 pub enum ReqManInitMessage {
     Evaluate,
     Validate,

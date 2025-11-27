@@ -5,7 +5,7 @@ use borsh::{BorshDeserialize, to_vec};
 use identity::PublicKey;
 use json_patch::diff;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
 };
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
@@ -1108,11 +1108,6 @@ pub struct RunnerMessage {
 
 impl Message for RunnerMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RunnerEvent {}
-
-impl Event for RunnerEvent {}
-
 #[derive(Debug, Clone)]
 pub struct RunnerResponse {
     pub result: RunnerResult,
@@ -1123,7 +1118,7 @@ impl Response for RunnerResponse {}
 
 #[async_trait]
 impl Actor for Runner {
-    type Event = RunnerEvent;
+    type Event = ();
     type Message = RunnerMessage;
     type Response = RunnerResponse;
 }

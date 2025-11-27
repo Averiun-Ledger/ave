@@ -5,12 +5,13 @@ use crate::{config::AveDbConfig};
 
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
-use ave_actors::{ActorContext, ActorError, EncryptedKey};
+use ave_actors::{Actor, ActorContext, ActorError, EncryptedKey};
 use ave_actors::{Collection, DbManager, PersistentActor, State, StoreError};
 #[cfg(feature = "rocksdb")]
 use ave_actors::{RocksDbManager, RocksDbStore};
 
 use async_trait::async_trait;
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Clone)]
 pub enum Database {
@@ -191,7 +192,7 @@ impl State for DbCollection {
 }
 
 #[async_trait]
-pub trait Storable: PersistentActor {
+pub trait Storable: PersistentActor where <Self as Actor>::Event: BorshSerialize + BorshDeserialize {
     async fn init_store(
         &mut self,
         name: &str,

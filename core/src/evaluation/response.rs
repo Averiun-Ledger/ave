@@ -46,7 +46,7 @@ pub struct Response {
     pub appr_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 pub struct EvalLedgerResponse {
     /// The patch to apply to the state.
     pub value: LedgerValue,
