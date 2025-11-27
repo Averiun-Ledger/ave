@@ -1274,12 +1274,11 @@ pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) 
         .layer(ServiceBuilder::new().layer(Extension(bridge)));
 
     // Add auth extension if enabled
-    if let Some(store) = auth_store.clone() {
-        main_routes = main_routes.layer(Extension(store.clone()));
-
-        // Add login route only if auth is enabled
+    if let Some(store) = auth_store {
+        // Apply auth store extension to all routes (including login)
         main_routes = main_routes
-            .route("/auth/login", post(auth::login));
+            .route("/auth/login", post(auth::login))
+            .layer(Extension(store));
     }
 
     // Add documentation if enabled

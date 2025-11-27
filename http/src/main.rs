@@ -4,7 +4,7 @@ use axum::{
     BoxError,
     handler::HandlerWithoutStateExt,
     http::{
-        Method, StatusCode, Uri, header,
+        Method, StatusCode, Uri, header, HeaderName,
         uri::{Authority, Scheme},
     },
     response::Redirect,
@@ -92,7 +92,7 @@ async fn main() {
             Method::PATCH,
             Method::DELETE,
         ])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([header::CONTENT_TYPE, HeaderName::from_static("x-api-key")])
         .allow_origin(Any);
 
     let config = build_config(args.env_config, &file_path).unwrap();
