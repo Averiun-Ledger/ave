@@ -1,4 +1,4 @@
-use std::{future::Future, str::FromStr};
+use std::str::FromStr;
 
 use config::Config;
 use identity::{DigestIdentifier, PublicKey, Signature, Signed};
@@ -35,7 +35,7 @@ pub use network::{
     TellConfig,
 };
 use prometheus_client::registry::Registry;
-use tokio::task::JoinHandle;
+use tokio::{signal::unix::{signal, SignalKind}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
@@ -109,7 +109,7 @@ impl Bridge {
         )
         .await?;
 
-        Self::bind_with_shutdown(token.clone(), tokio::signal::ctrl_c());
+        Self::bind_with_shutdown(token.clone());
 
         #[cfg(feature = "prometheus")]
         {
@@ -136,11 +136,17 @@ impl Bridge {
 
     fn bind_with_shutdown(
         token: CancellationToken,
-        shutdown_signal: impl Future + Send + 'static,
     ) {
         let cancellation_token = token.clone();
+        let mut sigterm =
+                signal(SignalKind::terminate()).expect("It could not be registered SIGTERM");
+                
         tokio::spawn(async move {
-            shutdown_signal.await;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+
             cancellation_token.cancel();
         });
     }
