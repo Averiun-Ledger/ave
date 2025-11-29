@@ -2,7 +2,7 @@
 //!
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{
+use ave_common::identity::{
     DigestIdentifier, PublicKey, Signature, SignatureIdentifier, Signed, TimeStamp
 };
 use core::{

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, to_vec};
-use identity::PublicKey;
+use ave_common::{ValueWrapper, identity::PublicKey};
 use json_patch::diff;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
@@ -14,7 +14,7 @@ use types::{ContractResult, EvaluateType, RunnerResult};
 use wasmtime::{Engine, Module, Store};
 
 use crate::{
-    Error, ValueWrapper,
+    Error, 
     governance::{
         Governance, Schema,
         events::{

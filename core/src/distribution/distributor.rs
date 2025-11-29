@@ -1,7 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
 use async_trait::async_trait;
-use identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy

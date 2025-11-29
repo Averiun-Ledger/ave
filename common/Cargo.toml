@@ -1,0 +1,16 @@
+[package]
+name = "ave-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ave-identity = { path = "../identity" }
+ave-contract-sdk = { path = "../../ave-contract-sdk" }

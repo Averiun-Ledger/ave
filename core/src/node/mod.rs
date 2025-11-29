@@ -24,7 +24,7 @@ use crate::{
     subject::{CreateSubjectData, SignedLedger},
 };
 
-use identity::{DigestIdentifier, PublicKey, Signature, keys::KeyPair};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signature, keys::KeyPair};
 
 use async_trait::async_trait;
 use ave_actors::{

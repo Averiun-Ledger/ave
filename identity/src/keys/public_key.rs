@@ -7,7 +7,7 @@
 //! ## Example
 //!
 //! ```
-//! use identity::keys::{KeyPair, KeyPairAlgorithm};
+//! use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm};
 //!
 //! // Generate a key pair
 //! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
@@ -59,7 +59,7 @@ use super::{DSAlgorithm, SignatureIdentifier};
 /// ## Example
 ///
 /// ```
-/// use identity::keys::{KeyPair, KeyPairAlgorithm, DSAlgorithm};
+/// use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm, DSAlgorithm};
 ///
 /// // Generate a keypair and extract public key
 /// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();

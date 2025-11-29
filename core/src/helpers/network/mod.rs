@@ -1,4 +1,4 @@
-use identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
 use ave_actors::Message;
 use serde::{Deserialize, Serialize};

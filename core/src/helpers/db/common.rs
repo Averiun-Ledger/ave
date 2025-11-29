@@ -1,4 +1,4 @@
-use std::{collections::HashSet, str::FromStr};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,7 +48,7 @@ pub struct RejectRequestInfo {
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EventRequestInfo {
     Create(CreateRequestInfo),
     Fact(FactRequestInfo),
@@ -56,128 +56,6 @@ pub enum EventRequestInfo {
     Confirm(ConfirmRequestInfo),
     EOL(EOLRequestInfo),
     Reject(RejectRequestInfo),
-}
-
-impl<'de> Deserialize<'de> for EventRequestInfo {
-    fn deserialize<D>(deserializer: D) -> Result<EventRequestInfo, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        let value: Value = Deserialize::deserialize(deserializer)?;
-
-        if let Some(create) = value.get("Create") {
-            let namespace = create
-                .get("namespace")
-                .ok_or_else(|| serde::de::Error::missing_field("namespace"))?;
-
-            return Ok(Self::Create(CreateRequestInfo {
-                name: create
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(|x| x.to_owned()),
-                description: create
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(|x| x.to_owned()),
-                governance_id: create
-                    .get("governance_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("governance_id")
-                    })?
-                    .to_owned(),
-                schema_id: create
-                    .get("schema_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("schema_id")
-                    })?
-                    .to_owned(),
-                namespace: serde_json::from_value(namespace.clone())
-                    .map_err(|e| serde::de::Error::custom(e.to_string()))?,
-            }));
-        };
-
-        if let Some(fact) = value.get("Fact") {
-            let payload_str = fact
-                .get("payload")
-                .and_then(Value::as_str)
-                .ok_or_else(|| serde::de::Error::missing_field("payload"))?;
-            let payload = Value::from_str(payload_str)
-                .map_err(serde::de::Error::custom)?;
-            return Ok(Self::Fact(FactRequestInfo {
-                subject_id: fact
-                    .get("subject_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("subject_id")
-                    })?
-                    .to_owned(),
-                payload,
-            }));
-        };
-
-        if let Some(transfer) = value.get("Transfer") {
-            return Ok(Self::Transfer(TransferRequestInfo {
-                subject_id: transfer
-                    .get("subject_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("subject_id")
-                    })?
-                    .to_owned(),
-                new_owner: transfer
-                    .get("new_owner")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("new_owner")
-                    })?
-                    .to_owned(),
-            }));
-        };
-
-        if let Some(confirm) = value.get("Confirm") {
-            return Ok(Self::Confirm(ConfirmRequestInfo {
-                subject_id: confirm
-                    .get("subject_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("subject_id")
-                    })?
-                    .to_owned(),
-                name_old_owner: confirm
-                    .get("name_old_owner")
-                    .and_then(Value::as_str)
-                    .map(|x| x.to_string()),
-            }));
-        };
-
-        if let Some(reject) = value.get("Reject") {
-            return Ok(Self::Reject(RejectRequestInfo {
-                subject_id: reject
-                    .get("subject_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("subject_id")
-                    })?
-                    .to_owned(),
-            }));
-        }
-
-        if let Some(eol) = value.get("EOL") {
-            return Ok(Self::EOL(EOLRequestInfo {
-                subject_id: eol
-                    .get("subject_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        serde::de::Error::missing_field("subject_id")
-                    })?
-                    .to_owned(),
-            }));
-        };
-
-        Err(serde::de::Error::custom("Invalid EventRequest type"))
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,7 +163,7 @@ pub struct ApproveInfo {
     pub request: ApprovalReqInfo,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalReqInfo {
     /// The signed event request.
     pub event_request: SignedInfo<FactInfo>,
@@ -303,102 +181,13 @@ pub struct ApprovalReqInfo {
     pub subject_id: String,
 }
 
-impl<'de> Deserialize<'de> for ApprovalReqInfo {
-    fn deserialize<D>(deserializer: D) -> Result<ApprovalReqInfo, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        let value: Value = Deserialize::deserialize(deserializer)?;
-
-        let sn = value
-            .get("sn")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| serde::de::Error::missing_field("sn"))?;
-        let gov_version = value
-            .get("gov_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| serde::de::Error::missing_field("gov_version"))?;
-        let state_hash = value
-            .get("state_hash")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("state_hash"))?
-            .to_owned();
-        let hash_prev_event = value
-            .get("hash_prev_event")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("hash_prev_event"))?
-            .to_owned();
-        let subject_id = value
-            .get("subject_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("subject_id"))?
-            .to_owned();
-        let patch_str = value
-            .get("patch")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("patch"))?;
-        let patch =
-            Value::from_str(patch_str).map_err(serde::de::Error::custom)?;
-
-        let event_request = value
-            .get("event_request")
-            .and_then(Value::as_object)
-            .ok_or_else(|| serde::de::Error::missing_field("event_request"))?;
-
-        let content =
-            event_request
-                .get("content")
-                .and_then(Value::as_object)
-                .ok_or_else(|| serde::de::Error::missing_field("content"))?;
-        let fact = content
-            .get("Fact")
-            .and_then(Value::as_object)
-            .ok_or_else(|| serde::de::Error::missing_field("Fact"))?;
-        let payload_str = fact
-            .get("payload")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("payload"))?;
-        let payload =
-            Value::from_str(payload_str).map_err(serde::de::Error::custom)?;
-        let subject_id_fact = fact
-            .get("subject_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::missing_field("subject_id"))?
-            .to_owned();
-
-        let signature = serde_json::from_value::<SignatureInfo>(
-            event_request
-                .get("signature")
-                .ok_or_else(|| serde::de::Error::missing_field("signature"))?
-                .clone(),
-        )
-        .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-
-        Ok(Self {
-            event_request: SignedInfo {
-                content: FactInfo {
-                    payload,
-                    subject_id: subject_id_fact,
-                },
-                signature,
-            },
-            sn,
-            gov_version,
-            patch,
-            state_hash,
-            hash_prev_event,
-            subject_id,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FactInfo {
     pub payload: Value,
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedInfo<T: Serialize + Clone> {
     /// The data that is signed
     pub content: T,
@@ -416,4 +205,45 @@ pub struct SignatureInfo {
     pub content_hash: String,
     /// The signature itself
     pub value: String,
+}
+
+impl TryFrom<crate::approval::request::ApprovalReq> for ApprovalReqInfo {
+    type Error = String;
+
+    fn try_from(value: crate::approval::request::ApprovalReq) -> Result<Self, Self::Error> {
+        use crate::model::request::EventRequest;
+
+        // Extract the FactRequest from EventRequest
+        let fact_request = match value.event_request.content {
+            EventRequest::Fact(fact) => fact,
+            _ => return Err("Expected Fact event request in ApprovalReq".to_string()),
+        };
+
+        // Convert Signature to SignatureInfo
+        let signature_info = SignatureInfo {
+            signer: value.event_request.signature.signer.to_string(),
+            timestamp: value.event_request.signature.timestamp.0,
+            content_hash: value.event_request.signature.content_hash.to_string(),
+            value: value.event_request.signature.value.to_string(),
+        };
+
+        // Convert FactRequest to FactInfo
+        let fact_info = FactInfo {
+            payload: fact_request.payload.0,
+            subject_id: fact_request.subject_id.to_string(),
+        };
+
+        Ok(ApprovalReqInfo {
+            event_request: SignedInfo {
+                content: fact_info,
+                signature: signature_info,
+            },
+            sn: value.sn,
+            gov_version: value.gov_version,
+            patch: value.patch.0,
+            state_hash: value.state_hash.to_string(),
+            hash_prev_event: value.hash_prev_event.to_string(),
+            subject_id: value.subject_id.to_string(),
+        })
+    }
 }

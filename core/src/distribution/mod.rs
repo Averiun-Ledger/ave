@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use distributor::{Distributor, DistributorMessage};
-use identity::{PublicKey, Signed};
+use ave_common::identity::{PublicKey, Signed};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message, NotPersistentActor,

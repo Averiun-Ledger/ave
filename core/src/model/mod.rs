@@ -9,11 +9,9 @@ pub mod namespace;
 pub mod network;
 pub mod patch;
 pub mod request;
-pub mod wrapper;
 
 use event::{Event as AveEvent, Ledger, ProofEvent};
 pub use namespace::Namespace;
-pub use wrapper::ValueWrapper;
 
 use crate::{
     EventRequest,

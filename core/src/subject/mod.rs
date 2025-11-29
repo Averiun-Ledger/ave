@@ -23,7 +23,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        Namespace, ValueWrapper,
+        Namespace, 
         common::{
             delete_relation, emit_fail, get_gov, get_last_event, get_vali_data,
             register_relation, try_to_update, verify_protocols_state,
@@ -53,7 +53,7 @@ use ave_actors::{
     Handler, Message, Response, Sink,
 };
 use event::LedgerEvent;
-use identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
+use ave_common::{ValueWrapper, identity::{DigestIdentifier, PublicKey, Signed, hash_borsh}};
 
 use std::ops::Deref;
 
@@ -3033,7 +3033,7 @@ mod tests {
 
     use ave_actors::SystemRef;
     use event::LedgerEventMessage;
-    use identity::{
+    use ave_common::identity::{
         Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer,
     };
     use serde_json::{Value, json};

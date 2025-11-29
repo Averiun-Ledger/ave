@@ -1,13 +1,13 @@
-use identity::{
+use ave_common::{ValueWrapper, identity::{
     DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey, keys::{Ed25519Signer, KeyPair}
-};
+}};
 use ave_core::{
     Api,
     approval::approver::ApprovalStateRes,
     config::{Config, ExternalDbConfig, AveDbConfig, SinkAuth},
     helpers::db::common::{SignaturesInfo, SubjectInfo},
     model::{
-        Namespace, ValueWrapper,
+        Namespace,
         request::{
             ConfirmRequest, CreateRequest, EventRequest, FactRequest,
             RejectRequest, TransferRequest,

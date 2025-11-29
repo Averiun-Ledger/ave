@@ -31,11 +31,10 @@ use helpers::db::common::{
     SubjectInfo,
 };
 use helpers::network::*;
-use identity::{DigestIdentifier, HashAlgorithm, Signed};
-use identity::keys::KeyPair;
+use ave_common::identity::{DigestIdentifier, HashAlgorithm, Signed};
+use ave_common::identity::keys::KeyPair;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use model::ValueWrapper;
 use model::event::Event;
 use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};

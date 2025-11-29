@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    CONTRACTS, Error, EventRequest, HASH_ALGORITHM, Subject, ValueWrapper, config::Config, evaluation::response::Response as EvalRes, governance::{Governance, Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
+    CONTRACTS, Error, EventRequest, HASH_ALGORITHM, Subject, config::Config, evaluation::response::Response as EvalRes, governance::{Governance, Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
          SignTypesNode,
         common::{
             UpdateData, emit_fail, get_metadata, get_sign,
@@ -14,9 +14,9 @@ use crate::{
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
-use identity::{
+use ave_common::{ValueWrapper, identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh
-};
+}};
 
 use json_patch::diff;
 use network::ComunicateInfo;

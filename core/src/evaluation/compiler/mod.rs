@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::Path, process::Command};
 use async_trait::async_trait;
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
-use identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
+use ave_common::{ValueWrapper, identity::{DigestIdentifier, HashAlgorithm, hash_borsh}};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
@@ -15,7 +15,7 @@ use tracing::error;
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    CONTRACTS, Error, HASH_ALGORITHM, ValueWrapper, model::common::{MAX_FUEL_COMPILATION, MemoryManager, create_secure_wasmtime_config, generate_linker}
+    CONTRACTS, Error, HASH_ALGORITHM,  model::common::{MAX_FUEL_COMPILATION, MemoryManager, create_secure_wasmtime_config, generate_linker}
 };
 
 const TARGET_COMPILER: &str = "Ave-Evaluation-Compiler";

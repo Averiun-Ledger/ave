@@ -41,7 +41,7 @@ impl KeyPairAlgorithm {
     ///
     /// # Example
     /// ```rust
-    /// use identity::keys::KeyPairAlgorithm;
+    /// use ave_common::identity::keys::KeyPairAlgorithm;
     ///
     /// let algorithm = KeyPairAlgorithm::Ed25519;
     /// let keypair = algorithm.generate_keypair().unwrap();
@@ -69,7 +69,7 @@ impl fmt::Display for KeyPairAlgorithm {
 /// # Example
 ///
 /// ```rust
-/// use identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
+/// use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
 ///
 /// // Generate a key pair
 /// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).expect("Failed to generate key pair");
@@ -113,7 +113,7 @@ impl KeyPair {
     ///
     /// # Example
     /// ```no_run
-    /// use identity::keys::KeyPair;
+    /// use ave_common::identity::keys::KeyPair;
     ///
     /// let der_bytes = std::fs::read("private_key.der").unwrap();
     /// let keypair = KeyPair::from_secret_der(&der_bytes).unwrap();
@@ -310,7 +310,7 @@ impl KeyPair {
     ///
     /// # Example
     /// ```no_run
-    /// use identity::keys::{KeyPair, KeyPairAlgorithm};
+    /// use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm};
     ///
     /// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
     /// let der_bytes = keypair.to_secret_der().unwrap();

@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use config::Config;
-use identity::{DigestIdentifier, PublicKey, Signature, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
 pub use core::{
     Api as AveApi,
     approval::approver::ApprovalStateRes,

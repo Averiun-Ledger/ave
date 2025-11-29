@@ -9,7 +9,7 @@ use crate::{
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::Signed;
+use ave_common::identity::Signed;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]

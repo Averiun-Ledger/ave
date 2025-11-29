@@ -1,5 +1,4 @@
 use crate::{
-    
     approval::approver::ApproverEvent,
     error::Error,
     external_db::DBManager,

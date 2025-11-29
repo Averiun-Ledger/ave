@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use identity::{KeyPair};
+use ave_common::identity::{KeyPair};
 use ave_actors::ActorRef;
 
 use libp2p::{
@@ -1303,7 +1303,7 @@ mod tests {
     use serde::Deserialize;
     use test_log::test;
 
-    use identity::keys::{Ed25519Signer, KeyPair};
+    use ave_common::identity::{KeyPair, keys::Ed25519Signer};
 
     use serial_test::serial;
 

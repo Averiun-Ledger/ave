@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use identity::{HashAlgorithm, KeyPairAlgorithm};
+use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 use network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer};
 

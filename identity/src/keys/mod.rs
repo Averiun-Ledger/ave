@@ -6,7 +6,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
+//! use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
 //!
 //! // Generate a key pair (algorithm-agnostic)
 //! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).expect("Failed to generate key pair");
@@ -31,7 +31,7 @@
 //! You can also use specific algorithm implementations directly:
 //!
 //! ```rust
-//! use identity::keys::{DSA, Ed25519Signer};
+//! use ave_common::identity::keys::{DSA, Ed25519Signer};
 //!
 //! let signer = Ed25519Signer::generate().unwrap();
 //! let signature = signer.sign(b"message").unwrap();

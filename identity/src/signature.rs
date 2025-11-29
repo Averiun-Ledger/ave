@@ -64,8 +64,8 @@ impl Signature {
     ///
     /// # Example
     /// ```
-    /// use identity::signature::Signature;
-    /// use identity::keys::Ed25519Signer;
+    /// use ave_common::identity::signature::Signature;
+    /// use ave_common::identity::keys::Ed25519Signer;
     /// use borsh::{BorshSerialize, BorshDeserialize};
     ///
     /// #[derive(BorshSerialize, BorshDeserialize)]

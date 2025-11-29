@@ -61,7 +61,7 @@ mod tests {
         time::Duration,
     };
 
-    use identity::{HashAlgorithm, KeyPairAlgorithm};
+    use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use core::{
         config::{LoggingOutput, LoggingRotation, SinkServer},
         subject::sinkdata::SinkTypes,

@@ -20,7 +20,7 @@ either = { workspace = true }
 fnv = { workspace = true } 
 futures = { workspace = true }
 futures-timer = { workspace = true }
-identity = { package = "ave-identity", path = "../identity" }
+ave-common = { path = "../common" }
 ip_network = { workspace = true }
 libp2p = { workspace = true, default_features = false, features = [
 	"identify",

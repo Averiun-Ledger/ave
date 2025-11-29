@@ -1,10 +1,9 @@
 use std::str::FromStr;
 
-use identity::{DigestIdentifier, PublicKey};
+use ave_common::{ValueWrapper, identity::{DigestIdentifier, PublicKey}};
 use core::{
     error::Error,
     model::{
-        ValueWrapper,
         namespace::Namespace,
         request::{
             ConfirmRequest, CreateRequest, EOLRequest, EventRequest,

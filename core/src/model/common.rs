@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler};
 
-use identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
 use network::ComunicateInfo;
 use wasmtime::{Caller, Config, Engine, Linker};
 
@@ -307,7 +307,7 @@ where
 pub async fn get_sign<A>(
     ctx: &mut ActorContext<A>,
     sign_type: SignTypesNode,
-) -> Result<identity::Signature, ActorError>
+) -> Result<Signature, ActorError>
 where
     A: Actor + Handler<A>,
 {

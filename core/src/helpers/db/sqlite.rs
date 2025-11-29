@@ -3,16 +3,17 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 use ave_actors::{ActorRef, Subscriber};
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use tracing::error;
 
 use crate::approval::approver::ApproverEvent;
+use crate::approval::request::ApprovalReq;
 use crate::error::Error;
 use crate::external_db::{DBManager, DBManagerMessage, DeleteTypes};
-use crate::helpers::db::common::{ApproveInfo, EventDB};
+use crate::helpers::db::common::{ApprovalReqInfo, ApproveInfo, EventDB};
 use crate::model::event::{LedgerValue, ProtocolsSignatures};
 use crate::request::RequestHandlerEvent;
 use crate::request::manager::RequestManagerEvent;
@@ -436,14 +437,23 @@ impl Querys for SqliteLocal {
             }
         };
 
-        Ok(ApproveInfo {
-            state: approve.1,
-            request: serde_json::from_str(&approve.0).map_err(|e| {
+        let approval_request: ApprovalReq = serde_json::from_str(&approve.0).map_err(|e| {
                 Error::ExtDB(format!(
-                    "Can not convert str to ApprovalReqInfo {}",
+                    "Can not convert str to ApprovalReq {}",
                     e
                 ))
-            })?,
+            })?;
+
+        let approval_request_info = ApprovalReqInfo::try_from(approval_request).map_err(|e| {
+                Error::ExtDB(format!(
+                    "Can not convert ApprovalReq to ApprovalReqInfo {}",
+                    e
+                ))
+            })?;
+
+        Ok(ApproveInfo {
+            state: approve.1,
+            request: approval_request_info,
         })
     }
 

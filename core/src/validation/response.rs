@@ -1,7 +1,7 @@
 use crate::{
     model::{ network::TimeOutResponse},
 };
-use identity::{Signature};
+use ave_common::identity::{Signature};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

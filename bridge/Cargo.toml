@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 prometheus-client = { workspace = true}
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true }
-identity = { package = "ave-identity", path = "../identity"}
+ave-common = { path = "../common"}
 pkcs8 = { version = "0.10.2", features = ["encryption"]}
 borsh = { workspace = true }
 config = { workspace = true }

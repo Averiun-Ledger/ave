@@ -18,7 +18,7 @@ use std::fmt::{self, Debug};
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use control_list::Config as ControlListConfig;
 pub use error::Error;
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 pub use libp2p::{
     PeerId,
     identity::{

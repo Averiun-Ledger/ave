@@ -6,7 +6,7 @@ pub mod model;
 
 use crate::{
     Error,
-    model::{Namespace, wrapper::ValueWrapper},
+    model::{Namespace, },
 };
 
 use model::{
@@ -18,7 +18,7 @@ use ave_actors::ActorError;
 
 pub use model::{Member, Quorum, Role, Schema};
 
-use identity::PublicKey;
+use ave_common::{ValueWrapper, identity::PublicKey};
 
 use serde::{Deserialize, Serialize};
 

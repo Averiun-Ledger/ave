@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::{Namespace, wrapper::ValueWrapper};
+use super::{Namespace};
 
 use crate::{
     Error,
@@ -11,9 +11,9 @@ use crate::{
     subject::Metadata,
 };
 
-use identity::{
+use ave_common::{ValueWrapper, identity::{
     DigestIdentifier, PublicKey,
-};
+}};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -307,7 +307,7 @@ pub mod tests {
 
     use super::*;
 
-    use identity::{Signed, keys::KeyPair};
+    use ave_common::identity::{Signature, Signed, keys::KeyPair};
 
     // Mocks
 
@@ -325,7 +325,7 @@ pub mod tests {
         };
         let content = EventRequest::Create(req);
         let signature =
-            identity::Signature::new(&content, &keys, ).unwrap();
+            Signature::new(&content, &keys, ).unwrap();
         Signed { content, signature }
     }
 }

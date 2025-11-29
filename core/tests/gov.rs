@@ -3,7 +3,7 @@ use std::str::FromStr;
 mod common;
 
 use ave_core::{approval::approver::ApprovalStateRes, auth::AuthWitness};
-use identity::{
+use ave_common::identity::{
     PublicKey,
     keys::{Ed25519Signer, KeyPair},
 };

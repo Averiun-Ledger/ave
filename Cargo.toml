@@ -5,7 +5,8 @@ members = [
     "bridge",
     "network",
     "protocols/tell",
-    "http"
+    "http",
+    "common"
 ]
 
 resolver = "2"

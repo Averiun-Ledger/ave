@@ -1,4 +1,4 @@
-use identity::hash_borsh;
+use ave_common::identity::hash_borsh;
 use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -78,7 +78,7 @@ pub async fn system(
 pub mod tests {
 
     use crate::config::{ExternalDbConfig, AveDbConfig};
-    use identity::{HashAlgorithm, KeyPairAlgorithm};
+    use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
     use std::{fs, time::Duration};
     use test_log::test;

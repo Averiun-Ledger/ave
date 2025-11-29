@@ -4,12 +4,11 @@
 use super::{
     network::TimeOutResponse,
     request::EventRequest,
-    wrapper::ValueWrapper,
 };
 
 use crate::{subject::Metadata, validation::proof::EventProof};
 
-use identity::{DigestIdentifier, Signature, Signed};
+use ave_common::{ValueWrapper, identity::{DigestIdentifier, Signature, Signed}};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

@@ -11,7 +11,7 @@ pub mod schema;
 
 use crate::{
     HASH_ALGORITHM, auth::WitnessesAuth, governance::{Governance, Quorum, model::ProtocolTypes}, model::{
-         SignTypesNode, ValueWrapper,
+         SignTypesNode,
         common::{
             emit_fail, get_metadata, get_sign, get_signers_quorum_gov_version,
             send_reboot_to_req, take_random_signers, try_to_update,
@@ -27,7 +27,7 @@ use ave_actors::{
 
 use async_trait::async_trait;
 use evaluator::{Evaluator, EvaluatorMessage};
-use identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh};
+use ave_common::{ValueWrapper, identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh}};
 use request::{EvaluationReq, SubjectContext};
 use response::{EvalLedgerResponse, EvaluationRes, Response as EvalRes};
 use serde_json::json;
@@ -787,16 +787,16 @@ impl Handler<Evaluation> for Evaluation {
 mod tests {
     use std::{str::FromStr, time::Duration};
 
-    use identity::{
-        Blake3Hasher, DigestIdentifier, KeyPair, Signed, hash_borsh
-    };
+    use ave_common::{ValueWrapper, identity::{
+        Blake3Hasher, DigestIdentifier, KeyPair, KeyPairAlgorithm, Signed, hash_borsh
+    }};
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use serde_json::json;
     use test_log::test;
 
     use crate::{
         EventRequest, FactRequest, Governance, NodeMessage, NodeResponse,
-        SubjectMessage, SubjectResponse, ValueWrapper,
+        SubjectMessage, SubjectResponse,
         approval::approver::ApprovalStateRes,
         model::{
              Namespace, SignTypesNode, event::LedgerValue,
@@ -986,7 +986,7 @@ mod tests {
             subject_id,
         ) = create_subject_gov().await;
 
-        let new_owner = KeyPair::generate(identity::KeyPairAlgorithm::Ed25519).unwrap();
+        let new_owner = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),

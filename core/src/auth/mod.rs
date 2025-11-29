@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,

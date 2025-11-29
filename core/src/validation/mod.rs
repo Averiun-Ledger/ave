@@ -28,7 +28,7 @@ use ave_actors::{
 
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use proof::ValidationProof;
 use request::ValidationReq;
 use response::ValidationRes;
@@ -562,15 +562,15 @@ pub mod tests {
     use std::time::Duration;
     use test_log::test;
 
-    use identity::{
+    use ave_common::{ValueWrapper, identity::{
         Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh, keys::Ed25519Signer
-    };
+    }};
     use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
 
     use crate::{
         CreateRequest, EOLRequest, EventRequest, Governance,  Node,
         NodeMessage, NodeResponse, Signed, Subject, SubjectMessage,
-        SubjectResponse, ValueWrapper,
+        SubjectResponse, 
         helpers::db::ExternalDB,
         model::{Namespace, SignTypesNode, event::LedgerValue},
         query::Query,

@@ -23,7 +23,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};

@@ -6,7 +6,7 @@ use ave_actors::{
 };
 
 use async_trait::async_trait;
-use identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::error;

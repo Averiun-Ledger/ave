@@ -23,7 +23,7 @@ use super::{
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
-use identity::{DigestIdentifier, PublicKey, TimeStamp};
+use ave_common::identity::{DigestIdentifier, PublicKey, TimeStamp};
 
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};

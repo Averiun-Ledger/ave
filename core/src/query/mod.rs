@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
 };

@@ -5,7 +5,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{
+use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
 use manager::{RequestManager, RequestManagerMessage};

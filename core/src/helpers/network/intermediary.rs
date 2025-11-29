@@ -16,7 +16,7 @@ use crate::{
 
 use super::ActorMessage;
 use super::{NetworkMessage, service::HelperService};
-use identity::PublicKey;
+use ave_common::identity::{DSAlgorithm, PublicKey};
 use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
@@ -660,7 +660,7 @@ impl Intermediary {
         public_key: &PublicKey,
     ) -> Result<PeerId, Error> {
         match public_key.algorithm() {
-            identity::DSAlgorithm::Ed25519 => {
+            DSAlgorithm::Ed25519 => {
                 let pk_ed = PublicKeyEd25519::try_from_bytes(public_key.as_bytes()).map_err(|e| 
                     Error::NetworkHelper(format!("Invalid Ed25519 public key, can not convert to PeerID: {}", e)))?;
 

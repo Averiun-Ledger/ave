@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::model::common::emit_fail;
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, Response
 };

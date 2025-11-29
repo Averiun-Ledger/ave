@@ -1,9 +1,9 @@
 use crate::{
     model::{
-         ValueWrapper, event::LedgerValue, network::TimeOutResponse,
+         event::LedgerValue, network::TimeOutResponse,
     },
 };
-use identity::{DigestIdentifier};
+use ave_common::{ValueWrapper, identity::DigestIdentifier};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

@@ -15,7 +15,7 @@ rust-version.workspace = true
 async-trait = { workspace = true }
 borsh = { workspace = true }
 generic-array = {version = "1.2.0", features = ["zeroize"] }
-identity = { package = "ave-identity", path = "../identity"}
+ave-common = { path = "../common"}
 json-patch = { version = "4.0.0" }
 lazy_static = { workspace = true }
 memsecurity = { version = "3.5.2", features = ["encryption"]}

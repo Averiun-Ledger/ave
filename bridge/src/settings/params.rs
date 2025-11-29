@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::{collections::BTreeMap, time::Duration};
 
-use identity::{HashAlgorithm, KeyPairAlgorithm};
+use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 use core::config::{
     ExternalDbConfig, AveDbConfig, LoggingOutput, LoggingRotation, SinkConfig,
     SinkServer,

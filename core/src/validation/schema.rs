@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 use network::ComunicateInfo;
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor};
 use serde::{Deserialize, Serialize};

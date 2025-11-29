@@ -6,8 +6,9 @@ use ave_actors::{
 use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
+use ave_common::ValueWrapper;
 use borsh::{BorshDeserialize, BorshSerialize};
-use identity::{
+use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
 use network::ComunicateInfo;
@@ -20,8 +21,7 @@ use crate::subject::SignedLedger;
 use crate::{
     ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Subject,
     SubjectMessage, SubjectResponse, Validation, ValidationInfo,
-    ValidationMessage, ValueWrapper,
-    approval::{Approval, ApprovalMessage},
+    ValidationMessage,    approval::{Approval, ApprovalMessage},
     auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
     db::Storable,
     distribution::{Distribution, DistributionMessage, DistributionType},

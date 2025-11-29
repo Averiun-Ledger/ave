@@ -3,7 +3,7 @@ use super::ValidationInfo;
 use crate::{
     Error, HASH_ALGORITHM, error, model::{ Namespace, request::EventRequest}
 };
-use identity::{
+use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh
 };
 

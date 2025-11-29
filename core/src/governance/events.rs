@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
-use identity::PublicKey;
+use ave_common::identity::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

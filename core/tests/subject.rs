@@ -8,11 +8,10 @@ use common::{
     emit_reject, emit_transfer, get_signatures, get_subject,
 };
 use futures::future::join_all;
-use identity::{KeyPair, PublicKey, keys::Ed25519Signer};
+use ave_common::{ValueWrapper, identity::{KeyPair, PublicKey, keys::Ed25519Signer}};
 use ave_core::{
     auth::AuthWitness,
     model::{
-        ValueWrapper,
         request::{ConfirmRequest, EventRequest, FactRequest},
     },
 };

@@ -1,4 +1,4 @@
-use identity::KeyPair;
+use ave_common::identity::KeyPair;
 use core::error::Error;
 use pkcs8::{Document, EncryptedPrivateKeyInfo, PrivateKeyInfo, pkcs5};
 
