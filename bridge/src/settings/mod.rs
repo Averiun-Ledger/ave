@@ -120,11 +120,11 @@ mod tests {
             std::env::set_var("AVE_BASE_GARBAGE_COLLECTOR", "1000");
             std::env::set_var(
                 "AVE_SINK_SINKS",
-                "Sever1|key1|All|https://www.ave-ledger.net/build/|true,Server2|key2|Create Fact|https://www.ave-ledger.net/community/|false,Server3|key2|Transfer|https://www.ave-ledger.net/community/|true,Server4|key2|Confirm|https://www.ave-ledger.net/community/issue|false",
+                "Sever1|key1|All|https://www.averiun.com/build/|true,Server2|key2|Create Fact|https://www.averiun.com/community/|false,Server3|key2|Transfer|https://www.averiun.com/community/|true,Server4|key2|Confirm|https://www.averiun.com/community/issue|false",
             );
             std::env::set_var(
                 "AVE_SINK_AUTH",
-                "https://www.ave-ledger.net/build/",
+                "https://www.averiun.com/build/",
             );
             std::env::set_var("AVE_SINK_USERNAME", "Sink-service");
 
@@ -220,17 +220,17 @@ mod tests {
         assert_eq!(config.sink.sinks.len(), 2);
         let mut sink_map = BTreeMap::new();
 
-        //"Sever1|key1|All|https://www.ave-ledger.net/build/|true,
-        //Server2|key2|Create Fact|https://www.ave-ledger.net/community/|false,
-        //Server3|key2|Transfer|https://www.ave-ledger.net/community/|true,
-        //Server4|key2|Confirm|https://www.ave-ledger.net/community/issue|false",
+        //"Sever1|key1|All|https://www.averiun.com/build/|true,
+        //Server2|key2|Create Fact|https://www.averiun.com/community/|false,
+        //Server3|key2|Transfer|https://www.averiun.com/community/|true,
+        //Server4|key2|Confirm|https://www.averiun.com/community/issue|false",
 
         sink_map.insert(
             "key1".to_owned(),
             vec![SinkServer {
                 server: "Sever1".to_owned(),
                 events: BTreeSet::from([SinkTypes::All]),
-                url: "https://www.ave-ledger.net/build/".to_owned(),
+                url: "https://www.averiun.com/build/".to_owned(),
                 auth: true,
             }],
         );
@@ -243,19 +243,19 @@ mod tests {
                         SinkTypes::Create,
                         SinkTypes::Fact,
                     ]),
-                    url: "https://www.ave-ledger.net/community/".to_owned(),
+                    url: "https://www.averiun.com/community/".to_owned(),
                     auth: false,
                 },
                 SinkServer {
                     server: "Server3".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
-                    url: "https://www.ave-ledger.net/community/".to_owned(),
+                    url: "https://www.averiun.com/community/".to_owned(),
                     auth: true,
                 },
                 SinkServer {
                     server: "Server4".to_owned(),
                     events: BTreeSet::from([SinkTypes::Confirm]),
-                    url: "https://www.ave-ledger.net/community/issue"
+                    url: "https://www.averiun.com/community/issue"
                         .to_owned(),
                     auth: false,
                 },
@@ -265,7 +265,7 @@ mod tests {
 
         assert_eq!(
             config.sink.auth,
-            "https://www.ave-ledger.net/build/".to_string()
+            "https://www.averiun.com/build/".to_string()
         );
 
         assert_eq!(config.sink.username, "Sink-service".to_string());

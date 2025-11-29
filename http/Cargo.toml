@@ -12,7 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bridge = { package = "ave-bridge", path = "../bridge" , default-features = false }
+bridge = { package = "ave-bridge", path = "../bridge", default-features = false, features = ["openapi"] }
 
 tokio = {  workspace = true }
 

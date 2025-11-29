@@ -4,11 +4,11 @@ use crate::{
     auth::{self, ApiKeyAuth, AuthStore},
     enviroment::build_doc,
     error::Error,
-    wrappers::{
-        ApproveInfo, Config as ConfigAveHttp, EventInfo, GovsData,
-        PaginatorEvents, RegisterDataSubj, RequestData, RequestInfo,
-        SignaturesInfo, SubjectInfo, TransferSubject,
-    },
+};
+use bridge::{
+    ApproveInfo, EventInfo, GovsData,
+    PaginatorEvents, RegisterDataSubj, RequestData, RequestInfo,
+    SignaturesInfo, SubjectInfo, TransferSubject,
 };
 use axum::{
     Extension, Json, Router,
@@ -19,7 +19,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use bytes::Bytes;
-use bridge::{Bridge, model::BridgeSignedEventRequest};
+use bridge::{Bridge, BridgeSignedEventRequest};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;
@@ -931,81 +931,6 @@ async fn get_peer_id(
 ///
 /// # Returns
 ///
-/// * `Json<ConfigAveHttp>` - Returns the config of the node in a Json
-#[ utoipa::path(
-    get,
-    path = "/config",
-    operation_id = "Config",
-    tag = "Other",
-    responses(
-        (status = 200, description = "Obtain config of node", body = ConfigAveHttp,
-        example = json!(
-            {
-                "ave_config": {
-                    "key_derivator": "Ed25519",
-                    "digest_derivator": "Blake3_256",
-                    "ave_db": "Rocksdb",
-                    "external_db": "Sqlite",
-                    "network": {
-                        "user_agent": "ave-node",
-                        "node_type": "Bootstrap",
-                        "listen_addresses": [
-                            "/ip4/0.0.0.0/tcp/50000"
-                        ],
-                        "external_addresses": [
-                            "/ip4/172.28.0.102/tcp/50000"
-                        ],
-                        "tell": {
-                            "message_timeout": 10,
-                            "max_concurrent_streams": 100
-                        },
-                        "routing": {
-                            "boot_nodes": [],
-                            "dht_random_walk": false,
-                            "pre_routing": true,
-                            "discovery_only_if_under_num": 184467,
-                            "allow_non_globals_in_dht": false,
-                            "allow_private_ip": false,
-                            "enable_mdns": false,
-                            "kademlia_disjoint_query_paths": true,
-                            "kademlia_replication_factor": null
-                        },
-                        "port_reuse": false,
-                        "control_list": {
-                            "enable": false,
-                            "allow_list": [],
-                            "block_list": [],
-                            "service_allow_list": [],
-                            "service_block_list": [],
-                            "interval_request": 60
-                        }
-                    },
-                    "contracts_dir": "./",
-                    "always_accept": true,
-                    "garbage_collector": 100,
-                    "sink": ""
-                },
-                "keys_path": "keys",
-                "prometheus": "0.0.0.0:3050",
-                "logging": {
-                    "level": "Info",
-                    "file": "ave.log",
-                    "max_size": 100,
-                    "max_files": 10,
-                    "compress": true
-                },
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_config(
-    _auth: ApiKeyAuth,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<ConfigAveHttp> {
-    Json(ConfigAveHttp::from(bridge.config()))
-}
-
 /// keys
 ///
 /// Gets private key of the node
@@ -1268,7 +1193,7 @@ pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) 
         .route("/event-request", post(send_event_request))
         .route("/controller-id", get(get_controller_id))
         .route("/peer-id", get(get_peer_id))
-        .route("/config", get(get_config))
+        // .route("/config", get(get_config)) // Removed: Config types don't support ToSchema
         .route("/keys", get(get_keys))
         .route("/pending-transfers", get(get_pending_transfers))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));

@@ -1,0 +1,51 @@
+//! Signature model.
+//!
+
+use crate::{error::Error, identity::{
+    DigestIdentifier, PublicKey, Signature, SignatureIdentifier, TimeStamp
+}};
+use serde::{Deserialize, Serialize};
+use std::{fmt::Debug, str::FromStr};
+
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
+
+/// Signature model for API communication
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct BridgeSignature {
+    /// Public key of the issuer
+    pub signer: String,
+    /// Timestamp at which the signature was made
+    pub timestamp: u64,
+    /// Signature value
+    pub value: String,
+    /// Content hash
+    pub content_hash: String,
+}
+
+impl From<Signature> for BridgeSignature {
+    fn from(signature: Signature) -> Self {
+        Self {
+            signer: signature.signer.to_string(),
+            timestamp: signature.timestamp.0,
+            value: signature.value.to_string(),
+            content_hash: signature.content_hash.to_string(),
+        }
+    }
+}
+
+impl TryFrom<BridgeSignature> for Signature {
+    type Error = Error;
+    fn try_from(signature: BridgeSignature) -> Result<Self, Self::Error> {
+        Ok(Self {
+            signer: PublicKey::from_str(&signature.signer)
+                .map_err(|_| Error::InvalidIdentifier("Invalid public key".to_owned()))?,
+            timestamp: TimeStamp(signature.timestamp),
+            value: SignatureIdentifier::from_str(&signature.value)
+                .map_err(|_| Error::InvalidIdentifier("Invalid signature".to_owned()))?,
+            content_hash: DigestIdentifier::from_str(&signature.content_hash)
+                .map_err(|_| Error::InvalidIdentifier("Invalid digest".to_owned()))?,
+        })
+    }
+}

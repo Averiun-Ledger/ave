@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
 
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
+
 /// This is the name space for a `Subject`.
 ///
 #[derive(
@@ -22,6 +25,7 @@ use std::fmt::{Error, Formatter};
     BorshDeserialize,
     BorshSerialize,
 )]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Namespace(Vec<String>);
 
 /// `Namespace` implementation.

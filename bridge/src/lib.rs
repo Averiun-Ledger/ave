@@ -2,6 +2,14 @@ use std::str::FromStr;
 
 use config::Config;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
+pub use ave_common::{
+    ApprovalReqInfo, ApproveInfo, BridgeSignedEventRequest, ConfirmRequestInfo,
+    CreateRequestInfo, EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo,
+    FactRequestInfo, GovsData, Namespace, Paginator, PaginatorEvents, ProtocolsError,
+    ProtocolsSignaturesInfo, RegisterDataSubj, RejectRequestInfo, RequestData,
+    RequestInfo, SignatureInfo, SignaturesInfo, SignedInfo, SubjectInfo,
+    TimeOutResponseInfo, TransferRequestInfo, TransferSubject,
+};
 pub use core::{
     Api as AveApi,
     approval::approver::ApprovalStateRes,
@@ -9,26 +17,9 @@ pub use core::{
     config::Config as AveConfig,
     config::{Logging, LoggingOutput, LoggingRotation, SinkConfig},
     error::Error,
-    helpers::db::common::{
-        ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo, CreateRequestInfo,
-        EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo, FactRequestInfo,
-        Paginator, PaginatorEvents, ProtocolsSignaturesInfo, RejectRequestInfo,
-        RequestInfo, SignatureInfo, SignaturesInfo, SignedInfo, SubjectInfo,
-        TimeOutResponseInfo, TransferRequestInfo,
-    },
-    model::{
-        Namespace,
-        event::ProtocolsError,
-        request::EventRequest,
-    },
-    node::{
-        TransferSubject,
-        register::{GovsData, RegisterDataSubj},
-    },
-    request::RequestData,
+    model::request::EventRequest,
 };
 use core::{config::SinkAuth, helpers::sink::obtain_token};
-use model::BridgeSignedEventRequest;
 pub use network::MonitorNetworkState;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, RoutingConfig, RoutingNode,
@@ -40,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
 pub mod config;
-pub mod model;
+pub mod conversions;
 pub mod settings;
 pub mod utils;
 pub use clap;
@@ -171,19 +162,21 @@ impl Bridge {
         &self,
         request: BridgeSignedEventRequest,
     ) -> Result<RequestData, Error> {
-        let event: EventRequest = EventRequest::try_from(request.request)?;
-        if let Some(signature) = request.signature {
-            let signature = Signature::try_from(signature)?;
+        let event: EventRequest = conversions::bridge_to_event_request(request.request)?;
+        let result = if let Some(signature) = request.signature {
+            let signature = Signature::try_from(signature)
+                .map_err(|e| Error::Bridge(format!("Invalid signature: {:?}", e)))?;
 
             let signed_request = Signed {
                 content: event,
                 signature,
             };
 
-            self.api.external_request(signed_request).await
+            self.api.external_request(signed_request).await?
         } else {
-            self.api.own_request(event).await
-        }
+            self.api.own_request(event).await?
+        };
+        Ok(conversions::core_request_to_common(result))
     }
 
     pub async fn get_network_state(
@@ -195,7 +188,8 @@ impl Bridge {
     pub async fn get_pending_transfers(
         &self,
     ) -> Result<Vec<TransferSubject>, Error> {
-        self.api.get_pending_transfers().await
+        let transfers = self.api.get_pending_transfers().await?;
+        Ok(transfers.into_iter().map(conversions::core_transfer_to_common).collect())
     }
 
     pub async fn get_request_state(
@@ -317,7 +311,8 @@ impl Bridge {
         &self,
         active: Option<bool>,
     ) -> Result<Vec<GovsData>, Error> {
-        self.api.all_govs(active).await
+        let govs = self.api.all_govs(active).await?;
+        Ok(govs.into_iter().map(conversions::core_gov_to_common).collect())
     }
 
     pub async fn get_all_subjs(
@@ -329,7 +324,8 @@ impl Bridge {
         let gov_id = DigestIdentifier::from_str(&gov_id).map_err(|e| {
             Error::Bridge(format!("Invalid governance id: {}", e))
         })?;
-        self.api.all_subjs(gov_id, active, schema).await
+        let subjs = self.api.all_subjs(gov_id, active, schema).await?;
+        Ok(subjs.into_iter().map(conversions::core_subj_to_common).collect())
     }
 
     pub async fn manual_distribution(

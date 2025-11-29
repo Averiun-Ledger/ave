@@ -38,6 +38,7 @@ rocksdb = ["core/rocksdb"]
 sqlite = ["core/sqlite"]
 ext-sqlite = ["core/ext-sqlite"]
 prometheus = ["axum"]
+openapi = ["ave-common/openapi"]
 
 [lib]
 bench = false

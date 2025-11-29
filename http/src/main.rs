@@ -38,8 +38,6 @@ mod error;
 mod logging;
 mod middleware;
 mod server;
-mod wrappers;
-
 mod doc;
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]

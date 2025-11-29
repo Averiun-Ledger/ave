@@ -1,17 +1,16 @@
 use crate::{
     auth::handlers::{ErrorResponse as AuthErrorResponse, LoginRequest, LoginResponse},
     server::*,
-    wrappers::{
-        ApprovalReqInfo, ApproveInfo, Config, ConfirmRequestInfo,
-        ControlListConfig, CreateRequestInfo, EOLRequestInfo, EventInfo,
-        EventRequestInfo, FactInfo, FactRequestInfo, GovsData, AveConfig,
-        LoggingOutput, LoggingRotation, Namespace, NetworkConfig, Paginator,
-        PaginatorEvents, ProtocolsError, ProtocolsSignaturesInfo,
-        RegisterDataSubj, RejectRequestInfo, RequestData, RequestInfo,
-        RoutingConfig, RoutingNode, SignatureInfo, SignaturesInfo, SignedInfo,
-        SinkConfig, SubjectInfo, TellConfig, TimeOutResponseInfo,
-        TransferRequestInfo, TransferSubject,
-    },
+};
+use bridge::{
+    ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo,
+    CreateRequestInfo, EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo,
+    FactRequestInfo, GovsData, Namespace,
+    Paginator, PaginatorEvents, ProtocolsError,
+    ProtocolsSignaturesInfo, RegisterDataSubj, RejectRequestInfo, RequestData,
+    RequestInfo, SignatureInfo, SignaturesInfo,
+    SignedInfo, SubjectInfo, TimeOutResponseInfo,
+    TransferRequestInfo, TransferSubject,
 };
 use utoipa::OpenApi;
 /// Ave HTTP
@@ -28,12 +27,12 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "Ave HTTP",
-        description = "This API provides interaction with Ave Ledger nodes using the HTTP protocol. It allows sending and retrieving various types of requests and managing subjects. The API is documented with OpenAPI for easy integration and use.",
+        description = "This API provides interaction with Averiun nodes using the HTTP protocol. It allows sending and retrieving various types of requests and managing subjects. The API is documented with OpenAPI for easy integration and use.",
         version = "0.3.0",
         contact(
             name = "Ave Information",
-            url = "https://www.ave-ledger.net/",
-            email = "info@ave-ledger.net"
+            url = "https://www.averiun.com/",
+            email = "info@averiun.com"
         ),
         license(
             name = "MIT",
@@ -62,7 +61,7 @@ use utoipa::OpenApi;
         get_first_or_end_events,
         get_event_sn,
         check_transfer,
-        get_config,
+        // get_config, // Removed: Config types don't support ToSchema
         get_keys,
         get_pending_transfers
     ),
@@ -101,17 +100,7 @@ use utoipa::OpenApi;
             SignaturesInfo,
             ProtocolsSignaturesInfo,
             TimeOutResponseInfo,
-            Config,
-            AveConfig,
-            NetworkConfig,
-            TellConfig,
-            RoutingConfig,
-            ControlListConfig,
-            RoutingNode,
-            TransferSubject,
-            SinkConfig,
-            LoggingRotation,
-            LoggingOutput
+            TransferSubject
         )
     ),
     tags(

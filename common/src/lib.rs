@@ -9,8 +9,12 @@
 //! ## Usage
 //!
 //! ```rust
-//! use ave_common::identity::{KeyPair, Signature};
-//! use ave_common::ValueWrapper;
+//! use ave_common::{
+//!     identity::{KeyPair, Signature},
+//!     ValueWrapper,
+//!     BridgeEventRequest,
+//!     BridgeFactRequest,
+//! };
 //!
 //! // Create a new keypair
 //! let keypair = KeyPair::default();
@@ -29,5 +33,18 @@
 // Re-export the entire identity module
 pub use ave_identity as identity;
 
-// Re-export ValueWrapper from ave-contract-sdk
-pub use ave_contract_sdk::ValueWrapper;
+pub mod wrapper;
+// Internal modules
+pub mod error;
+pub mod namespace;
+pub mod request;
+pub mod response;
+pub mod signature;
+
+// Re-export commonly used types
+pub use wrapper::ValueWrapper;
+pub use error::Error;
+pub use namespace::Namespace;
+pub use request::*;
+pub use response::*;
+pub use signature::*;

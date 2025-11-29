@@ -1105,7 +1105,7 @@ where
     D: Deserializer<'de>,
 {
     let v: Vec<String> = Vec::deserialize(deserializer)?;
-    // Server2|key2|Create Fact|https://www.ave-ledger.net/community/|false
+    // Server2|key2|Create Fact|https://www.averiun.com/community/|false
 
     let mut map: BTreeMap<String, Vec<SinkServer>> = BTreeMap::new();
     for element in v.iter() {

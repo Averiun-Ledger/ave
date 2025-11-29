@@ -5,13 +5,12 @@
 
 pub mod common;
 pub mod event;
-pub mod namespace;
 pub mod network;
 pub mod patch;
 pub mod request;
 
 use event::{Event as AveEvent, Ledger, ProofEvent};
-pub use namespace::Namespace;
+pub use ave_common::Namespace;
 
 use crate::{
     EventRequest,
