@@ -33,6 +33,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 mod auth;
+mod config_types;
 mod enviroment;
 mod error;
 mod logging;

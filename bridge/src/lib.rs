@@ -15,7 +15,7 @@ pub use core::{
     approval::approver::ApprovalStateRes,
     auth::AuthWitness,
     config::Config as AveConfig,
-    config::{Logging, LoggingOutput, LoggingRotation, SinkConfig},
+    config::{Logging, LoggingOutput, LoggingRotation, SinkConfig, SinkServer},
     error::Error,
     model::request::EventRequest,
 };

@@ -21,7 +21,7 @@ homepage = "https://www.averiun.com"
 repository = "https://github.com/Averiun-Ledger/ave"
 license = "AGPL-3.0-only"
 keywords = ["traceability", "distributed-ledger", "Averiun", "sustainability"]
-rust-version = "1.90.0"
+rust-version = "1.91.0"
 
 [workspace.dependencies]
 async-trait = "0.1.88"

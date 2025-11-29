@@ -931,6 +931,24 @@ async fn get_peer_id(
 ///
 /// # Returns
 ///
+/// * `Json<ConfigHttp>` - Returns the config of the node
+#[utoipa::path(
+    get,
+    path = "/config",
+    operation_id = "Config",
+    tag = "Other",
+    responses(
+        (status = 200, description = "Obtain config of node", body = crate::config_types::ConfigHttp),
+        (status = 500, description = "Internal Server Error"),
+    )
+)]
+async fn get_config(
+    _auth: ApiKeyAuth,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Json<crate::config_types::ConfigHttp> {
+    Json(crate::config_types::ConfigHttp::from(bridge.config()))
+}
+
 /// keys
 ///
 /// Gets private key of the node
@@ -1193,7 +1211,7 @@ pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) 
         .route("/event-request", post(send_event_request))
         .route("/controller-id", get(get_controller_id))
         .route("/peer-id", get(get_peer_id))
-        // .route("/config", get(get_config)) // Removed: Config types don't support ToSchema
+        .route("/config", get(get_config))
         .route("/keys", get(get_keys))
         .route("/pending-transfers", get(get_pending_transfers))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));

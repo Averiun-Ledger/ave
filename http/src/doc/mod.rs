@@ -1,16 +1,20 @@
 use crate::{
-    auth::handlers::{ErrorResponse as AuthErrorResponse, LoginRequest, LoginResponse},
+    auth::handlers::{
+        ErrorResponse as AuthErrorResponse, LoginRequest, LoginResponse,
+    },
+    config_types::{
+        AveConfigHttp, ConfigHttp, LoggingHttp, LoggingOutputHttp,
+        NetworkConfigHttp, SinkConfigHttp, SinkServerHttp,
+    },
     server::*,
 };
 use bridge::{
-    ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo,
-    CreateRequestInfo, EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo,
-    FactRequestInfo, GovsData, Namespace,
-    Paginator, PaginatorEvents, ProtocolsError,
+    ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo, CreateRequestInfo,
+    EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo, FactRequestInfo,
+    GovsData, Namespace, Paginator, PaginatorEvents, ProtocolsError,
     ProtocolsSignaturesInfo, RegisterDataSubj, RejectRequestInfo, RequestData,
-    RequestInfo, SignatureInfo, SignaturesInfo,
-    SignedInfo, SubjectInfo, TimeOutResponseInfo,
-    TransferRequestInfo, TransferSubject,
+    RequestInfo, SignatureInfo, SignaturesInfo, SignedInfo, SubjectInfo,
+    TimeOutResponseInfo, TransferRequestInfo, TransferSubject,
 };
 use utoipa::OpenApi;
 /// Ave HTTP
@@ -61,7 +65,7 @@ use utoipa::OpenApi;
         get_first_or_end_events,
         get_event_sn,
         check_transfer,
-        // get_config, // Removed: Config types don't support ToSchema
+        get_config,
         get_keys,
         get_pending_transfers
     ),
@@ -100,7 +104,14 @@ use utoipa::OpenApi;
             SignaturesInfo,
             ProtocolsSignaturesInfo,
             TimeOutResponseInfo,
-            TransferSubject
+            TransferSubject,
+            ConfigHttp,
+            AveConfigHttp,
+            NetworkConfigHttp,
+            LoggingHttp,
+            LoggingOutputHttp,
+            SinkConfigHttp,
+            SinkServerHttp
         )
     ),
     tags(

@@ -4,7 +4,7 @@
 # ============================================================================
 # Etapa base común para ambas arquitecturas
 # ============================================================================
-FROM rust:1.90-slim-bullseye AS base
+FROM rust:1.91-slim-bullseye AS base
 RUN apt-get update && apt-get install --no-install-recommends -y \
     pkg-config libssl-dev \
     && apt-get clean \
@@ -26,6 +26,7 @@ COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
 COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
 COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
+COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
@@ -40,6 +41,7 @@ COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
 COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
+COPY ./ave/common/src ./ave/common/src
 COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
 
 COPY ./ave-actors/actor/src ./ave-actors/actor/src
@@ -124,7 +126,7 @@ RUN cargo build --target aarch64-unknown-linux-gnu --release --no-default-featur
 # ============================================================================
 # Imágenes finales
 # ============================================================================
-FROM --platform=linux/amd64 rust:1.90-slim-bullseye AS amd64
+FROM --platform=linux/amd64 rust:1.91-slim-bullseye AS amd64
 RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -132,7 +134,7 @@ COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/ave-http
 RUN rustup target add wasm32-unknown-unknown
 CMD ["ave-http"]
 
-FROM --platform=linux/arm64 rust:1.90-slim-bullseye AS arm64
+FROM --platform=linux/arm64 rust:1.91-slim-bullseye AS arm64
 RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
