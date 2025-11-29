@@ -16,7 +16,7 @@ use enviroment::{
     build_auth_user, build_https_cert, build_https_private_key,
 };
 use futures::future::join_all;
-use bridge::{
+use ave_bridge::{
     Bridge,
     clap::Parser,
     settings::{

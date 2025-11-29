@@ -15,8 +15,8 @@ pub struct ConfigHttp {
     pub sink: SinkConfigHttp,
 }
 
-impl From<bridge::config::Config> for ConfigHttp {
-    fn from(value: bridge::config::Config) -> Self {
+impl From<ave_bridge::config::Config> for ConfigHttp {
+    fn from(value: ave_bridge::config::Config) -> Self {
         Self {
             ave_config: AveConfigHttp::from(value.ave_config),
             keys_path: value.keys_path,
@@ -39,8 +39,8 @@ pub struct AveConfigHttp {
     pub garbage_collector: u64,
 }
 
-impl From<bridge::AveConfig> for AveConfigHttp {
-    fn from(value: bridge::AveConfig) -> Self {
+impl From<ave_bridge::AveConfig> for AveConfigHttp {
+    fn from(value: ave_bridge::AveConfig) -> Self {
         Self {
             keypair_algorithm: format!("{:?}", value.keypair_algorithm),
             hash_algorithm: format!("{:?}", value.hash_algorithm),
@@ -60,8 +60,8 @@ pub struct NetworkConfigHttp {
     pub config: String,
 }
 
-impl From<bridge::NetworkConfig> for NetworkConfigHttp {
-    fn from(value: bridge::NetworkConfig) -> Self {
+impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
+    fn from(value: ave_bridge::NetworkConfig) -> Self {
         Self {
             config: format!("{:?}", value),
         }
@@ -78,8 +78,8 @@ pub struct LoggingHttp {
     pub max_files: usize,
 }
 
-impl From<bridge::Logging> for LoggingHttp {
-    fn from(value: bridge::Logging) -> Self {
+impl From<ave_bridge::Logging> for LoggingHttp {
+    fn from(value: ave_bridge::Logging) -> Self {
         Self {
             output: LoggingOutputHttp::from(value.output),
             api_url: value.api_url,
@@ -98,8 +98,8 @@ pub struct LoggingOutputHttp {
     pub api: bool,
 }
 
-impl From<bridge::LoggingOutput> for LoggingOutputHttp {
-    fn from(value: bridge::LoggingOutput) -> Self {
+impl From<ave_bridge::LoggingOutput> for LoggingOutputHttp {
+    fn from(value: ave_bridge::LoggingOutput) -> Self {
         Self {
             stdout: value.stdout,
             file: value.file,
@@ -115,8 +115,8 @@ pub struct SinkConfigHttp {
     pub username: String,
 }
 
-impl From<bridge::SinkConfig> for SinkConfigHttp {
-    fn from(value: bridge::SinkConfig) -> Self {
+impl From<ave_bridge::SinkConfig> for SinkConfigHttp {
+    fn from(value: ave_bridge::SinkConfig) -> Self {
         Self {
             sinks: value.sinks.into_iter()
                 .map(|(k, v)| (k, v.into_iter().map(SinkServerHttp::from).collect()))
@@ -135,8 +135,8 @@ pub struct SinkServerHttp {
     pub auth: bool,
 }
 
-impl From<bridge::SinkServer> for SinkServerHttp {
-    fn from(value: bridge::SinkServer) -> Self {
+impl From<ave_bridge::SinkServer> for SinkServerHttp {
+    fn from(value: ave_bridge::SinkServer) -> Self {
         Self {
             server: value.server,
             events: value.events.into_iter().map(|e| format!("{:?}", e)).collect(),

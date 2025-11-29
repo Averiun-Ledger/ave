@@ -3,7 +3,12 @@ use std::str::FromStr;
 use config::Config;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
 pub use ave_common::{
-    ApprovalReqInfo, ApproveInfo, BridgeSignedEventRequest, ConfirmRequestInfo,
+    // Request types
+    BridgeSignedEventRequest, BridgeEventRequest, BridgeCreateRequest,
+    BridgeFactRequest, BridgeTransferRequest, BridgeEOLRequest,
+    BridgeConfirmRequest, BridgeRejectRequest, BridgeSignature,
+    // Response types
+    ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo,
     CreateRequestInfo, EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo,
     FactRequestInfo, GovsData, Namespace, Paginator, PaginatorEvents, ProtocolsError,
     ProtocolsSignaturesInfo, RegisterDataSubj, RejectRequestInfo, RequestData,

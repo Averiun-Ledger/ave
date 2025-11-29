@@ -8,7 +8,12 @@ use crate::{
     },
     server::*,
 };
-use bridge::{
+use ave_bridge::{
+    // Request types from ave-common re-exported by bridge
+    BridgeSignedEventRequest, BridgeEventRequest, BridgeCreateRequest,
+    BridgeFactRequest, BridgeTransferRequest, BridgeEOLRequest,
+    BridgeConfirmRequest, BridgeRejectRequest, BridgeSignature,
+    // Response types from ave-common re-exported by bridge
     ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo, CreateRequestInfo,
     EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo, FactRequestInfo,
     GovsData, Namespace, Paginator, PaginatorEvents, ProtocolsError,
@@ -17,22 +22,40 @@ use bridge::{
     TimeOutResponseInfo, TransferRequestInfo, TransferSubject,
 };
 use utoipa::OpenApi;
-/// Ave HTTP
+
+/// # Ave HTTP API
 ///
-/// This API provides interaction with Ave Ledger nodes using the HTTP protocol.
-/// It allows sending and retrieving various types of requests and managing subjects.
-/// The API is documented with OpenAPI for easy integration and use.
+/// RESTful API for interacting with Ave Ledger nodes using HTTP protocol.
 ///
-/// # Configuration
+/// ## Overview
 ///
-/// This client uses a single configuration variable, which is set through an environment variable.
-/// Ensure that the environment variable is properly configured before using this API.
+/// This API provides comprehensive access to Ave Ledger functionality including:
+/// - **Event Management**: Create, query, and manage blockchain events
+/// - **Subject Management**: Create and manage subjects (digital assets/entities)
+/// - **Governance**: Manage governance structures and policies
+/// - **Approvals**: Handle approval workflows for events
+/// - **Transfers**: Manage subject ownership transfers
+/// - **Authentication**: Secure API access with API keys
+///
+/// ## Authentication
+///
+/// Most endpoints require authentication using API keys obtained through the `/login` endpoint.
+/// Include the API key in the `x-api-key` header for authenticated requests.
+///
+/// ## Event Types
+///
+/// - **Create**: Initialize new subjects in the ledger
+/// - **Fact**: Update subject state with new data
+/// - **Transfer**: Transfer subject ownership to a new owner
+/// - **Confirm**: Confirm reception of a transferred subject
+/// - **EOL**: Mark a subject as end-of-life
+/// - **Reject**: Reject a transfer request
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Ave HTTP",
-        description = "This API provides interaction with Averiun nodes using the HTTP protocol. It allows sending and retrieving various types of requests and managing subjects. The API is documented with OpenAPI for easy integration and use.",
-        version = "0.3.0",
+        title = "Ave HTTP API",
+        description = "RESTful API for Ave Ledger - A distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.",
+        version = "0.7.5",
         contact(
             name = "Ave Information",
             url = "https://www.averiun.com/",
@@ -71,40 +94,70 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            // Authentication schemas
             LoginRequest,
             LoginResponse,
             AuthErrorResponse,
+
+            // Query parameter schemas
             SubjectQuery,
             GovQuery,
             EventsQuery,
             EventSnQuery,
             EventFirstLastQuery,
+
+            // Request schemas - Event requests that can be sent
+            BridgeSignedEventRequest,
+            BridgeEventRequest,
+            BridgeCreateRequest,
+            BridgeFactRequest,
+            BridgeTransferRequest,
+            BridgeEOLRequest,
+            BridgeConfirmRequest,
+            BridgeRejectRequest,
+            BridgeSignature,
+
+            // Response schemas - Event data structures
             PaginatorEvents,
-            EventInfo,
             Paginator,
-            ProtocolsError,
+            EventInfo,
             EventRequestInfo,
+            ProtocolsError,
+
+            // Request Info schemas - Detailed event request information
             CreateRequestInfo,
+            FactRequestInfo,
             TransferRequestInfo,
             ConfirmRequestInfo,
-            RejectRequestInfo,
             EOLRequestInfo,
-            FactRequestInfo,
-            Namespace,
-            RequestData,
-            GovsData,
+            RejectRequestInfo,
+
+            // Subject and Governance schemas
+            SubjectInfo,
             RegisterDataSubj,
+            GovsData,
+            Namespace,
+
+            // Request status schemas
+            RequestData,
             RequestInfo,
+
+            // Approval schemas
             ApproveInfo,
             ApprovalReqInfo,
             SignedInfo<FactInfo>,
             FactInfo,
-            SignatureInfo,
-            SubjectInfo,
+
+            // Signature schemas
             SignaturesInfo,
             ProtocolsSignaturesInfo,
+            SignatureInfo,
             TimeOutResponseInfo,
+
+            // Transfer schemas
             TransferSubject,
+
+            // Configuration schemas
             ConfigHttp,
             AveConfigHttp,
             NetworkConfigHttp,
@@ -115,18 +168,16 @@ use utoipa::OpenApi;
         )
     ),
     tags(
-        (name = "Authentication", description = "Authentication endpoints for obtaining API keys."),
-        (name = "Auth", description = "Endpoints related to authorization."),
-        (name = "Event", description = "Endpoints related to Events."),
-        (name = "Update", description = "Endpoints related to Update."),
-        (name = "Governance", description = "Endpoints related to Governances."),
-        (name = "Subject", description = "Endpoints for managing subjects and their data."),
-        (name = "State", description = "Endpoints related to States."),
-        (name = "Approval", description = "Endpoints related to request approvals."),
-        (name = "Request", description = "Endpoints for managing event requests."),
-        (name = "Transfer", description = "Endpoints for managing transfers."),
-        (name = "Signature", description = "Endpoints for managing signatures."),
-        (name = "Other", description = "Miscellaneous endpoints for node identification and configuration."),
+        (name = "Authentication", description = "Endpoints for API authentication and access control. Use the /login endpoint to obtain API keys for subsequent requests."),
+        (name = "Event Request", description = "Submit and manage event requests. Events are state changes in the ledger including creating subjects, updating data, and transferring ownership."),
+        (name = "Approval", description = "Manage approval workflows for events. Some events require explicit approval before being committed to the ledger."),
+        (name = "Authorization", description = "Configure authorization rules for subjects. Define which witnesses can approve events for specific subjects."),
+        (name = "Subject", description = "Query and manage subjects (digital assets/entities). Subjects represent any trackable entity in the ledger with its own state and history."),
+        (name = "Governance", description = "Query governance structures. Governances define the rules, schemas, and policies for subject creation and management."),
+        (name = "Event", description = "Query event history and details. Events represent all state changes that have occurred for subjects in the ledger."),
+        (name = "Signature", description = "Query cryptographic signatures. Signatures prove the authenticity and integrity of events from various participants."),
+        (name = "Transfer", description = "Manage subject ownership transfers. Transfer endpoints handle the process of changing subject ownership between parties."),
+        (name = "Node", description = "Query node information and configuration. Access node identity, network status, and configuration details."),
     )
 )]
 pub struct ApiDoc;

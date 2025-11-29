@@ -1,7 +1,7 @@
 use file_rotate::TimeFrequency;
 use file_rotate::compression::Compression;
 use file_rotate::{ContentLimit, FileRotate, suffix::AppendCount};
-use bridge::{Logging, LoggingRotation};
+use ave_bridge::{Logging, LoggingRotation};
 use reqwest::Client;
 use std::fs::OpenOptions;
 use std::io::{self, Write};

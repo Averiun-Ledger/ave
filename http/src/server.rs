@@ -5,7 +5,7 @@ use crate::{
     enviroment::build_doc,
     error::Error,
 };
-use bridge::{
+use ave_bridge::{
     ApproveInfo, EventInfo, GovsData,
     PaginatorEvents, RegisterDataSubj, RequestData, RequestInfo,
     SignaturesInfo, SubjectInfo, TransferSubject,
@@ -19,7 +19,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use bytes::Bytes;
-use bridge::{Bridge, BridgeSignedEventRequest};
+use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;

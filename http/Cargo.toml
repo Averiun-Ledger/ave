@@ -12,7 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bridge = { package = "ave-bridge", path = "../bridge", default-features = false, features = ["openapi"] }
+ave-bridge = { path = "../bridge", default-features = false, features = ["openapi"] }
 
 tokio = {  workspace = true }
 
@@ -41,7 +41,7 @@ bytes = "1.10.0"
 
 [features]
 default = ["prometheus", "sqlite", "ext-sqlite"]
-rocksdb = ["bridge/rocksdb"]
-sqlite = ["bridge/sqlite"]
-ext-sqlite = ["bridge/ext-sqlite"]
-prometheus = ["bridge/prometheus"]
+rocksdb = ["ave-bridge/rocksdb"]
+sqlite = ["ave-bridge/sqlite"]
+ext-sqlite = ["ave-bridge/ext-sqlite"]
+prometheus = ["ave-bridge/prometheus"]
