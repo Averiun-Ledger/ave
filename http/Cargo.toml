@@ -24,20 +24,20 @@ tracing-appender = { workspace = true }
 file-rotate = {  workspace = true }
 
 getrandom = { workspace = true }
-async-trait = "0.1"
+async-trait = "0.1.89"
 
-futures = { version = "0.3", default-features = false }
+futures = { version = "0.3.31", default-features = false }
 
-reqwest = { version = "0.12.22"}
-rustls = { version = "0.23.23", features = ["ring"] }
-axum-server = { version = "0.7.2", features = ["tls-rustls"] }
-axum = { version = "0.8.6" }
+reqwest = { version = "0.12.24"}
+rustls = { version = "0.23.35", features = ["ring"] }
+axum-server = { version = "0.7.3", features = ["tls-rustls"] }
+axum = { version = "0.8.7" }
 axum-extra = "0.12.1"
 tower = "0.5.2"
-tower-http = {version = "0.6.2", features = ["trace", "metrics", "cors"]}
-utoipa = { version = "5.3.1", features = ["axum_extras"]}
+tower-http = {version = "0.6.7", features = ["trace", "metrics", "cors"]}
+utoipa = { version = "5.4.0", features = ["axum_extras"]}
 utoipa-rapidoc = { version = "6.0.0", features = ["axum"]}
-bytes = "1.10.0"
+bytes = "1.11.0"
 
 [features]
 default = ["prometheus", "sqlite", "ext-sqlite"]
