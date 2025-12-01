@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use borsh::{BorshDeserialize, to_vec};
-use ave_common::{ValueWrapper, identity::PublicKey};
-use json_patch::diff;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor, Response,
 };
+use ave_common::{ValueWrapper, identity::PublicKey};
+use borsh::{BorshDeserialize, to_vec};
+use json_patch::diff;
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
 use tracing::error;
@@ -14,7 +15,7 @@ use types::{ContractResult, EvaluateType, RunnerResult};
 use wasmtime::{Engine, Module, Store};
 
 use crate::{
-    Error, 
+    Error,
     governance::{
         Governance, Schema,
         events::{
@@ -25,7 +26,10 @@ use crate::{
     },
     model::{
         Namespace,
-        common::{MemoryManager, generate_linker, create_secure_wasmtime_config, MAX_FUEL},
+        common::{
+            MAX_FUEL, MemoryManager, create_secure_wasmtime_config,
+            generate_linker,
+        },
         patch::apply_patch,
     },
 };

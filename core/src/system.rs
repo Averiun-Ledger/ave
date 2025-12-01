@@ -1,10 +1,10 @@
-use ave_common::identity::hash_borsh;
 use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
+use ave_common::identity::hash_borsh;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Error, HASH_ALGORITHM, AveBaseConfig,
+    AveBaseConfig, Error, HASH_ALGORITHM,
     config::SinkAuth,
     db::Database,
     external_db::DBManager,
@@ -42,9 +42,11 @@ pub async fn system(
     );
     system.add_helper("sink", ave_sink).await;
 
-    let pass_hash = hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string()).map_err(|e| {
-        Error::System(format!("Can not obtain password hash: {}", e))
-    })?;
+    let pass_hash =
+        hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
+            .map_err(|e| {
+                Error::System(format!("Can not obtain password hash: {}", e))
+            })?;
 
     let array_hash: [u8; 32] = pass_hash.hash_array().map_err(|e| {
         Error::System(format!("Can not obtain password hash as array: {}", e))
@@ -58,7 +60,10 @@ pub async fn system(
     system.add_helper("encrypted_key", encrypted_key).await;
 
     let db_manager_actor = system
-        .create_root_actor("db_manager", DBManager::initial(config.garbage_collector))
+        .create_root_actor(
+            "db_manager",
+            DBManager::initial(config.garbage_collector),
+        )
         .await
         .map_err(|e| Error::System(e.to_string()))?;
 
@@ -77,7 +82,7 @@ pub async fn system(
 #[cfg(test)]
 pub mod tests {
 
-    use crate::config::{ExternalDbConfig, AveDbConfig};
+    use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
     use std::{fs, time::Duration};
@@ -93,8 +98,7 @@ pub mod tests {
         let (system, _runner) = create_system().await;
         let db: Option<Database> = system.get_helper("store").await;
         assert!(db.is_some());
-        let ep: Option<EncryptedKey> =
-            system.get_helper("encrypted_key").await;
+        let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
         assert!(ep.is_some());
         let any: Option<Dummy> = system.get_helper("dummy").await;
         assert!(any.is_none());

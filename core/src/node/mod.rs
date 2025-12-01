@@ -24,7 +24,9 @@ use crate::{
     subject::{CreateSubjectData, SignedLedger},
 };
 
-use ave_common::identity::{DigestIdentifier, PublicKey, Signature, keys::KeyPair};
+use ave_common::identity::{
+    DigestIdentifier, PublicKey, Signature, keys::KeyPair,
+};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -41,7 +43,9 @@ pub mod transfer;
 
 const TARGET_NODE: &str = "Ave-Node";
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct TransferSubject {
     pub name: String,
     pub subject_id: String,
@@ -49,14 +53,18 @@ pub struct TransferSubject {
     pub actual_owner: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct TransferData {
     pub name: String,
     pub new_owner: String,
     pub actual_owner: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct SubjectData {
     pub owner: String,
     pub governance_id: Option<String>,
@@ -83,7 +91,10 @@ pub struct Node {
 
 // Manual Borsh implementation to skip the 'owner' field
 impl BorshSerialize for Node {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         // Serialize only the fields we want to persist, skipping 'owner'
         BorshSerialize::serialize(&self.owned_subjects, writer)?;
         BorshSerialize::serialize(&self.known_subjects, writer)?;
@@ -94,12 +105,18 @@ impl BorshSerialize for Node {
 }
 
 impl BorshDeserialize for Node {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
         // Deserialize the persisted fields
-        let owned_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
-        let known_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
-        let temporal_subjects = HashMap::<String, SubjectData>::deserialize_reader(reader)?;
-        let transfer_subjects = HashMap::<String, TransferData>::deserialize_reader(reader)?;
+        let owned_subjects =
+            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let known_subjects =
+            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let temporal_subjects =
+            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+        let transfer_subjects =
+            HashMap::<String, TransferData>::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
@@ -341,7 +358,9 @@ pub enum NodeResponse {
 impl Response for NodeResponse {}
 
 /// Node event.
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum NodeEvent {
     UpdateSubject {
         subject_id: String,
@@ -767,7 +786,10 @@ impl Handler<Node> for Node {
                 let subject = Subject::from(data.clone());
 
                 let child = ctx
-                    .create_child(&format!("{}", data.subject_id), Subject::initial(Some(subject)))
+                    .create_child(
+                        &format!("{}", data.subject_id),
+                        Subject::initial(Some(subject)),
+                    )
                     .await?;
 
                 let sink = Sink::new(child.subscribe(), ext_db.get_subject());

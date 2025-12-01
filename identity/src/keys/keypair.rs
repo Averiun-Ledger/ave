@@ -129,7 +129,8 @@ impl KeyPair {
         let oid = private_key_info.algorithm.oid;
 
         // Ed25519 OID: 1.3.101.112
-        const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+        const ED25519_OID: ObjectIdentifier =
+            ObjectIdentifier::new_unwrap("1.3.101.112");
 
         // Match OID to algorithm
         if oid == ED25519_OID {
@@ -317,9 +318,10 @@ impl KeyPair {
     /// std::fs::write("private_key.der", der_bytes).unwrap();
     /// ```
     pub fn to_secret_der(&self) -> Result<Vec<u8>, CryptoError> {
-        use pkcs8::{der::Encode, ObjectIdentifier, PrivateKeyInfo};
+        use pkcs8::{ObjectIdentifier, PrivateKeyInfo, der::Encode};
 
-        const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+        const ED25519_OID: ObjectIdentifier =
+            ObjectIdentifier::new_unwrap("1.3.101.112");
 
         let secret_key_bytes = self.secret_key_bytes()?;
 
@@ -340,9 +342,9 @@ impl KeyPair {
             public_key: None,
         };
 
-        private_key_info
-            .to_der()
-            .map_err(|e| CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e)))
+        private_key_info.to_der().map_err(|e| {
+            CryptoError::InvalidSecretKey(format!("DER encoding failed: {}", e))
+        })
     }
 }
 
@@ -609,13 +611,16 @@ mod tests {
         let invalid_der = vec![0x00, 0x01, 0x02];
         let result = KeyPair::from_secret_der(&invalid_der);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CryptoError::InvalidDerFormat(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            CryptoError::InvalidDerFormat(_)
+        ));
     }
 
     #[test]
     fn test_keypair_from_der_unsupported_algorithm() {
         // Create a valid DER structure but with an unsupported OID
-        use pkcs8::{der::Encode, ObjectIdentifier, PrivateKeyInfo};
+        use pkcs8::{ObjectIdentifier, PrivateKeyInfo, der::Encode};
 
         // Use a different OID (e.g., secp256k1: 1.3.132.0.10)
         let unsupported_oid = ObjectIdentifier::new_unwrap("1.3.132.0.10");
@@ -638,6 +643,9 @@ mod tests {
 
         let result = KeyPair::from_secret_der(&der_bytes);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CryptoError::UnsupportedAlgorithm(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            CryptoError::UnsupportedAlgorithm(_)
+        ));
     }
 }

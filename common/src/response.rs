@@ -1,9 +1,9 @@
 //! Response types from Ave API
 
-use std::collections::HashSet;
+use crate::namespace::Namespace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::namespace::Namespace;
+use std::collections::HashSet;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
@@ -239,7 +239,6 @@ pub struct SignatureInfo {
     /// The signature itself
     pub value: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

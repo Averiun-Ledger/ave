@@ -1,5 +1,3 @@
-
-
 use std::{
     io::{Read, Write},
     ops::Deref,
@@ -264,8 +262,7 @@ impl ValueWrapper {
                     for _ in 0..len {
                         result.push(
                             ValueWrapper::deserialize_reader_with_depth(
-                                reader,
-                                next_depth,
+                                reader, next_depth,
                             )?
                             .0,
                         );
@@ -298,8 +295,9 @@ impl ValueWrapper {
                 })?;
                 for _ in 0..len {
                     let key = String::deserialize_reader(reader)?;
-                    let value =
-                        ValueWrapper::deserialize_reader_with_depth(reader, next_depth)?;
+                    let value = ValueWrapper::deserialize_reader_with_depth(
+                        reader, next_depth,
+                    )?;
                     result.insert(key, value.0);
                 }
                 Ok(ValueWrapper(Value::Object(result)))
@@ -331,7 +329,8 @@ mod tests {
     fn test_value_wrapper_string() {
         let value = ValueWrapper(Value::String("test".to_owned()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -339,20 +338,24 @@ mod tests {
     fn test_value_wrapper_bool() {
         let value = ValueWrapper(Value::Bool(true));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
 
         let value_false = ValueWrapper(Value::Bool(false));
         let vec_false = borsh::to_vec(&value_false).unwrap();
-        let value2_false: ValueWrapper = BorshDeserialize::try_from_slice(&vec_false).unwrap();
+        let value2_false: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec_false).unwrap();
         assert_eq!(value_false, value2_false);
     }
 
     #[test]
     fn test_value_wrapper_number_f64() {
-        let value = ValueWrapper(Value::Number(Number::from_f64(3.14).unwrap()));
+        let value =
+            ValueWrapper(Value::Number(Number::from_f64(3.14).unwrap()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -360,7 +363,8 @@ mod tests {
     fn test_value_wrapper_number_i64() {
         let value = ValueWrapper(Value::Number(Number::from(-42i64)));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -368,7 +372,8 @@ mod tests {
     fn test_value_wrapper_number_u64() {
         let value = ValueWrapper(Value::Number(Number::from(12345u64)));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -376,7 +381,8 @@ mod tests {
     fn test_value_wrapper_null() {
         let value = ValueWrapper(Value::Null);
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -389,7 +395,8 @@ mod tests {
             Value::Null,
         ]));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -397,7 +404,8 @@ mod tests {
     fn test_value_wrapper_empty_array() {
         let value = ValueWrapper(Value::Array(vec![]));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -410,7 +418,8 @@ mod tests {
 
         let value = ValueWrapper(Value::Object(map));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -418,7 +427,8 @@ mod tests {
     fn test_value_wrapper_empty_object() {
         let value = ValueWrapper(Value::Object(Map::new()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -430,15 +440,19 @@ mod tests {
 
         let mut outer_map = Map::new();
         outer_map.insert("point".to_string(), Value::Object(inner_map));
-        outer_map.insert("values".to_string(), Value::Array(vec![
-            Value::Number(Number::from(1)),
-            Value::Number(Number::from(2)),
-            Value::Number(Number::from(3)),
-        ]));
+        outer_map.insert(
+            "values".to_string(),
+            Value::Array(vec![
+                Value::Number(Number::from(1)),
+                Value::Number(Number::from(2)),
+                Value::Number(Number::from(3)),
+            ]),
+        );
 
         let value = ValueWrapper(Value::Object(outer_map));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -454,7 +468,8 @@ mod tests {
         let vec = borsh::to_vec(&wrapper).unwrap();
 
         // This should succeed as we're at the limit
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&vec);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&vec);
         assert!(result.is_ok());
     }
 
@@ -470,9 +485,15 @@ mod tests {
         let vec = borsh::to_vec(&wrapper).unwrap();
 
         // This should fail due to exceeding recursion limit
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&vec);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&vec);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Recursion depth limit exceeded"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Recursion depth limit exceeded")
+        );
     }
 
     #[test]
@@ -481,7 +502,8 @@ mod tests {
         let large_array = vec![Value::Null; MAX_COLLECTION_SIZE as usize];
         let value = ValueWrapper(Value::Array(large_array));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -492,9 +514,15 @@ mod tests {
         let oversized_len = MAX_COLLECTION_SIZE + 1;
         bytes.extend_from_slice(&oversized_len.to_le_bytes());
 
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&bytes);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Array size too large"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Array size too large")
+        );
     }
 
     #[test]
@@ -504,9 +532,15 @@ mod tests {
         let oversized_len = MAX_COLLECTION_SIZE + 1;
         bytes.extend_from_slice(&oversized_len.to_le_bytes());
 
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&bytes);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Object size too large"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Object size too large")
+        );
     }
 
     #[test]
@@ -514,9 +548,15 @@ mod tests {
         // Use an invalid type tag (6 doesn't exist, valid are 0-5)
         let bytes = vec![6u8];
 
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&bytes);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid Value representation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid Value representation")
+        );
     }
 
     #[test]
@@ -524,16 +564,23 @@ mod tests {
         // Type tag 1 (Number) with invalid internal order 3
         let bytes = vec![1u8, 3u8];
 
-        let result: Result<ValueWrapper, _> = BorshDeserialize::try_from_slice(&bytes);
+        let result: Result<ValueWrapper, _> =
+            BorshDeserialize::try_from_slice(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid Number representation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid Number representation")
+        );
     }
 
     #[test]
     fn test_value_wrapper_unicode_strings() {
         let value = ValueWrapper(Value::String("Hello 世界 🌍".to_owned()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -541,7 +588,8 @@ mod tests {
     fn test_value_wrapper_empty_string() {
         let value = ValueWrapper(Value::String(String::new()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -550,13 +598,16 @@ mod tests {
         // Test zero
         let value = ValueWrapper(Value::Number(Number::from_f64(0.0).unwrap()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
 
         // Test negative zero
-        let value = ValueWrapper(Value::Number(Number::from_f64(-0.0).unwrap()));
+        let value =
+            ValueWrapper(Value::Number(Number::from_f64(-0.0).unwrap()));
         let vec = borsh::to_vec(&value).unwrap();
-        let value2: ValueWrapper = BorshDeserialize::try_from_slice(&vec).unwrap();
+        let value2: ValueWrapper =
+            BorshDeserialize::try_from_slice(&vec).unwrap();
         assert_eq!(value, value2);
     }
 
@@ -594,7 +645,8 @@ mod tests {
         assert_eq!(value.get("age"), Some(&Value::Number(Number::from(30))));
         assert_eq!(value.get("missing"), None);
 
-        let non_object = ValueWrapper(Value::String("not an object".to_owned()));
+        let non_object =
+            ValueWrapper(Value::String("not an object".to_owned()));
         assert_eq!(non_object.get("key"), None);
     }
 

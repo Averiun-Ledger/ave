@@ -1,11 +1,8 @@
-use crate::{
-    model::{
-         Namespace, request::EventRequest,
-    },
+use crate::model::{Namespace, request::EventRequest};
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, PublicKey, Signed},
 };
-use ave_common::{ValueWrapper, identity::{
-    DigestIdentifier, PublicKey, Signed,
-}};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

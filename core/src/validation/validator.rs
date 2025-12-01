@@ -29,7 +29,9 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    RetryMessage, Strategy,
 };
 use tracing::{error, warn};
 

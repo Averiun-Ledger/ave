@@ -42,9 +42,9 @@ pub mod response;
 pub mod signature;
 
 // Re-export commonly used types
-pub use wrapper::ValueWrapper;
 pub use error::Error;
 pub use namespace::Namespace;
 pub use request::*;
 pub use response::*;
 pub use signature::*;
+pub use wrapper::ValueWrapper;

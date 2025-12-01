@@ -1,11 +1,8 @@
-use crate::{
-    model::{ network::TimeOutResponse},
-};
-use ave_common::identity::{Signature};
+use crate::model::network::TimeOutResponse;
+use ave_common::identity::Signature;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-
 
 /// A Enum representing a validation response.
 #[derive(

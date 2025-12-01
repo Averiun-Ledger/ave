@@ -19,7 +19,16 @@ use crate::{
 
 const TARGET_EXTERNAL: &str = "Ave-ExternalDB";
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+    PartialEq,
+    Eq,
+)]
 pub enum DeleteTypes {
     Request { id: String },
 }
@@ -36,7 +45,10 @@ impl Deref for DurationWrapper {
 }
 
 impl BorshSerialize for DurationWrapper {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         // Serialize Duration as seconds (u64) and nanoseconds (u32)
         BorshSerialize::serialize(&self.0.as_secs(), writer)?;
         BorshSerialize::serialize(&self.0.subsec_nanos(), writer)?;
@@ -45,14 +57,18 @@ impl BorshSerialize for DurationWrapper {
 }
 
 impl BorshDeserialize for DurationWrapper {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
         let secs = u64::deserialize_reader(reader)?;
         let nanos = u32::deserialize_reader(reader)?;
         Ok(DurationWrapper(Duration::new(secs, nanos)))
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct DBManager {
     time: DurationWrapper,
     delete_req: Vec<DeleteTypes>,
@@ -99,7 +115,9 @@ pub enum DBManagerMessage {
 
 impl Message for DBManagerMessage {}
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum DBManagerEvent {
     DeleteReq(DeleteTypes),
     DeleteConfirm(DeleteTypes),

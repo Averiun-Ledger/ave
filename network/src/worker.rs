@@ -21,8 +21,8 @@ use std::{
     time::Duration,
 };
 
-use ave_common::identity::{KeyPair};
 use ave_actors::ActorRef;
+use ave_common::identity::KeyPair;
 
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm,

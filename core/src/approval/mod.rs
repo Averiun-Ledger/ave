@@ -7,8 +7,8 @@ use ave_actors::{
 };
 use ave_actors::{ActorPath, ActorRef, Event};
 use ave_actors::{LightPersistence, PersistentActor};
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::{PublicKey, Signed};
+use borsh::{BorshDeserialize, BorshSerialize};
 use request::ApprovalReq;
 use response::ApprovalRes;
 use serde::{Deserialize, Serialize};

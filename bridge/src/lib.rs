@@ -1,20 +1,46 @@
 use std::str::FromStr;
 
-use config::Config;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
 pub use ave_common::{
-    // Request types
-    BridgeSignedEventRequest, BridgeEventRequest, BridgeCreateRequest,
-    BridgeFactRequest, BridgeTransferRequest, BridgeEOLRequest,
-    BridgeConfirmRequest, BridgeRejectRequest, BridgeSignature,
     // Response types
-    ApprovalReqInfo, ApproveInfo, ConfirmRequestInfo,
-    CreateRequestInfo, EOLRequestInfo, EventInfo, EventRequestInfo, FactInfo,
-    FactRequestInfo, GovsData, Namespace, Paginator, PaginatorEvents, ProtocolsError,
-    ProtocolsSignaturesInfo, RegisterDataSubj, RejectRequestInfo, RequestData,
-    RequestInfo, SignatureInfo, SignaturesInfo, SignedInfo, SubjectInfo,
-    TimeOutResponseInfo, TransferRequestInfo, TransferSubject,
+    ApprovalReqInfo,
+    ApproveInfo,
+    BridgeConfirmRequest,
+    BridgeCreateRequest,
+    BridgeEOLRequest,
+    BridgeEventRequest,
+    BridgeFactRequest,
+    BridgeRejectRequest,
+    BridgeSignature,
+    // Request types
+    BridgeSignedEventRequest,
+    BridgeTransferRequest,
+    ConfirmRequestInfo,
+    CreateRequestInfo,
+    EOLRequestInfo,
+    EventInfo,
+    EventRequestInfo,
+    FactInfo,
+    FactRequestInfo,
+    GovsData,
+    Namespace,
+    Paginator,
+    PaginatorEvents,
+    ProtocolsError,
+    ProtocolsSignaturesInfo,
+    RegisterDataSubj,
+    RejectRequestInfo,
+    RequestData,
+    RequestInfo,
+    SignatureInfo,
+    SignaturesInfo,
+    SignedInfo,
+    SubjectInfo,
+    TimeOutResponseInfo,
+    TransferRequestInfo,
+    TransferSubject,
 };
+use config::Config;
 pub use core::{
     Api as AveApi,
     approval::approver::ApprovalStateRes,
@@ -27,11 +53,14 @@ pub use core::{
 use core::{config::SinkAuth, helpers::sink::obtain_token};
 pub use network::MonitorNetworkState;
 pub use network::{
-    Config as NetworkConfig, ControlListConfig, RoutingConfig, RoutingNode,
-    TellConfig,
+    Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
+    RoutingNode, TellConfig,
 };
 use prometheus_client::registry::Registry;
-use tokio::{signal::unix::{signal, SignalKind}, task::JoinHandle};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
@@ -130,13 +159,11 @@ impl Bridge {
         &self.cancellation
     }
 
-    fn bind_with_shutdown(
-        token: CancellationToken,
-    ) {
+    fn bind_with_shutdown(token: CancellationToken) {
         let cancellation_token = token.clone();
-        let mut sigterm =
-                signal(SignalKind::terminate()).expect("It could not be registered SIGTERM");
-                
+        let mut sigterm = signal(SignalKind::terminate())
+            .expect("It could not be registered SIGTERM");
+
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
@@ -167,10 +194,12 @@ impl Bridge {
         &self,
         request: BridgeSignedEventRequest,
     ) -> Result<RequestData, Error> {
-        let event: EventRequest = conversions::bridge_to_event_request(request.request)?;
+        let event: EventRequest =
+            conversions::bridge_to_event_request(request.request)?;
         let result = if let Some(signature) = request.signature {
-            let signature = Signature::try_from(signature)
-                .map_err(|e| Error::Bridge(format!("Invalid signature: {:?}", e)))?;
+            let signature = Signature::try_from(signature).map_err(|e| {
+                Error::Bridge(format!("Invalid signature: {:?}", e))
+            })?;
 
             let signed_request = Signed {
                 content: event,
@@ -194,7 +223,10 @@ impl Bridge {
         &self,
     ) -> Result<Vec<TransferSubject>, Error> {
         let transfers = self.api.get_pending_transfers().await?;
-        Ok(transfers.into_iter().map(conversions::core_transfer_to_common).collect())
+        Ok(transfers
+            .into_iter()
+            .map(conversions::core_transfer_to_common)
+            .collect())
     }
 
     pub async fn get_request_state(
@@ -246,9 +278,9 @@ impl Bridge {
         let mut witnesses_key = vec![];
 
         for witness in witnesses {
-            witnesses_key.push(PublicKey::from_str(&witness).map_err(
-                |e| Error::Bridge(format!("Invalid key identifier: {}", e)),
-            )?);
+            witnesses_key.push(PublicKey::from_str(&witness).map_err(|e| {
+                Error::Bridge(format!("Invalid key identifier: {}", e))
+            })?);
         }
 
         let auh_witness = if witnesses_key.is_empty() {
@@ -317,7 +349,10 @@ impl Bridge {
         active: Option<bool>,
     ) -> Result<Vec<GovsData>, Error> {
         let govs = self.api.all_govs(active).await?;
-        Ok(govs.into_iter().map(conversions::core_gov_to_common).collect())
+        Ok(govs
+            .into_iter()
+            .map(conversions::core_gov_to_common)
+            .collect())
     }
 
     pub async fn get_all_subjs(
@@ -330,7 +365,10 @@ impl Bridge {
             Error::Bridge(format!("Invalid governance id: {}", e))
         })?;
         let subjs = self.api.all_subjs(gov_id, active, schema).await?;
-        Ok(subjs.into_iter().map(conversions::core_subj_to_common).collect())
+        Ok(subjs
+            .into_iter()
+            .map(conversions::core_subj_to_common)
+            .collect())
     }
 
     pub async fn manual_distribution(

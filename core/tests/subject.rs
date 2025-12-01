@@ -2,19 +2,20 @@ use std::{str::FromStr, time::Duration};
 
 mod common;
 
+use ave_common::{
+    ValueWrapper,
+    identity::{KeyPair, PublicKey, keys::Ed25519Signer},
+};
+use ave_core::{
+    auth::AuthWitness,
+    model::request::{ConfirmRequest, EventRequest, FactRequest},
+};
 use common::{
     check_transfer, create_and_authorize_governance,
     create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
     emit_reject, emit_transfer, get_signatures, get_subject,
 };
 use futures::future::join_all;
-use ave_common::{ValueWrapper, identity::{KeyPair, PublicKey, keys::Ed25519Signer}};
-use ave_core::{
-    auth::AuthWitness,
-    model::{
-        request::{ConfirmRequest, EventRequest, FactRequest},
-    },
-};
 use serde_json::json;
 use test_log::test;
 
@@ -1131,8 +1132,7 @@ async fn test_subject_transfer_event_1() {
         .auth_subject(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.controller_id())
-                    .unwrap(),
+                PublicKey::from_str(&owner_governance.controller_id()).unwrap(),
             ),
         )
         .await
@@ -1379,8 +1379,7 @@ async fn test_subject_transfer_event_2() {
         .auth_subject(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.controller_id())
-                    .unwrap(),
+                PublicKey::from_str(&owner_governance.controller_id()).unwrap(),
             ),
         )
         .await
@@ -1445,8 +1444,7 @@ async fn test_subject_transfer_event_2() {
         .auth_subject(
             subject_id.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.controller_id())
-                    .unwrap(),
+                PublicKey::from_str(&owner_governance.controller_id()).unwrap(),
             ),
         )
         .await
@@ -1710,8 +1708,7 @@ async fn test_subject_transfer_event_3() {
         .auth_subject(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.controller_id())
-                    .unwrap(),
+                PublicKey::from_str(&owner_governance.controller_id()).unwrap(),
             ),
         )
         .await
@@ -1786,8 +1783,7 @@ async fn test_subject_transfer_event_3() {
         .auth_subject(
             subject_id_1.clone(),
             AuthWitness::One(
-                PublicKey::from_str(&owner_governance.controller_id())
-                    .unwrap(),
+                PublicKey::from_str(&owner_governance.controller_id()).unwrap(),
             ),
         )
         .await
@@ -3411,9 +3407,10 @@ async fn test_subj_no_all_validators() {
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![], "").await;
 
-    let offline_controller = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-                .public_key()
-                .to_string();
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -3496,7 +3493,7 @@ async fn test_subj_no_all_validators() {
                            },
                            "validate": {
                                 "fixed": 1
-                           } 
+                           }
                         }
                     }
                 }
@@ -3518,19 +3515,18 @@ async fn test_subj_no_all_validators() {
     .await
     .unwrap();
 
-        // emit event to subject
-        let json = json!({
-            "ModOne": {
-                "data": 1,
-            }
-        });
+    // emit event to subject
+    let json = json!({
+        "ModOne": {
+            "data": 1,
+        }
+    });
 
-        let request = EventRequest::Fact(FactRequest {
-            subject_id: subject_id_1.clone(),
-            payload: ValueWrapper(json),
-        });
-        let _response = owner_governance.own_request(request).await.unwrap();
-    
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: subject_id_1.clone(),
+        payload: ValueWrapper(json),
+    });
+    let _response = owner_governance.own_request(request).await.unwrap();
 
     let state = get_subject(owner_governance, subject_id_1.clone(), Some(1))
         .await
@@ -3568,9 +3564,10 @@ async fn test_subj_no_all_evaluators() {
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![], "").await;
 
-    let offline_controller = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-                .public_key()
-                .to_string();
+    let offline_controller =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -3653,7 +3650,7 @@ async fn test_subj_no_all_evaluators() {
                            },
                            "validate": {
                                 "fixed": 1
-                           } 
+                           }
                         }
                     }
                 }
@@ -3675,19 +3672,18 @@ async fn test_subj_no_all_evaluators() {
     .await
     .unwrap();
 
-        // emit event to subject
-        let json = json!({
-            "ModOne": {
-                "data": 1,
-            }
-        });
+    // emit event to subject
+    let json = json!({
+        "ModOne": {
+            "data": 1,
+        }
+    });
 
-        let request = EventRequest::Fact(FactRequest {
-            subject_id: subject_id_1.clone(),
-            payload: ValueWrapper(json),
-        });
-        let _response = owner_governance.own_request(request).await.unwrap();
-    
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: subject_id_1.clone(),
+        payload: ValueWrapper(json),
+    });
+    let _response = owner_governance.own_request(request).await.unwrap();
 
     let state = get_subject(owner_governance, subject_id_1.clone(), Some(1))
         .await

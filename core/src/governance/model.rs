@@ -1,8 +1,8 @@
 //! # Governance model.
 //!
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::PublicKey;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 
 use std::{
@@ -1002,8 +1002,16 @@ impl fmt::Display for ProtocolTypes {
 
 /// Governance quorum.
 #[derive(
-    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash, Eq,
-    BorshDeserialize, BorshSerialize
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Hash,
+    Eq,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Quorum {

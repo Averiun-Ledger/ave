@@ -1,10 +1,22 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
+use auth::{
+    AuthConfig, AuthDatabase,
+    integration::{cleanup_old_data, initialize_auth_database, log_auth_statistics},
+};
+use ave_bridge::{
+    Bridge,
+    clap::Parser,
+    settings::{
+        build_config, build_config_path, build_password, build_sink_password,
+        command::Args,
+    },
+};
 use axum::{
     BoxError,
     handler::HandlerWithoutStateExt,
     http::{
-        Method, StatusCode, Uri, header, HeaderName,
+        HeaderName, Method, StatusCode, Uri, header,
         uri::{Authority, Scheme},
     },
     response::Redirect,
@@ -12,34 +24,28 @@ use axum::{
 use axum_extra::extract::Host;
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use enviroment::{
-    build_address_http, build_address_https, build_auth_password,
-    build_auth_user, build_https_cert, build_https_private_key,
+    build_address_http, build_address_https, build_https_cert,
+    build_https_private_key,
 };
 use futures::future::join_all;
-use ave_bridge::{
-    Bridge,
-    clap::Parser,
-    settings::{
-        build_config, build_file_path, build_password, build_sink_password,
-        command::Args,
-    },
-};
-use auth::AuthStore;
 use middleware::tower_trace;
+use serde::Deserialize;
 use server::build_routes;
 use std::sync::Arc;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{net::TcpListener, time::interval};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::info;
+use tracing::{error, info, warn};
+
+use crate::enviroment::build_auth_config;
 
 mod auth;
 mod config_types;
+mod doc;
 mod enviroment;
 mod error;
 mod logging;
 mod middleware;
 mod server;
-mod doc;
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
@@ -72,9 +78,14 @@ async fn main() {
         password_sink = build_sink_password();
     }
 
-    let mut file_path = args.file_path;
-    if file_path.is_empty() {
-        file_path = build_file_path();
+    let mut config_path = args.config_path;
+    if config_path.is_empty() {
+        config_path = build_config_path();
+    }
+
+    let mut auth_config_path = args.auth_config_path;
+    if auth_config_path.is_empty() {
+        auth_config_path = build_auth_config();
     }
 
     let https_address = build_address_https();
@@ -91,25 +102,63 @@ async fn main() {
             Method::PATCH,
             Method::DELETE,
         ])
-        .allow_headers([header::CONTENT_TYPE, HeaderName::from_static("x-api-key")])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-api-key"),
+        ])
         .allow_origin(Any);
 
-    let config = build_config(args.env_config, &file_path).unwrap();
-    let _log_handle = logging::init_logging(&config.logging).await;
+    let bridge_config = build_config(args.env_config, &config_path).unwrap();
+    let _log_handle = logging::init_logging(&bridge_config.logging).await;
+    
+    // Load authentication configuration (optional)
+    let auth_config = load_auth_config(auth_config_path);
 
-    // Initialize authentication store (optional)
-    let auth_store = if let Some(auth_password) = build_auth_password() {
-        let auth_user = build_auth_user();
-        let store = Arc::new(RwLock::new(AuthStore::new(auth_user.clone(), auth_password)));
-        info!(TARGET_HTTP, "Authentication system ENABLED for user: {}", auth_user);
-        Some(store)
-    } else {
-        info!(TARGET_HTTP, "Authentication system DISABLED - all endpoints are public");
-        None
+    // Initialize authentication database (optional)
+    let auth_db: Option<Arc<AuthDatabase>> = match auth_config {
+        Some(auth_config) if auth_config.enabled => {
+            match initialize_auth_database(&auth_config).await {
+                Ok(db) => {
+                    info!(TARGET_HTTP, "Authentication system ENABLED");
+                    log_auth_statistics(&db).await;
+                    // Background maintenance: cleanup audit logs, rate limits, expired API keys
+                    let maintenance_db = db.clone();
+                    tokio::spawn(async move {
+                        let mut ticker = interval(Duration::from_secs(3600));
+                        loop {
+                            ticker.tick().await;
+                            if let Err(e) = cleanup_old_data(&maintenance_db).await {
+                                warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
+                            }
+                        }
+                    });
+                    Some(db)
+                }
+                Err(e) => {
+                    error!(
+                        TARGET_HTTP,
+                        "Failed to initialize auth system: {}", e
+                    );
+                    warn!(TARGET_HTTP, "Continuing WITHOUT authentication");
+                    None
+                }
+            }
+        }
+        Some(_) => {
+            info!(TARGET_HTTP, "Authentication explicitly DISABLED");
+            None
+        }
+        None => {
+            info!(
+                TARGET_HTTP,
+                "No authentication configuration found - starting without auth"
+            );
+            None
+        }
     };
 
     let (bridge, runners) =
-        Bridge::build(config, &password, &password_sink, None)
+        Bridge::build(bridge_config, &password, &password_sink, None)
             .await
             .unwrap();
 
@@ -143,7 +192,7 @@ async fn main() {
         axum_server::bind_rustls(https_address, tls)
             .handle(handle_clone)
             .serve(
-                tower_trace(build_routes(bridge, auth_store))
+                tower_trace(build_routes(bridge, auth_db))
                     .layer(cors)
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -152,7 +201,7 @@ async fn main() {
     } else {
         axum::serve(
             listener_http,
-            tower_trace(build_routes(bridge, auth_store))
+            tower_trace(build_routes(bridge, auth_db))
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
@@ -163,6 +212,24 @@ async fn main() {
         .await
         .unwrap()
     }
+}
+
+fn load_auth_config(path: String) -> Option<AuthConfig> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+
+    #[derive(Deserialize)]
+    struct AuthWrapper {
+        auth: AuthConfig,
+    }
+
+    toml::from_str::<AuthWrapper>(&content)
+        .map(|w| w.auth)
+        .or_else(|_| toml::from_str::<AuthConfig>(&content))
+        .ok()
 }
 
 async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {

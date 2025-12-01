@@ -143,7 +143,16 @@ impl fmt::Display for HashAlgorithm {
 /// The output contains:
 /// - 1 byte: algorithm identifier
 /// - N bytes: actual hash value (length depends on algorithm)
-#[derive(Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Ord, PartialOrd)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Ord,
+    PartialOrd,
+)]
 pub struct DigestIdentifier {
     inner: AlgorithmIdentifiedBytes<HashAlgorithm>,
 }
@@ -417,7 +426,11 @@ mod tests {
         assert!(!hash_str.is_empty());
 
         // Blake3 hash should start with 'B'
-        assert!(hash_str.starts_with('B'), "Blake3 hash should start with 'B', got: {}", hash_str);
+        assert!(
+            hash_str.starts_with('B'),
+            "Blake3 hash should start with 'B', got: {}",
+            hash_str
+        );
 
         // Should be able to parse back
         let parsed: DigestIdentifier = hash_str.parse().unwrap();
@@ -639,11 +652,12 @@ mod tests {
         assert_eq!(json, "\"\"");
 
         // Should deserialize from empty string
-        let deserialized: DigestIdentifier = serde_json::from_str("\"\"").unwrap();
+        let deserialized: DigestIdentifier =
+            serde_json::from_str("\"\"").unwrap();
         assert!(deserialized.is_empty());
         assert_eq!(deserialized.algorithm(), HashAlgorithm::Blake3);
     }
-    
+
     #[test]
     fn test_empty_digest_bincode() {
         let empty = DigestIdentifier::default();
@@ -660,7 +674,7 @@ mod tests {
 
         // Should deserialize with bincode
         let result: DigestIdentifier = borsh::from_slice(&bytes).unwrap();
-        
+
         assert!(result.is_empty());
         assert_eq!(result.algorithm(), HashAlgorithm::Blake3);
     }

@@ -1,19 +1,24 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use distributor::{Distributor, DistributorMessage};
-use ave_common::identity::{PublicKey, Signed};
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message, NotPersistentActor,
 };
+use ave_common::identity::{PublicKey, Signed};
+use distributor::{Distributor, DistributorMessage};
 use tracing::{error, warn};
 
 use crate::{
-    Event as AveEvent, governance::model::WitnessesData, model::{
+    Event as AveEvent,
+    governance::model::WitnessesData,
+    model::{
         common::{emit_fail, get_gov},
         event::ProtocolsSignatures,
-    }, request::manager::{RequestManager, RequestManagerMessage}, subject::SignedLedger, validation::proof::ValidationProof
+    },
+    request::manager::{RequestManager, RequestManagerMessage},
+    subject::SignedLedger,
+    validation::proof::ValidationProof,
 };
 
 pub mod distributor;

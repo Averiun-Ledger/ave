@@ -76,7 +76,16 @@ use super::{DSAlgorithm, SignatureIdentifier};
 /// let key_str = public_key.to_string();
 /// println!("Public key: {}", key_str);
 /// ```
-#[derive(Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Ord, PartialOrd)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Ord,
+    PartialOrd,
+)]
 pub struct PublicKey {
     inner: AlgorithmIdentifiedBytes<DSAlgorithm>,
 }
@@ -288,7 +297,11 @@ mod tests {
         let key_str = public_key.to_string();
 
         // Ed25519 public key should start with 'E'
-        assert!(key_str.starts_with('E'), "Ed25519 public key should start with 'E', got: {}", key_str);
+        assert!(
+            key_str.starts_with('E'),
+            "Ed25519 public key should start with 'E', got: {}",
+            key_str
+        );
 
         let parsed: PublicKey = key_str.parse().unwrap();
         assert_eq!(public_key, parsed);

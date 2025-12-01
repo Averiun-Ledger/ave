@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 mod common;
 
-use ave_core::{approval::approver::ApprovalStateRes, auth::AuthWitness};
 use ave_common::identity::{
     PublicKey,
     keys::{Ed25519Signer, KeyPair},
 };
+use ave_core::{approval::approver::ApprovalStateRes, auth::AuthWitness};
 
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,

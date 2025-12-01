@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use borsh::{BorshDeserialize, BorshSerialize};
-use ave_common::identity::{DigestIdentifier, PublicKey};
-use network::ComunicateInfo;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
     Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::identity::{DigestIdentifier, PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
+use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
 use tracing::{error, warn};
@@ -22,7 +22,9 @@ use crate::{
 
 const TARGET_AUTH: &str = "Ave-Auth";
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum AuthWitness {
     One(PublicKey),
     Many(Vec<PublicKey>),
@@ -63,7 +65,9 @@ fn merge_options(
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize,  BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct Auth {
     our_node: PublicKey,
     auth: HashMap<String, AuthWitness>,
@@ -150,7 +154,9 @@ pub enum AuthResponse {
 
 impl Response for AuthResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum AuthEvent {
     NewAuth {
         subject_id: String,

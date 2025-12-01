@@ -2,13 +2,14 @@ use std::fmt::Display;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    NotPersistentActor, Response,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::{model::{common::emit_fail}, subject::Metadata};
+use crate::{model::common::emit_fail, subject::Metadata};
 const TARGET_SINKDATA: &str = "Ave-Subject-Sinkdata";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

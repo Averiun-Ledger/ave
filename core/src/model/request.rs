@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::{Namespace};
+use super::Namespace;
 
 use crate::{
     Error,
@@ -11,9 +11,10 @@ use crate::{
     subject::Metadata,
 };
 
-use ave_common::{ValueWrapper, identity::{
-    DigestIdentifier, PublicKey,
-}};
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, PublicKey},
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -324,8 +325,7 @@ pub mod tests {
             namespace: Namespace::from("namespace"),
         };
         let content = EventRequest::Create(req);
-        let signature =
-            Signature::new(&content, &keys, ).unwrap();
+        let signature = Signature::new(&content, &keys).unwrap();
         Signed { content, signature }
     }
 }

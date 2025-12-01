@@ -1,5 +1,6 @@
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor, Response,
 };
 
 use crate::{Event as NetworkEvent, NetworkState};

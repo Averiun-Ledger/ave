@@ -38,23 +38,23 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
                 ))
             })?;
 
-            let key_pair = KeyPair::from_secret_der(dec_pk.as_bytes()).map_err(
-                |error| {
+            let key_pair = KeyPair::from_secret_der(dec_pk.as_bytes())
+                .map_err(|error| {
                     Error::Bridge(format!(
                         "Error creating key pair from secret der: {}",
                         error
                     ))
-                },
-            )?;
+                })?;
             Ok(key_pair)
         }
         Err(_) => {
-            let key_pair = config.ave_config.keypair_algorithm.generate_keypair().map_err(|e| {
-                Error::Bridge(format!(
-                    "Error generating KeyPair {}",
-                    e
-                ))
-            })?;
+            let key_pair = config
+                .ave_config
+                .keypair_algorithm
+                .generate_keypair()
+                .map_err(|e| {
+                    Error::Bridge(format!("Error generating KeyPair {}", e))
+                })?;
 
             let der = key_pair.to_secret_der().map_err(|error| {
                 Error::Bridge(format!("Error getting secret der: {}", error))

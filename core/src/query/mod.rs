@@ -1,8 +1,9 @@
 use async_trait::async_trait;
-use ave_common::identity::PublicKey;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor, Response
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor, Response,
 };
+use ave_common::identity::PublicKey;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 

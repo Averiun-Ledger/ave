@@ -1,12 +1,16 @@
 use std::{collections::HashSet, path::Path, process::Command};
 
 use async_trait::async_trait;
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor,
+};
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
+};
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
-use ave_common::{ValueWrapper, identity::{DigestIdentifier, HashAlgorithm, hash_borsh}};
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::fs;
@@ -15,7 +19,11 @@ use tracing::error;
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    CONTRACTS, Error, HASH_ALGORITHM,  model::common::{MAX_FUEL_COMPILATION, MemoryManager, create_secure_wasmtime_config, generate_linker}
+    CONTRACTS, Error, HASH_ALGORITHM,
+    model::common::{
+        MAX_FUEL_COMPILATION, MemoryManager, create_secure_wasmtime_config,
+        generate_linker,
+    },
 };
 
 const TARGET_COMPILER: &str = "Ave-Evaluation-Compiler";
@@ -289,10 +297,7 @@ impl Compiler {
             ))
         })?;
         let state_ptr = context.add_data_raw(&state_bytes).map_err(|e| {
-            Error::Compiler(format!(
-                "Error allocating state in memory: {}",
-                e
-            ))
+            Error::Compiler(format!("Error allocating state in memory: {}", e))
         })?;
         Ok((context, state_ptr as u32))
     }
@@ -320,7 +325,6 @@ pub enum CompilerMessage {
 impl Message for CompilerMessage {}
 
 impl NotPersistentActor for Compiler {}
-
 
 #[async_trait]
 impl Actor for Compiler {
@@ -352,19 +356,20 @@ impl Handler<Compiler> for Compiler {
                 };
 
                 let contract_wrapper = ValueWrapper(json!({"raw": contract}));
-                let contract_hash = match hash_borsh(&*hash.hasher(), &contract_wrapper) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        error!(
-                            TARGET_COMPILER,
-                            "Compile, Can not hash contract: {}", e
-                        );
-                        return Err(ActorError::Functional(format!(
-                            "Can not hash contract: {}",
-                            e
-                        )));
-                    }
-                };
+                let contract_hash =
+                    match hash_borsh(&*hash.hasher(), &contract_wrapper) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            error!(
+                                TARGET_COMPILER,
+                                "Compile, Can not hash contract: {}", e
+                            );
+                            return Err(ActorError::Functional(format!(
+                                "Can not hash contract: {}",
+                                e
+                            )));
+                        }
+                    };
 
                 if contract_hash != self.contract {
                     if let Err(e) =

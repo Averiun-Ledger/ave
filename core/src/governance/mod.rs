@@ -4,17 +4,14 @@
 pub mod events;
 pub mod model;
 
-use crate::{
-    Error,
-    model::{Namespace, },
-};
+use crate::{Error, model::Namespace};
 
+use ave_actors::ActorError;
 use model::{
     CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes,
     RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas, RolesGov,
     RolesSchema, SchemaKeyCreators, SignersType, WitnessesData,
 };
-use ave_actors::ActorError;
 
 pub use model::{Member, Quorum, Role, Schema};
 

@@ -22,6 +22,9 @@ pub mod validation;
 
 use approval::approver::ApprovalStateRes;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
+use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
+use ave_common::identity::keys::KeyPair;
+use ave_common::identity::{DigestIdentifier, HashAlgorithm, Signed};
 use config::Config as AveBaseConfig;
 use error::Error;
 use governance::Governance;
@@ -31,14 +34,11 @@ use helpers::db::common::{
     SubjectInfo,
 };
 use helpers::network::*;
-use ave_common::identity::{DigestIdentifier, HashAlgorithm, Signed};
-use ave_common::identity::keys::KeyPair;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use model::event::Event;
 use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
-use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
 use tokio::sync::RwLock;
 
 pub use network::MonitorNetworkState;
@@ -157,8 +157,10 @@ impl Api {
             let _ = worker.run().await;
         });
 
-        let node_actor =
-            system.create_root_actor("node", Node::initial(keys.clone())).await.map_err(|e| {
+        let node_actor = system
+            .create_root_actor("node", Node::initial(keys.clone()))
+            .await
+            .map_err(|e| {
                 let e = format!("Can not get node actor: {}", e);
                 error!(TARGET_API, "Init system, {}", e);
                 Error::System(e.to_owned())
@@ -192,7 +194,10 @@ impl Api {
         };
 
         let request_actor = system
-            .create_root_actor("request", RequestHandler::initial(keys.public_key()))
+            .create_root_actor(
+                "request",
+                RequestHandler::initial(keys.public_key()),
+            )
             .await
             .map_err(|e| {
                 let e = format!("Can not get request actor: {}", e);

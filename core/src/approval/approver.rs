@@ -22,8 +22,8 @@ use ave_actors::{
     Strategy,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed, TimeStamp};
+use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};

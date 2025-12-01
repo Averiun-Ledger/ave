@@ -10,24 +10,32 @@ mod runner;
 pub mod schema;
 
 use crate::{
-    HASH_ALGORITHM, auth::WitnessesAuth, governance::{Governance, Quorum, model::ProtocolTypes}, model::{
-         SignTypesNode,
+    HASH_ALGORITHM,
+    auth::WitnessesAuth,
+    governance::{Governance, Quorum, model::ProtocolTypes},
+    model::{
+        SignTypesNode,
         common::{
             emit_fail, get_metadata, get_sign, get_signers_quorum_gov_version,
             send_reboot_to_req, take_random_signers, try_to_update,
         },
         event::{LedgerValue, ProtocolsError, ProtocolsSignatures},
         request::EventRequest,
-    }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata
+    },
+    request::manager::{RequestManager, RequestManagerMessage},
+    subject::Metadata,
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    Handler, Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Message, NotPersistentActor,
 };
 
 use async_trait::async_trait;
+use ave_common::{
+    ValueWrapper,
+    identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh},
+};
 use evaluator::{Evaluator, EvaluatorMessage};
-use ave_common::{ValueWrapper, identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh}};
 use request::{EvaluationReq, SubjectContext};
 use response::{EvalLedgerResponse, EvaluationRes, Response as EvalRes};
 use serde_json::json;
@@ -284,7 +292,6 @@ pub enum EvaluationMessage {
 impl Message for EvaluationMessage {}
 
 impl NotPersistentActor for Evaluation {}
-
 
 #[async_trait]
 impl Actor for Evaluation {
@@ -787,10 +794,14 @@ impl Handler<Evaluation> for Evaluation {
 mod tests {
     use std::{str::FromStr, time::Duration};
 
-    use ave_common::{ValueWrapper, identity::{
-        Blake3Hasher, DigestIdentifier, KeyPair, KeyPairAlgorithm, Signed, hash_borsh
-    }};
     use ave_actors::{ActorPath, ActorRef, SystemRef};
+    use ave_common::{
+        ValueWrapper,
+        identity::{
+            Blake3Hasher, DigestIdentifier, KeyPair, KeyPairAlgorithm, Signed,
+            hash_borsh,
+        },
+    };
     use serde_json::json;
     use test_log::test;
 
@@ -799,7 +810,7 @@ mod tests {
         SubjectMessage, SubjectResponse,
         approval::approver::ApprovalStateRes,
         model::{
-             Namespace, SignTypesNode, event::LedgerValue,
+            Namespace, SignTypesNode, event::LedgerValue,
             request::TransferRequest,
         },
         node::Node,
@@ -1492,7 +1503,6 @@ mod tests {
                 "one": 0, "three": 0, "two": 0
             })))
         );
-        
 
         assert_eq!(
             last_event.content.state_hash,
@@ -1547,7 +1557,6 @@ mod tests {
             ledger_event_actor,
             subject_id,
         ) = create_subject().await;
-
 
         let fact_request = EventRequest::Fact(crate::FactRequest {
             subject_id,

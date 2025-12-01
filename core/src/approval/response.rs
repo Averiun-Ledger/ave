@@ -1,4 +1,4 @@
-use crate::model::{ network::TimeOutResponse};
+use crate::model::network::TimeOutResponse;
 use ave_common::identity::Signature;
 
 use borsh::{BorshDeserialize, BorshSerialize};

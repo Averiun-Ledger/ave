@@ -4,10 +4,10 @@ use ave_actors::{
     Handler, Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -41,7 +41,9 @@ pub struct RequestData {
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct RequestHandler {
     node_key: PublicKey,
     handling: HashMap<String, (String, Signed<EventRequest>)>,
@@ -81,7 +83,7 @@ impl RequestHandler {
             HashAlgorithm::Blake3
         };
 
-        let subject_id = hash_borsh(&*hash.hasher(),&request)
+        let subject_id = hash_borsh(&*hash.hasher(), &request)
             .map_err(|e| ActorError::Functional(e.to_string()))?;
 
         let data = if create_req.schema_id == "governance" {
@@ -277,7 +279,9 @@ pub enum RequestHandlerResponse {
 
 impl Response for RequestHandlerResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum RequestHandlerEvent {
     EventToQueue {
         id: String,
@@ -333,8 +337,12 @@ impl Actor for RequestHandler {
                 request,
                 command: ReqManInitMessage::Validate,
             };
-            let request_manager_actor =
-                ctx.create_child(&request_id, RequestManager::initial(request_manager_init)).await?;
+            let request_manager_actor = ctx
+                .create_child(
+                    &request_id,
+                    RequestManager::initial(request_manager_init),
+                )
+                .await?;
 
             let sink = Sink::new(
                 request_manager_actor.subscribe(),

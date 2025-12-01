@@ -1,14 +1,14 @@
 //! # Event data model.
 //!
 
-use super::{
-    network::TimeOutResponse,
-    request::EventRequest,
-};
+use super::{network::TimeOutResponse, request::EventRequest};
 
 use crate::{subject::Metadata, validation::proof::EventProof};
 
-use ave_common::{ValueWrapper, identity::{DigestIdentifier, Signature, Signed}};
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, Signature, Signed},
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -76,13 +76,12 @@ pub struct ProofEvent {
     BorshDeserialize,
     Hash,
     Ord,
-    PartialOrd
+    PartialOrd,
 )]
 pub enum ProtocolsSignatures {
     Signature(Signature),
     TimeOut(TimeOutResponse),
 }
-
 
 /// A struct representing an event.
 #[derive(

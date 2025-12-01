@@ -16,12 +16,12 @@ use crate::{
 
 use super::ActorMessage;
 use super::{NetworkMessage, service::HelperService};
+use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
-use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
 use serde::Deserialize;
 use std::io::Cursor;
 use tokio::sync::mpsc;
@@ -97,9 +97,8 @@ impl Intermediary {
         match command {
             Command::SendMessage { message } => {
                 // Public key to peer_id
-                let node_peer = Intermediary::to_peer_id(
-                    &message.info.receiver,
-                )?;
+                let node_peer =
+                    Intermediary::to_peer_id(&message.info.receiver)?;
 
                 // Message to Vec<u8>
                 let network_message =
@@ -138,8 +137,9 @@ impl Intermediary {
 
                 match message.message {
                     ActorMessage::TransferRes { res } => {
-                        let authorizer_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let authorizer_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         let authorizer_actor: Option<ActorRef<Updater>> =
                             self.system.get_actor(&authorizer_path).await;
 
@@ -161,8 +161,9 @@ impl Intermediary {
                         };
                     }
                     ActorMessage::Transfer { subject_id } => {
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         let distributor_actor: Option<ActorRef<Distributor>> =
                             self.system.get_actor(&distributor_path).await;
 
@@ -187,8 +188,9 @@ impl Intermediary {
                         };
                     }
                     ActorMessage::DistributionGetLastSn { subject_id } => {
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         let distributor_actor: Option<ActorRef<Distributor>> =
                             self.system.get_actor(&distributor_path).await;
 
@@ -213,8 +215,9 @@ impl Intermediary {
                         };
                     }
                     ActorMessage::AuthLastSn { sn } => {
-                        let authorizer_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let authorizer_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         let authorizer_actor: Option<ActorRef<Updater>> =
                             self.system.get_actor(&authorizer_path).await;
 
@@ -237,8 +240,9 @@ impl Intermediary {
                     }
                     ActorMessage::ValidationReq { req, schema_id } => {
                         // Validator path.
-                        let validator_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let validator_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         if schema_id == "governance" {
                             let validator_actor: Option<ActorRef<Validator>> =
@@ -292,8 +296,9 @@ impl Intermediary {
                     }
                     ActorMessage::EvaluationReq { req, schema_id } => {
                         // Evaluator path.
-                        let evaluator_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let evaluator_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
 
                         if schema_id == "governance" {
                             // Evaluator actor.
@@ -348,8 +353,9 @@ impl Intermediary {
                         }
                     }
                     ActorMessage::ApprovalReq { req } => {
-                        let approver_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let approver_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
 
                         // Evaluator actor.
                         let approver_actor: Option<ActorRef<Approver>> =
@@ -383,8 +389,9 @@ impl Intermediary {
                         prev_event_validation_response,
                     } => {
                         // Distributor path.
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
 
                         // SI ESTE sdistributor no está disponible quiere decir que el sujeto no existe, enviarlo al distributor del nodo
                         let distributor_actor: Option<ActorRef<Distributor>> =
@@ -438,8 +445,9 @@ impl Intermediary {
                         actual_sn,
                         subject_id,
                     } => {
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         let distributor_actor: Option<ActorRef<Distributor>> =
                             self.system.get_actor(&distributor_path).await;
@@ -468,8 +476,9 @@ impl Intermediary {
                     }
                     ActorMessage::ValidationRes { res } => {
                         // Validator path.
-                        let validator_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let validator_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         let validator_actor: Option<ActorRef<Validator>> =
                             self.system.get_actor(&validator_path).await;
@@ -498,8 +507,9 @@ impl Intermediary {
                     }
                     ActorMessage::EvaluationRes { res } => {
                         // Validator path.
-                        let evaluator_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let evaluator_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         let evaluator_actor: Option<ActorRef<Evaluator>> =
                             self.system.get_actor(&evaluator_path).await;
@@ -528,8 +538,9 @@ impl Intermediary {
                     }
                     ActorMessage::ApprovalRes { res } => {
                         // Validator path.
-                        let approver_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let approver_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         let approver_actor: Option<ActorRef<Approver>> =
                             self.system.get_actor(&approver_path).await;
@@ -566,8 +577,9 @@ impl Intermediary {
                         governance_id,
                     } => {
                         // Distributor path.
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
 
                         // SI ESTE sdistributor no está disponible quiere decir que el sujeto no existe, enviarlo al distributor del nodo
                         let distributor_actor: Option<ActorRef<Distributor>> =
@@ -623,8 +635,9 @@ impl Intermediary {
                     }
                     ActorMessage::DistributionLastEventRes { signer } => {
                         // Validator path.
-                        let distributor_path =
-                            ActorPath::from(message.info.receiver_actor.clone());
+                        let distributor_path = ActorPath::from(
+                            message.info.receiver_actor.clone(),
+                        );
                         // Validator actor.
                         let distributor_actor: Option<ActorRef<Distributor>> =
                             self.system.get_actor(&distributor_path).await;
@@ -656,17 +669,15 @@ impl Intermediary {
         Ok(())
     }
 
-    fn to_peer_id(
-        public_key: &PublicKey,
-    ) -> Result<PeerId, Error> {
+    fn to_peer_id(public_key: &PublicKey) -> Result<PeerId, Error> {
         match public_key.algorithm() {
             DSAlgorithm::Ed25519 => {
                 let pk_ed = PublicKeyEd25519::try_from_bytes(public_key.as_bytes()).map_err(|e| 
                     Error::NetworkHelper(format!("Invalid Ed25519 public key, can not convert to PeerID: {}", e)))?;
 
-                let pk = network::PublicKeyLibP2P::from(pk_ed);                    
+                let pk = network::PublicKeyLibP2P::from(pk_ed);
                 Ok(pk.to_peer_id())
-            },
+            }
         }
     }
 

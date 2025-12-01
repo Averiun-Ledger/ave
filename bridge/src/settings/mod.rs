@@ -50,8 +50,8 @@ pub fn build_sink_password() -> String {
     env::var("AVE_SINK_PASSWORD").unwrap_or_default()
 }
 
-pub fn build_file_path() -> String {
-    env::var("AVE_FILE_PATH").unwrap_or_default()
+pub fn build_config_path() -> String {
+    env::var("AVE_CONFIG").unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -76,10 +76,7 @@ mod tests {
     fn test_env_full() {
         unsafe {
             std::env::set_var("AVE_NETWORK_TELL_MESSAGE_TIMEOUT_SECS", "58");
-            std::env::set_var(
-                "AVE_NETWORK_TELL_MAX_CONCURRENT_STREAMS",
-                "166",
-            );
+            std::env::set_var("AVE_NETWORK_TELL_MAX_CONCURRENT_STREAMS", "166");
             std::env::set_var("AVE_NETWORK_REQRES_MESSAGE_TIMEOUT_SECS", "59");
             std::env::set_var(
                 "AVE_NETWORK_REQRES_MAX_CONCURRENT_STREAMS",
@@ -255,8 +252,7 @@ mod tests {
                 SinkServer {
                     server: "Server4".to_owned(),
                     events: BTreeSet::from([SinkTypes::Confirm]),
-                    url: "https://www.averiun.com/community/issue"
-                        .to_owned(),
+                    url: "https://www.averiun.com/community/issue".to_owned(),
                     auth: false,
                 },
             ],
@@ -314,10 +310,7 @@ mod tests {
             config.ave_config.network.routing.get_dht_random_walk(),
             true
         );
-        assert_eq!(
-            config.ave_config.network.routing.get_discovery_limit(),
-            55
-        );
+        assert_eq!(config.ave_config.network.routing.get_discovery_limit(), 55);
         assert_eq!(
             config
                 .ave_config
@@ -455,12 +448,8 @@ mod tests {
             std::env::remove_var("AVE_NETWORK_CONTROL_LIST_ENABLE");
             std::env::remove_var("AVE_NETWORK_CONTROL_LIST_ALLOW_LIST");
             std::env::remove_var("AVE_NETWORK_CONTROL_LIST_BLOCK_LIST");
-            std::env::remove_var(
-                "AVE_NETWORK_CONTROL_LIST_SERVICE_ALLOW_LIST",
-            );
-            std::env::remove_var(
-                "AVE_NETWORK_CONTROL_LIST_SERVICE_BLOCK_LIST",
-            );
+            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_SERVICE_ALLOW_LIST");
+            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_SERVICE_BLOCK_LIST");
             std::env::remove_var("AVE_NETWORK_CONTROL_LIST_INTERVAL_REQUEST");
             std::env::remove_var("AVE_LOGGING_OUTPUT");
             std::env::remove_var("AVE_LOGGING_API_URL");

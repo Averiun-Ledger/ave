@@ -23,7 +23,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        Namespace, 
+        Namespace,
         common::{
             delete_relation, emit_fail, get_gov, get_last_event, get_vali_data,
             register_relation, try_to_update, verify_protocols_state,
@@ -52,8 +52,11 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message, Response, Sink,
 };
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, PublicKey, Signed, hash_borsh},
+};
 use event::LedgerEvent;
-use ave_common::{ValueWrapper, identity::{DigestIdentifier, PublicKey, Signed, hash_borsh}};
 
 use std::ops::Deref;
 
@@ -139,7 +142,15 @@ pub struct Metadata {
 }
 
 /// Suject header
-#[derive(Default, Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct Subject {
     /// The name of the subject.
     pub name: Option<String>,
@@ -172,7 +183,6 @@ pub struct Subject {
 }
 
 impl Subject {
-    
     /// Creates a new `Subject` from an create event.
     ///
     /// # Arguments
@@ -216,7 +226,7 @@ impl Subject {
             Err(Error::Subject("Invalid create event request".to_string()))
         }
     }
-        async fn get_node_key(
+    async fn get_node_key(
         &self,
         ctx: &mut ActorContext<Subject>,
     ) -> Result<PublicKey, ActorError> {
@@ -2821,10 +2831,7 @@ impl Storable for Subject {}
 #[cfg(test)]
 mod tests {
 
-    use std::{
-        collections::HashSet,
-        time::Instant,
-    };
+    use std::{collections::HashSet, time::Instant};
 
     use super::*;
 
@@ -3032,14 +3039,13 @@ mod tests {
     }
 
     use ave_actors::SystemRef;
-    use event::LedgerEventMessage;
     use ave_common::identity::{
         Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer,
     };
+    use event::LedgerEventMessage;
     use serde_json::{Value, json};
     use test_log::test;
 
-    
     #[test]
     fn test_serialize_deserialize() {
         let node_keys = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();

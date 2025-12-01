@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use reqwest::Client;
 use ave_actors::Subscriber;
+use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};

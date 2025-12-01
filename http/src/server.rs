@@ -1,27 +1,34 @@
 use std::sync::Arc;
 
 use crate::{
-    auth::{self, ApiKeyAuth, AuthStore},
+    auth::{
+        AuthDatabase, admin_handlers, apikey_handlers,
+        login_handler,
+        middleware::{
+            ApiKeyAuthNew, audit_log_middleware, read_only_middleware,
+        },
+        models::AuthContext,
+        system_handlers,
+    },
     enviroment::build_doc,
     error::Error,
 };
 use ave_bridge::{
-    ApproveInfo, EventInfo, GovsData,
-    PaginatorEvents, RegisterDataSubj, RequestData, RequestInfo,
-    SignaturesInfo, SubjectInfo, TransferSubject,
+    ApproveInfo, EventInfo, GovsData, PaginatorEvents, RegisterDataSubj,
+    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
 };
+use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use axum::{
     Extension, Json, Router,
     body::Body,
     extract::{Path, Query},
     http::{StatusCode, header},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
 use bytes::Bytes;
-use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use serde::Deserialize;
-use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use utoipa::ToSchema;
 
@@ -90,7 +97,7 @@ use utoipa_rapidoc::RapiDoc;
     )
 )]
 async fn send_event_request(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
 ) -> Result<Json<RequestData>, Error> {
@@ -133,7 +140,7 @@ async fn send_event_request(
     )
 )]
 async fn get_request_state(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<RequestInfo>, Error> {
@@ -169,7 +176,7 @@ async fn get_request_state(
     )
 )]
 async fn get_approval(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<ApproveInfo>, Error> {
@@ -210,7 +217,7 @@ async fn get_approval(
     )
 )]
 async fn patch_approval(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(response): Json<String>,
@@ -252,7 +259,7 @@ async fn patch_approval(
     )
 )]
 async fn put_auth(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
@@ -290,7 +297,7 @@ async fn put_auth(
     )
 )]
 async fn get_all_auth_subjects(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<String>>, Error> {
     match bridge.get_all_auth_subjects().await {
@@ -332,7 +339,7 @@ async fn get_all_auth_subjects(
     )
 )]
 async fn get_witnesses_subject(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<Vec<String>>, Error> {
@@ -371,7 +378,7 @@ async fn get_witnesses_subject(
     )
 )]
 async fn delete_auth_subject(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -412,7 +419,7 @@ async fn delete_auth_subject(
     )
 )]
 async fn update_subject(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -448,7 +455,7 @@ async fn update_subject(
     )
 )]
 async fn check_transfer(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -488,7 +495,7 @@ async fn check_transfer(
     )
 )]
 async fn manual_distribution(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, Error> {
@@ -536,7 +543,7 @@ async fn manual_distribution(
     )
 )]
 async fn get_all_govs(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, Error> {
@@ -586,7 +593,7 @@ async fn get_all_govs(
     )
 )]
 async fn get_all_subjects(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(governance_id): Path<String>,
     Query(parameters): Query<SubjectQuery>,
@@ -658,7 +665,7 @@ async fn get_all_subjects(
     )
 )]
 async fn get_events(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventsQuery>,
@@ -794,7 +801,7 @@ async fn get_events(
     )
 )]
 async fn get_state(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SubjectInfo>, Error> {
@@ -848,7 +855,7 @@ async fn get_state(
     )
 )]
 async fn get_signatures(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SignaturesInfo>, Error> {
@@ -884,7 +891,7 @@ async fn get_signatures(
     )
 )]
 async fn get_controller_id(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
     Json(bridge.controller_id())
@@ -915,7 +922,7 @@ async fn get_controller_id(
     )
 )]
 async fn get_peer_id(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
     Json(bridge.peer_id())
@@ -943,7 +950,7 @@ async fn get_peer_id(
     )
 )]
 async fn get_config(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<crate::config_types::ConfigHttp> {
     Json(crate::config_types::ConfigHttp::from(bridge.config()))
@@ -971,7 +978,7 @@ async fn get_config(
     )
 )]
 async fn get_keys(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> impl IntoResponse {
     let keys_path = format!("{}/node_private.der", bridge.config().keys_path);
@@ -1055,7 +1062,7 @@ async fn get_keys(
     )
 )]
 async fn get_event_sn(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventSnQuery>,
@@ -1117,7 +1124,7 @@ async fn get_event_sn(
     )
 )]
 async fn get_first_or_end_events(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventFirstLastQuery>,
@@ -1166,7 +1173,7 @@ responses(
 )
 )]
 async fn get_pending_transfers(
-    _auth: ApiKeyAuth,
+    _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<TransferSubject>>, Error> {
     match bridge.get_pending_transfers().await {
@@ -1180,11 +1187,13 @@ async fn get_pending_transfers(
     }
 }
 
-pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) -> Router {
+pub fn build_routes(
+    bridge: Bridge,
+    auth_db: Option<Arc<AuthDatabase>>,
+) -> Router {
     let bridge = Arc::new(bridge);
 
-    // Main routes (authentication optional based on auth_store presence)
-    let mut main_routes = Router::new()
+    let main_routes = Router::new()
         .route("/signatures/{subject_id}", get(get_signatures))
         .route("/state/{subject_id}", get(get_state))
         .route("/events/{subject_id}", get(get_events))
@@ -1216,16 +1225,111 @@ pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) 
         .route("/pending-transfers", get(get_pending_transfers))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));
 
-    // Add auth extension if enabled
-    if let Some(store) = auth_store {
-        // Apply auth store extension to all routes (including login)
-        main_routes = main_routes
-            .route("/auth/login", post(auth::login))
-            .layer(Extension(store));
-    }
+    if let Some(db) = auth_db {
+        let protected_routes = Router::new()
+            .route(
+                "/admin/users",
+                get(admin_handlers::list_users)
+                    .post(admin_handlers::create_user),
+            )
+            .route(
+                "/admin/users/{user_id}",
+                get(admin_handlers::get_user)
+                    .put(admin_handlers::update_user)
+                    .delete(admin_handlers::delete_user),
+            )
+            .route(
+                "/admin/users/{user_id}/roles/{role_id}",
+                post(admin_handlers::assign_role)
+                    .delete(admin_handlers::remove_role),
+            )
+            .route(
+                "/admin/users/{user_id}/permissions",
+                get(admin_handlers::get_user_permissions)
+                    .post(admin_handlers::set_user_permission)
+                    .delete(admin_handlers::remove_user_permission),
+            )
+            .route(
+                "/admin/roles",
+                get(admin_handlers::list_roles)
+                    .post(admin_handlers::create_role),
+            )
+            .route(
+                "/admin/roles/{role_id}",
+                get(admin_handlers::get_role)
+                    .put(admin_handlers::update_role)
+                    .delete(admin_handlers::delete_role),
+            )
+            .route(
+                "/admin/roles/{role_id}/permissions",
+                get(admin_handlers::get_role_permissions)
+                    .post(admin_handlers::set_role_permission)
+                    .delete(admin_handlers::remove_role_permission),
+            )
+            .route(
+                "/admin/api-keys/user/{user_id}",
+                post(apikey_handlers::create_api_key_for_user)
+                    .get(apikey_handlers::list_user_api_keys_admin),
+            )
+            .route("/admin/api-keys", get(apikey_handlers::list_all_api_keys))
+            .route(
+                "/admin/api-keys/{key_id}",
+                get(apikey_handlers::get_api_key)
+                    .delete(apikey_handlers::revoke_api_key),
+            )
+            .route(
+                "/admin/api-keys/{key_id}/rotate",
+                post(apikey_handlers::rotate_api_key),
+            )
+            .route("/admin/resources", get(system_handlers::list_resources))
+            .route("/admin/actions", get(system_handlers::list_actions))
+            .route("/admin/audit-logs", get(system_handlers::query_audit_logs))
+            .route(
+                "/admin/audit-logs/stats",
+                get(system_handlers::get_audit_stats),
+            )
+            .route(
+                "/admin/rate-limits/stats",
+                get(system_handlers::get_rate_limit_stats),
+            )
+            .route("/admin/config", get(system_handlers::list_system_config))
+            .route(
+                "/admin/config/{key}",
+                put(system_handlers::update_system_config),
+            )
+            .route("/me", get(system_handlers::get_me))
+            .route("/me/permissions", get(system_handlers::get_my_permissions))
+            .route(
+                "/me/permissions/detailed",
+                get(system_handlers::get_my_permissions_detailed),
+            )
+            .route(
+                "/me/api-keys",
+                post(apikey_handlers::create_my_api_key)
+                    .get(apikey_handlers::list_my_api_keys),
+            )
+            .route(
+                "/me/api-keys/{key_id}",
+                delete(apikey_handlers::revoke_my_api_key),
+            )
+            .layer(middleware::from_extractor::<ApiKeyAuthNew>());
 
-    // Add documentation if enabled
-    if build_doc() {
+        let app = main_routes
+            .route("/login", post(login_handler::login))
+            .merge(protected_routes)
+            .layer(Extension(db.clone()))
+            .layer(middleware::from_fn(read_only_layer))
+            .layer(middleware::from_fn(audit_layer));
+
+        if build_doc() {
+            app.merge(
+                RapiDoc::with_openapi("/doc/aveapi.json", ApiDoc::openapi())
+                    .path("/doc"),
+            )
+        } else {
+            app
+        }
+    } else if build_doc() {
         main_routes.merge(
             RapiDoc::with_openapi("/doc/aveapi.json", ApiDoc::openapi())
                 .path("/doc"),
@@ -1233,4 +1337,31 @@ pub fn build_routes(bridge: Bridge, auth_store: Option<Arc<RwLock<AuthStore>>>) 
     } else {
         main_routes
     }
+}
+
+async fn read_only_layer(
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let db = req
+        .extensions()
+        .get::<Arc<AuthDatabase>>()
+        .cloned();
+    read_only_middleware(db, req, next).await
+}
+
+async fn audit_layer(
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let auth_ctx = req
+        .extensions()
+        .get::<Arc<AuthContext>>()
+        .cloned();
+    let db = req
+        .extensions()
+        .get::<Arc<AuthDatabase>>()
+        .cloned();
+
+    audit_log_middleware(auth_ctx, db, req, next).await
 }

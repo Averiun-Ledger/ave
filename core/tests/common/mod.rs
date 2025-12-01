@@ -1,10 +1,14 @@
-use ave_common::{ValueWrapper, identity::{
-    DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey, keys::{Ed25519Signer, KeyPair}
-}};
+use ave_common::{
+    ValueWrapper,
+    identity::{
+        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
+        keys::{Ed25519Signer, KeyPair},
+    },
+};
 use ave_core::{
     Api,
     approval::approver::ApprovalStateRes,
-    config::{Config, ExternalDbConfig, AveDbConfig, SinkAuth},
+    config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth},
     helpers::db::common::{SignaturesInfo, SubjectInfo},
     model::{
         Namespace,

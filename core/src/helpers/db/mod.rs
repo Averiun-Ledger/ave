@@ -4,18 +4,19 @@ use crate::{
     external_db::DBManager,
     request::{RequestHandlerEvent, manager::RequestManagerEvent},
     subject::{
-        SignedLedger, event::LedgerEventEvent, sinkdata::SinkDataEvent, validata::ValiDataEvent
+        SignedLedger, event::LedgerEventEvent, sinkdata::SinkDataEvent,
+        validata::ValiDataEvent,
     },
 };
 
 use crate::config::ExternalDbConfig;
 
 use async_trait::async_trait;
+use ave_actors::{ActorRef, Subscriber};
 use common::{
     ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
     SubjectInfo,
 };
-use ave_actors::{ActorRef, Subscriber};
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
 use std::path::Path;

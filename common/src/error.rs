@@ -13,15 +13,15 @@ pub enum Error {
     /// Bridge error
     #[error("Bridge error: {0}")]
     Bridge(String),
-    
+
     /// Serialization/Deserialization error
     #[error("Serde error: {0}")]
     Serde(String),
-    
+
     /// Invalid identifier error
     #[error("Invalid identifier: {0}")]
     InvalidIdentifier(String),
-    
+
     /// Generic error
     #[error("{0}")]
     Generic(String),

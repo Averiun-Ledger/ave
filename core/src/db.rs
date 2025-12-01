@@ -1,7 +1,7 @@
 //! # Store module.
 //!
 
-use crate::{config::AveDbConfig};
+use crate::config::AveDbConfig;
 
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
@@ -192,7 +192,10 @@ impl State for DbCollection {
 }
 
 #[async_trait]
-pub trait Storable: PersistentActor where <Self as Actor>::Event: BorshSerialize + BorshDeserialize {
+pub trait Storable: PersistentActor
+where
+    <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
+{
     async fn init_store(
         &mut self,
         name: &str,

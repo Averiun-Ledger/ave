@@ -2,7 +2,6 @@
 //!
 //! These tests verify complete workflows that span multiple modules.
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_identity::{
     BLAKE3_HASHER,
     error::CryptoError,
@@ -11,6 +10,7 @@ use ave_identity::{
     keys::{KeyPair, KeyPairAlgorithm, PublicKey},
     signature::Signature,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Test data structure for serialization
 #[derive(Debug, Clone, PartialEq, BorshSerialize, BorshDeserialize)]
@@ -47,8 +47,8 @@ fn test_complete_signing_workflow() {
     let pub_key_str = public_key.to_string();
 
     // 6. Parse public key from string
-    let parsed_public_key: PublicKey = pub_key_str.parse()
-        .expect("Failed to parse public key");
+    let parsed_public_key: PublicKey =
+        pub_key_str.parse().expect("Failed to parse public key");
 
     assert_eq!(public_key, parsed_public_key);
 
@@ -72,8 +72,8 @@ fn test_hash_serialize_deserialize_verify() {
     let hash_str = hash1.to_string();
 
     // 4. Deserialize hash from string
-    let hash2: DigestIdentifier = hash_str.parse()
-        .expect("Failed to parse hash");
+    let hash2: DigestIdentifier =
+        hash_str.parse().expect("Failed to parse hash");
 
     // 5. Verify hashes match
     assert_eq!(hash1, hash2);

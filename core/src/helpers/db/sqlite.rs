@@ -3,8 +3,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ave_common::identity::PublicKey;
 use ave_actors::{ActorRef, Subscriber};
+use ave_common::identity::PublicKey;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use tracing::error;
@@ -437,14 +437,16 @@ impl Querys for SqliteLocal {
             }
         };
 
-        let approval_request: ApprovalReq = serde_json::from_str(&approve.0).map_err(|e| {
+        let approval_request: ApprovalReq = serde_json::from_str(&approve.0)
+            .map_err(|e| {
                 Error::ExtDB(format!(
                     "Can not convert str to ApprovalReq {}",
                     e
                 ))
             })?;
 
-        let approval_request_info = ApprovalReqInfo::try_from(approval_request).map_err(|e| {
+        let approval_request_info = ApprovalReqInfo::try_from(approval_request)
+            .map_err(|e| {
                 Error::ExtDB(format!(
                     "Can not convert ApprovalReq to ApprovalReqInfo {}",
                     e
@@ -980,38 +982,38 @@ impl Subscriber<SignedLedger> for SqliteLocal {
             }
             return;
         };
-        let (patch, error): (Option<String>, Option<String>) = match event
-            .content
-            .value.clone()
-        {
-            LedgerValue::Patch(value_wrapper) => {
-                succes = "true".to_owned();
-                (Some(value_wrapper.0.to_string()), None)
-            }
-            LedgerValue::Error(protocols_error) => {
-                let Ok(string) = serde_json::to_string(&protocols_error) else {
-                    let e = Error::ExtDB(
-                        "Can not Serialize protocols_error as String"
-                            .to_owned(),
-                    );
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<Signed<Ledger>> LedgerValue::Error: {}", e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
+        let (patch, error): (Option<String>, Option<String>) =
+            match event.content.value.clone() {
+                LedgerValue::Patch(value_wrapper) => {
+                    succes = "true".to_owned();
+                    (Some(value_wrapper.0.to_string()), None)
+                }
+                LedgerValue::Error(protocols_error) => {
+                    let Ok(string) = serde_json::to_string(&protocols_error)
+                    else {
+                        let e = Error::ExtDB(
+                            "Can not Serialize protocols_error as String"
+                                .to_owned(),
+                        );
                         error!(
                             TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
+                            "Subscriber<Signed<Ledger>> LedgerValue::Error: {}",
+                            e
                         );
-                    }
-                    return;
-                };
-                succes = "false".to_owned();
-                (None, Some(string))
-            }
-        };
+                        if let Err(e) =
+                            self.manager.tell(DBManagerMessage::Error(e)).await
+                        {
+                            error!(
+                                TARGET_SQLITE,
+                                "Can no send message to DBManager actor: {}", e
+                            );
+                        }
+                        return;
+                    };
+                    succes = "false".to_owned();
+                    (None, Some(string))
+                }
+            };
 
         if let Ok(conn) = self.conn.lock() {
             let sql = "INSERT INTO events (subject_id, sn, patch, error, event_req, succes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";

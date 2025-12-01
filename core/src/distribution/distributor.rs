@@ -1,17 +1,24 @@
 use std::{str::FromStr, time::Duration};
 
 use async_trait::async_trait;
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    RetryMessage, Strategy,
+};
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
-};
 
 use crate::{
-    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Node, NodeMessage, NodeResponse, Subject, SubjectMessage, SubjectResponse, auth::WitnessesAuth, governance::{
+    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Node,
+    NodeMessage, NodeResponse, Subject, SubjectMessage, SubjectResponse,
+    auth::WitnessesAuth,
+    governance::{
         Governance,
         model::{CreatorQuantity, HashThisRole, RoleTypes},
-    }, intermediary::Intermediary, model::{
+    },
+    intermediary::Intermediary,
+    model::{
         Namespace,
         common::{
             emit_fail, get_gov, get_node_subject_data, get_quantity,
@@ -19,7 +26,10 @@ use crate::{
         },
         event::{Ledger, ProtocolsSignatures},
         network::RetryNetwork,
-    }, subject::SignedLedger, update::TransferResponse, validation::proof::ValidationProof
+    },
+    subject::SignedLedger,
+    update::TransferResponse,
+    validation::proof::ValidationProof,
 };
 
 use tracing::{error, warn};

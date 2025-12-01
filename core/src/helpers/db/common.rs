@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 // Re-export types from ave-common
 pub use ave_common::{
-    ApprovalReqInfo, ApproveInfo, EventInfo, FactInfo, Paginator, PaginatorEvents,
-    ProtocolsSignaturesInfo, RequestInfo, SignatureInfo, SignaturesInfo, SignedInfo,
-    SubjectInfo, TimeOutResponseInfo,
+    ApprovalReqInfo, ApproveInfo, EventInfo, FactInfo, Paginator,
+    PaginatorEvents, ProtocolsSignaturesInfo, RequestInfo, SignatureInfo,
+    SignaturesInfo, SignedInfo, SubjectInfo, TimeOutResponseInfo,
 };
 
 // Internal database types that are NOT part of the public API
@@ -48,20 +48,30 @@ pub struct SignaturesDB {
 impl TryFrom<crate::approval::request::ApprovalReq> for ApprovalReqInfo {
     type Error = String;
 
-    fn try_from(value: crate::approval::request::ApprovalReq) -> Result<Self, Self::Error> {
+    fn try_from(
+        value: crate::approval::request::ApprovalReq,
+    ) -> Result<Self, Self::Error> {
         use crate::model::request::EventRequest;
 
         // Extract the FactRequest from EventRequest
         let fact_request = match value.event_request.content {
             EventRequest::Fact(fact) => fact,
-            _ => return Err("Expected Fact event request in ApprovalReq".to_string()),
+            _ => {
+                return Err(
+                    "Expected Fact event request in ApprovalReq".to_string()
+                );
+            }
         };
 
         // Convert Signature to SignatureInfo
         let signature_info = SignatureInfo {
             signer: value.event_request.signature.signer.to_string(),
             timestamp: value.event_request.signature.timestamp.0,
-            content_hash: value.event_request.signature.content_hash.to_string(),
+            content_hash: value
+                .event_request
+                .signature
+                .content_hash
+                .to_string(),
             value: value.event_request.signature.value.to_string(),
         };
 

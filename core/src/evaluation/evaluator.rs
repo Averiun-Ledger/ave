@@ -1,28 +1,40 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    CONTRACTS, Error, EventRequest, HASH_ALGORITHM, Subject, config::Config, evaluation::response::Response as EvalRes, governance::{Governance, Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
-         SignTypesNode,
+    CONTRACTS, Error, EventRequest, HASH_ALGORITHM, Subject,
+    config::Config,
+    evaluation::response::Response as EvalRes,
+    governance::{Governance, Schema},
+    helpers::network::{NetworkMessage, intermediary::Intermediary},
+    model::{
+        SignTypesNode,
         common::{
             UpdateData, emit_fail, get_metadata, get_sign,
             update_ledger_network,
         },
         network::{RetryNetwork, TimeOutResponse},
-    }, subject::{SubjectMessage, SubjectResponse}
+    },
+    subject::{SubjectMessage, SubjectResponse},
 };
 
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
-use ave_common::{ValueWrapper, identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh
-}};
+use ave_common::{
+    ValueWrapper,
+    identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
+        hash_borsh,
+    },
+};
 
 use json_patch::diff;
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor, RetryMessage, Strategy
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
+    RetryMessage, Strategy,
 };
 
 use serde_json::Value;
@@ -364,8 +376,10 @@ impl Evaluator {
             .clone()
         {
             EventRequest::Fact(..) => {
-                let state_hash = match hash_borsh(&*hash.hasher(),&evaluation.final_state )
-                {
+                let state_hash = match hash_borsh(
+                    &*hash.hasher(),
+                    &evaluation.final_state,
+                ) {
                     Ok(state_hash) => state_hash,
                     Err(e) => return EvaluationRes::Error(e.to_string()),
                 };
@@ -381,25 +395,30 @@ impl Evaluator {
                 (ValueWrapper(patch), state_hash)
             }
             EventRequest::Transfer(..) => {
-                let state_hash = match hash_borsh(&*hash.hasher(),&evaluation_req.state ) {
-                    Ok(state_hash) => state_hash,
-                    Err(e) => return EvaluationRes::Error(e.to_string()),
-                };
+                let state_hash =
+                    match hash_borsh(&*hash.hasher(), &evaluation_req.state) {
+                        Ok(state_hash) => state_hash,
+                        Err(e) => return EvaluationRes::Error(e.to_string()),
+                    };
 
                 (evaluation.final_state, state_hash)
             }
             EventRequest::Confirm(..) => {
                 if !is_governance {
-                    let state_hash = match hash_borsh(&*hash.hasher(),&evaluation_req.state )
-                    {
+                    let state_hash = match hash_borsh(
+                        &*hash.hasher(),
+                        &evaluation_req.state,
+                    ) {
                         Ok(state_hash) => state_hash,
                         Err(e) => return EvaluationRes::Error(e.to_string()),
                     };
 
                     (evaluation.final_state, state_hash)
                 } else {
-                    let state_hash = match hash_borsh(&*hash.hasher(),&evaluation.final_state )
-                    {
+                    let state_hash = match hash_borsh(
+                        &*hash.hasher(),
+                        &evaluation.final_state,
+                    ) {
                         Ok(state_hash) => state_hash,
                         Err(e) => return EvaluationRes::Error(e.to_string()),
                     };

@@ -1,10 +1,11 @@
 use super::ValidationInfo;
 
 use crate::{
-    Error, HASH_ALGORITHM, error, model::{ Namespace, request::EventRequest}
+    Error, HASH_ALGORITHM, error,
+    model::{Namespace, request::EventRequest},
 };
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh
+    DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -162,7 +163,6 @@ impl Default for ValidationProof {
     }
 }
 
-
 impl ValidationProof {
     /// Create a new validation proof from a validation command.
     pub fn from_info(
@@ -175,10 +175,11 @@ impl ValidationProof {
             error!(TARGET_PROOF, "Error getting hash algorithm");
             HashAlgorithm::Blake3
         };
-        
-        let event_hash = hash_borsh(&*derivator.hasher(),& info.event_proof).map_err(|e| {
-            Error::Hash(format!("Can not obtain event proof hash: {}", e))
-        })?;
+
+        let event_hash = hash_borsh(&*derivator.hasher(), &info.event_proof)
+            .map_err(|e| {
+                Error::Hash(format!("Can not obtain event proof hash: {}", e))
+            })?;
 
         let validation_proof: ValidationProof = Self {
             governance_id: info.metadata.governance_id.clone(),

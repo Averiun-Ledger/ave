@@ -27,8 +27,8 @@ use ave_actors::{
 };
 
 use async_trait::async_trait;
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use borsh::{BorshDeserialize, BorshSerialize};
 use proof::ValidationProof;
 use request::ValidationReq;
 use response::ValidationRes;
@@ -41,7 +41,9 @@ use std::collections::HashSet;
 const TARGET_VALIDATION: &str = "Ave-Validation";
 
 /// A struct for passing validation information.
-#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct ValidationInfo {
     pub metadata: Metadata,
     pub event_proof: Signed<ProofEvent>,
@@ -562,15 +564,18 @@ pub mod tests {
     use std::time::Duration;
     use test_log::test;
 
-    use ave_common::{ValueWrapper, identity::{
-        Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh, keys::Ed25519Signer
-    }};
     use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
+    use ave_common::{
+        ValueWrapper,
+        identity::{
+            Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh,
+            keys::Ed25519Signer,
+        },
+    };
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Governance,  Node,
-        NodeMessage, NodeResponse, Signed, Subject, SubjectMessage,
-        SubjectResponse, 
+        CreateRequest, EOLRequest, EventRequest, Governance, Node, NodeMessage,
+        NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse,
         helpers::db::ExternalDB,
         model::{Namespace, SignTypesNode, event::LedgerValue},
         query::Query,
@@ -595,10 +600,18 @@ pub mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, ..) = create_system().await;
 
-        let node_actor = system.create_root_actor("node", Node::initial(node_keys.clone())).await.unwrap();
+        let node_actor = system
+            .create_root_actor("node", Node::initial(node_keys.clone()))
+            .await
+            .unwrap();
 
-        let request_actor =
-            system.create_root_actor("request", RequestHandler::initial(node_keys.public_key())).await.unwrap();
+        let request_actor = system
+            .create_root_actor(
+                "request",
+                RequestHandler::initial(node_keys.public_key()),
+            )
+            .await
+            .unwrap();
 
         let query_actor = system
             .create_root_actor("query", Query::new(node_keys.public_key()))
@@ -687,8 +700,7 @@ pub mod tests {
                 "[]".to_owned(),
             ),))
         );
-        
-        
+
         assert_eq!(
             last_event.content.state_hash,
             hash_borsh(&Blake3Hasher, &metadata.properties).unwrap()

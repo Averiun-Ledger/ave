@@ -1,13 +1,15 @@
 use async_trait::async_trait;
-use borsh::{BorshDeserialize, BorshSerialize};
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, Handler, NotPersistentActor,
+};
 use ave_common::identity::{PublicKey, TimeStamp};
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler, NotPersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::{NetworkMessage, intermediary::Intermediary};
 
-use super::{ common::emit_fail};
+use super::common::emit_fail;
 
 const TARGET_NETWORK: &str = "Ave-Model-Network";
 
@@ -22,7 +24,7 @@ const TARGET_NETWORK: &str = "Ave-Model-Network";
     BorshSerialize,
     BorshDeserialize,
     Ord,
-    PartialOrd
+    PartialOrd,
 )]
 pub struct TimeOutResponse {
     pub who: PublicKey,
@@ -40,7 +42,7 @@ impl Actor for RetryNetwork {
     type Response = ();
 }
 
-impl NotPersistentActor for RetryNetwork{}
+impl NotPersistentActor for RetryNetwork {}
 
 #[async_trait]
 impl Handler<RetryNetwork> for RetryNetwork {

@@ -9,8 +9,8 @@ pub mod network;
 pub mod patch;
 pub mod request;
 
-use event::{Event as AveEvent, Ledger, ProofEvent};
 pub use ave_common::Namespace;
+use event::{Event as AveEvent, Ledger, ProofEvent};
 
 use crate::{
     EventRequest,

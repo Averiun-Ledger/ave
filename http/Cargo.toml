@@ -39,6 +39,19 @@ utoipa = { version = "5.4.0", features = ["axum_extras"]}
 utoipa-rapidoc = { version = "6.0.0", features = ["axum"]}
 bytes = "1.11.0"
 
+# Auth system dependencies
+rusqlite = { version = "0.37.0", features = ["bundled", "time"] }
+argon2 = { version = "0.5.3", features = ["std"] }
+sha2 = "0.10.8"
+hex = "0.4.3"
+rand = "0.8.5"
+time = "0.3.36"
+thiserror = "2.0.9"
+toml = "0.8.19"
+
+[dev-dependencies]
+tempfile = "3.10.1"
+
 [features]
 default = ["prometheus", "sqlite", "ext-sqlite"]
 rocksdb = ["ave-bridge/rocksdb"]

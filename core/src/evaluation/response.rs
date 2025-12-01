@@ -1,8 +1,4 @@
-use crate::{
-    model::{
-         event::LedgerValue, network::TimeOutResponse,
-    },
-};
+use crate::model::{event::LedgerValue, network::TimeOutResponse};
 use ave_common::{ValueWrapper, identity::DigestIdentifier};
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -46,7 +42,9 @@ pub struct Response {
     pub appr_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct EvalLedgerResponse {
     /// The patch to apply to the state.
     pub value: LedgerValue,

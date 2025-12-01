@@ -1,7 +1,8 @@
-use crate::{
-    model::{ request::EventRequest, },
+use crate::model::request::EventRequest;
+use ave_common::{
+    ValueWrapper,
+    identity::{DigestIdentifier, Signed},
 };
-use ave_common::{ValueWrapper, identity::{DigestIdentifier, Signed}};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

@@ -1,8 +1,6 @@
 use super::proof::ValidationProof;
 
-use crate::{
-    model::{ event::ProtocolsSignatures},
-};
+use crate::model::event::ProtocolsSignatures;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

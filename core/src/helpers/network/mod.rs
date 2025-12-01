@@ -1,13 +1,13 @@
+use ave_actors::Message;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use network::ComunicateInfo;
-use ave_actors::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Event as AveEvent,
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
-    model::event::{ProtocolsSignatures},
+    model::event::ProtocolsSignatures,
     subject::SignedLedger,
     update::TransferResponse,
     validation::{

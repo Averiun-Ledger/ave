@@ -1,9 +1,12 @@
 //! Signature model.
 //!
 
-use crate::{error::Error, identity::{
-    DigestIdentifier, PublicKey, Signature, SignatureIdentifier, TimeStamp
-}};
+use crate::{
+    error::Error,
+    identity::{
+        DigestIdentifier, PublicKey, Signature, SignatureIdentifier, TimeStamp,
+    },
+};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, str::FromStr};
 
@@ -39,13 +42,17 @@ impl TryFrom<BridgeSignature> for Signature {
     type Error = Error;
     fn try_from(signature: BridgeSignature) -> Result<Self, Self::Error> {
         Ok(Self {
-            signer: PublicKey::from_str(&signature.signer)
-                .map_err(|_| Error::InvalidIdentifier("Invalid public key".to_owned()))?,
+            signer: PublicKey::from_str(&signature.signer).map_err(|_| {
+                Error::InvalidIdentifier("Invalid public key".to_owned())
+            })?,
             timestamp: TimeStamp(signature.timestamp),
-            value: SignatureIdentifier::from_str(&signature.value)
-                .map_err(|_| Error::InvalidIdentifier("Invalid signature".to_owned()))?,
+            value: SignatureIdentifier::from_str(&signature.value).map_err(
+                |_| Error::InvalidIdentifier("Invalid signature".to_owned()),
+            )?,
             content_hash: DigestIdentifier::from_str(&signature.content_hash)
-                .map_err(|_| Error::InvalidIdentifier("Invalid digest".to_owned()))?,
+                .map_err(|_| {
+                Error::InvalidIdentifier("Invalid digest".to_owned())
+            })?,
         })
     }
 }

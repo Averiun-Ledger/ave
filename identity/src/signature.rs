@@ -33,7 +33,7 @@ use subtle::ConstantTimeEq;
     PartialEq,
     Hash,
     Ord,
-    PartialOrd
+    PartialOrd,
 )]
 pub struct Signature {
     /// The public key of the signer

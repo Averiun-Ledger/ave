@@ -14,7 +14,16 @@ use super::{DSAlgorithm, ED25519_PUBLIC_KEY_LENGTH, ED25519_SIGNATURE_LENGTH};
 /// The output contains:
 /// - 1 byte: algorithm identifier
 /// - N bytes: actual signature value (length depends on algorithm)
-#[derive(Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Ord, PartialOrd)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Ord,
+    PartialOrd,
+)]
 pub struct SignatureIdentifier {
     inner: AlgorithmIdentifiedBytes<DSAlgorithm>,
 }

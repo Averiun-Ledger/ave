@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 use core::config::{
-    ExternalDbConfig, AveDbConfig, LoggingOutput, LoggingRotation, SinkConfig,
+    AveDbConfig, ExternalDbConfig, LoggingOutput, LoggingRotation, SinkConfig,
     SinkServer,
 };
 use core::error::Error;
@@ -146,12 +146,11 @@ impl AveParams {
             Error::Bridge(e)
         })?;
 
-        let ave_params: AveParams =
-            config.try_deserialize().map_err(|e| {
-                let e = format!("Error try deserialize config: {}", e);
-                error!(TARGET_PARAMS, "{}", e);
-                Error::Bridge(e)
-            })?;
+        let ave_params: AveParams = config.try_deserialize().map_err(|e| {
+            let e = format!("Error try deserialize config: {}", e);
+            error!(TARGET_PARAMS, "{}", e);
+            Error::Bridge(e)
+        })?;
 
         Ok(Self {
             network: NetworkParams::from_env(&format!("{parent}_"))?,

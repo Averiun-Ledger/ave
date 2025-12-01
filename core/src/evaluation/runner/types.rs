@@ -1,8 +1,8 @@
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::{ValueWrapper, identity::PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{model::Namespace};
+use crate::model::Namespace;
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,

@@ -7,10 +7,10 @@ use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
 use ave_common::ValueWrapper;
-use borsh::{BorshDeserialize, BorshSerialize};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,7 +21,8 @@ use crate::subject::SignedLedger;
 use crate::{
     ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Subject,
     SubjectMessage, SubjectResponse, Validation, ValidationInfo,
-    ValidationMessage,    approval::{Approval, ApprovalMessage},
+    ValidationMessage,
+    approval::{Approval, ApprovalMessage},
     auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
     db::Storable,
     distribution::{Distribution, DistributionMessage, DistributionType},
@@ -56,7 +57,9 @@ use super::{
     types::{ProtocolsResult, ReqManInitMessage, RequestManagerState},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct RequestManager {
     our_key: PublicKey,
     id: String,
@@ -866,7 +869,9 @@ pub enum RequestManagerMessage {
 
 impl Message for RequestManagerMessage {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum RequestManagerEvent {
     UpdateState {
         id: String,
@@ -913,18 +918,19 @@ impl Handler<RequestManager> for RequestManager {
             RequestManagerMessage::Reboot { governance_id } => {
                 info!(TARGET_MANAGER, "Init reboot {}", self.id);
                 if let RequestManagerState::Reboot = self.state.clone() {
-                    let reboot_actor =
-                        match ctx.create_child("reboot", Reboot::new(governance_id)).await {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "Reboot, can not create Reboot actor: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        };
+                    let reboot_actor = match ctx
+                        .create_child("reboot", Reboot::new(governance_id))
+                        .await
+                    {
+                        Ok(actor) => actor,
+                        Err(e) => {
+                            error!(
+                                TARGET_MANAGER,
+                                "Reboot, can not create Reboot actor: {}", e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    };
 
                     if let Err(e) = reboot_actor.tell(RebootMessage::Init).await
                     {

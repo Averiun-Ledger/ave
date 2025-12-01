@@ -2,7 +2,9 @@ use rand::rng;
 use rand::seq::IteratorRandom;
 use std::collections::{HashMap, HashSet};
 
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler};
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
+};
 
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
 use network::ComunicateInfo;
@@ -10,8 +12,8 @@ use wasmtime::{Caller, Config, Engine, Linker};
 
 use crate::{
     ActorMessage, Error, Event as AveEvent, EventRequestType, Governance,
-    NetworkMessage, Node, NodeMessage, NodeResponse,
-    Subject, SubjectMessage, SubjectResponse,
+    NetworkMessage, Node, NodeMessage, NodeResponse, Subject, SubjectMessage,
+    SubjectResponse,
     auth::{Auth, AuthMessage, WitnessesAuth},
     governance::{
         Quorum,
@@ -50,8 +52,8 @@ pub struct MemoryManager {
 }
 
 // Security limits to prevent memory exhaustion attacks
-const MAX_TOTAL_MEMORY: usize = 5_000_000;   // 5MB total memory limit (for production execution)
-const MAX_SINGLE_ALLOC: usize = 2_000_000;   // 2MB single allocation limit (for production execution)
+const MAX_TOTAL_MEMORY: usize = 5_000_000; // 5MB total memory limit (for production execution)
+const MAX_SINGLE_ALLOC: usize = 2_000_000; // 2MB single allocation limit (for production execution)
 
 // Fuel limits for contract execution
 // Production limit: 10M operations (~100ms execution, suitable for 1000s of concurrent evaluations)
@@ -88,7 +90,12 @@ impl MemoryManager {
         Ok(current_len)
     }
 
-    pub fn write_byte(&mut self, start_ptr: usize, offset: usize, data: u8) -> Result<(), Error> {
+    pub fn write_byte(
+        &mut self,
+        start_ptr: usize,
+        offset: usize,
+        data: u8,
+    ) -> Result<(), Error> {
         // Security check: validate pointer exists in allocation map
         let len = self.map.get(&start_ptr).ok_or_else(|| {
             Error::Runner(format!("Invalid write pointer: {}", start_ptr))
@@ -254,8 +261,9 @@ where
     A: Actor + Handler<A>,
 {
     let tranfer_register_path = ActorPath::from("/user/node/transfer_register");
-    let transfer_register_actor: Option<ave_actors::ActorRef<TransferRegister>> =
-        ctx.system().get_actor(&tranfer_register_path).await;
+    let transfer_register_actor: Option<
+        ave_actors::ActorRef<TransferRegister>,
+    > = ctx.system().get_actor(&tranfer_register_path).await;
 
     let response =
         if let Some(transfer_register_actor) = transfer_register_actor {
