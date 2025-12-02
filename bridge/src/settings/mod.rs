@@ -32,412 +32,691 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, Error> {
     Ok(bridge_config)
 }
 
-/*
 #[cfg(test)]
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
+        path::PathBuf,
         time::Duration,
     };
 
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use core::{
-        config::{LoggingOutput, LoggingRotation, SinkServer},
+        config::{
+            AveDbConfig, ExternalDbConfig, LoggingOutput, LoggingRotation,
+            SinkServer,
+        },
         subject::sinkdata::SinkTypes,
     };
     use network::{NodeType, RoutingNode};
-    use serial_test::serial;
+    use tempfile::TempPath;
 
-    use crate::settings::build_config;
+    use crate::{config::Config as BridgeConfig, settings::build_config};
+
+    const FULL_TOML: &str = r#"
+keys_path = "/custom/keys"
+prometheus = "1.2.3.4:3333"
+
+[node]
+keypair_algorithm = "Ed25519"
+hash_algorithm = "Blake3"
+ave_db = "/data/ave.db"
+external_db = "/data/ext.db"
+contracts_dir = "/contracts"
+always_accept = true
+garbage_collector = 900
+
+[node.network]
+node_type = "Addressable"
+listen_addresses = ["/ip4/127.0.0.1/tcp/5001", "/ip4/127.0.0.1/tcp/5002"]
+external_addresses = ["/ip4/10.0.0.1/tcp/7000"]
+boot_nodes = [
+    { peer_id = "12D3KooWNode1", address = ["/ip4/1.1.1.1/tcp/1000"] },
+    { peer_id = "12D3KooWNode2", address = ["/ip4/2.2.2.2/tcp/2000"] }
+]
+
+[node.network.tell]
+message_timeout = 58
+max_concurrent_streams = 166
+
+[node.network.req_res]
+message_timeout = 59
+max_concurrent_streams = 167
+
+[node.network.routing]
+dht_random_walk = false
+discovery_only_if_under_num = 25
+allow_private_address_in_dht = true
+allow_dns_address_in_dht = true
+allow_loop_back_address_in_dht = true
+kademlia_disjoint_query_paths = false
+
+[node.network.control_list]
+enable = true
+allow_list = ["Peer200", "Peer300"]
+block_list = ["Peer1", "Peer2"]
+service_allow_list = ["http://allow.local/list"]
+service_block_list = ["http://block.local/list"]
+interval_request = 42
+
+[logging]
+output = { stdout = false, file = true, api = true }
+api_url = "https://example.com/logs"
+file_path = "/tmp/my.log"
+rotation = "hourly"
+max_size = 52428800
+max_files = 5
+
+[sink]
+auth = "https://auth.service"
+username = "sink-user"
+
+[sink.sinks]
+primary = [
+    { server = "SinkOne", events = ["Create", "All"], url = "https://sink.one", auth = true },
+    { server = "SinkTwo", events = ["Transfer"], url = "https://sink.two", auth = false }
+]
+
+[auth]
+enabled = true
+database_path = "/var/db/auth.db"
+superadmin = "admin:supersecret"
+
+[auth.password_policy]
+min_length = 12
+require_uppercase = true
+require_lowercase = true
+require_digit = true
+require_special = true
+expiration_days = 30
+
+[auth.api_key]
+default_ttl_seconds = 3600
+max_keys_per_user = 20
+allow_custom_prefix = true
+revoke_on_role_change = false
+
+[auth.lockout]
+max_attempts = 3
+duration_seconds = 600
+reset_on_success = false
+
+[auth.rate_limit]
+enabled = false
+window_seconds = 120
+max_requests = 50
+limit_by_key = false
+limit_by_ip = true
+cleanup_interval_seconds = 1800
+
+[auth.session]
+audit_enabled = false
+audit_retention_days = 30
+log_success = false
+log_failures = true
+log_all_requests = true
+
+[http]
+http_address = "127.0.0.1:4000"
+https_address = "127.0.0.1:4443"
+https_cert_path = "/certs/cert.pem"
+https_private_key_path = "/certs/key.pem"
+enable_doc = true
+"#;
+
+    const FULL_YAML: &str = r#"
+keys_path: /custom/keys
+prometheus: 1.2.3.4:3333
+node:
+  keypair_algorithm: Ed25519
+  hash_algorithm: Blake3
+  ave_db: /data/ave.db
+  external_db: /data/ext.db
+  contracts_dir: /contracts
+  always_accept: true
+  garbage_collector: 900
+  network:
+    node_type: Addressable
+    listen_addresses:
+      - /ip4/127.0.0.1/tcp/5001
+      - /ip4/127.0.0.1/tcp/5002
+    external_addresses:
+      - /ip4/10.0.0.1/tcp/7000
+    boot_nodes:
+      - peer_id: 12D3KooWNode1
+        address:
+          - /ip4/1.1.1.1/tcp/1000
+      - peer_id: 12D3KooWNode2
+        address:
+          - /ip4/2.2.2.2/tcp/2000
+    tell:
+      message_timeout: 58
+      max_concurrent_streams: 166
+    req_res:
+      message_timeout: 59
+      max_concurrent_streams: 167
+    routing:
+      dht_random_walk: false
+      discovery_only_if_under_num: 25
+      allow_private_address_in_dht: true
+      allow_dns_address_in_dht: true
+      allow_loop_back_address_in_dht: true
+      kademlia_disjoint_query_paths: false
+    control_list:
+      enable: true
+      allow_list: [Peer200, Peer300]
+      block_list: [Peer1, Peer2]
+      service_allow_list: [http://allow.local/list]
+      service_block_list: [http://block.local/list]
+      interval_request: 42
+logging:
+  output:
+    stdout: false
+    file: true
+    api: true
+  api_url: https://example.com/logs
+  file_path: /tmp/my.log
+  rotation: hourly
+  max_size: 52428800
+  max_files: 5
+sink:
+  auth: https://auth.service
+  username: sink-user
+  sinks:
+    primary:
+      - server: SinkOne
+        events: [Create, All]
+        url: https://sink.one
+        auth: true
+      - server: SinkTwo
+        events: [Transfer]
+        url: https://sink.two
+        auth: false
+auth:
+  enabled: true
+  database_path: /var/db/auth.db
+  superadmin: admin:supersecret
+  password_policy:
+    min_length: 12
+    require_uppercase: true
+    require_lowercase: true
+    require_digit: true
+    require_special: true
+    expiration_days: 30
+  api_key:
+    default_ttl_seconds: 3600
+    max_keys_per_user: 20
+    allow_custom_prefix: true
+    revoke_on_role_change: false
+  lockout:
+    max_attempts: 3
+    duration_seconds: 600
+    reset_on_success: false
+  rate_limit:
+    enabled: false
+    window_seconds: 120
+    max_requests: 50
+    limit_by_key: false
+    limit_by_ip: true
+    cleanup_interval_seconds: 1800
+  session:
+    audit_enabled: false
+    audit_retention_days: 30
+    log_success: false
+    log_failures: true
+    log_all_requests: true
+http:
+  http_address: 127.0.0.1:4000
+  https_address: 127.0.0.1:4443
+  https_cert_path: /certs/cert.pem
+  https_private_key_path: /certs/key.pem
+  enable_doc: true
+"#;
+
+    const FULL_JSON: &str = r#"
+{
+  "keys_path": "/custom/keys",
+  "prometheus": "1.2.3.4:3333",
+  "node": {
+    "keypair_algorithm": "Ed25519",
+    "hash_algorithm": "Blake3",
+    "ave_db": "/data/ave.db",
+    "external_db": "/data/ext.db",
+    "contracts_dir": "/contracts",
+    "always_accept": true,
+    "garbage_collector": 900,
+    "network": {
+      "node_type": "Addressable",
+      "listen_addresses": [
+        "/ip4/127.0.0.1/tcp/5001",
+        "/ip4/127.0.0.1/tcp/5002"
+      ],
+      "external_addresses": [
+        "/ip4/10.0.0.1/tcp/7000"
+      ],
+      "boot_nodes": [
+        {
+          "peer_id": "12D3KooWNode1",
+          "address": ["/ip4/1.1.1.1/tcp/1000"]
+        },
+        {
+          "peer_id": "12D3KooWNode2",
+          "address": ["/ip4/2.2.2.2/tcp/2000"]
+        }
+      ],
+      "tell": {
+        "message_timeout": 58,
+        "max_concurrent_streams": 166
+      },
+      "req_res": {
+        "message_timeout": 59,
+        "max_concurrent_streams": 167
+      },
+      "routing": {
+        "dht_random_walk": false,
+        "discovery_only_if_under_num": 25,
+        "allow_private_address_in_dht": true,
+        "allow_dns_address_in_dht": true,
+        "allow_loop_back_address_in_dht": true,
+        "kademlia_disjoint_query_paths": false
+      },
+      "control_list": {
+        "enable": true,
+        "allow_list": ["Peer200", "Peer300"],
+        "block_list": ["Peer1", "Peer2"],
+        "service_allow_list": ["http://allow.local/list"],
+        "service_block_list": ["http://block.local/list"],
+        "interval_request": 42
+      }
+    }
+  },
+  "logging": {
+    "output": {
+      "stdout": false,
+      "file": true,
+      "api": true
+    },
+    "api_url": "https://example.com/logs",
+    "file_path": "/tmp/my.log",
+    "rotation": "hourly",
+    "max_size": 52428800,
+    "max_files": 5
+  },
+  "sink": {
+    "auth": "https://auth.service",
+    "username": "sink-user",
+    "sinks": {
+      "primary": [
+        {
+          "server": "SinkOne",
+          "events": ["Create", "All"],
+          "url": "https://sink.one",
+          "auth": true
+        },
+        {
+          "server": "SinkTwo",
+          "events": ["Transfer"],
+          "url": "https://sink.two",
+          "auth": false
+        }
+      ]
+    }
+  },
+  "auth": {
+    "enabled": true,
+    "database_path": "/var/db/auth.db",
+    "superadmin": "admin:supersecret",
+    "password_policy": {
+      "min_length": 12,
+      "require_uppercase": true,
+      "require_lowercase": true,
+      "require_digit": true,
+      "require_special": true,
+      "expiration_days": 30
+    },
+    "api_key": {
+      "default_ttl_seconds": 3600,
+      "max_keys_per_user": 20,
+      "allow_custom_prefix": true,
+      "revoke_on_role_change": false
+    },
+    "lockout": {
+      "max_attempts": 3,
+      "duration_seconds": 600,
+      "reset_on_success": false
+    },
+    "rate_limit": {
+      "enabled": false,
+      "window_seconds": 120,
+      "max_requests": 50,
+      "limit_by_key": false,
+      "limit_by_ip": true,
+      "cleanup_interval_seconds": 1800
+    },
+    "session": {
+      "audit_enabled": false,
+      "audit_retention_days": 30,
+      "log_success": false,
+      "log_failures": true,
+      "log_all_requests": true
+    }
+  },
+  "http": {
+    "http_address": "127.0.0.1:4000",
+    "https_address": "127.0.0.1:4443",
+    "https_cert_path": "/certs/cert.pem",
+    "https_private_key_path": "/certs/key.pem",
+    "enable_doc": true
+  }
+}
+"#;
+
+    const PARTIAL_TOML: &str = r#"
+keys_path = "/partial/keys"
+
+[auth]
+enabled = true
+
+[http]
+http_address = "127.0.0.1:8888"
+enable_doc = true
+"#;
+
+    const PARTIAL_YAML: &str = r#"
+keys_path: /partial/keys
+auth:
+  enabled: true
+http:
+  http_address: 127.0.0.1:8888
+  enable_doc: true
+"#;
+
+    const PARTIAL_JSON: &str = r#"
+{
+  "keys_path": "/partial/keys",
+  "auth": {
+    "enabled": true
+  },
+  "http": {
+    "http_address": "127.0.0.1:8888",
+    "enable_doc": true
+  }
+}
+"#;
 
     #[test]
-    #[serial]
-    fn test_env_full() {
-        unsafe {
-            std::env::set_var("AVE_NETWORK_TELL_MESSAGE_TIMEOUT_SECS", "58");
-            std::env::set_var("AVE_NETWORK_TELL_MAX_CONCURRENT_STREAMS", "166");
-            std::env::set_var("AVE_NETWORK_REQRES_MESSAGE_TIMEOUT_SECS", "59");
-            std::env::set_var(
-                "AVE_NETWORK_REQRES_MAX_CONCURRENT_STREAMS",
-                "167",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_BOOT_NODES",
-                "/ip4/172.17.0.1/tcp/50000/p2p/12D3KooWLXexpg81PjdjnrhmHUxN7U5EtfXJgr9cahei1SJ9Ub3B,/ip4/127.0.0.1/tcp/60001/p2p/12D3KooWLXexpg81PjdjnrhmHUxN7U5EtfXJgr9cahei1SJ9Ub3B,/ip4/11.11.0.11/tcp/10000/p2p/12D3KooWRS3QVwqBtNp7rUCG4SF3nBrinQqJYC1N5qc1Wdr4jrze,/ip4/12.22.33.44/tcp/55511/p2p/12D3KooWRS3QVwqBtNp7rUCG4SF3nBrinQqJYC1N5qc1Wdr4jrze",
-            );
-            std::env::set_var("AVE_NETWORK_ROUTING_DHT_RANDOM_WALK", "true");
-            std::env::set_var(
-                "AVE_NETWORK_ROUTING_DISCOVERY_ONLY_IF_UNDER_NUM",
-                "55",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_ROUTING_ALLOW_PRIVATE_ADDRESS_IN_DHT",
-                "true",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_ROUTING_ALLOW_DNS_ADDRESS_IN_DHT",
-                "true",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_ROUTING_ALLOW_LOOP_BACK_ADDRESS_IN_DHT",
-                "true",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_ROUTING_KADEMLIA_DISJOINT_QUERY_PATHS",
-                "false",
-            );
+    fn build_config_reads_full_toml() {
+        let path = write_config("toml", FULL_TOML);
+        let config = build_config(path.to_str().unwrap()).expect("toml config");
+        assert_full_config(config);
+    }
 
-            std::env::set_var("AVE_BASE_KEY_DERIVATOR", "Secp256k1");
-            std::env::set_var("AVE_BASE_DIGEST_DERIVATOR", "Blake3_512");
-            std::env::set_var("AVE_BASE_ALWAYS_ACCEPT", "true");
-            std::env::set_var("AVE_BASE_CONTRACTS_DIR", "./fake_route");
-            std::env::set_var("AVE_BASE_AVE_DB", "./fake/db/path");
-            std::env::set_var("AVE_BASE_EXTERNAL_DB", "./fake/db/path");
-            std::env::set_var("AVE_BASE_GARBAGE_COLLECTOR", "1000");
-            std::env::set_var(
-                "AVE_SINK_SINKS",
-                "Sever1|key1|All|https://www.averiun.com/build/|true,Server2|key2|Create Fact|https://www.averiun.com/community/|false,Server3|key2|Transfer|https://www.averiun.com/community/|true,Server4|key2|Confirm|https://www.averiun.com/community/issue|false",
-            );
-            std::env::set_var(
-                "AVE_SINK_AUTH",
-                "https://www.averiun.com/build/",
-            );
-            std::env::set_var("AVE_SINK_USERNAME", "Sink-service");
+    #[test]
+    fn build_config_reads_full_yaml() {
+        let path = write_config("yaml", FULL_YAML);
+        let config = build_config(path.to_str().unwrap()).expect("yaml config");
+        assert_full_config(config);
+    }
 
-            std::env::set_var("AVE_NETWORK_NODE_TYPE", "Addressable");
-            std::env::set_var(
-                "AVE_NETWORK_LISTEN_ADDRESSES",
-                "/ip4/127.0.0.1/tcp/50000,/ip4/127.0.0.1/tcp/50001,/ip4/127.0.0.1/tcp/50002",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_EXTERNAL_ADDRESSES",
-                "/ip4/90.1.0.60/tcp/50000,/ip4/90.1.0.61/tcp/50000",
-            );
+    #[test]
+    fn build_config_reads_full_json() {
+        let path = write_config("json", FULL_JSON);
+        let config = build_config(path.to_str().unwrap()).expect("json config");
+        assert_full_config(config);
+    }
 
-            std::env::set_var("AVE_KEYS_PATH", "./fake/keys/path");
-            std::env::set_var("AVE_PROMETHEUS", "10.0.0.0:3030");
+    #[test]
+    fn build_config_fills_defaults_for_partial_toml() {
+        let path = write_config("toml", PARTIAL_TOML);
+        let config =
+            build_config(path.to_str().unwrap()).expect("partial toml config");
+        assert_partial_defaults(config);
+    }
 
-            std::env::set_var("AVE_NETWORK_CONTROL_LIST_ENABLE", "true");
-            std::env::set_var(
-                "AVE_NETWORK_CONTROL_LIST_ALLOW_LIST",
-                "Peer200,Peer300",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_CONTROL_LIST_BLOCK_LIST",
-                "Peer1,Peer2",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_CONTROL_LIST_SERVICE_ALLOW_LIST",
-                "http://90.0.0.1:3000/allow_list,http://90.0.0.2:4000/allow_list",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_CONTROL_LIST_SERVICE_BLOCK_LIST",
-                "http://90.0.0.1:3000/block_list,http://90.0.0.2:4000/block_list",
-            );
-            std::env::set_var(
-                "AVE_NETWORK_CONTROL_LIST_INTERVAL_REQUEST",
-                "58",
-            );
-            std::env::set_var("AVE_LOGGING_OUTPUT", "file,api");
-            std::env::set_var(
-                "AVE_LOGGING_API_URL",
-                "https://example.com/logs",
-            );
-            std::env::set_var("AVE_LOGGING_FILE_PATH", "/tmp/my.log");
-            std::env::set_var("AVE_LOGGING_ROTATION", "hourly");
-            std::env::set_var("AVE_LOGGING_MAX_SIZE", "52428800");
-            std::env::set_var("AVE_LOGGING_MAX_FILES", "5");
-        }
+    #[test]
+    fn build_config_fills_defaults_for_partial_yaml() {
+        let path = write_config("yaml", PARTIAL_YAML);
+        let config =
+            build_config(path.to_str().unwrap()).expect("partial yaml config");
+        assert_partial_defaults(config);
+    }
 
-        let config = build_config("").unwrap();
+    #[test]
+    fn build_config_fills_defaults_for_partial_json() {
+        let path = write_config("json", PARTIAL_JSON);
+        let config =
+            build_config(path.to_str().unwrap()).expect("partial json config");
+        assert_partial_defaults(config);
+    }
 
-        let log = &config.logging;
+    fn write_config(extension: &str, content: &str) -> TempPath {
+        let file = tempfile::Builder::new()
+            .suffix(&format!(".{extension}"))
+            .tempfile()
+            .expect("create temp config file");
+        std::fs::write(file.path(), content).expect("write temp config");
+        file.into_temp_path()
+    }
+
+    fn assert_full_config(config: BridgeConfig) {
+        assert_eq!(config.keys_path, PathBuf::from("/custom/keys"));
+        assert_eq!(config.prometheus, "1.2.3.4:3333");
+
+        let node = &config.node;
+        assert_eq!(node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
+        assert_eq!(node.hash_algorithm, HashAlgorithm::Blake3);
+        assert!(node.always_accept);
+        assert_eq!(node.contracts_dir, PathBuf::from("/contracts"));
+        assert_eq!(node.garbage_collector, Duration::from_secs(900));
         assert_eq!(
-            log.output,
+            node.ave_db,
+            AveDbConfig::build(&PathBuf::from("/data/ave.db"))
+        );
+        assert_eq!(
+            node.external_db,
+            ExternalDbConfig::build(&PathBuf::from("/data/ext.db"))
+        );
+
+        assert_eq!(node.network.node_type, NodeType::Addressable);
+        assert_eq!(
+            node.network.listen_addresses,
+            vec![
+                "/ip4/127.0.0.1/tcp/5001".to_owned(),
+                "/ip4/127.0.0.1/tcp/5002".to_owned()
+            ]
+        );
+        assert_eq!(
+            node.network.external_addresses,
+            vec!["/ip4/10.0.0.1/tcp/7000".to_owned()]
+        );
+        let expected_boot_nodes = vec![
+            RoutingNode {
+                peer_id: "12D3KooWNode1".to_owned(),
+                address: vec!["/ip4/1.1.1.1/tcp/1000".to_owned()],
+            },
+            RoutingNode {
+                peer_id: "12D3KooWNode2".to_owned(),
+                address: vec!["/ip4/2.2.2.2/tcp/2000".to_owned()],
+            },
+        ];
+        assert_eq!(node.network.boot_nodes.len(), expected_boot_nodes.len());
+        for expected in expected_boot_nodes {
+            let Some(actual) = node
+                .network
+                .boot_nodes
+                .iter()
+                .find(|node| node.peer_id == expected.peer_id)
+            else {
+                panic!("boot node {} missing", expected.peer_id);
+            };
+            assert_eq!(actual.address, expected.address);
+        }
+        assert_eq!(
+            node.network.tell.get_message_timeout(),
+            Duration::from_secs(58)
+        );
+        assert_eq!(
+            node.network.req_res.get_message_timeout(),
+            Duration::from_secs(59)
+        );
+        assert_eq!(node.network.tell.get_max_concurrent_streams(), 166);
+        assert_eq!(node.network.req_res.get_max_concurrent_streams(), 167);
+        assert!(!node.network.routing.get_dht_random_walk());
+        assert_eq!(node.network.routing.get_discovery_limit(), 25);
+        assert!(node
+            .network
+            .routing
+            .get_allow_private_address_in_dht());
+        assert!(node.network.routing.get_allow_dns_address_in_dht());
+        assert!(node
+            .network
+            .routing
+            .get_allow_loop_back_address_in_dht());
+        assert!(
+            !node
+                .network
+                .routing
+                .get_kademlia_disjoint_query_paths()
+        );
+        assert!(node.network.control_list.get_enable());
+        assert_eq!(
+            node.network.control_list.get_allow_list(),
+            vec!["Peer200", "Peer300"]
+        );
+        assert_eq!(
+            node.network.control_list.get_block_list(),
+            vec!["Peer1", "Peer2"]
+        );
+        assert_eq!(
+            node.network
+                .control_list
+                .get_service_allow_list(),
+            vec!["http://allow.local/list"]
+        );
+        assert_eq!(
+            node.network
+                .control_list
+                .get_service_block_list(),
+            vec!["http://block.local/list"]
+        );
+        assert_eq!(
+            node.network.control_list.get_interval_request(),
+            Duration::from_secs(42)
+        );
+
+        let logging = &config.logging;
+        assert_eq!(
+            logging.output,
             LoggingOutput {
                 stdout: false,
                 file: true,
                 api: true
             }
         );
-        assert_eq!(log.api_url.as_deref(), Some("https://example.com/logs"));
-        assert_eq!(log.file_path, "/tmp/my.log");
-        assert_eq!(log.rotation, LoggingRotation::Hourly);
-        assert_eq!(log.max_size, 50 * 1024 * 1024);
-        assert_eq!(log.max_files, 5);
+        assert_eq!(logging.api_url.as_deref(), Some("https://example.com/logs"));
+        assert_eq!(logging.file_path, PathBuf::from("/tmp/my.log"));
+        assert_eq!(logging.rotation, LoggingRotation::Hourly);
+        assert_eq!(logging.max_size, 52_428_800);
+        assert_eq!(logging.max_files, 5);
 
-        assert_eq!(config.ave_config.network.node_type, NodeType::Addressable);
-        assert_eq!(
-            config.ave_config.network.listen_addresses,
-            vec![
-                "/ip4/127.0.0.1/tcp/50000".to_owned(),
-                "/ip4/127.0.0.1/tcp/50001".to_owned(),
-                "/ip4/127.0.0.1/tcp/50002".to_owned()
-            ]
-        );
-        assert_eq!(
-            config.ave_config.network.external_addresses,
-            vec![
-                "/ip4/90.1.0.60/tcp/50000".to_owned(),
-                "/ip4/90.1.0.61/tcp/50000".to_owned(),
-            ]
-        );
-        assert_eq!(config.ave_config.hash_algorithm, HashAlgorithm::Blake3);
-        assert_eq!(
-            config.ave_config.keypair_algorithm,
-            KeyPairAlgorithm::Ed25519
-        );
-        assert_eq!(config.ave_config.always_accept, true);
-        assert_eq!(
-            config.ave_config.garbage_collector,
-            Duration::from_secs(1000)
-        );
-        assert_eq!(config.ave_config.contracts_dir, "./fake_route");
-        assert_eq!(config.sink.sinks.len(), 2);
-        let mut sink_map = BTreeMap::new();
-
-        //"Sever1|key1|All|https://www.averiun.com/build/|true,
-        //Server2|key2|Create Fact|https://www.averiun.com/community/|false,
-        //Server3|key2|Transfer|https://www.averiun.com/community/|true,
-        //Server4|key2|Confirm|https://www.averiun.com/community/issue|false",
-
-        sink_map.insert(
-            "key1".to_owned(),
-            vec![SinkServer {
-                server: "Sever1".to_owned(),
-                events: BTreeSet::from([SinkTypes::All]),
-                url: "https://www.averiun.com/build/".to_owned(),
-                auth: true,
-            }],
-        );
-        sink_map.insert(
-            "key2".to_owned(),
+        let mut expected_sinks = BTreeMap::new();
+        expected_sinks.insert(
+            "primary".to_owned(),
             vec![
                 SinkServer {
-                    server: "Server2".to_owned(),
-                    events: BTreeSet::from([
-                        SinkTypes::Create,
-                        SinkTypes::Fact,
-                    ]),
-                    url: "https://www.averiun.com/community/".to_owned(),
-                    auth: false,
-                },
-                SinkServer {
-                    server: "Server3".to_owned(),
-                    events: BTreeSet::from([SinkTypes::Transfer]),
-                    url: "https://www.averiun.com/community/".to_owned(),
+                    server: "SinkOne".to_owned(),
+                    events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
+                    url: "https://sink.one".to_owned(),
                     auth: true,
                 },
                 SinkServer {
-                    server: "Server4".to_owned(),
-                    events: BTreeSet::from([SinkTypes::Confirm]),
-                    url: "https://www.averiun.com/community/issue".to_owned(),
+                    server: "SinkTwo".to_owned(),
+                    events: BTreeSet::from([SinkTypes::Transfer]),
+                    url: "https://sink.two".to_owned(),
                     auth: false,
                 },
             ],
         );
-        assert_eq!(config.sink.sinks, sink_map);
+        assert_eq!(config.sink.sinks, expected_sinks);
+        assert_eq!(config.sink.auth, "https://auth.service");
+        assert_eq!(config.sink.username, "sink-user");
 
-        assert_eq!(
-            config.sink.auth,
-            "https://www.averiun.com/build/".to_string()
-        );
+        let auth = &config.auth;
+        assert!(auth.enabled);
+        assert_eq!(auth.database_path, PathBuf::from("/var/db/auth.db"));
+        assert_eq!(auth.superadmin, "admin:supersecret");
+        assert_eq!(auth.password_policy.min_length, 12);
+        assert!(auth.password_policy.require_uppercase);
+        assert!(auth.password_policy.require_lowercase);
+        assert!(auth.password_policy.require_digit);
+        assert!(auth.password_policy.require_special);
+        assert_eq!(auth.password_policy.expiration_days, 30);
+        assert_eq!(auth.api_key.default_ttl_seconds, 3600);
+        assert_eq!(auth.api_key.max_keys_per_user, 20);
+        assert!(auth.api_key.allow_custom_prefix);
+        assert!(!auth.api_key.revoke_on_role_change);
+        assert_eq!(auth.lockout.max_attempts, 3);
+        assert_eq!(auth.lockout.duration_seconds, 600);
+        assert!(!auth.lockout.reset_on_success);
+        assert!(!auth.rate_limit.enabled);
+        assert_eq!(auth.rate_limit.window_seconds, 120);
+        assert_eq!(auth.rate_limit.max_requests, 50);
+        assert!(!auth.rate_limit.limit_by_key);
+        assert!(auth.rate_limit.limit_by_ip);
+        assert_eq!(auth.rate_limit.cleanup_interval_seconds, 1800);
+        assert!(!auth.session.audit_enabled);
+        assert_eq!(auth.session.audit_retention_days, 30);
+        assert!(!auth.session.log_success);
+        assert!(auth.session.log_failures);
+        assert!(auth.session.log_all_requests);
 
-        assert_eq!(config.sink.username, "Sink-service".to_string());
+        let http = &config.http;
+        assert_eq!(http.http_address, "127.0.0.1:4000");
+        assert_eq!(http.https_address.as_deref(), Some("127.0.0.1:4443"));
+        assert_eq!(
+            http.https_cert_path.as_deref(),
+            Some(PathBuf::from("/certs/cert.pem").as_path())
+        );
+        assert_eq!(
+            http.https_private_key_path.as_deref(),
+            Some(PathBuf::from("/certs/key.pem").as_path())
+        );
+        assert!(http.enable_doc);
+    }
 
-        let boot_nodes = vec![
-            RoutingNode {
-                address: vec![
-                    "/ip4/172.17.0.1/tcp/50000".to_owned(),
-                    "/ip4/127.0.0.1/tcp/60001".to_owned(),
-                ],
-                peer_id: "12D3KooWLXexpg81PjdjnrhmHUxN7U5EtfXJgr9cahei1SJ9Ub3B"
-                    .to_owned(),
-            },
-            RoutingNode {
-                address: vec![
-                    "/ip4/11.11.0.11/tcp/10000".to_owned(),
-                    "/ip4/12.22.33.44/tcp/55511".to_owned(),
-                ],
-                peer_id: "12D3KooWRS3QVwqBtNp7rUCG4SF3nBrinQqJYC1N5qc1Wdr4jrze"
-                    .to_owned(),
-            },
-        ];
+    fn assert_partial_defaults(config: BridgeConfig) {
+        assert_eq!(config.keys_path, PathBuf::from("/partial/keys"));
+        assert_eq!(config.prometheus, "0.0.0.0:3050");
+        assert!(config.auth.enabled);
+        assert_eq!(config.http.http_address, "127.0.0.1:8888");
+        assert!(config.http.enable_doc);
 
-        assert_eq!(
-            config.ave_config.network.boot_nodes.len(),
-            boot_nodes.len()
-        );
+        // Defaults remain for everything not provided.
+        assert_eq!(config.logging.output.stdout, true);
+        assert_eq!(config.logging.output.file, false);
+        assert_eq!(config.logging.rotation, LoggingRotation::Size);
+        assert_eq!(config.logging.file_path, PathBuf::from("logs"));
+        assert_eq!(config.logging.max_files, 3);
+        assert_eq!(config.sink.sinks.len(), 0);
 
-        for node in config.ave_config.network.boot_nodes.iter() {
-            if node.peer_id
-                == "12D3KooWLXexpg81PjdjnrhmHUxN7U5EtfXJgr9cahei1SJ9Ub3B"
-            {
-                assert_eq!(boot_nodes[0].peer_id, node.peer_id);
-                assert_eq!(boot_nodes[0].address, node.address);
-            } else if node.peer_id
-                == "12D3KooWRS3QVwqBtNp7rUCG4SF3nBrinQqJYC1N5qc1Wdr4jrze"
-            {
-                assert_eq!(boot_nodes[1].peer_id, node.peer_id);
-                assert_eq!(boot_nodes[1].address, node.address);
-            } else {
-                panic!("Invalid peer_id");
-            }
-        }
-
+        assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
+        assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
+        assert_eq!(config.node.contracts_dir, PathBuf::new());
+        assert_eq!(config.node.ave_db, AveDbConfig::default());
+        assert_eq!(config.node.external_db, ExternalDbConfig::default());
+        assert_eq!(config.node.garbage_collector, Duration::from_secs(120));
+        assert_eq!(config.node.network.node_type, NodeType::Bootstrap);
+        assert!(config.node.network.listen_addresses.is_empty());
+        assert!(config.node.network.external_addresses.is_empty());
+        assert!(config.node.network.boot_nodes.is_empty());
         assert_eq!(
-            config.ave_config.network.routing.get_dht_random_walk(),
-            true
-        );
-        assert_eq!(config.ave_config.network.routing.get_discovery_limit(), 55);
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .routing
-                .get_allow_private_address_in_dht(),
-            true
+            config.node.network.control_list.get_interval_request(),
+            Duration::from_secs(60)
         );
         assert_eq!(
-            config
-                .ave_config
-                .network
-                .routing
-                .get_allow_dns_address_in_dht(),
-            true
+            config.node.network.req_res.get_message_timeout(),
+            Duration::from_secs(10)
         );
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .routing
-                .get_allow_loop_back_address_in_dht(),
-            true
-        );
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .routing
-                .get_kademlia_disjoint_query_paths(),
-            false
-        );
-        assert_eq!(
-            config.ave_config.network.tell.get_message_timeout(),
-            Duration::from_secs(58)
-        );
-
-        assert_eq!(
-            config.ave_config.network.req_res.get_message_timeout(),
-            Duration::from_secs(59)
-        );
-        assert_eq!(
-            config.ave_config.network.tell.get_max_concurrent_streams(),
-            166
-        );
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .req_res
-                .get_max_concurrent_streams(),
-            167
-        );
-
-        assert_eq!(config.keys_path, "./fake/keys/path".to_owned());
-        assert_eq!(config.prometheus, "10.0.0.0:3030".to_owned());
-
-        assert_eq!(
-            config.ave_config.network.control_list.get_allow_list(),
-            vec!["Peer200", "Peer300"]
-        );
-        assert_eq!(
-            config.ave_config.network.control_list.get_block_list(),
-            vec!["Peer1", "Peer2"]
-        );
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .control_list
-                .get_service_allow_list(),
-            vec![
-                "http://90.0.0.1:3000/allow_list",
-                "http://90.0.0.2:4000/allow_list"
-            ]
-        );
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .control_list
-                .get_service_block_list(),
-            vec![
-                "http://90.0.0.1:3000/block_list",
-                "http://90.0.0.2:4000/block_list"
-            ]
-        );
-        assert!(config.ave_config.network.control_list.get_enable());
-        assert_eq!(
-            config
-                .ave_config
-                .network
-                .control_list
-                .get_interval_request(),
-            Duration::from_secs(58)
-        );
-
-        unsafe {
-            std::env::remove_var("AVE_NETWORK_TELL_MESSAGE_TIMEOUT_SECS");
-            std::env::remove_var("AVE_NETWORK_TELL_MAX_CONCURRENT_STREAMS");
-            std::env::remove_var("AVE_NETWORK_REQRES_MESSAGE_TIMEOUT_SECS");
-            std::env::remove_var("AVE_NETWORK_REQRES_MAX_CONCURRENT_STREAMS");
-            std::env::remove_var("AVE_NETWORK_BOOT_NODES");
-            std::env::remove_var("AVE_NETWORK_ROUTING_DHT_RANDOM_WALK");
-            std::env::remove_var(
-                "AVE_NETWORK_ROUTING_DISCOVERY_ONLY_IF_UNDER_NUM",
-            );
-            std::env::remove_var(
-                "AVE_NETWORK_ROUTING_ALLOW_PRIVATE_ADDRESS_IN_DHT",
-            );
-            std::env::remove_var(
-                "AVE_NETWORK_ROUTING_ALLOW_DNS_ADDRESS_IN_DHT",
-            );
-            std::env::remove_var(
-                "AVE_NETWORK_ROUTING_ALLOW_LOOP_BACK_ADDRESS_IN_DHT",
-            );
-            std::env::remove_var(
-                "AVE_NETWORK_ROUTING_KADEMLIA_DISJOINT_QUERY_PATHS",
-            );
-            std::env::remove_var("AVE_KEYS_PATH");
-            std::env::remove_var("AVE_NETWORK_NODE_TYPE");
-            std::env::remove_var("AVE_NETWORK_LISTEN_ADDRESSES");
-            std::env::remove_var("AVE_NETWORK_EXTERNAL_ADDRESSES");
-            std::env::remove_var("AVE_BASE_KEY_DERIVATOR");
-            std::env::remove_var("AVE_BASE_DIGEST_DERIVATOR");
-            std::env::remove_var("AVE_BASE_ALWAYS_ACCEPT");
-            std::env::remove_var("AVE_BASE_CONTRACTS_DIR");
-            std::env::remove_var("AVE_BASE_AVE_DB");
-            std::env::remove_var("AVE_BASE_EXTERNAL_DB");
-            std::env::remove_var("AVE_BASE_GARBAGE_COLLECTOR");
-            std::env::remove_var("AVE_SINK_SINKS");
-            std::env::remove_var("AVE_SINK_AUTH");
-            std::env::remove_var("AVE_SINK_USERNAME");
-            std::env::remove_var("AVE_PROMETHEUS");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_ENABLE");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_ALLOW_LIST");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_BLOCK_LIST");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_SERVICE_ALLOW_LIST");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_SERVICE_BLOCK_LIST");
-            std::env::remove_var("AVE_NETWORK_CONTROL_LIST_INTERVAL_REQUEST");
-            std::env::remove_var("AVE_LOGGING_OUTPUT");
-            std::env::remove_var("AVE_LOGGING_API_URL");
-            std::env::remove_var("AVE_LOGGING_FILE_PATH");
-            std::env::remove_var("AVE_LOGGING_ROTATION");
-            std::env::remove_var("AVE_LOGGING_MAX_SIZE");
-            std::env::remove_var("AVE_LOGGING_MAX_FILES");
-        }
+        assert_eq!(config.node.network.tell.get_max_concurrent_streams(), 100);
     }
 }
-
-*/
