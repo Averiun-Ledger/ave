@@ -30,7 +30,7 @@ use libp2p::{
         dial_opts::DialOpts,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -200,9 +200,23 @@ impl std::error::Error for InboundFailure {}
 
 /// The configuration for a `Behaviour` protocol.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct Config {
+    #[serde(
+        deserialize_with = "deserialize_duration_secs"
+    )]
     pub message_timeout: Duration,
     pub max_concurrent_streams: usize,
+}
+
+fn deserialize_duration_secs<'de, D>(
+    deserializer: D,
+) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let u: u64 = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(u))
 }
 
 impl Config {

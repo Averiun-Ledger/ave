@@ -2,13 +2,19 @@
 //
 // This module provides the database access layer for the auth system using SQLite
 
-use super::config::AuthConfig;
+use crate::auth::validate_password;
+
 use super::crypto::hash_password;
 use super::models::*;
-use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
-use std::sync::{Arc, Mutex};
+use ave_bridge::auth::AuthConfig;
+use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, params};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 // =============================================================================
 // ERROR TYPE
@@ -77,19 +83,22 @@ impl AuthDatabase {
     /// 1. Create the database file if it doesn't exist
     /// 2. Run migrations to set up the schema
     /// 3. Bootstrap the superadmin account if configured
-    pub fn new(config: AuthConfig) -> Result<Self, DatabaseError> {
+    pub fn new(config: AuthConfig, password: &str) -> Result<Self, DatabaseError> {
         // Create parent directory if it doesn't exist
-        if let Some(parent) = config.database_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+        let path = config.database_path.clone();
+        if !Path::new(&path).exists() {
+            fs::create_dir_all(&path).map_err(|e| {
                 DatabaseError::InitializationError(format!(
-                    "Failed to create database directory: {}",
+                    "Can not create auth dir: {}",
                     e
                 ))
             })?;
         }
 
+        let path = path.join("auth.db");
+
         // Open connection
-        let connection = Connection::open(&config.database_path)
+        let connection = Connection::open(&path)
             .map_err(|e| DatabaseError::ConnectionError(e.to_string()))?;
 
         // Enable foreign keys
@@ -106,7 +115,7 @@ impl AuthDatabase {
         db.run_migrations()?;
 
         // Bootstrap superadmin if needed
-        db.bootstrap_superadmin()?;
+        db.bootstrap_superadmin(password)?;
 
         Ok(db)
     }
@@ -141,7 +150,7 @@ impl AuthDatabase {
     }
 
     /// Bootstrap superadmin account on first run
-    pub fn bootstrap_superadmin(&self) -> Result<(), DatabaseError> {
+    pub fn bootstrap_superadmin(&self, password: &str) -> Result<(), DatabaseError> {
         let conn = self.connection.lock().unwrap();
 
         // Check if any users exist
@@ -159,23 +168,19 @@ impl AuthDatabase {
         }
 
         // Get superadmin config
-        let superadmin_config = match &self.config.superadmin {
-            Some(config) => config,
-            None => {
-                warn!(
-                    "No superadmin configuration found and no users exist. Please create a superadmin manually."
-                );
-                return Ok(());
-            }
+        let superadmin = if !self.config.superadmin.is_empty() {
+            self.config.superadmin.clone()
+        } else {
+            "admin".to_owned()
         };
 
         info!(
             "Bootstrapping superadmin account: {}",
-            superadmin_config.username
+            superadmin
         );
 
         // Hash password
-        let password_hash = hash_password(&superadmin_config.password)
+        let password_hash = hash_password(&password)
             .map_err(|e| {
                 DatabaseError::CryptoError(format!(
                     "Failed to hash superadmin password: {}",
@@ -187,7 +192,7 @@ impl AuthDatabase {
         conn.execute(
             "INSERT INTO users (username, password_hash, is_superadmin, is_active)
              VALUES (?1, ?2, 1, 1)",
-            params![superadmin_config.username, password_hash],
+            params![superadmin, password_hash],
         ).map_err(|e| DatabaseError::InsertError(format!("Failed to create superadmin: {}", e)))?;
 
         let user_id = conn.last_insert_rowid();
@@ -260,11 +265,8 @@ impl AuthDatabase {
         }
 
         // Validate password
-        super::config::validate_password(
-            password,
-            &self.config.password_policy,
-        )
-        .map_err(DatabaseError::ValidationError)?;
+        validate_password(password, &self.config.password_policy)
+            .map_err(DatabaseError::ValidationError)?;
 
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
@@ -406,7 +408,7 @@ impl AuthDatabase {
 
         // Update password if provided
         if let Some(pwd) = password {
-            super::config::validate_password(pwd, &self.config.password_policy)
+            validate_password(pwd, &self.config.password_policy)
                 .map_err(DatabaseError::ValidationError)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {
@@ -499,7 +501,12 @@ impl AuthDatabase {
 
         // Revoke API keys if configured
         if self.config.api_key.revoke_on_role_change {
-            Self::revoke_user_api_keys_internal(&conn, user_id, assigned_by, "Role changed")?;
+            Self::revoke_user_api_keys_internal(
+                &conn,
+                user_id,
+                assigned_by,
+                "Role changed",
+            )?;
         }
 
         Ok(())
@@ -521,7 +528,12 @@ impl AuthDatabase {
 
         // Revoke API keys if configured
         if self.config.api_key.revoke_on_role_change {
-            Self::revoke_user_api_keys_internal(&conn, user_id, None, "Role changed")?;
+            Self::revoke_user_api_keys_internal(
+                &conn,
+                user_id,
+                None,
+                "Role changed",
+            )?;
         }
 
         Ok(())

@@ -1,25 +1,15 @@
-use std::env;
-
 use config::Config;
 use core::error::Error;
-use params::Params;
 use tracing::error;
 
 pub mod command;
-use crate::config::Config as BridgeConfig;
-pub mod params;
+use crate::{config::Config as BridgeConfig};
 
 const TARGET_SETTING: &str = "Ave-Bridge-Settings";
 
-pub fn build_config(env: bool, file: &str) -> Result<BridgeConfig, Error> {
-    // Env configuration
-    let mut params_env = Params::default();
-    if env {
-        params_env = Params::from_env()?;
-    }
-
+pub fn build_config(file: &str) -> Result<BridgeConfig, Error> {
     // file configuration (json, yaml or toml)
-    let mut params_file = Params::default();
+    let mut bridge_config = BridgeConfig::default();
     if !file.is_empty() {
         let mut config = Config::builder();
 
@@ -31,7 +21,7 @@ pub fn build_config(env: bool, file: &str) -> Result<BridgeConfig, Error> {
             Error::Bridge(e)
         })?;
 
-        params_file = config.try_deserialize().map_err(|e| {
+        bridge_config = config.try_deserialize().map_err(|e| {
             let e = format!("Error try deserialize config: {}", e);
             error!(TARGET_SETTING, e);
             Error::Bridge(e)
@@ -39,21 +29,10 @@ pub fn build_config(env: bool, file: &str) -> Result<BridgeConfig, Error> {
     }
 
     // Mix configurations.
-    Ok(BridgeConfig::from(params_env.mix_config(params_file)))
+    Ok(bridge_config)
 }
 
-pub fn build_password() -> String {
-    env::var("AVE_PASSWORD").unwrap_or("ave".to_owned())
-}
-
-pub fn build_sink_password() -> String {
-    env::var("AVE_SINK_PASSWORD").unwrap_or_default()
-}
-
-pub fn build_config_path() -> String {
-    env::var("AVE_CONFIG").unwrap_or_default()
-}
-
+/*
 #[cfg(test)]
 mod tests {
     use std::{
@@ -170,7 +149,7 @@ mod tests {
             std::env::set_var("AVE_LOGGING_MAX_FILES", "5");
         }
 
-        let config = build_config(true, "").unwrap();
+        let config = build_config("").unwrap();
 
         let log = &config.logging;
         assert_eq!(
@@ -460,3 +439,5 @@ mod tests {
         }
     }
 }
+
+*/

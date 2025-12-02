@@ -20,11 +20,11 @@ use ave_core::{
 };
 use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
-use std::{fs, str::FromStr, time::Duration};
+use std::{fs, path::PathBuf, str::FromStr, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub fn create_temp_dir() -> String {
+pub fn create_temp_dir() -> PathBuf {
     let path = temp_dir();
 
     if fs::metadata(&path).is_err() {
@@ -33,9 +33,9 @@ pub fn create_temp_dir() -> String {
     path
 }
 
-fn temp_dir() -> String {
+fn temp_dir() -> PathBuf {
     let dir = tempfile::tempdir().expect("Can not create temporal directory.");
-    dir.path().to_str().unwrap().to_owned()
+    dir.path().to_path_buf()
 }
 
 pub async fn create_node(
@@ -43,8 +43,8 @@ pub async fn create_node(
     listen_address: &str,
     peers: Vec<RoutingNode>,
     always_accept: bool,
-    paths: Option<(String, String)>,
-) -> (Api, String, String, CancellationToken, Vec<JoinHandle<()>>) {
+    paths: Option<(PathBuf, PathBuf)>,
+) -> (Api, PathBuf, PathBuf, CancellationToken, Vec<JoinHandle<()>>) {
     let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
     let (local_db, ext_db) = if let Some((local_db, ext_db)) = paths {
@@ -52,12 +52,12 @@ pub async fn create_node(
     } else {
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
-        let local_db = dir.path().to_str().unwrap();
+        let local_db = dir.path().to_path_buf();
 
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
-        let ext_db = dir.path().to_str().unwrap();
-        (local_db.to_owned(), ext_db.to_owned())
+        let ext_db = dir.path().to_path_buf();
+        (local_db, ext_db)
     };
 
     let network_config = NetworkConfig::new(

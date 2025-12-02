@@ -2,10 +2,9 @@
 //
 // This module provides helper functions to integrate the auth system into the server
 
-use super::config::AuthConfig;
 use super::database::AuthDatabase;
-use std::path::Path;
 use std::sync::Arc;
+use ave_bridge::auth::AuthConfig;
 use tracing::{error, info};
 
 const TARGET: &str = "AveHttpAuth";
@@ -17,6 +16,7 @@ const TARGET: &str = "AveHttpAuth";
 /// Returns an Arc-wrapped database ready for use
 pub async fn initialize_auth_database(
     config: &AuthConfig,
+    password: &str
 ) -> Result<Arc<AuthDatabase>, String> {
     if !config.enabled {
         return Err("Authentication system is disabled".to_string());
@@ -28,17 +28,8 @@ pub async fn initialize_auth_database(
         config.database_path.display()
     );
 
-    // Ensure parent directory exists
-    if let Some(parent) = Path::new(&config.database_path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("Failed to create database directory: {}", e)
-            })?;
-        }
-    }
-
     // Initialize database (runs migrations and bootstraps superadmin automatically)
-    let db = AuthDatabase::new(config.clone())
+    let db = AuthDatabase::new(config.clone(), password)
         .map_err(|e| format!("Failed to initialize auth database: {}", e))?;
 
     info!(TARGET, "Authentication database initialized successfully");

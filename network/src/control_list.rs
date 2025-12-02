@@ -4,7 +4,7 @@ use libp2p::{
         CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm, dummy,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::{
     collections::{HashSet, VecDeque},
     fmt,
@@ -25,7 +25,8 @@ use crate::{RoutingNode, utils::request_update_lists};
 const TARGET_CONTROL_LIST: &str = "AveNetwork-Control-list";
 
 /// Configuration for the control list behaviour.
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Activate allow and block lists
     enable: bool,
@@ -43,7 +44,33 @@ pub struct Config {
     service_block_list: Vec<String>,
 
     /// Time interval to be used for queries updating the lists
+    #[serde(
+        deserialize_with = "deserialize_duration_secs"
+    )]
     interval_request: Duration,
+}
+
+fn deserialize_duration_secs<'de, D>(
+    deserializer: D,
+) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let u: u64 = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(u))
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enable: Default::default(),
+            allow_list: Default::default(),
+            block_list: Default::default(),
+            service_allow_list: Default::default(),
+            service_block_list: Default::default(),
+            interval_request: Duration::from_secs(60),
+        }
+    }
 }
 
 /// Control List Settings

@@ -46,7 +46,7 @@ pub use core::{
     approval::approver::ApprovalStateRes,
     auth::AuthWitness,
     config::Config as AveConfig,
-    config::{Logging, LoggingOutput, LoggingRotation, SinkConfig, SinkServer},
+    config::{LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer},
     error::Error,
     model::request::EventRequest,
 };
@@ -65,10 +65,13 @@ use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
 pub mod config;
+pub use http::HttpConfig;
 pub mod conversions;
+pub mod http;
 pub mod settings;
 pub mod utils;
 pub use clap;
+pub mod auth;
 #[cfg(feature = "prometheus")]
 pub mod prometheus;
 #[cfg(feature = "prometheus")]
@@ -92,7 +95,7 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn build(
-        settings: Config,
+        settings: &Config,
         password: &str,
         password_sink: &str,
         token: Option<CancellationToken>,
@@ -122,7 +125,7 @@ impl Bridge {
 
         let (api, mut runners) = AveApi::build(
             keys,
-            settings.ave_config.clone(),
+            settings.node.clone(),
             SinkAuth {
                 sink: settings.sink.clone(),
                 token: auth_token,
@@ -148,7 +151,7 @@ impl Bridge {
         Ok((
             Self {
                 api,
-                config: settings,
+                config: settings.clone(),
                 cancellation: token,
             },
             runners,
@@ -184,10 +187,6 @@ impl Bridge {
 
     pub fn config(&self) -> Config {
         self.config.clone()
-    }
-
-    pub fn keys_path(&self) -> String {
-        self.config.keys_path.clone()
     }
 
     pub async fn send_event_request(

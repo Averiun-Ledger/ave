@@ -101,7 +101,7 @@ impl ExternalDB {
                         Error::Node(format!("Can not create src dir: {}", e))
                     })?;
                 }
-                let path = format!("{}/database.db", path);
+                let path = path.join("database.db") ;
                 let sqlite = SqliteLocal::new(&path, manager).await?;
                 Ok(ExternalDB::SqliteLocal(sqlite))
             }

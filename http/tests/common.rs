@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ave_http::auth::config::*;
+use ave_bridge::auth::{ApiKeyConfig, AuthConfig, LockoutConfig, PasswordPolicy, RateLimitConfig, SessionConfig};
 use ave_http::auth::database::AuthDatabase;
 
 pub fn create_temp_dir() -> String {
@@ -28,10 +28,7 @@ pub fn create_test_db() -> AuthDatabase {
     let config = AuthConfig {
         enabled: true,
         database_path: PathBuf::from(create_temp_dir()).join("test.db"),
-        superadmin: Some(SuperadminConfig {
-            username: "admin".to_string(),
-            password: "AdminPass123!".to_string(),
-        }),
+        superadmin: "admin".to_string(),
         password_policy: PasswordPolicy {
             min_length: 8,
             require_uppercase: true,
@@ -68,7 +65,7 @@ pub fn create_test_db() -> AuthDatabase {
         },
     };
 
-    let db = AuthDatabase::new(config).unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
     db
 }

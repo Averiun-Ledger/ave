@@ -225,7 +225,7 @@ impl Node {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
-        let dir = format!("{}/contracts", config.contracts_dir);
+        let dir =  config.contracts_dir.join("contracts");
 
         if !Path::new(&dir).exists() {
             fs::create_dir_all(&dir).await.map_err(|e| {

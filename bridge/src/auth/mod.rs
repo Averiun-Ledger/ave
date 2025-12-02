@@ -7,47 +7,41 @@ use std::path::PathBuf;
 
 /// Authentication system configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AuthConfig {
     /// Enable or disable authentication
     /// If false, all endpoints are accessible without authentication
-    #[serde(default = "default_enabled")]
     pub enabled: bool,
 
     /// Path to the SQLite database file
-    #[serde(default = "default_database_path")]
     pub database_path: PathBuf,
 
     /// Superadmin bootstrap credentials
     /// Only used on first run to create initial superadmin account
-    pub superadmin: Option<SuperadminConfig>,
+    pub superadmin: String,
 
     /// Password policy settings
-    #[serde(default)]
     pub password_policy: PasswordPolicy,
 
     /// API key settings
-    #[serde(default)]
     pub api_key: ApiKeyConfig,
 
     /// Account lockout settings
-    #[serde(default)]
     pub lockout: LockoutConfig,
 
     /// Rate limiting settings
-    #[serde(default)]
     pub rate_limit: RateLimitConfig,
 
     /// Session settings
-    #[serde(default)]
     pub session: SessionConfig,
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            enabled: default_enabled(),
-            database_path: default_database_path(),
-            superadmin: None,
+            enabled: false,
+            database_path: PathBuf::from("auth"),
+            superadmin: String::default(),
             password_policy: PasswordPolicy::default(),
             api_key: ApiKeyConfig::default(),
             lockout: LockoutConfig::default(),
@@ -55,25 +49,6 @@ impl Default for AuthConfig {
             session: SessionConfig::default(),
         }
     }
-}
-
-fn default_enabled() -> bool {
-    false
-}
-
-fn default_database_path() -> PathBuf {
-    PathBuf::from("./data/auth.db")
-}
-
-/// Superadmin bootstrap configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SuperadminConfig {
-    /// Initial superadmin username
-    pub username: String,
-
-    /// Initial superadmin password
-    /// This should be changed immediately after first login
-    pub password: String,
 }
 
 /// Password policy configuration
@@ -344,120 +319,4 @@ fn default_log_failures() -> bool {
 
 fn default_log_all_requests() -> bool {
     false
-}
-
-/// Validate password against policy
-pub fn validate_password(
-    password: &str,
-    policy: &PasswordPolicy,
-) -> Result<(), String> {
-    if password.len() < policy.min_length {
-        return Err(format!(
-            "Password must be at least {} characters long",
-            policy.min_length
-        ));
-    }
-
-    if policy.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
-        return Err(
-            "Password must contain at least one uppercase letter".to_string()
-        );
-    }
-
-    if policy.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
-        return Err(
-            "Password must contain at least one lowercase letter".to_string()
-        );
-    }
-
-    if policy.require_digit && !password.chars().any(|c| c.is_ascii_digit()) {
-        return Err("Password must contain at least one digit".to_string());
-    }
-
-    if policy.require_special && !password.chars().any(|c| !c.is_alphanumeric())
-    {
-        return Err(
-            "Password must contain at least one special character".to_string()
-        );
-    }
-
-    Ok(())
-}
-
-// =============================================================================
-// TESTS
-// =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = AuthConfig::default();
-        assert!(!config.enabled);
-        assert_eq!(config.password_policy.min_length, 8);
-    }
-
-    #[test]
-    fn test_password_validation_length() {
-        let policy = PasswordPolicy {
-            min_length: 10,
-            ..Default::default()
-        };
-
-        assert!(validate_password("short", &policy).is_err());
-        assert!(validate_password("longenough", &policy).is_ok());
-    }
-
-    #[test]
-    fn test_password_validation_uppercase() {
-        let policy = PasswordPolicy {
-            min_length: 1,
-            require_uppercase: true,
-            ..Default::default()
-        };
-
-        assert!(validate_password("lowercase", &policy).is_err());
-        assert!(validate_password("Uppercase", &policy).is_ok());
-    }
-
-    #[test]
-    fn test_password_validation_digit() {
-        let policy = PasswordPolicy {
-            min_length: 1,
-            require_digit: true,
-            ..Default::default()
-        };
-
-        assert!(validate_password("nodigits", &policy).is_err());
-        assert!(validate_password("with1digit", &policy).is_ok());
-    }
-
-    #[test]
-    fn test_password_validation_special() {
-        let policy = PasswordPolicy {
-            min_length: 1,
-            require_special: true,
-            ..Default::default()
-        };
-
-        assert!(validate_password("nospecial", &policy).is_err());
-        assert!(validate_password("with!special", &policy).is_ok());
-    }
-
-    #[test]
-    fn test_password_validation_all_requirements() {
-        let policy = PasswordPolicy {
-            min_length: 12,
-            require_uppercase: true,
-            require_lowercase: true,
-            require_digit: true,
-            require_special: true,
-            expiration_days: 0,
-        };
-
-        assert!(validate_password("weak", &policy).is_err());
-        assert!(validate_password("StrongPass123!", &policy).is_ok());
-    }
 }

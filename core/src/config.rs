@@ -1,9 +1,7 @@
 //! # Configuration module
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    time::Duration,
+    collections::{BTreeMap, BTreeSet}, fmt::{self, Display, write}, path::PathBuf, time::Duration
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
@@ -14,31 +12,54 @@ use crate::{helpers::sink::TokenResponse, subject::sinkdata::SinkTypes};
 
 /// Node configuration.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Key derivator.
     pub keypair_algorithm: KeyPairAlgorithm,
     /// Digest derivator.
     pub hash_algorithm: HashAlgorithm,
     /// Database configuration.
+    #[serde(deserialize_with = "AveDbConfig::deserialize_db")]
     pub ave_db: AveDbConfig,
     /// External database configuration.
+    #[serde(deserialize_with = "ExternalDbConfig::deserialize_db")]
     pub external_db: ExternalDbConfig,
     /// Network configuration.
     pub network: NetworkConfig,
     /// Contract dir.
-    pub contracts_dir: String,
+    pub contracts_dir: PathBuf,
     /// Approval mode.
     pub always_accept: bool,
     /// Garbage collector acts
+    #[serde(
+        deserialize_with = "deserialize_duration_secs"
+    )]
     pub garbage_collector: Duration,
 }
 
-impl Config {
-    pub fn add_path(&mut self, path: &str) {
-        self.ave_db.add_path(path);
-        self.external_db.add_path(path);
+fn deserialize_duration_secs<'de, D>(
+    deserializer: D,
+) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let u: u64 = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(u))
+}
 
-        self.contracts_dir = format!("{}/{}", path, self.contracts_dir);
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            keypair_algorithm: KeyPairAlgorithm::Ed25519,
+            hash_algorithm: HashAlgorithm::Blake3,
+            ave_db: Default::default(),
+            external_db: Default::default(),
+            network: Default::default(),
+            contracts_dir: PathBuf::new(),
+            always_accept: Default::default(),
+            garbage_collector: Duration::from_secs(120),
+        }
     }
 }
 
@@ -49,13 +70,13 @@ pub enum AveDbConfig {
     #[cfg(feature = "rocksdb")]
     Rocksdb {
         /// Path to the database.
-        path: String,
+        path: PathBuf,
     },
     /// Sqlite database.
     #[cfg(feature = "sqlite")]
     Sqlite {
         /// Path to the database.
-        path: String,
+        path: PathBuf,
     },
 }
 
@@ -63,30 +84,17 @@ impl Default for AveDbConfig {
     fn default() -> Self {
         #[cfg(feature = "rocksdb")]
         return AveDbConfig::Rocksdb {
-            path: "db/local/rocksdb".to_owned(),
+            path: PathBuf::from("db").join("local").join("rocksdb"),
         };
         #[cfg(feature = "sqlite")]
         return AveDbConfig::Sqlite {
-            path: "db/local/sqlite".to_owned(),
+            path: PathBuf::from("db").join("local").join("sqlite"),
         };
     }
 }
 
 impl AveDbConfig {
-    pub fn add_path(&mut self, new_path: &str) {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            AveDbConfig::Rocksdb { path } => {
-                *path = format!("{}/{}", new_path, path);
-            }
-            #[cfg(feature = "sqlite")]
-            AveDbConfig::Sqlite { path } => {
-                *path = format!("{}/{}", new_path, path);
-            }
-        };
-    }
-
-    pub fn build(path: &str) -> Self {
+    pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "rocksdb")]
         return AveDbConfig::Rocksdb {
             path: path.to_owned(),
@@ -105,9 +113,9 @@ impl AveDbConfig {
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "rocksdb")]
-        return Ok(AveDbConfig::Rocksdb { path });
+        return Ok(AveDbConfig::Rocksdb { path: PathBuf::from(path) });
         #[cfg(feature = "sqlite")]
-        return Ok(AveDbConfig::Sqlite { path });
+        return Ok(AveDbConfig::Sqlite { path: PathBuf::from(path) });
     }
 }
 
@@ -129,7 +137,7 @@ pub enum ExternalDbConfig {
     #[cfg(feature = "ext-sqlite")]
     Sqlite {
         /// Path to the database.
-        path: String,
+        path: PathBuf,
     },
 }
 
@@ -137,22 +145,13 @@ impl Default for ExternalDbConfig {
     fn default() -> Self {
         #[cfg(feature = "ext-sqlite")]
         return ExternalDbConfig::Sqlite {
-            path: "db/ext/ext-sqlite".to_owned(),
+            path: PathBuf::from("db").join("ext").join("sqlite"),
         };
     }
 }
 
 impl ExternalDbConfig {
-    pub fn add_path(&mut self, new_path: &str) {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDbConfig::Sqlite { path } => {
-                *path = format!("{}/{}", new_path, path);
-            }
-        };
-    }
-
-    pub fn build(path: &str) -> Self {
+    pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "ext-sqlite")]
         return ExternalDbConfig::Sqlite {
             path: path.to_owned(),
@@ -167,7 +166,7 @@ impl ExternalDbConfig {
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "ext-sqlite")]
-        return Ok(ExternalDbConfig::Sqlite { path });
+        return Ok(ExternalDbConfig::Sqlite { path: PathBuf::from(path) });
     }
 }
 
@@ -207,23 +206,45 @@ pub enum LoggingRotation {
     Never,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct Logging {
-    /// Output type: "stdout", "file", etc.
-    pub output: LoggingOutput,
-    /// Api url for logging.
-    pub api_url: Option<String>,
-    /// Path to the log file.
-    pub file_path: String,
-    /// Log rotation type: "size", "time", etc.
-    pub rotation: LoggingRotation,
-    /// Maximum size of the log file.
-    pub max_size: usize,
-    /// Maximum number of log files to keep.
-    pub max_files: usize,
+impl Display for LoggingRotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoggingRotation::Size => write!(f, "size"),
+            LoggingRotation::Hourly => write!(f, "hourly"),
+            LoggingRotation::Daily => write!(f, "daily"),
+            LoggingRotation::Weekly => write!(f, "weekly"),
+            LoggingRotation::Monthly => write!(f, "monthly"),
+            LoggingRotation::Yearly => write!(f, "yearly"),
+            LoggingRotation::Never => write!(f, "never"),
+        }
+    }
 }
 
-impl Logging {
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub output: LoggingOutput,
+    pub api_url: Option<String>,
+    pub file_path: PathBuf, // ruta base de logs
+    pub rotation: LoggingRotation,
+    pub max_size: usize, // bytes
+    pub max_files: usize, // copias a conservar
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            output: LoggingOutput::default(),
+            api_url: None,
+            file_path: PathBuf::from("logs"),
+            rotation: LoggingRotation::default(),
+            max_size: 100 * 1024 * 1024,
+            max_files: 3,
+        }
+    }
+}
+
+impl LoggingConfig {
     pub fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
@@ -245,6 +266,7 @@ pub struct SinkAuth {
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct SinkConfig {
     pub sinks: BTreeMap<String, Vec<SinkServer>>,
     pub auth: String,

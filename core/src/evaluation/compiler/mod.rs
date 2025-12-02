@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path, process::Command};
+use std::{collections::HashSet, path::{Path, PathBuf}, process::Command};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -68,18 +68,19 @@ impl Compiler {
 
     async fn compile_contract(
         contract: &str,
-        contract_path: &str,
+        contract_path: &PathBuf,
     ) -> Result<(), Error> {
         // Write contract.
         let Ok(decode_base64) = BASE64_STANDARD.decode(contract) else {
             return Err(Error::Compiler(format!(
                 "Failed to decode base64 {}",
-                contract_path
+                contract_path.to_string_lossy()
             )));
         };
 
-        if !Path::new(&format!("{}/src", contract_path)).exists() {
-            fs::create_dir_all(&format!("{}/src", contract_path))
+        let dir = contract_path.join("src");
+        if !Path::new(&dir).exists() {
+            fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| {
                     Error::Node(format!("Can not create src dir: {}", e))
@@ -87,26 +88,28 @@ impl Compiler {
         }
 
         let toml: String = Self::compilation_toml();
+        let cargo = contract_path.join("Cargo.toml");
         // We write cargo.toml
-        fs::write(format!("{}/Cargo.toml", contract_path), toml)
+        fs::write(&cargo, toml)
             .await
             .map_err(|e| {
                 Error::Node(format!("Can not create Cargo.toml file: {}", e))
             })?;
 
-        fs::write(format!("{}/src/lib.rs", contract_path), decode_base64)
+        
+        fs::write(contract_path.join("src").join("lib.rs"), decode_base64)
             .await
             .map_err(|e| {
                 Error::Compiler(format!(
-                    "Can not create {}/src/lib.rs file: {}",
-                    contract_path, e
+                    "Can not create lib.rs file: {}",
+                    e
                 ))
             })?;
 
         // Compiling contract
         let status = Command::new("cargo")
             .arg("build")
-            .arg(format!("--manifest-path={}/Cargo.toml", contract_path))
+            .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
             .arg("--target")
             .arg("wasm32-unknown-unknown")
             .arg("--release")
@@ -114,36 +117,31 @@ impl Compiler {
             // Does not show stdout. Generates child process and waits
             .map_err(|e| {
                 Error::Compiler(format!(
-                    "Can not compile contract {}/src/lib.rs: {}",
-                    contract_path, e
+                    "Can not compile contract: {}",
+                    e
                 ))
             })?;
 
         // Is success
         if !status.status.success() {
-            return Err(Error::Compiler(format!(
-                "Can not compile {}/src/lib.rs",
-                contract_path
-            )));
+            return Err(Error::Compiler("Can not compile contract".to_string()));
         }
 
         Ok(())
     }
 
     async fn check_wasm(
-        contract_path: &str,
+        contract_path: &PathBuf,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, Error> {
         // Read compile contract
-        let file = fs::read(format!(
-            "{}/target/wasm32-unknown-unknown/release/contract.wasm",
-            contract_path
-        ))
+        
+        let file = fs::read(contract_path.join("target").join("wasm32-unknown-unknown").join("release").join("contract.wasm"))
         .await
         .map_err(|e| {
             Error::Compiler(format!(
-                "Can not read compile contract {}: {}",
-                contract_path, e
+                "Can not read contract.wasm: {}",
+                e
             ))
         })?;
 
@@ -156,8 +154,8 @@ impl Compiler {
         // Precompilation
         let contract_bytes = engine.precompile_module(&file).map_err(|e| {
             Error::Compiler(format!(
-                "Can not precompile contract {} with wasmtime engine: {}",
-                contract_path, e
+                "Can not precompile module with wasmtime engine: {}",
+                e
             ))
         })?;
 
@@ -184,25 +182,16 @@ impl Compiler {
             match import.ty() {
                 ExternType::Func(_) => {
                     if !pending_sdk.remove(import.name()) {
-                        return Err(Error::Compiler(format!(
-                            "Module {} has a function that is not contemplated in the sdk",
-                            contract_path
-                        )));
+                        return Err(Error::Compiler("Module has a function that is not contemplated in the sdk".to_owned()));
                     }
                 }
                 _ => {
-                    return Err(Error::Compiler(format!(
-                        "Module {} has a import that is not function",
-                        contract_path
-                    )));
+                    return Err(Error::Compiler("Module has a import that is not function".to_owned()));
                 }
             }
         }
         if !pending_sdk.is_empty() {
-            return Err(Error::Compiler(format!(
-                "Module {} has not al imports of sdk",
-                contract_path
-            )));
+            return Err(Error::Compiler("Module has not all imports of sdk".to_owned()));
         }
 
         // We create a context from the state and the event.
@@ -318,7 +307,7 @@ pub enum CompilerMessage {
         contract: String,
         contract_name: String,
         initial_value: Value,
-        contract_path: String,
+        contract_path: PathBuf,
     },
 }
 

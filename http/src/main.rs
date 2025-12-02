@@ -1,15 +1,20 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use auth::{
-    AuthConfig, AuthDatabase,
-    integration::{cleanup_old_data, initialize_auth_database, log_auth_statistics},
+    AuthDatabase,
+    integration::{
+        cleanup_old_data, initialize_auth_database, log_auth_statistics,
+    },
 };
 use ave_bridge::{
     Bridge,
     clap::Parser,
     settings::{
-        build_config, build_config_path, build_password, build_sink_password,
-        command::Args,
+        build_config,
+        command::{
+            Args, build_auth_password, build_config_path, build_key_password,
+            build_sink_password,
+        },
     },
 };
 use axum::{
@@ -23,25 +28,17 @@ use axum::{
 };
 use axum_extra::extract::Host;
 use axum_server::{Handle, tls_rustls::RustlsConfig};
-use enviroment::{
-    build_address_http, build_address_https, build_https_cert,
-    build_https_private_key,
-};
 use futures::future::join_all;
 use middleware::tower_trace;
-use serde::Deserialize;
 use server::build_routes;
 use std::sync::Arc;
 use tokio::{net::TcpListener, time::interval};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
-use crate::enviroment::build_auth_config;
-
 mod auth;
 mod config_types;
 mod doc;
-mod enviroment;
 mod error;
 mod logging;
 mod middleware;
@@ -68,31 +65,20 @@ const TARGET_HTTP: &str = "AveHttp";
 async fn main() {
     let args = Args::parse();
 
-    let mut password = args.password;
-    if password.is_empty() {
-        password = build_password();
-    }
-
-    let mut password_sink = args.password_sink;
-    if password_sink.is_empty() {
-        password_sink = build_sink_password();
-    }
-
     let mut config_path = args.config_path;
     if config_path.is_empty() {
         config_path = build_config_path();
     }
 
-    let mut auth_config_path = args.auth_config_path;
-    if auth_config_path.is_empty() {
-        auth_config_path = build_auth_config();
-    }
+    let config = build_config(&config_path)
+        .map_err(|e| {
+            error!("Can not build config: {}", e);
+        })
+        .expect("Can not build config");
 
-    let https_address = build_address_https();
-
-    let listener_http = tokio::net::TcpListener::bind(build_address_http())
+    let listener_http = tokio::net::TcpListener::bind(&config.http.http_address)
         .await
-        .unwrap();
+        .expect("Can not build TCP listener with http address");
 
     let cors = CorsLayer::new()
         .allow_methods([
@@ -108,62 +94,64 @@ async fn main() {
         ])
         .allow_origin(Any);
 
-    let bridge_config = build_config(args.env_config, &config_path).unwrap();
-    let _log_handle = logging::init_logging(&bridge_config.logging).await;
-    
-    // Load authentication configuration (optional)
-    let auth_config = load_auth_config(auth_config_path);
+    let _log_handle = logging::init_logging(&config.logging).await;
 
-    // Initialize authentication database (optional)
-    let auth_db: Option<Arc<AuthDatabase>> = match auth_config {
-        Some(auth_config) if auth_config.enabled => {
-            match initialize_auth_database(&auth_config).await {
-                Ok(db) => {
-                    info!(TARGET_HTTP, "Authentication system ENABLED");
-                    log_auth_statistics(&db).await;
-                    // Background maintenance: cleanup audit logs, rate limits, expired API keys
-                    let maintenance_db = db.clone();
-                    tokio::spawn(async move {
-                        let mut ticker = interval(Duration::from_secs(3600));
-                        loop {
-                            ticker.tick().await;
-                            if let Err(e) = cleanup_old_data(&maintenance_db).await {
-                                warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
-                            }
-                        }
-                    });
-                    Some(db)
-                }
-                Err(e) => {
-                    error!(
-                        TARGET_HTTP,
-                        "Failed to initialize auth system: {}", e
-                    );
-                    warn!(TARGET_HTTP, "Continuing WITHOUT authentication");
-                    None
+    let auth_db: Option<Arc<AuthDatabase>> = if config.auth.enabled {
+        let mut auth_password = args.auth_password;
+        if auth_password.is_empty() {
+            auth_password = build_auth_password();
+        }
+
+        if auth_password.is_empty() {
+            error!(
+                "Auth system is enable but superadmin password is not configured"
+            );
+            return;
+        }
+
+        let db = initialize_auth_database(&config.auth, &auth_password)
+            .await
+            .map_err(|e| {
+                error!(TARGET_HTTP, "Failed to initialize auth system: {}", e);
+            })
+            .expect("Can not initialize auth database");
+
+        info!(TARGET_HTTP, "Authentication system ENABLED");
+        log_auth_statistics(&db).await;
+        // Background maintenance: cleanup audit logs, rate limits, expired API keys
+        let maintenance_db = db.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(3600));
+            loop {
+                ticker.tick().await;
+                if let Err(e) = cleanup_old_data(&maintenance_db).await {
+                    warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
                 }
             }
-        }
-        Some(_) => {
-            info!(TARGET_HTTP, "Authentication explicitly DISABLED");
-            None
-        }
-        None => {
-            info!(
-                TARGET_HTTP,
-                "No authentication configuration found - starting without auth"
-            );
-            None
-        }
+        });
+        Some(db)
+    } else {
+        None
     };
 
-    let (bridge, runners) =
-        Bridge::build(bridge_config, &password, &password_sink, None)
-            .await
-            .unwrap();
+    let mut key_password = args.key_password;
+    if key_password.is_empty() {
+        key_password = build_key_password();
+    }
 
-    if !https_address.is_empty() {
-        let https_address = https_address.parse::<SocketAddr>().unwrap();
+    let mut sink_password = args.sink_password;
+    if sink_password.is_empty() {
+        sink_password = build_sink_password();
+    }
+
+    let (bridge, runners) =
+        Bridge::build(&config, &key_password, &sink_password, None)
+            .await.map_err(|e| {
+                error!("Can not build Bridge: {}", e);
+            }).expect("Can not build Bridge");
+
+    if let Some(https_address) = config.http.https_address {
+        let https_address = https_address.parse::<SocketAddr>().expect("Can not parse Https address as SocketAddr");
 
         tokio::spawn(redirect_http_to_https(
             https_address.port(),
@@ -173,12 +161,20 @@ async fn main() {
             .install_default()
             .unwrap();
 
+        let (cert, private_key) = match (config.http.https_cert_path, config.http.https_private_key_path) {
+            (Some(cert), Some(private_key)) => (cert, private_key),
+            _ => {
+                error!("Https must have cert and private key");
+                return;
+            }
+        };
+
+
         let tls = RustlsConfig::from_pem_file(
-            PathBuf::from(&build_https_cert()),
-            PathBuf::from(&build_https_private_key()),
+            PathBuf::from(&cert),
+            PathBuf::from(&private_key),
         )
-        .await
-        .unwrap();
+        .await.expect("Can not build tls");
 
         let handle = Handle::new();
 
@@ -192,7 +188,7 @@ async fn main() {
         axum_server::bind_rustls(https_address, tls)
             .handle(handle_clone)
             .serve(
-                tower_trace(build_routes(bridge, auth_db))
+                tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
                     .layer(cors)
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -201,7 +197,7 @@ async fn main() {
     } else {
         axum::serve(
             listener_http,
-            tower_trace(build_routes(bridge, auth_db))
+            tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
@@ -212,24 +208,6 @@ async fn main() {
         .await
         .unwrap()
     }
-}
-
-fn load_auth_config(path: String) -> Option<AuthConfig> {
-    if path.is_empty() {
-        return None;
-    }
-
-    let content = std::fs::read_to_string(&path).ok()?;
-
-    #[derive(Deserialize)]
-    struct AuthWrapper {
-        auth: AuthConfig,
-    }
-
-    toml::from_str::<AuthWrapper>(&content)
-        .map(|w| w.auth)
-        .or_else(|_| toml::from_str::<AuthConfig>(&content))
-        .ok()
 }
 
 async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {

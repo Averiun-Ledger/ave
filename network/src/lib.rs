@@ -39,6 +39,7 @@ pub use crate::utils::ReqResConfig;
 
 /// The network configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
 pub struct Config {
     /// The node type.
     pub node_type: NodeType,
@@ -90,9 +91,9 @@ impl Config {
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub enum NodeType {
     /// Bootstrap node.
+    #[default]
     Bootstrap,
     /// Addressable node.
-    #[default]
     Addressable,
     /// Ephemeral node.
     Ephemeral,

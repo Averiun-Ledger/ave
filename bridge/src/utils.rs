@@ -15,7 +15,9 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
             Error::Bridge(format!("Error creating keys directory: {}", error))
         })?;
     }
-    let path = format!("{}/node_private.der", &config.keys_path);
+
+
+    let path = config.keys_path.join("node_private.de");
     match fs::metadata(&path) {
         Ok(_) => {
             let document = Document::read_der_file(path).map_err(|error| {
@@ -49,7 +51,7 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
         }
         Err(_) => {
             let key_pair = config
-                .ave_config
+                .node
                 .keypair_algorithm
                 .generate_keypair()
                 .map_err(|e| {

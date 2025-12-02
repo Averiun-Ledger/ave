@@ -85,7 +85,7 @@ pub mod tests {
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
-    use std::{fs, time::Duration};
+    use std::{fs, path::PathBuf, time::Duration};
     use test_log::test;
 
     use super::*;
@@ -104,7 +104,7 @@ pub mod tests {
         assert!(any.is_none());
     }
 
-    pub fn create_temp_dir() -> String {
+    pub fn create_temp_dir() -> PathBuf {
         let path = temp_dir();
 
         if fs::metadata(&path).is_err() {
@@ -113,16 +113,16 @@ pub mod tests {
         path
     }
 
-    fn temp_dir() -> String {
+    fn temp_dir() -> PathBuf {
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
-        dir.path().to_str().unwrap().to_owned()
+        dir.path().to_path_buf()
     }
 
     pub async fn create_system() -> (SystemRef, JoinHandle<()>) {
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
-        let path = dir.path().to_str().unwrap();
+        let path = dir.path().to_path_buf();
 
         let newtork_config = NetworkConfig::new(
             network::NodeType::Bootstrap,
@@ -133,7 +133,7 @@ pub mod tests {
         let config = AveBaseConfig {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
-            ave_db: AveDbConfig::build(path),
+            ave_db: AveDbConfig::build(&path),
             external_db: ExternalDbConfig::build(&create_temp_dir()),
             network: newtork_config,
             contracts_dir: create_temp_dir(),

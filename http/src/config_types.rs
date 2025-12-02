@@ -23,8 +23,8 @@ pub struct ConfigHttp {
 impl From<ave_bridge::config::Config> for ConfigHttp {
     fn from(value: ave_bridge::config::Config) -> Self {
         Self {
-            ave_config: AveConfigHttp::from(value.ave_config),
-            keys_path: value.keys_path,
+            ave_config: AveConfigHttp::from(value.node),
+            keys_path: value.keys_path.to_string_lossy().to_string(),
             prometheus: value.prometheus,
             logging: LoggingHttp::from(value.logging),
             sink: SinkConfigHttp::from(value.sink),
@@ -60,7 +60,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             ave_db: value.ave_db.to_string(),
             external_db: value.external_db.to_string(),
             network: NetworkConfigHttp::from(value.network),
-            contracts_dir: value.contracts_dir,
+            contracts_dir: value.contracts_dir.to_string_lossy().to_string(),
             always_accept: value.always_accept,
             garbage_collector: value.garbage_collector.as_secs(),
         }
@@ -227,12 +227,12 @@ pub struct LoggingHttp {
     pub max_files: usize,
 }
 
-impl From<ave_bridge::Logging> for LoggingHttp {
-    fn from(value: ave_bridge::Logging) -> Self {
+impl From<ave_bridge::LoggingConfig> for LoggingHttp {
+    fn from(value: ave_bridge::LoggingConfig) -> Self {
         Self {
             output: LoggingOutputHttp::from(value.output),
             api_url: value.api_url,
-            file_path: value.file_path,
+            file_path: value.file_path.to_string_lossy().to_string(),
             rotation: format!("{:?}", value.rotation),
             max_size: value.max_size,
             max_files: value.max_files,

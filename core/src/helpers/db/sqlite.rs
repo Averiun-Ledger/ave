@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -481,7 +482,7 @@ impl Querys for SqliteLocal {
 
 impl SqliteLocal {
     pub async fn new(
-        path: &str,
+        path: &PathBuf,
         manager: ActorRef<DBManager>,
     ) -> Result<Self, Error> {
         let flags = OpenFlags::default();

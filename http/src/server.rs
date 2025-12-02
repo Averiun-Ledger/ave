@@ -2,15 +2,13 @@ use std::sync::Arc;
 
 use crate::{
     auth::{
-        AuthDatabase, admin_handlers, apikey_handlers,
-        login_handler,
+        AuthDatabase, admin_handlers, apikey_handlers, login_handler,
         middleware::{
             ApiKeyAuthNew, audit_log_middleware, read_only_middleware,
         },
         models::AuthContext,
         system_handlers,
     },
-    enviroment::build_doc,
     error::Error,
 };
 use ave_bridge::{
@@ -981,7 +979,7 @@ async fn get_keys(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> impl IntoResponse {
-    let keys_path = format!("{}/node_private.der", bridge.config().keys_path);
+    let keys_path = bridge.config().keys_path.join("node_private.der");
 
     // Lee el archivo como bytes
     let keys = match std::fs::read(&keys_path) {
@@ -1188,6 +1186,7 @@ async fn get_pending_transfers(
 }
 
 pub fn build_routes(
+    doc: bool,
     bridge: Bridge,
     auth_db: Option<Arc<AuthDatabase>>,
 ) -> Router {
@@ -1321,17 +1320,17 @@ pub fn build_routes(
             .layer(middleware::from_fn(read_only_layer))
             .layer(middleware::from_fn(audit_layer));
 
-        if build_doc() {
+        if doc {
             app.merge(
-                RapiDoc::with_openapi("/doc/aveapi.json", ApiDoc::openapi())
+                RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
                     .path("/doc"),
             )
         } else {
             app
         }
-    } else if build_doc() {
+    } else if doc {
         main_routes.merge(
-            RapiDoc::with_openapi("/doc/aveapi.json", ApiDoc::openapi())
+            RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
                 .path("/doc"),
         )
     } else {
@@ -1343,10 +1342,7 @@ async fn read_only_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    let db = req
-        .extensions()
-        .get::<Arc<AuthDatabase>>()
-        .cloned();
+    let db = req.extensions().get::<Arc<AuthDatabase>>().cloned();
     read_only_middleware(db, req, next).await
 }
 
@@ -1354,14 +1350,8 @@ async fn audit_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    let auth_ctx = req
-        .extensions()
-        .get::<Arc<AuthContext>>()
-        .cloned();
-    let db = req
-        .extensions()
-        .get::<Arc<AuthDatabase>>()
-        .cloned();
+    let auth_ctx = req.extensions().get::<Arc<AuthContext>>().cloned();
+    let db = req.extensions().get::<Arc<AuthDatabase>>().cloned();
 
     audit_log_middleware(auth_ctx, db, req, next).await
 }

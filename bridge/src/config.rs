@@ -1,23 +1,38 @@
-use core::config::{Config as AveConfig, Logging, SinkConfig};
+use core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
+use std::path::PathBuf;
 use serde::Deserialize;
 
+use crate::{auth::AuthConfig, http::HttpConfig};
+
 #[derive(Deserialize, Debug, Clone)]
+#[serde(default)]
 pub struct Config {
     /// Settings from Ave Base.
-    pub ave_config: AveConfig,
-    /// Path for encryptep keys.
-    pub keys_path: String,
+    pub node: AveConfig,
+    /// Path for encrypted keys.
+    pub keys_path: PathBuf,
     /// TcpListener from prometheus axum server.
     pub prometheus: String,
     /// Logging parameters.
-    pub logging: Logging,
+    pub logging: LoggingConfig,
     /// Sink parameters.
     pub sink: SinkConfig,
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+    /// HTTP server configuration.
+    pub http: HttpConfig,
 }
 
-impl Config {
-    pub fn add_path(&mut self, path: &str) {
-        self.keys_path = format!("{}/{}", path, self.keys_path);
-        self.ave_config.add_path(path);
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            node: Default::default(),
+            keys_path: PathBuf::from("keys"),
+            prometheus: "0.0.0.0:3050".to_owned(),
+            logging: Default::default(),
+            sink: Default::default(),
+            auth: Default::default(),
+            http: Default::default(),
+        }
     }
 }

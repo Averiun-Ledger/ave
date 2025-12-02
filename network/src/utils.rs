@@ -2,7 +2,7 @@ use crate::{Error, routing::RoutingNode};
 use ip_network::IpNetwork;
 use libp2p::{Multiaddr, PeerId, multiaddr::Protocol, swarm::ConnectionId};
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
 use tracing::error;
 
@@ -292,11 +292,25 @@ pub fn is_tcp(addr: &Multiaddr) -> bool {
 
 /// The configuration for a `Behaviour` protocol.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ReqResConfig {
     /// message timeout
+    #[serde(
+        deserialize_with = "deserialize_duration_secs"
+    )]
     pub message_timeout: Duration,
     /// max concurrent streams
     pub max_concurrent_streams: usize,
+}
+
+fn deserialize_duration_secs<'de, D>(
+    deserializer: D,
+) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let u: u64 = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(u))
 }
 
 impl ReqResConfig {

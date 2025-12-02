@@ -1,4 +1,4 @@
-use ave_bridge::{Logging, LoggingRotation};
+use ave_bridge::{LoggingConfig, LoggingRotation};
 use file_rotate::TimeFrequency;
 use file_rotate::compression::Compression;
 use file_rotate::{ContentLimit, FileRotate, suffix::AppendCount};
@@ -43,12 +43,12 @@ impl Drop for ApiEventWriter {
     }
 }
 
-pub async fn init_logging(cfg: &Logging) -> Option<LoggingHandle> {
+pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
     if !cfg.logs() {
         return None;
     }
 
-    let Logging {
+    let LoggingConfig {
         output,
         api_url,
         file_path,
@@ -106,7 +106,7 @@ pub async fn init_logging(cfg: &Logging) -> Option<LoggingHandle> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).create(true).append(true);
 
-        let full = format!("{}/ave.log", file_path);
+        let full = file_path.join("ave.log");
         let fr = FileRotate::new(
             &full,
             AppendCount::new(max_files),

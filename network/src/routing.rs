@@ -557,6 +557,7 @@ impl NetworkBehaviour for Behaviour {
 
 /// Configuration for the routing behaviour.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Whether to enable random walks in the Kademlia DHT.
     dht_random_walk: bool,
@@ -572,6 +573,19 @@ pub struct Config {
 
     /// When enabled the number of disjoint paths used equals the configured parallelism.
     kademlia_disjoint_query_paths: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            dht_random_walk: true,
+            discovery_only_if_under_num: u64::MAX,
+            allow_private_address_in_dht: Default::default(),
+            allow_dns_address_in_dht: Default::default(),
+            allow_loop_back_address_in_dht: Default::default(),
+            kademlia_disjoint_query_paths: true,
+        }
+    }
 }
 
 impl Config {
@@ -651,12 +665,6 @@ impl Config {
     pub fn with_kademlia_disjoint_query_paths(mut self, enable: bool) -> Self {
         self.kademlia_disjoint_query_paths = enable;
         self
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
