@@ -265,7 +265,7 @@ impl AuthDatabase {
         }
 
         // Validate password
-        validate_password(password, &self.config.password_policy)
+        validate_password(password)
             .map_err(DatabaseError::ValidationError)?;
 
         // Hash password
@@ -408,7 +408,7 @@ impl AuthDatabase {
 
         // Update password if provided
         if let Some(pwd) = password {
-            validate_password(pwd, &self.config.password_policy)
+            validate_password(pwd)
                 .map_err(DatabaseError::ValidationError)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {

@@ -118,17 +118,9 @@ primary = [
 ]
 
 [auth]
-enabled = true
+enable = true
 database_path = "/var/db/auth.db"
 superadmin = "admin:supersecret"
-
-[auth.password_policy]
-min_length = 12
-require_uppercase = true
-require_lowercase = true
-require_digit = true
-require_special = true
-expiration_days = 30
 
 [auth.api_key]
 default_ttl_seconds = 3600
@@ -142,7 +134,7 @@ duration_seconds = 600
 reset_on_success = false
 
 [auth.rate_limit]
-enabled = false
+enable = false
 window_seconds = 120
 max_requests = 50
 limit_by_key = false
@@ -150,7 +142,7 @@ limit_by_ip = true
 cleanup_interval_seconds = 1800
 
 [auth.session]
-audit_enabled = false
+audit_enable = false
 audit_retention_days = 30
 log_success = false
 log_failures = true
@@ -233,16 +225,9 @@ sink:
         url: https://sink.two
         auth: false
 auth:
-  enabled: true
+  enable: true
   database_path: /var/db/auth.db
   superadmin: admin:supersecret
-  password_policy:
-    min_length: 12
-    require_uppercase: true
-    require_lowercase: true
-    require_digit: true
-    require_special: true
-    expiration_days: 30
   api_key:
     default_ttl_seconds: 3600
     max_keys_per_user: 20
@@ -253,14 +238,14 @@ auth:
     duration_seconds: 600
     reset_on_success: false
   rate_limit:
-    enabled: false
+    enable: false
     window_seconds: 120
     max_requests: 50
     limit_by_key: false
     limit_by_ip: true
     cleanup_interval_seconds: 1800
   session:
-    audit_enabled: false
+    audit_enable: false
     audit_retention_days: 30
     log_success: false
     log_failures: true
@@ -363,17 +348,9 @@ http:
     }
   },
   "auth": {
-    "enabled": true,
+    "enable": true,
     "database_path": "/var/db/auth.db",
     "superadmin": "admin:supersecret",
-    "password_policy": {
-      "min_length": 12,
-      "require_uppercase": true,
-      "require_lowercase": true,
-      "require_digit": true,
-      "require_special": true,
-      "expiration_days": 30
-    },
     "api_key": {
       "default_ttl_seconds": 3600,
       "max_keys_per_user": 20,
@@ -386,7 +363,7 @@ http:
       "reset_on_success": false
     },
     "rate_limit": {
-      "enabled": false,
+      "enable": false,
       "window_seconds": 120,
       "max_requests": 50,
       "limit_by_key": false,
@@ -394,7 +371,7 @@ http:
       "cleanup_interval_seconds": 1800
     },
     "session": {
-      "audit_enabled": false,
+      "audit_enable": false,
       "audit_retention_days": 30,
       "log_success": false,
       "log_failures": true,
@@ -415,7 +392,7 @@ http:
 keys_path = "/partial/keys"
 
 [auth]
-enabled = true
+enable = true
 
 [http]
 http_address = "127.0.0.1:8888"
@@ -425,7 +402,7 @@ enable_doc = true
     const PARTIAL_YAML: &str = r#"
 keys_path: /partial/keys
 auth:
-  enabled: true
+  enable: true
 http:
   http_address: 127.0.0.1:8888
   enable_doc: true
@@ -435,7 +412,7 @@ http:
 {
   "keys_path": "/partial/keys",
   "auth": {
-    "enabled": true
+    "enable": true
   },
   "http": {
     "http_address": "127.0.0.1:8888",
@@ -642,15 +619,9 @@ http:
         assert_eq!(config.sink.username, "sink-user");
 
         let auth = &config.auth;
-        assert!(auth.enabled);
+        assert!(auth.enable);
         assert_eq!(auth.database_path, PathBuf::from("/var/db/auth.db"));
         assert_eq!(auth.superadmin, "admin:supersecret");
-        assert_eq!(auth.password_policy.min_length, 12);
-        assert!(auth.password_policy.require_uppercase);
-        assert!(auth.password_policy.require_lowercase);
-        assert!(auth.password_policy.require_digit);
-        assert!(auth.password_policy.require_special);
-        assert_eq!(auth.password_policy.expiration_days, 30);
         assert_eq!(auth.api_key.default_ttl_seconds, 3600);
         assert_eq!(auth.api_key.max_keys_per_user, 20);
         assert!(auth.api_key.allow_custom_prefix);
@@ -658,13 +629,13 @@ http:
         assert_eq!(auth.lockout.max_attempts, 3);
         assert_eq!(auth.lockout.duration_seconds, 600);
         assert!(!auth.lockout.reset_on_success);
-        assert!(!auth.rate_limit.enabled);
+        assert!(!auth.rate_limit.enable);
         assert_eq!(auth.rate_limit.window_seconds, 120);
         assert_eq!(auth.rate_limit.max_requests, 50);
         assert!(!auth.rate_limit.limit_by_key);
         assert!(auth.rate_limit.limit_by_ip);
         assert_eq!(auth.rate_limit.cleanup_interval_seconds, 1800);
-        assert!(!auth.session.audit_enabled);
+        assert!(!auth.session.audit_enable);
         assert_eq!(auth.session.audit_retention_days, 30);
         assert!(!auth.session.log_success);
         assert!(auth.session.log_failures);
@@ -687,7 +658,7 @@ http:
     fn assert_partial_defaults(config: BridgeConfig) {
         assert_eq!(config.keys_path, PathBuf::from("/partial/keys"));
         assert_eq!(config.prometheus, "0.0.0.0:3050");
-        assert!(config.auth.enabled);
+        assert!(config.auth.enable);
         assert_eq!(config.http.http_address, "127.0.0.1:8888");
         assert!(config.http.enable_doc);
 

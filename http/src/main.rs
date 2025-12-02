@@ -96,7 +96,7 @@ async fn main() {
 
     let _log_handle = logging::init_logging(&config.logging).await;
 
-    let auth_db: Option<Arc<AuthDatabase>> = if config.auth.enabled {
+    let auth_db: Option<Arc<AuthDatabase>> = if config.auth.enable {
         let mut auth_password = args.auth_password;
         if auth_password.is_empty() {
             auth_password = build_auth_password();
@@ -159,7 +159,7 @@ async fn main() {
         ));
         rustls::crypto::ring::default_provider()
             .install_default()
-            .unwrap();
+            .expect("Can not install ring for RustTLS");
 
         let (cert, private_key) = match (config.http.https_cert_path, config.http.https_private_key_path) {
             (Some(cert), Some(private_key)) => (cert, private_key),
@@ -193,7 +193,7 @@ async fn main() {
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
             .await
-            .unwrap();
+            .expect("Can not run axum server");
     } else {
         axum::serve(
             listener_http,
@@ -206,7 +206,7 @@ async fn main() {
             info!(TARGET_HTTP, "All the runners have stopped");
         })
         .await
-        .unwrap()
+        .expect("Can not run axum server");
     }
 }
 
@@ -248,7 +248,7 @@ async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
 
     let ports = Ports {
         https: https.to_string(),
-        http: listener_http.local_addr().unwrap().port().to_string(),
+        http: listener_http.local_addr().expect("Invalid listener http").port().to_string(),
     };
 
     let redirect = move |Host(host): Host, uri: Uri| async move {
@@ -263,5 +263,5 @@ async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
 
     axum::serve(listener_http, redirect.into_make_service())
         .await
-        .unwrap();
+        .expect("Can not run axum server, redirect http to https");
 }

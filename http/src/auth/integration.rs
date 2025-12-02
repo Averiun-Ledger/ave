@@ -18,7 +18,7 @@ pub async fn initialize_auth_database(
     config: &AuthConfig,
     password: &str
 ) -> Result<Arc<AuthDatabase>, String> {
-    if !config.enabled {
+    if !config.enable {
         return Err("Authentication system is disabled".to_string());
     }
 
@@ -44,7 +44,7 @@ pub async fn initialize_auth_database(
     info!(
         TARGET,
         "  - Rate Limiting: {}",
-        if config.rate_limit.enabled {
+        if config.rate_limit.enable {
             "enabled"
         } else {
             "disabled"
@@ -53,7 +53,7 @@ pub async fn initialize_auth_database(
     info!(
         TARGET,
         "  - Audit Logging: {}",
-        if config.session.audit_enabled {
+        if config.session.audit_enable {
             "enabled"
         } else {
             "disabled"

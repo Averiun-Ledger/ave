@@ -248,7 +248,7 @@ impl AuthDatabase {
         ip_address: Option<&str>,
         endpoint: Option<&str>,
     ) -> Result<bool, DatabaseError> {
-        if !self.config.rate_limit.enabled {
+        if !self.config.rate_limit.enable {
             return Ok(true); // Rate limiting disabled
         }
 
