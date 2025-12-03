@@ -59,12 +59,6 @@ pub struct ApiKeyConfig {
     /// Maximum number of API keys per user
     /// 0 = unlimited
     pub max_keys_per_user: u32,
-
-    /// Allow custom key prefixes
-    pub allow_custom_prefix: bool,
-
-    /// Automatically revoke keys when user role changes
-    pub revoke_on_role_change: bool,
 }
 
 impl Default for ApiKeyConfig {
@@ -72,8 +66,6 @@ impl Default for ApiKeyConfig {
         Self {
             default_ttl_seconds: 2592000,
             max_keys_per_user: 10,
-            allow_custom_prefix: false,
-            revoke_on_role_change: true,
         }
     }
 }
@@ -88,17 +80,13 @@ pub struct LockoutConfig {
 
     /// Lockout duration in seconds
     pub duration_seconds: i64,
-
-    /// Reset failed attempts count after successful login
-    pub reset_on_success: bool,
 }
 
 impl Default for LockoutConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
-            duration_seconds: 900,
-            reset_on_success: true,
+            max_attempts: 10,
+            duration_seconds: 300,
         }
     }
 }
@@ -152,12 +140,6 @@ pub struct SessionConfig {
     /// Audit log retention in days (0 = keep forever)
     pub audit_retention_days: u32,
 
-    /// Log successful authentication attempts
-    pub log_success: bool,
-
-    /// Log failed authentication attempts
-    pub log_failures: bool,
-
     /// Log all API calls
     pub log_all_requests: bool,
 }
@@ -167,8 +149,6 @@ impl Default for SessionConfig {
         Self {
             audit_enable: true,
             audit_retention_days: 90,
-            log_success: true,
-            log_failures: true,
             log_all_requests: false,
         }
     }

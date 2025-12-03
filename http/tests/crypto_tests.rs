@@ -3,7 +3,7 @@
 // Comprehensive tests for password hashing, API key generation, and cryptographic operations
 
 use ave_http::auth::crypto::{
-    generate_api_key, generate_api_key_with_prefix, hash_api_key, hash_password, verify_password,
+    generate_api_key, hash_api_key, hash_password, verify_password
 };
 
 #[cfg(test)]
@@ -92,10 +92,10 @@ mod tests {
         // Plaintext should be non-empty
         assert!(!plaintext.is_empty(), "API key should not be empty");
 
-        // Should start with ave_v1_
+        // Should start with ave_node_
         assert!(
-            plaintext.starts_with("ave_v1_"),
-            "API key should have ave_v1_ prefix"
+            plaintext.starts_with("ave_node_"),
+            "API key should have ave_node_ prefix"
         );
 
         // Hash it
@@ -113,25 +113,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_api_key_with_prefix() {
-        let prefix = "test";
-        let plaintext = generate_api_key_with_prefix(prefix);
-
-        // Should start with prefix
-        assert!(
-            plaintext.starts_with("ave_v1_test_"),
-            "API key should start with custom prefix"
-        );
-
-        // Should verify
-        let hash = hash_api_key(&plaintext);
-        assert_eq!(
-            hash_api_key(&plaintext),
-            hash,
-            "Prefixed API key should hash consistently"
-        );
-    }
 
     #[test]
     fn test_api_key_uniqueness() {
@@ -185,32 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn test_api_key_long_prefix() {
-        let prefix = "very_long_prefix_for_testing_purposes";
-        let plaintext = generate_api_key_with_prefix(prefix);
-
-        assert!(plaintext.starts_with(&format!("ave_v1_{}_", prefix)));
-        assert_eq!(
-            hash_api_key(&plaintext),
-            hash_api_key(&plaintext),
-            "Long prefix key should hash consistently"
-        );
-    }
-
-    #[test]
-    fn test_api_key_special_chars_in_prefix() {
-        let prefix = "test@123";
-        let plaintext = generate_api_key_with_prefix(prefix);
-
-        assert!(plaintext.starts_with("ave_v1_test@123_"));
-        assert_eq!(
-            hash_api_key(&plaintext),
-            hash_api_key(&plaintext),
-            "Special char prefix key should hash consistently"
-        );
-    }
-
-    #[test]
     fn test_api_key_format() {
         let plaintext = generate_api_key();
 
@@ -261,21 +216,6 @@ mod tests {
                 verify_password(password, &hash).expect("Should verify"),
                 "Password '{}' should verify",
                 password
-            );
-        }
-    }
-
-    #[test]
-    fn test_multiple_api_key_generation_success() {
-        let prefixes = vec!["test", "prod", "dev_v2"];
-
-        for prefix in prefixes {
-            let plaintext = generate_api_key_with_prefix(prefix);
-            assert_eq!(
-                hash_api_key(&plaintext),
-                hash_api_key(&plaintext),
-                "API key with prefix {:?} should hash consistently",
-                prefix
             );
         }
     }

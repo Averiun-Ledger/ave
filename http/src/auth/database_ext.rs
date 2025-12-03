@@ -76,7 +76,7 @@ impl AuthDatabase {
         description: Option<&str>,
         default_ttl_seconds: Option<i64>,
     ) -> Result<Role, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if role already exists
         let exists: bool = conn
@@ -107,19 +107,19 @@ impl AuthDatabase {
 
     /// Get role by ID
     pub fn get_role_by_id(&self, role_id: i64) -> Result<Role, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_role_by_id_internal(&conn, role_id)
     }
 
     /// Get role by name
     pub fn get_role_by_name(&self, name: &str) -> Result<Role, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_role_by_name_internal(&conn, name)
     }
 
     /// List all roles
     pub fn list_roles(&self) -> Result<Vec<RoleInfo>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             "SELECT r.id, r.name, r.description, r.default_ttl_seconds, r.is_system, r.created_at,
@@ -155,7 +155,7 @@ impl AuthDatabase {
         description: Option<&str>,
         default_ttl_seconds: Option<i64>,
     ) -> Result<Role, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if role is system role
         let role = Self::get_role_by_id_internal(&conn, role_id)?;
@@ -186,7 +186,7 @@ impl AuthDatabase {
 
     /// Delete role (soft delete)
     pub fn delete_role(&self, role_id: i64) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if role is system role
         let role = Self::get_role_by_id_internal(&conn, role_id)?;
@@ -270,7 +270,7 @@ impl AuthDatabase {
 
     /// List all resources
     pub fn list_resources(&self) -> Result<Vec<Resource>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn
             .prepare(
@@ -299,7 +299,7 @@ impl AuthDatabase {
 
     /// List all actions
     pub fn list_actions(&self) -> Result<Vec<Action>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn
             .prepare(
@@ -341,7 +341,7 @@ impl AuthDatabase {
         action: &str,
         allowed: bool,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Get resource and action IDs
         let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
@@ -364,7 +364,7 @@ impl AuthDatabase {
         resource: &str,
         action: &str,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
@@ -384,7 +384,7 @@ impl AuthDatabase {
         &self,
         role_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn
             .prepare(
@@ -421,7 +421,7 @@ impl AuthDatabase {
         allowed: bool,
         granted_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
@@ -442,7 +442,7 @@ impl AuthDatabase {
         resource: &str,
         action: &str,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
@@ -462,7 +462,7 @@ impl AuthDatabase {
         &self,
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn
             .prepare(
@@ -495,7 +495,7 @@ impl AuthDatabase {
         &self,
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Query that combines role permissions and user overrides
         // User permissions take precedence over role permissions
@@ -536,7 +536,7 @@ impl AuthDatabase {
         &self,
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Get all effective permissions combining role permissions and user overrides
         let mut stmt = conn

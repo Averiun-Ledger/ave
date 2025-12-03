@@ -94,81 +94,67 @@ CROSS JOIN actions a
 WHERE r.name IN ('subjects', 'events', 'governances', 'approvals', 'transfers', 'signatures', 'auth');
 
 -- =============================================================================
--- ALL ROLE PERMISSIONS
+-- OWNER ROLE PERMISSIONS
 -- =============================================================================
--- All role has full access to ledger endpoints
--- All role CANNOT manage users, roles, permissions, or API keys (except their own)
-
--- Ledger endpoints - full access
+-- Full access to business endpoints (non-admin)
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
-    (SELECT id FROM roles WHERE name = 'all'),
+    (SELECT id FROM roles WHERE name = 'owner'),
     r.id,
     a.id,
     1
 FROM resources r
 CROSS JOIN actions a
-WHERE r.name IN ('subjects', 'events', 'governances', 'approvals', 'transfers', 'signatures', 'auth');
-
--- System endpoints - read only
-INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
-SELECT
-    (SELECT id FROM roles WHERE name = 'all'),
-    (SELECT id FROM resources WHERE name = 'system'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('read');
-
--- Own API keys - read and manage (will be enforced at application level)
-INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
-SELECT
-    (SELECT id FROM roles WHERE name = 'all'),
-    (SELECT id FROM resources WHERE name = 'api_keys'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('read', 'list');
-
--- DENY all access to admin endpoints
-INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
-SELECT
-    (SELECT id FROM roles WHERE name = 'all'),
-    r.id,
-    a.id,
-    0
-FROM resources r
-CROSS JOIN actions a
-WHERE r.name IN ('users', 'roles', 'permissions');
+WHERE r.name IN ('subjects', 'events', 'governances', 'approvals', 'transfers', 'signatures', 'auth', 'system');
 
 -- =============================================================================
--- READONLY ROLE PERMISSIONS
+-- READ ROLE PERMISSIONS
 -- =============================================================================
--- Readonly has read/list access to everything except admin functions
-
--- Read access to ledger endpoints
+-- Read/list on selected endpoints; allows update/check-transfer flows
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
-    (SELECT id FROM roles WHERE name = 'readonly'),
+    (SELECT id FROM roles WHERE name = 'read'),
     r.id,
     a.id,
     1
 FROM resources r
 CROSS JOIN actions a
-WHERE r.name IN ('subjects', 'events', 'governances', 'approvals', 'transfers', 'signatures', 'auth', 'system', 'audit')
-  AND a.name IN ('read', 'list');
+WHERE
+    (
+        r.name IN ('signatures', 'subjects', 'events', 'governances', 'approvals', 'auth', 'transfers', 'system')
+        AND a.name IN ('read', 'list')
+    )
+    OR (r.name = 'subjects' AND a.name = 'update')
+    OR (r.name = 'transfers' AND a.name = 'execute');
 
--- DENY write operations
+-- =============================================================================
+-- WRITE ROLE PERMISSIONS
+-- =============================================================================
+-- Write flows over business endpoints
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
-    (SELECT id FROM roles WHERE name = 'readonly'),
+    (SELECT id FROM roles WHERE name = 'write'),
     r.id,
     a.id,
-    0
+    1
 FROM resources r
 CROSS JOIN actions a
-WHERE a.name IN ('create', 'update', 'delete', 'execute', 'manage');
+WHERE (r.name, a.name) IN (
+    ('approvals', 'read'), ('approvals', 'execute'),
+    ('events', 'create'), ('events', 'read'),
+    ('transfers', 'read'), ('transfers', 'execute'),
+    ('subjects', 'update'),
+    ('auth', 'create'), ('auth', 'update'), ('auth', 'delete'), ('auth', 'read'), ('auth', 'list'),
+    ('system', 'read')
+);
 
 -- =============================================================================
--- END OF MIGRATION
+-- SENDER ROLE PERMISSIONS
 -- =============================================================================
+-- Only allowed to send event requests
+INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
+SELECT
+    (SELECT id FROM roles WHERE name = 'sender'),
+    (SELECT id FROM resources WHERE name = 'events'),
+    (SELECT id FROM actions WHERE name = 'create'),
+    1;

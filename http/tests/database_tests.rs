@@ -4,12 +4,46 @@
 
 mod common;
 
+use ave_bridge::auth::RateLimitConfig;
 use ave_http::auth::database::DatabaseError;
 use ave_http::auth::models::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    use ave_bridge::auth::{
+        ApiKeyConfig, AuthConfig, LockoutConfig, SessionConfig,
+    };
+    use ave_http::auth::database::AuthDatabase;
+
+    fn create_test_db_with_rate_limit(
+        rate_limit: RateLimitConfig,
+    ) -> AuthDatabase {
+        let config = AuthConfig {
+            enable: true,
+            database_path: PathBuf::from(common::create_temp_dir())
+                .join("test.db"),
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig {
+                default_ttl_seconds: 0,
+                max_keys_per_user: 10,
+            },
+            lockout: LockoutConfig {
+                max_attempts: 5,
+                duration_seconds: 900,
+            },
+            rate_limit,
+            session: SessionConfig {
+                audit_enable: true,
+                audit_retention_days: 90,
+                log_all_requests: false,
+            },
+        };
+
+        AuthDatabase::new(config, "AdminPass123!").unwrap()
+    }
 
     // =============================================================================
     // USER MANAGEMENT TESTS
@@ -254,7 +288,7 @@ mod tests {
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
-        let (api_key, key_info) = db.create_api_key(user.id, Some("test_key"), None, None, None).unwrap();
+        let (api_key, key_info) = db.create_api_key(user.id, Some("test_key"), None,  None).unwrap();
 
         assert!(!api_key.is_empty());
         assert_eq!(key_info.name, Some("test_key".to_string()));
@@ -266,7 +300,7 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         let context = db.verify_api_key(&api_key).unwrap();
 
@@ -290,7 +324,7 @@ mod tests {
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
         // Create key with 1 second TTL
-        let (api_key, _) = db.create_api_key(user.id, None, None, None, Some(1)).unwrap();
+        let (api_key, _) = db.create_api_key(user.id, None, None,  Some(1)).unwrap();
 
         // Should work immediately
         assert!(db.verify_api_key(&api_key).is_ok());
@@ -304,11 +338,70 @@ mod tests {
     }
 
     #[test]
+    fn test_api_key_ttl_uses_system_default_when_absent_or_zero() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = tmp_dir.path().to_path_buf();
+        config.api_key.default_ttl_seconds = 100;
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", false, None, None)
+            .unwrap();
+
+        // No TTL provided -> should use system default
+        let (_, info1) = db.create_api_key(user.id, None, None, None).unwrap();
+        assert_eq!(info1.expires_at, Some(info1.created_at + 100));
+
+        // TTL = 0 provided -> should still use system default
+        let (_, info2) = db.create_api_key(user.id, None, None, Some(0)).unwrap();
+        assert_eq!(info2.expires_at, Some(info2.created_at + 100));
+    }
+
+    #[test]
+    fn test_api_key_ttl_capped_by_system_default_and_user_when_no_system() {
+        // System TTL caps user-provided TTL
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = tmp_dir.path().to_path_buf();
+        config.api_key.default_ttl_seconds = 50;
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", false, None, None)
+            .unwrap();
+
+        let (_, capped) = db
+            .create_api_key(user.id, None, None, Some(100))
+            .unwrap();
+        assert_eq!(capped.expires_at, Some(capped.created_at + 50));
+
+        // When system TTL is 0, user TTL is honored
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = tmp_dir.path().to_path_buf();
+        config.api_key.default_ttl_seconds = 0;
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        let user = db
+            .create_user("testuser2", "TestPass123!", false, None, None)
+            .unwrap();
+
+        let (_, info) = db
+            .create_api_key(user.id, None, None, Some(30))
+            .unwrap();
+        assert_eq!(info.expires_at, Some(info.created_at + 30));
+    }
+
+    #[test]
     fn test_revoke_api_key() {
         let db = common::create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, key_info) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false,  None,None).unwrap();
+        let (api_key, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         // Revoke the key
         db.revoke_api_key(key_info.id, None, None).unwrap();
@@ -324,8 +417,8 @@ mod tests {
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
-        db.create_api_key(user.id, Some("key1"), None, None, None).unwrap();
-        db.create_api_key(user.id, Some("key2"), None, None, None).unwrap();
+        db.create_api_key(user.id, Some("key1"), None,  None).unwrap();
+        db.create_api_key(user.id, Some("key2"), None,  None).unwrap();
 
         let keys = db.list_user_api_keys(user.id, false).unwrap();
 
@@ -337,7 +430,7 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, key_info) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (api_key, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         assert!(key_info.last_used_at.is_none());
 
@@ -349,6 +442,28 @@ mod tests {
         let used_key = keys.iter().find(|k| k.id == key_info.id).unwrap();
 
         assert!(used_key.last_used_at.is_some());
+    }
+
+    #[test]
+    fn test_apply_ttl_to_legacy_api_keys() {
+        let mut db = common::create_test_db();
+
+        let user =
+            db.create_user("testuser", "TestPass123!", false, None, None)
+                .unwrap();
+        let (_, key_info) = db.create_api_key(user.id, None, None, None).unwrap();
+
+        // Verify no expiration was set
+        let info = db.get_api_key_info(key_info.id).unwrap();
+        assert!(info.expires_at.is_none());
+
+        // Enable TTL and run cleanup to backfill
+        db.set_default_api_key_ttl(100);
+
+        let _ = db.cleanup_expired_api_keys().unwrap();
+        let info = db.get_api_key_info(key_info.id).unwrap();
+
+        assert_eq!(info.expires_at, Some(info.created_at + 100));
     }
 
     // =============================================================================
@@ -443,7 +558,7 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (_, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         // Make 10 requests (well under limit of 100)
         for _ in 0..10 {
@@ -457,7 +572,7 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (_, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         // Hit rate limit (100 requests)
         for _ in 0..100 {
@@ -469,34 +584,129 @@ mod tests {
         assert!(matches!(result, Err(DatabaseError::RateLimitExceeded(_))));
     }
 
+    #[test]
+    fn test_rate_limit_by_ip_only() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 2,
+            limit_by_key: false,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+        };
+
+        let db = create_test_db_with_rate_limit(rate_limit);
+
+        let user = db
+            .create_user("testuser", "TestPass123!", false, None, None)
+            .unwrap();
+        let (_, key1) =
+            db.create_api_key(user.id, None, None, None).unwrap();
+        let (_, key2) =
+            db.create_api_key(user.id, None, None, None).unwrap();
+
+        // Two requests from same IP should pass
+        assert!(db
+            .check_rate_limit(Some(key1.id), Some("127.0.0.1"), Some("/api/test"))
+            .is_ok());
+        assert!(db
+            .check_rate_limit(Some(key1.id), Some("127.0.0.1"), Some("/api/test"))
+            .is_ok());
+
+        // Third request from same IP but different key should exceed (IP-only limit)
+        let result = db
+            .check_rate_limit(Some(key2.id), Some("127.0.0.1"), Some("/api/test"));
+        assert!(matches!(result, Err(DatabaseError::RateLimitExceeded(_))));
+    }
+
+    #[test]
+    fn test_rate_limit_by_key_only() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 1,
+            limit_by_key: true,
+            limit_by_ip: false,
+            cleanup_interval_seconds: 3600,
+        };
+
+        let db = create_test_db_with_rate_limit(rate_limit);
+
+        let user = db
+            .create_user("testuser", "TestPass123!", false, None, None)
+            .unwrap();
+        let (_, key_info) =
+            db.create_api_key(user.id, None, None, None).unwrap();
+
+        // First request from any IP should pass
+        assert!(db
+            .check_rate_limit(Some(key_info.id), Some("10.0.0.1"), Some("/api/test"))
+            .is_ok());
+
+        // Second request with the same key but different IP should still be limited
+        let result = db
+            .check_rate_limit(Some(key_info.id), Some("10.0.0.2"), Some("/api/test"));
+        assert!(matches!(result, Err(DatabaseError::RateLimitExceeded(_))));
+    }
+
     // =============================================================================
     // AUDIT LOG TESTS
     // =============================================================================
 
     #[test]
-    fn test_create_audit_log() {
-        let db = common::create_test_db();
+    fn test_audit_logging_disabled() {
+        let session = SessionConfig {
+            audit_enable: false,
+            audit_retention_days: 90,
+            log_all_requests: true,
+        };
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let config = AuthConfig {
+            enable: true,
+            database_path: PathBuf::from(common::create_temp_dir())
+                .join("test.db"),
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig {
+                default_ttl_seconds: 0,
+                max_keys_per_user: 10,
+            },
+            lockout: LockoutConfig {
+                max_attempts: 5,
+                duration_seconds: 900,
+            },
+            rate_limit: RateLimitConfig {
+                enable: true,
+                window_seconds: 60,
+                max_requests: 100,
+                limit_by_key: true,
+                limit_by_ip: true,
+                cleanup_interval_seconds: 3600,
+            },
+            session,
+        };
 
-        db.create_audit_log(
-            Some(user.id),
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        // Attempt to log should be a no-op when audit is disabled
+        let log_id = db.create_audit_log(
             None,
-            "user_created",
-            Some("user"),
-            Some(&user.id.to_string()),
-            Some("/admin/users"),
+            None,
+            "login",
+            None,
+            None,
+            Some("/login"),
             Some("POST"),
-            Some("127.0.0.1"),
+            None,
             None,
             None,
             None,
             true,
             None,
         ).unwrap();
+        assert_eq!(log_id, 0);
 
         let query = AuditLogQuery {
-            user_id: Some(user.id),
+            user_id: None,
             action_type: None,
             resource_type: None,
             success: None,
@@ -507,20 +717,111 @@ mod tests {
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
-        assert!(!logs.is_empty());
+        assert!(logs.is_empty());
     }
 
     #[test]
-    fn test_query_audit_logs_by_action() {
-        let db = common::create_test_db();
+    fn test_log_api_request_enabled() {
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.session.audit_enable = true;
+        config.session.log_all_requests = true;
+        config.database_path =
+            PathBuf::from(common::create_temp_dir()).join("test.db");
 
-        db.create_audit_log(
-            None, None, "login", None, None, None, None, None, None, None, None, true, None
-        ).unwrap();
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        let user = db
+            .create_user("apiuser", "Pass123!", false, None, None)
+            .unwrap();
+        let (_, key) =
+            db.create_api_key(user.id, None, None, None).unwrap();
+
+        let ctx = AuthContext {
+            user_id: user.id,
+            username: user.username.clone(),
+            is_superadmin: false,
+            roles: vec![],
+            permissions: vec![],
+            api_key_id: key.id,
+            ip_address: Some("127.0.0.1".to_string()),
+        };
+
+        let log_id = db
+            .log_api_request(
+                &ctx,
+                "/api/test",
+                "GET",
+                ctx.ip_address.as_deref(),
+                Some("tester"),
+                "req-123",
+                true,
+                None,
+            )
+            .unwrap();
+        assert_ne!(log_id, 0);
 
         let query = AuditLogQuery {
-            user_id: None,
-            action_type: Some("login".to_string()),
+            user_id: Some(user.id),
+            action_type: Some("api_request".to_string()),
+            resource_type: None,
+            success: Some(true),
+            start_timestamp: None,
+            end_timestamp: None,
+            limit: None,
+            offset: None,
+        };
+
+        let logs = db.query_audit_logs(&query).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].endpoint.as_deref(), Some("/api/test"));
+        assert_eq!(logs[0].http_method.as_deref(), Some("GET"));
+    }
+
+    #[test]
+    fn test_log_api_request_disabled() {
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.session.audit_enable = true;
+        config.session.log_all_requests = false;
+        config.database_path =
+            PathBuf::from(common::create_temp_dir()).join("test.db");
+
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+
+        let user = db
+            .create_user("apiuser", "Pass123!", false, None, None)
+            .unwrap();
+        let (_, key) =
+            db.create_api_key(user.id, None, None, None).unwrap();
+
+        let ctx = AuthContext {
+            user_id: user.id,
+            username: user.username.clone(),
+            is_superadmin: false,
+            roles: vec![],
+            permissions: vec![],
+            api_key_id: key.id,
+            ip_address: Some("127.0.0.1".to_string()),
+        };
+
+        let log_id = db
+            .log_api_request(
+                &ctx,
+                "/api/test",
+                "POST",
+                ctx.ip_address.as_deref(),
+                None,
+                "req-456",
+                false,
+                Some("HTTP 500"),
+            )
+            .unwrap();
+        assert_eq!(log_id, 0);
+
+        let query = AuditLogQuery {
+            user_id: Some(user.id),
+            action_type: Some("api_request".to_string()),
             resource_type: None,
             success: None,
             start_timestamp: None,
@@ -530,7 +831,7 @@ mod tests {
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
-        assert!(!logs.is_empty());
+        assert!(logs.is_empty());
     }
 
     // =============================================================================

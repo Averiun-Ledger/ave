@@ -4,9 +4,10 @@ use crate::{
     auth::{
         AuthDatabase, admin_handlers, apikey_handlers, login_handler,
         middleware::{
-            ApiKeyAuthNew, audit_log_middleware, read_only_middleware,
+            ApiKeyAuthNew, audit_log_middleware, check_permission,
+            read_only_middleware,
         },
-        models::AuthContext,
+        models::{AuthContext, ErrorResponse},
         system_handlers,
     },
     error::Error,
@@ -62,6 +63,7 @@ pub struct EventFirstLastQuery {
 use crate::doc::ApiDoc;
 use utoipa::OpenApi;
 use utoipa_rapidoc::RapiDoc;
+use axum::http::Method;
 
 /// Send Event Request
 ///
@@ -997,13 +999,15 @@ async fn get_keys(
     let body = Bytes::from(keys);
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = StatusCode::OK;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, "application/pkcs8".parse().unwrap());
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        "attachment; filename=\"node_private.der\"".parse().unwrap(),
-    );
+    if let Ok(ct) = "application/pkcs8".parse() {
+        response.headers_mut().insert(header::CONTENT_TYPE, ct);
+    }
+    if let Ok(disposition) = "attachment; filename=\"node_private.der\"".parse()
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
     response
 }
 
@@ -1224,6 +1228,15 @@ pub fn build_routes(
         .route("/pending-transfers", get(get_pending_transfers))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));
 
+    let doc_routes = if doc {
+        Some(
+            RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
+                .path("/doc"),
+        )
+    } else {
+        None
+    };
+
     if let Some(db) = auth_db {
         let protected_routes = Router::new()
             .route(
@@ -1313,28 +1326,33 @@ pub fn build_routes(
             )
             .layer(middleware::from_extractor::<ApiKeyAuthNew>());
 
-        let app = main_routes
-            .route("/login", post(login_handler::login))
+        // Routes that require authentication & permission checks
+        let authed = Router::new()
+            .merge(main_routes.clone())
             .merge(protected_routes)
             .layer(Extension(db.clone()))
+            .layer(middleware::from_extractor::<ApiKeyAuthNew>())
+            .layer(middleware::from_fn(permission_layer))
             .layer(middleware::from_fn(read_only_layer))
             .layer(middleware::from_fn(audit_layer));
 
-        if doc {
-            app.merge(
-                RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
-                    .path("/doc"),
-            )
-        } else {
-            app
+        // Login remains unauthenticated but needs DB extension
+        let mut app = Router::new()
+            .route("/login", post(login_handler::login))
+            .layer(Extension(db.clone()))
+            .merge(authed);
+
+        if let Some(doc_routes) = doc_routes {
+            app = app.merge(doc_routes);
         }
-    } else if doc {
-        main_routes.merge(
-            RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
-                .path("/doc"),
-        )
+
+        app
     } else {
-        main_routes
+        let mut app = main_routes;
+        if let Some(doc_routes) = doc_routes {
+            app = app.merge(doc_routes);
+        }
+        app
     }
 }
 
@@ -1354,4 +1372,251 @@ async fn audit_layer(
     let db = req.extensions().get::<Arc<AuthDatabase>>().cloned();
 
     audit_log_middleware(auth_ctx, db, req, next).await
+}
+
+pub(crate) async fn permission_layer(
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    // Skip docs
+    if req.uri().path().starts_with("/doc") {
+        return next.run(req).await;
+    }
+
+    let auth_ctx = match req.extensions().get::<Arc<AuthContext>>().cloned() {
+        Some(ctx) => ctx,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Authentication required".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some((resource, action)) =
+        permission_for(req.method(), req.uri().path())
+    {
+        if let Err(resp) = check_permission(&auth_ctx, resource, action) {
+            return resp.into_response();
+        }
+    }
+
+    next.run(req).await
+}
+
+pub(crate) fn permission_for(
+    method: &Method,
+    path: &str,
+) -> Option<(&'static str, &'static str)> {
+    // Admin routes already perform explicit checks
+    if path.starts_with("/admin/") || path == "/login" {
+        return None;
+    }
+
+    match (method, path) {
+        // Events / requests
+        (&Method::POST, "/event-request") => Some(("events", "create")),
+        (&Method::GET, p) if p.starts_with("/event-request/") => {
+            Some(("events", "read"))
+        }
+        (&Method::GET, p) if p.starts_with("/events-first-last/") => {
+            Some(("events", "list"))
+        }
+        (&Method::GET, p) if p.starts_with("/events/") => {
+            Some(("events", "list"))
+        }
+        (&Method::GET, p) if p.starts_with("/event/") => {
+            Some(("events", "read"))
+        }
+
+        // Approvals
+        (&Method::GET, p) if p.starts_with("/approval-request/") => {
+            Some(("approvals", "read"))
+        }
+        (&Method::PATCH, p) if p.starts_with("/approval-request/") => {
+            Some(("approvals", "execute"))
+        }
+
+        // Subjects / auth
+        (&Method::GET, "/auth") => Some(("auth", "list")),
+        (&Method::GET, p) if p.starts_with("/auth/") => {
+            Some(("auth", "read"))
+        }
+        (&Method::PUT, p) if p.starts_with("/auth/") => {
+            Some(("auth", "create"))
+        }
+        (&Method::DELETE, p) if p.starts_with("/auth/") => {
+            Some(("auth", "delete"))
+        }
+
+        // Updates / transfers
+        (&Method::POST, p) if p.starts_with("/update/") => {
+            Some(("subjects", "update"))
+        }
+        (&Method::POST, p) if p.starts_with("/check-transfer/") => {
+            Some(("transfers", "execute"))
+        }
+        (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
+            Some(("transfers", "execute"))
+        }
+
+        // Ledger info
+        (&Method::GET, p) if p.starts_with("/signatures/") => {
+            Some(("signatures", "read"))
+        }
+        (&Method::GET, p) if p.starts_with("/state/") => {
+            Some(("subjects", "read"))
+        }
+        (&Method::GET, p) if p.starts_with("/register-subjects/") => {
+            Some(("subjects", "list"))
+        }
+        (&Method::GET, "/register-governances") => {
+            Some(("governances", "list"))
+        }
+        (&Method::GET, p) if p.starts_with("/events/") => {
+            Some(("events", "list"))
+        }
+
+        // System/info
+        (&Method::GET, "/controller-id") => Some(("system", "read")),
+        (&Method::GET, "/peer-id") => Some(("system", "read")),
+        (&Method::GET, "/config") => Some(("system", "read")),
+        (&Method::GET, "/keys") => Some(("system", "read")),
+        (&Method::GET, "/pending-transfers") => Some(("transfers", "read")),
+
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_bridge::auth::{
+        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
+    };
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::{delete, get, post},
+        Router,
+    };
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    async fn ok_handler() -> StatusCode {
+        StatusCode::OK
+    }
+
+    fn build_db() -> Arc<AuthDatabase> {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = AuthConfig {
+            enable: true,
+            database_path: PathBuf::from(tmp.path()),
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig::default(),
+            lockout: LockoutConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            session: SessionConfig::default(),
+        };
+        Arc::new(AuthDatabase::new(config, "AdminPass123!").unwrap())
+    }
+
+    fn auth_ctx_for_role(db: &AuthDatabase, role: &str) -> Arc<AuthContext> {
+        let role = db.get_role_by_name(role).unwrap();
+        let perms = db.get_role_permissions(role.id).unwrap();
+        Arc::new(AuthContext {
+            user_id: 1,
+            username: role.name.clone(),
+            is_superadmin: false,
+            roles: vec![role.name],
+            permissions: perms,
+            api_key_id: 1,
+            ip_address: None,
+        })
+    }
+
+    async fn call(
+        app: &Router,
+        method: Method,
+        path: &str,
+        ctx: Arc<AuthContext>,
+    ) -> StatusCode {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ctx);
+
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    fn router() -> Router {
+        Router::new()
+            .route("/signatures/abc", get(ok_handler))
+            .route("/event-request", post(ok_handler))
+            .route("/event-request/123", get(ok_handler))
+            .route("/manual-distribution/abc", post(ok_handler))
+            .route("/auth/abc", delete(ok_handler))
+            .layer(middleware::from_fn(permission_layer))
+    }
+
+    #[tokio::test]
+    async fn read_role_allows_reads_but_not_writes() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "read");
+        let app = router();
+
+        let status =
+            call(&app, Method::GET, "/signatures/abc", ctx.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let status =
+            call(&app, Method::POST, "/event-request", ctx.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn write_role_allows_event_request_write() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "write");
+        let app = router();
+
+        let status = call(&app, Method::POST, "/event-request", ctx).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sender_role_only_allows_send_event() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "sender");
+        let app = router();
+
+        let ok_status =
+            call(&app, Method::POST, "/event-request", ctx.clone()).await;
+        assert_eq!(ok_status, StatusCode::OK);
+
+        let forbidden =
+            call(&app, Method::GET, "/event-request/123", ctx).await;
+        assert_eq!(forbidden, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn owner_role_allows_full_business_access() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "owner");
+        let app = router();
+
+        let status =
+            call(&app, Method::DELETE, "/auth/abc", ctx.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let status =
+            call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
+        assert_eq!(status, StatusCode::OK);
+    }
 }

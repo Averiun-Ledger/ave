@@ -28,7 +28,12 @@ impl AuthDatabase {
         success: bool,
         error_message: Option<&str>,
     ) -> Result<i64, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        // Respect global audit toggle
+        if !self.config.session.audit_enable {
+            return Ok(0); // Auditing disabled
+        }
+
+        let conn = self.lock_conn()?;
 
         conn.execute(
             "INSERT INTO audit_logs (
@@ -57,12 +62,45 @@ impl AuthDatabase {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Log an API request if audit logging of requests is enabled
+    pub fn log_api_request(
+        &self,
+        ctx: &crate::auth::models::AuthContext,
+        path: &str,
+        method: &str,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+        request_id: &str,
+        success: bool,
+        error_message: Option<&str>,
+    ) -> Result<i64, DatabaseError> {
+        if !self.config.session.log_all_requests {
+            return Ok(0);
+        }
+
+        self.create_audit_log(
+            Some(ctx.user_id),
+            Some(ctx.api_key_id),
+            "api_request",
+            None,
+            None,
+            Some(path),
+            Some(method),
+            ip_address,
+            user_agent,
+            Some(request_id),
+            None,
+            success,
+            error_message,
+        )
+    }
+
     /// Query audit logs
     pub fn query_audit_logs(
         &self,
         query: &AuditLogQuery,
     ) -> Result<Vec<AuditLog>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut sql = String::from(
             "SELECT id, timestamp, user_id, api_key_id, action_type, resource_type,
@@ -159,7 +197,7 @@ impl AuthDatabase {
             return Ok(0); // Keep forever
         }
 
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let cutoff_timestamp = Self::now() - (retention_days as i64 * 86400);
 
@@ -178,7 +216,7 @@ impl AuthDatabase {
         &self,
         days: u32,
     ) -> Result<serde_json::Value, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let cutoff = Self::now() - (days as i64 * 86400);
 
@@ -252,7 +290,13 @@ impl AuthDatabase {
             return Ok(true); // Rate limiting disabled
         }
 
-        let conn = self.connection.lock().unwrap();
+        // Respect configuration for which dimensions participate in the limit
+        let api_key_id =
+            if self.config.rate_limit.limit_by_key { api_key_id } else { None };
+        let ip_address =
+            if self.config.rate_limit.limit_by_ip { ip_address } else { None };
+
+        let conn = self.lock_conn()?;
 
         let now = Self::now();
         let window_start = now - self.config.rate_limit.window_seconds;
@@ -302,7 +346,7 @@ impl AuthDatabase {
 
     /// Cleanup old rate limit entries
     pub fn cleanup_rate_limits(&self) -> Result<usize, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let cutoff =
             Self::now() - self.config.rate_limit.cleanup_interval_seconds;
@@ -323,7 +367,7 @@ impl AuthDatabase {
         api_key_id: Option<i64>,
         hours: u32,
     ) -> Result<serde_json::Value, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let cutoff = Self::now() - (hours as i64 * 3600);
 
@@ -390,7 +434,7 @@ impl AuthDatabase {
         &self,
         key: &str,
     ) -> Result<SystemConfig, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_system_config_internal(&conn, key)
     }
 
@@ -398,7 +442,7 @@ impl AuthDatabase {
     pub fn list_system_config(
         &self,
     ) -> Result<Vec<SystemConfig>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn
             .prepare(
@@ -432,7 +476,7 @@ impl AuthDatabase {
         value: &str,
         updated_by: Option<i64>,
     ) -> Result<SystemConfig, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         conn.execute(
             "UPDATE system_config SET value = ?1, updated_by = ?2 WHERE key = ?3",

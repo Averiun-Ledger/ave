@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 /// Result type for crypto operations
 pub type CryptoResult<T> = Result<T, CryptoError>;
 
+const API_KEY_PREFIX: &str = "ave_node_";
+
 /// Errors that can occur during cryptographic operations
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
@@ -78,8 +80,8 @@ pub fn verify_password(password: &str, hash: &str) -> CryptoResult<bool> {
 
 /// Generate a new API key with prefix
 ///
-/// Format: ave_v1_<40 random hex chars>
-/// Example: ave_v1_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0
+/// Format: ave_node_<40 random hex chars>
+/// Example: ave_node_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0
 ///
 /// The key is 20 bytes (160 bits) of randomness encoded as 40 hex characters.
 ///
@@ -91,28 +93,12 @@ pub fn generate_api_key() -> String {
     let random_bytes: [u8; 20] = rng.r#gen();
     let random_hex = hex::encode(random_bytes);
 
-    format!("ave_v1_{}", random_hex)
-}
-
-/// Generate an API key with a custom prefix
-///
-/// # Arguments
-/// * `prefix` - Custom prefix to use (e.g., "test", "prod", "dev")
-///
-/// # Returns
-/// * `String` - The generated API key with custom prefix
-pub fn generate_api_key_with_prefix(prefix: &str) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random_bytes: [u8; 20] = rng.r#gen();
-    let random_hex = hex::encode(random_bytes);
-
-    format!("ave_v1_{}_{}", prefix, random_hex)
+    format!("{API_KEY_PREFIX}{random_hex}")
 }
 
 /// Extract the visible prefix from an API key
 ///
-/// Returns the first 11 characters (ave_v1_XXX) for logging and identification
+/// Returns the first 11 characters (ave_node_XXX) for logging and identification
 ///
 /// # Arguments
 /// * `api_key` - The full API key
@@ -120,11 +106,7 @@ pub fn generate_api_key_with_prefix(prefix: &str) -> String {
 /// # Returns
 /// * `String` - The visible prefix
 pub fn extract_key_prefix(api_key: &str) -> String {
-    if api_key.len() >= 11 {
-        api_key[..11].to_string()
-    } else {
-        api_key.to_string()
-    }
+    api_key[..API_KEY_PREFIX.len()].to_string()
 }
 
 /// Hash an API key using SHA-256
@@ -179,18 +161,13 @@ mod tests {
     fn test_api_key_generation() {
         let key = generate_api_key();
 
+        
         // Check format
-        assert!(key.starts_with("ave_v1_"));
+        assert!(key.starts_with("ave_node_"));
         // Length should be 7 (prefix) + 40 (hex) = 47
-        assert_eq!(key.len(), 47);
+        assert_eq!(key.len(), 49);
     }
 
-    #[test]
-    fn test_api_key_with_custom_prefix() {
-        let key = generate_api_key_with_prefix("test");
-
-        assert!(key.starts_with("ave_v1_test_"));
-    }
 
     #[test]
     fn test_api_key_uniqueness() {
@@ -202,10 +179,10 @@ mod tests {
 
     #[test]
     fn test_extract_key_prefix() {
-        let key = "ave_v1_abcdef1234567890";
+        let key = "ave_node_abcdef1234567890";
         let prefix = extract_key_prefix(&key);
 
-        assert_eq!(prefix, "ave_v1_abcd"); // 11 characters
+        assert_eq!(prefix, "ave_node_"); // 11 characters
     }
 
     #[test]
@@ -223,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_api_key_hash_deterministic() {
-        let key = "ave_v1_test123";
+        let key = "ave_node_test123";
         let hash1 = hash_api_key(&key);
         let hash2 = hash_api_key(&key);
 

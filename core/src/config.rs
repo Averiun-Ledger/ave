@@ -1,7 +1,7 @@
 //! # Configuration module
 
 use std::{
-    collections::{BTreeMap, BTreeSet}, fmt::{self, Display, write}, path::PathBuf, time::Duration
+    collections::{BTreeMap, BTreeSet}, fmt::{self, Display}, path::PathBuf, time::Duration
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};

@@ -15,12 +15,11 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         // Verify key works
         assert!(db.verify_api_key(&api_key).is_ok());
 
-        // Add role to user (config has revoke_on_role_change = true)
         let role = db.create_role("editor", None, None).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
@@ -38,7 +37,7 @@ mod tests {
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
-        let (api_key, _) = db.create_api_key(user.id, None, None, None, None).unwrap();
+        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
 
         // Verify key works
         assert!(db.verify_api_key(&api_key).is_ok());
@@ -101,7 +100,7 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key1, _) = db.create_api_key(user.id, Some("key1"), None, None, None).unwrap();
+        let (api_key1, _) = db.create_api_key(user.id, Some("key1"), None,  None).unwrap();
 
         let role1 = db.create_role("role1", None, None).unwrap();
         db.assign_role_to_user(user.id, role1.id, None).unwrap();
@@ -110,7 +109,7 @@ mod tests {
         assert!(matches!(db.verify_api_key(&api_key1), Err(DatabaseError::PermissionDenied(_))));
 
         // Create new key
-        let (api_key2, _) = db.create_api_key(user.id, Some("key2"), None, None, None).unwrap();
+        let (api_key2, _) = db.create_api_key(user.id, Some("key2"), None,  None).unwrap();
 
         let role2 = db.create_role("role2", None, None).unwrap();
         db.assign_role_to_user(user.id, role2.id, None).unwrap();

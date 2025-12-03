@@ -15,8 +15,8 @@ fn db_error_to_response(
         DatabaseError::NotFoundError(msg) => (StatusCode::NOT_FOUND, msg),
         DatabaseError::DuplicateError(msg) => (StatusCode::CONFLICT, msg),
         DatabaseError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
-        DatabaseError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, msg),
-        DatabaseError::AccountLocked(msg) => (StatusCode::FORBIDDEN, msg),
+        DatabaseError::PermissionDenied(msg) => (StatusCode::UNAUTHORIZED, msg),
+        DatabaseError::AccountLocked(msg) => (StatusCode::UNAUTHORIZED, msg),
         DatabaseError::RateLimitExceeded(msg) => {
             (StatusCode::TOO_MANY_REQUESTS, msg)
         }
@@ -87,7 +87,6 @@ pub async fn login(
             user.id,
             Some(&format!("{}_session", user.username)),
             None, // No description
-            None, // No custom prefix
             None, // Use role's default TTL
         )
         .map_err(db_error_to_response)?;

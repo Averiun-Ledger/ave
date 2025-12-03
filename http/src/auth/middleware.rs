@@ -58,7 +58,15 @@ where
                 })?;
 
             // Verify API key and get auth context
-            let db = auth_db.unwrap();
+            let Some(db) = auth_db else {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "Authentication database unavailable"
+                            .to_string(),
+                    }),
+                ));
+            };
             let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
                 (
                     StatusCode::UNAUTHORIZED,
@@ -209,30 +217,23 @@ pub async fn audit_log_middleware(
 
     // Log to audit if database is available and logging is enabled
     if let (Some(db), Some(ctx)) = (auth_db, auth_ctx) {
-        if db.config.session.log_all_requests {
-            let success = response.status().is_success();
-            let error_message = if !success {
-                Some(format!("HTTP {}", response.status()))
-            } else {
-                None
-            };
+        let success = response.status().is_success();
+        let error_message = if !success {
+            Some(format!("HTTP {}", response.status()))
+        } else {
+            None
+        };
 
-            let _ = db.create_audit_log(
-                Some(ctx.user_id),
-                Some(ctx.api_key_id),
-                "api_request",
-                None,
-                None,
-                Some(&path),
-                Some(&method),
-                ip_address.as_deref(),
-                user_agent.as_deref(),
-                Some(&request_id),
-                None,
-                success,
-                error_message.as_deref(),
-            );
-        }
+        let _ = db.log_api_request(
+            &ctx,
+            &path,
+            &method,
+            ip_address.as_deref(),
+            user_agent.as_deref(),
+            &request_id,
+            success,
+            error_message.as_deref(),
+        );
     }
 
     response

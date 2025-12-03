@@ -125,13 +125,10 @@ superadmin = "admin:supersecret"
 [auth.api_key]
 default_ttl_seconds = 3600
 max_keys_per_user = 20
-allow_custom_prefix = true
-revoke_on_role_change = false
 
 [auth.lockout]
 max_attempts = 3
 duration_seconds = 600
-reset_on_success = false
 
 [auth.rate_limit]
 enable = false
@@ -144,8 +141,6 @@ cleanup_interval_seconds = 1800
 [auth.session]
 audit_enable = false
 audit_retention_days = 30
-log_success = false
-log_failures = true
 log_all_requests = true
 
 [http]
@@ -231,12 +226,9 @@ auth:
   api_key:
     default_ttl_seconds: 3600
     max_keys_per_user: 20
-    allow_custom_prefix: true
-    revoke_on_role_change: false
   lockout:
     max_attempts: 3
     duration_seconds: 600
-    reset_on_success: false
   rate_limit:
     enable: false
     window_seconds: 120
@@ -247,8 +239,6 @@ auth:
   session:
     audit_enable: false
     audit_retention_days: 30
-    log_success: false
-    log_failures: true
     log_all_requests: true
 http:
   http_address: 127.0.0.1:4000
@@ -353,14 +343,11 @@ http:
     "superadmin": "admin:supersecret",
     "api_key": {
       "default_ttl_seconds": 3600,
-      "max_keys_per_user": 20,
-      "allow_custom_prefix": true,
-      "revoke_on_role_change": false
+      "max_keys_per_user": 20
     },
     "lockout": {
       "max_attempts": 3,
-      "duration_seconds": 600,
-      "reset_on_success": false
+      "duration_seconds": 600
     },
     "rate_limit": {
       "enable": false,
@@ -373,8 +360,6 @@ http:
     "session": {
       "audit_enable": false,
       "audit_retention_days": 30,
-      "log_success": false,
-      "log_failures": true,
       "log_all_requests": true
     }
   },
@@ -624,11 +609,8 @@ http:
         assert_eq!(auth.superadmin, "admin:supersecret");
         assert_eq!(auth.api_key.default_ttl_seconds, 3600);
         assert_eq!(auth.api_key.max_keys_per_user, 20);
-        assert!(auth.api_key.allow_custom_prefix);
-        assert!(!auth.api_key.revoke_on_role_change);
         assert_eq!(auth.lockout.max_attempts, 3);
         assert_eq!(auth.lockout.duration_seconds, 600);
-        assert!(!auth.lockout.reset_on_success);
         assert!(!auth.rate_limit.enable);
         assert_eq!(auth.rate_limit.window_seconds, 120);
         assert_eq!(auth.rate_limit.max_requests, 50);
@@ -637,8 +619,6 @@ http:
         assert_eq!(auth.rate_limit.cleanup_interval_seconds, 1800);
         assert!(!auth.session.audit_enable);
         assert_eq!(auth.session.audit_retention_days, 30);
-        assert!(!auth.session.log_success);
-        assert!(auth.session.log_failures);
         assert!(auth.session.log_all_requests);
 
         let http = &config.http;

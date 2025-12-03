@@ -290,8 +290,10 @@ INSERT OR IGNORE INTO actions (name, description, is_system) VALUES
 INSERT OR IGNORE INTO roles (name, description, is_system, default_ttl_seconds) VALUES
     ('superadmin', 'Full system access with all privileges', 1, NULL),
     ('admin', 'Administrative access to users, roles, and API keys', 1, 2592000),
-    ('all', 'Full access to all endpoints except admin functions', 1, 2592000),
-    ('readonly', 'Read-only access to all endpoints', 1, 7776000);
+    ('owner', 'Full access to business endpoints (non-admin)', 1, NULL),
+    ('read', 'Read access to selected business endpoints', 1, NULL),
+    ('write', 'Write access to selected business endpoints', 1, NULL),
+    ('sender', 'Limited to sending event requests', 1, NULL);
 
 -- Get role IDs
 -- Note: We'll set up permissions programmatically in Rust to handle the dynamic IDs

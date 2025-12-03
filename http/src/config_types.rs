@@ -2,6 +2,12 @@
 //!
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
+use ave_bridge::{
+    HttpConfig,
+    auth::{
+        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
+    },
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
@@ -9,7 +15,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ConfigHttp {
     /// Core AVE configuration
-    pub ave_config: AveConfigHttp,
+    pub node: AveConfigHttp,
     /// Path to cryptographic keys
     pub keys_path: String,
     /// Prometheus metrics endpoint
@@ -18,25 +24,149 @@ pub struct ConfigHttp {
     pub logging: LoggingHttp,
     /// Event sink configuration
     pub sink: SinkConfigHttp,
+    pub auth: AuthConfigHttp,
+    pub http: HttpConfigHttp,
 }
 
 impl From<ave_bridge::config::Config> for ConfigHttp {
     fn from(value: ave_bridge::config::Config) -> Self {
         Self {
-            ave_config: AveConfigHttp::from(value.node),
+            node: AveConfigHttp::from(value.node),
             keys_path: value.keys_path.to_string_lossy().to_string(),
             prometheus: value.prometheus,
             logging: LoggingHttp::from(value.logging),
             sink: SinkConfigHttp::from(value.sink),
+            auth: AuthConfigHttp::from(value.auth),
+            http: HttpConfigHttp::from(value.http)
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct AuthConfigHttp {
+    pub enable: bool,
+    pub database_path: String,
+    pub superadmin: String,
+    pub api_key: ApiKeyConfigHttp,
+    pub lockout: LockoutConfigHttp,
+    pub rate_limit: RateLimitConfigHttp,
+    pub session: SessionConfigHttp,
+}
+
+impl From<AuthConfig> for AuthConfigHttp {
+    fn from(value: AuthConfig) -> Self {
+        Self {
+            enable: value.enable,
+            database_path: value.database_path.to_string_lossy().to_string(),
+            superadmin: value.superadmin,
+            api_key: ApiKeyConfigHttp::from(value.api_key),
+            lockout: LockoutConfigHttp::from(value.lockout),
+            rate_limit: RateLimitConfigHttp::from(value.rate_limit),
+            session: SessionConfigHttp::from(value.session),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ApiKeyConfigHttp {
+    pub default_ttl_seconds: i64,
+    pub max_keys_per_user: u32,
+}
+
+impl From<ApiKeyConfig> for ApiKeyConfigHttp {
+    fn from(value: ApiKeyConfig) -> Self {
+        Self {
+            default_ttl_seconds: value.default_ttl_seconds,
+            max_keys_per_user: value.max_keys_per_user,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct LockoutConfigHttp {
+    pub max_attempts: u32,
+    pub duration_seconds: i64,
+}
+
+impl From<LockoutConfig> for LockoutConfigHttp {
+    fn from(value: LockoutConfig) -> Self {
+        Self {
+            max_attempts: value.max_attempts,
+            duration_seconds: value.duration_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct RateLimitConfigHttp {
+    pub enable: bool,
+    pub window_seconds: i64,
+    pub max_requests: u32,
+    pub limit_by_key: bool,
+    pub limit_by_ip: bool,
+    pub cleanup_interval_seconds: i64,
+}
+
+impl From<RateLimitConfig> for RateLimitConfigHttp {
+    fn from(value: RateLimitConfig) -> Self {
+        Self {
+            enable: value.enable,
+            window_seconds: value.window_seconds,
+            max_requests: value.max_requests,
+            limit_by_key: value.limit_by_key,
+            limit_by_ip: value.limit_by_ip,
+            cleanup_interval_seconds: value.cleanup_interval_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct SessionConfigHttp {
+    pub audit_enable: bool,
+    pub audit_retention_days: u32,
+    pub log_all_requests: bool,
+}
+
+impl From<SessionConfig> for SessionConfigHttp {
+    fn from(value: SessionConfig) -> Self {
+        Self {
+            audit_enable: value.audit_enable,
+            audit_retention_days: value.audit_retention_days,
+            log_all_requests: value.log_all_requests,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct HttpConfigHttp {
+    pub http_address: String,
+    pub https_address: Option<String>,
+    pub https_cert_path: Option<String>,
+    pub https_private_key_path: Option<String>,
+    pub enable_doc: bool,
+}
+
+impl From<HttpConfig> for HttpConfigHttp {
+    fn from(value: HttpConfig) -> Self {
+        Self {
+            http_address: value.http_address,
+            https_address: value.https_address,
+            https_cert_path: value
+                .https_cert_path
+                .map(|x| x.to_string_lossy().to_string()),
+            https_private_key_path: value
+                .https_private_key_path
+                .map(|x| x.to_string_lossy().to_string()),
+            enable_doc: value.enable_doc,
         }
     }
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct AveConfigHttp {
-    /// Keypair algorithm (Ed25519, Secp256k1)
+    /// Keypair algorithm
     pub keypair_algorithm: String,
-    /// Hash algorithm (Blake3, SHA2_256, SHA2_512, SHA3_256, SHA3_512)
+    /// Hash algorithm
     pub hash_algorithm: String,
     /// AVE database path
     pub ave_db: String,
@@ -93,7 +223,11 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
             node_type: format!("{:?}", value.node_type),
             listen_addresses: value.listen_addresses,
             external_addresses: value.external_addresses,
-            boot_nodes: value.boot_nodes.into_iter().map(RoutingNodeHttp::from).collect(),
+            boot_nodes: value
+                .boot_nodes
+                .into_iter()
+                .map(RoutingNodeHttp::from)
+                .collect(),
             tell: TellConfigHttp::from(value.tell),
             req_res: ReqResConfigHttp::from(value.req_res),
             routing: RoutingConfigHttp::from(value.routing),
@@ -157,10 +291,13 @@ impl From<ave_bridge::RoutingConfig> for RoutingConfigHttp {
         Self {
             dht_random_walk: value.get_dht_random_walk(),
             discovery_only_if_under_num: value.get_discovery_limit(),
-            allow_private_address_in_dht: value.get_allow_private_address_in_dht(),
+            allow_private_address_in_dht: value
+                .get_allow_private_address_in_dht(),
             allow_dns_address_in_dht: value.get_allow_dns_address_in_dht(),
-            allow_loop_back_address_in_dht: value.get_allow_loop_back_address_in_dht(),
-            kademlia_disjoint_query_paths: value.get_kademlia_disjoint_query_paths(),
+            allow_loop_back_address_in_dht: value
+                .get_allow_loop_back_address_in_dht(),
+            kademlia_disjoint_query_paths: value
+                .get_kademlia_disjoint_query_paths(),
         }
     }
 }
@@ -302,11 +439,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
     fn from(value: ave_bridge::SinkServer) -> Self {
         Self {
             server: value.server,
-            events: value
-                .events
-                .into_iter()
-                .map(|e| e.to_string())
-                .collect(),
+            events: value.events.into_iter().map(|e| e.to_string()).collect(),
             url: value.url,
             auth: value.auth,
         }

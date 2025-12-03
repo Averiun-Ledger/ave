@@ -9,9 +9,14 @@ export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 
 DOCKER_USERNAME="averiun"
 DOCKER_REPO="ave-http"
-TAG_ARRAY=("0.7.5-sqlite" "0.7.5-rocksdb")
-DOCKERFILE_ARRAY=("./ave/http/docker/Dockerfile.sqlite" "./ave/http/docker/Dockerfile.rocksdb")
-FEATURES_ARRAY=("ext-sqlite sqlite prometheus" "ext-sqlite rocksdb prometheus")
+PROD_TAG_ARRAY=("0.7.6-sqlite" "0.7.6-rocksdb")
+PROD_DOCKERFILE_ARRAY=("./ave/http/docker/Dockerfile.sqlite" "./ave/http/docker/Dockerfile.rocksdb")
+PROD_FEATURES_ARRAY=("ext-sqlite sqlite prometheus" "ext-sqlite rocksdb prometheus")
+
+# Arrays that will be used for the current build
+TAG_ARRAY=("${PROD_TAG_ARRAY[@]}")
+DOCKERFILE_ARRAY=("${PROD_DOCKERFILE_ARRAY[@]}")
+FEATURES_ARRAY=("${PROD_FEATURES_ARRAY[@]}")
 
 # Ask for environment
 echo "Build environment selection:"
@@ -92,15 +97,15 @@ if [ "$ENVIRONMENT" = "development" ]; then
     FEATURES_ARRAY=()
 
     if [ "$BUILD_SQLITE" = true ]; then
-        TAG_ARRAY+=("0.7.4-sqlite-prometheus-test")
-        DOCKERFILE_ARRAY+=("./ave/http/docker/Dockerfile.sqlite")
-        FEATURES_ARRAY+=("ext-sqlite sqlite prometheus")
+        TAG_ARRAY+=("${PROD_TAG_ARRAY[0]}-test")
+        DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[0]}")
+        FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[0]}")
     fi
 
     if [ "$BUILD_ROCKSDB" = true ]; then
-        TAG_ARRAY+=("0.7.4-rocksdb-prometheus-test")
-        DOCKERFILE_ARRAY+=("./ave/http/docker/Dockerfile.rocksdb")
-        FEATURES_ARRAY+=("ext-sqlite rocksdb prometheus")
+        TAG_ARRAY+=("${PROD_TAG_ARRAY[1]}-test")
+        DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[1]}")
+        FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[1]}")
     fi
 
     SKIP_PUSH=true

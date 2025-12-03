@@ -3,8 +3,7 @@
 // This module provides database operations for API keys
 
 use super::crypto::{
-    extract_key_prefix, generate_api_key, generate_api_key_with_prefix,
-    hash_api_key,
+    extract_key_prefix, generate_api_key, hash_api_key,
 };
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
@@ -57,7 +56,7 @@ impl AuthDatabase {
         &self,
         key_id: i64,
     ) -> Result<ApiKeyInfo, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_api_key_info_internal(&conn, key_id)
     }
 
@@ -67,10 +66,9 @@ impl AuthDatabase {
         user_id: i64,
         name: Option<&str>,
         description: Option<&str>,
-        custom_prefix: Option<&str>,
         expires_in_seconds: Option<i64>,
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if user exists and is active
         let user = AuthDatabase::get_user_by_id_internal(&conn, user_id)?;
@@ -99,16 +97,7 @@ impl AuthDatabase {
         }
 
         // Generate API key
-        let api_key = if let Some(prefix) = custom_prefix {
-            if !self.config.api_key.allow_custom_prefix {
-                return Err(DatabaseError::ValidationError(
-                    "Custom prefixes are not allowed".to_string(),
-                ));
-            }
-            generate_api_key_with_prefix(prefix)
-        } else {
-            generate_api_key()
-        };
+        let api_key = generate_api_key();
 
         // Extract visible prefix
         let key_prefix = extract_key_prefix(&api_key);
@@ -118,28 +107,25 @@ impl AuthDatabase {
 
         // Calculate expiration
         let now = Self::now();
-        let expires_at = if let Some(ttl) = expires_in_seconds {
-            if ttl == 0 {
-                None // 0 means never expires
-            } else {
-                Some(now + ttl)
-            }
-        } else if self.config.api_key.default_ttl_seconds > 0 {
-            Some(now + self.config.api_key.default_ttl_seconds)
-        } else {
-            // Check role default TTL
-            let roles = AuthDatabase::get_user_roles_internal(&conn, user_id)?;
-            let mut role_ttl = None;
-            for role_name in &roles {
-                if let Ok(role) = AuthDatabase::get_role_by_name_internal(&conn, role_name) {
-                    if let Some(ttl) = role.default_ttl_seconds {
-                        role_ttl = Some(ttl);
-                        break;
-                    }
+        let config_ttl = self.config.api_key.default_ttl_seconds;
+        let effective_ttl = match expires_in_seconds {
+            Some(ttl) if ttl > 0 => {
+                if config_ttl > 0 {
+                    Some(std::cmp::min(ttl, config_ttl))
+                } else {
+                    Some(ttl)
                 }
             }
-            role_ttl.map(|ttl| now + ttl)
+            Some(0) | None => {
+                if config_ttl > 0 {
+                    Some(config_ttl)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
+        let expires_at = effective_ttl.map(|ttl| now + ttl);
 
         // Insert API key
         conn.execute(
@@ -162,7 +148,7 @@ impl AuthDatabase {
         user_id: i64,
         include_revoked: bool,
     ) -> Result<Vec<ApiKeyInfo>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
@@ -216,7 +202,7 @@ impl AuthDatabase {
         &self,
         include_revoked: bool,
     ) -> Result<Vec<ApiKeyInfo>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
@@ -271,7 +257,7 @@ impl AuthDatabase {
         revoked_by: Option<i64>,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let now = Self::now();
 
@@ -310,7 +296,7 @@ impl AuthDatabase {
         &self,
         api_key: &str,
     ) -> Result<AuthContext, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let key_hash = hash_api_key(api_key);
 
@@ -401,7 +387,7 @@ impl AuthDatabase {
         key_id: i64,
         ip_address: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let now = Self::now();
 
@@ -415,9 +401,20 @@ impl AuthDatabase {
 
     /// Delete expired API keys
     pub fn cleanup_expired_api_keys(&self) -> Result<usize, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let now = Self::now();
+
+        // If a default TTL is configured, backfill expires_at for legacy keys
+        if self.config.api_key.default_ttl_seconds > 0 {
+            conn.execute(
+                "UPDATE api_keys
+                 SET expires_at = created_at + ?1
+                 WHERE expires_at IS NULL AND revoked = 0",
+                params![self.config.api_key.default_ttl_seconds],
+            )
+            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        }
 
         let deleted = conn
             .execute(

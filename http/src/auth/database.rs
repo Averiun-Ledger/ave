@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, params};
 use std::{
     fs,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use thiserror::Error;
 use tracing::{debug, error, info};
@@ -77,6 +77,15 @@ pub struct AuthDatabase {
 }
 
 impl AuthDatabase {
+    /// Get a locked database connection with error handling
+    pub(crate) fn lock_conn(
+        &self,
+    ) -> Result<MutexGuard<'_, Connection>, DatabaseError> {
+        self.connection
+            .lock()
+            .map_err(|e| DatabaseError::ConnectionError(format!("DB lock poisoned: {}", e)))
+    }
+
     /// Create a new AuthDatabase instance
     ///
     /// This will:
@@ -124,7 +133,7 @@ impl AuthDatabase {
     pub fn run_migrations(&self) -> Result<(), DatabaseError> {
         info!("Running database migrations...");
 
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Read and execute migration files
         let migration_001 =
@@ -151,7 +160,7 @@ impl AuthDatabase {
 
     /// Bootstrap superadmin account on first run
     pub fn bootstrap_superadmin(&self, password: &str) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if any users exist
         let user_count: i64 = conn
@@ -230,6 +239,12 @@ impl AuthDatabase {
     pub(crate) fn now() -> i64 {
         time::OffsetDateTime::now_utc().unix_timestamp()
     }
+
+    /// Override default API key TTL on an existing instance (used for tests/config reloads)
+    #[allow(dead_code)] // primarily used in tests / config reload scenarios
+    pub fn set_default_api_key_ttl(&mut self, ttl: i64) {
+        Arc::make_mut(&mut self.config).api_key.default_ttl_seconds = ttl;
+    }
 }
 
 // =============================================================================
@@ -246,7 +261,7 @@ impl AuthDatabase {
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
     ) -> Result<User, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if username already exists
         let exists: bool = conn
@@ -333,7 +348,7 @@ impl AuthDatabase {
 
     /// Get user by ID
     pub fn get_user_by_id(&self, user_id: i64) -> Result<User, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_user_by_id_internal(&conn, user_id)
     }
 
@@ -342,7 +357,7 @@ impl AuthDatabase {
         &self,
         include_inactive: bool,
     ) -> Result<Vec<UserInfo>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let query = if include_inactive {
             "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
@@ -401,7 +416,7 @@ impl AuthDatabase {
         password: Option<&str>,
         is_active: Option<bool>,
     ) -> Result<User, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Check if user exists
         let _ = Self::get_user_by_id_internal(&conn, user_id)?;
@@ -439,7 +454,7 @@ impl AuthDatabase {
 
     /// Delete user (soft delete)
     pub fn delete_user(&self, user_id: i64) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         conn.execute(
             "UPDATE users SET is_deleted = 1 WHERE id = ?1",
@@ -479,7 +494,7 @@ impl AuthDatabase {
         &self,
         user_id: i64,
     ) -> Result<Vec<String>, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
         Self::get_user_roles_internal(&conn, user_id)
     }
 
@@ -490,7 +505,7 @@ impl AuthDatabase {
         role_id: i64,
         assigned_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         conn.execute(
             "INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by)
@@ -499,15 +514,13 @@ impl AuthDatabase {
         )
         .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
-        // Revoke API keys if configured
-        if self.config.api_key.revoke_on_role_change {
+        // Revoke API keys
             Self::revoke_user_api_keys_internal(
                 &conn,
                 user_id,
                 assigned_by,
                 "Role changed",
             )?;
-        }
 
         Ok(())
     }
@@ -518,7 +531,7 @@ impl AuthDatabase {
         user_id: i64,
         role_id: i64,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         conn.execute(
             "DELETE FROM user_roles WHERE user_id = ?1 AND role_id = ?2",
@@ -526,16 +539,13 @@ impl AuthDatabase {
         )
         .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
 
-        // Revoke API keys if configured
-        if self.config.api_key.revoke_on_role_change {
+        // Revoke API keys
             Self::revoke_user_api_keys_internal(
                 &conn,
                 user_id,
                 None,
                 "Role changed",
             )?;
-        }
-
         Ok(())
     }
 
@@ -545,7 +555,7 @@ impl AuthDatabase {
         username: &str,
         password: &str,
     ) -> Result<User, DatabaseError> {
-        let conn = self.connection.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let user: User = conn
             .query_row(

@@ -32,13 +32,10 @@ pub fn create_test_db() -> AuthDatabase {
         api_key: ApiKeyConfig {
             default_ttl_seconds: 0,
             max_keys_per_user: 10,
-            allow_custom_prefix: false,
-            revoke_on_role_change: true,
         },
         lockout: LockoutConfig {
             max_attempts: 5,
             duration_seconds: 900,
-            reset_on_success: true,
         },
         rate_limit: RateLimitConfig {
             enable: true,
@@ -51,8 +48,6 @@ pub fn create_test_db() -> AuthDatabase {
         session: SessionConfig {
             audit_enable: true,
             audit_retention_days: 90,
-            log_success: true,
-            log_failures: true,
             log_all_requests: false,
         },
     };

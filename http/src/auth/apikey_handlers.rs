@@ -68,7 +68,6 @@ pub async fn create_api_key_for_user(
             user_id,
             req.name.as_deref(),
             req.description.as_deref(),
-            None, // No custom prefix for admin-created keys
             req.expires_in_seconds,
         )
         .map_err(db_error_to_response)?;
@@ -290,7 +289,6 @@ pub async fn rotate_api_key(
             req.description
                 .as_deref()
                 .or(existing.description.as_deref()),
-            None,
             req.expires_in_seconds,
         )
         .map_err(db_error_to_response)?;
@@ -347,7 +345,6 @@ pub async fn create_my_api_key(
             auth_ctx.user_id,
             req.name.as_deref(),
             req.description.as_deref(),
-            None,
             req.expires_in_seconds,
         )
         .map_err(db_error_to_response)?;

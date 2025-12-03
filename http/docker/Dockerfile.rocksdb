@@ -38,6 +38,7 @@ COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
 
 # Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
+COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
 COPY ./ave/bridge/src ./ave/bridge/src
@@ -113,6 +114,7 @@ COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
 
 # Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
+COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
 COPY ./ave/bridge/src ./ave/bridge/src

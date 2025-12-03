@@ -1,9 +1,7 @@
 use crate::{
     auth::{
-        admin_handlers,
-        admin_handlers::ListUsersQuery,
-        apikey_handlers,
-        apikey_handlers::ListApiKeysQuery,
+        admin_handlers::{self, ListUsersQuery},
+        apikey_handlers::{self, ListApiKeysQuery},
         login_handler,
         models::{
             ApiKeyInfo, AuditLog, AuditLogQuery, CreateApiKeyRequest,
@@ -13,16 +11,17 @@ use crate::{
             UpdateRoleRequest, UpdateSystemConfigRequest, UpdateUserRequest,
             UserInfo,
         },
-        system_handlers,
         system_handlers::{
-            AuditStatsQuery, DetailedPermissionsResponse, RolePermissionsInfo,
+            self, AuditStatsQuery, DetailedPermissionsResponse,
+            RolePermissionsInfo,
         },
     },
     config_types::{
-        AveConfigHttp, ConfigHttp, ControlListConfigHttp, LoggingHttp,
-        LoggingOutputHttp, NetworkConfigHttp, ReqResConfigHttp,
-        RoutingConfigHttp, RoutingNodeHttp, SinkConfigHttp, SinkServerHttp,
-        TellConfigHttp,
+        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, ConfigHttp,
+        ControlListConfigHttp, HttpConfigHttp, LockoutConfigHttp, LoggingHttp,
+        LoggingOutputHttp, NetworkConfigHttp, RateLimitConfigHttp,
+        ReqResConfigHttp, RoutingConfigHttp, RoutingNodeHttp,
+        SessionConfigHttp, SinkConfigHttp, SinkServerHttp, TellConfigHttp,
     },
     server::*,
 };
@@ -260,6 +259,12 @@ use utoipa::OpenApi;
 
             // Configuration schemas
             ConfigHttp,
+            LockoutConfigHttp,
+            ApiKeyConfigHttp,
+            AuthConfigHttp,
+            RateLimitConfigHttp,
+            SessionConfigHttp,
+            HttpConfigHttp,
             AveConfigHttp,
             NetworkConfigHttp,
             RoutingNodeHttp,
