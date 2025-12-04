@@ -27,6 +27,7 @@ pub mod system_handlers;
 pub use database::AuthDatabase;
 
 const MIN_LENGTH: usize = 8;
+const MAX_LENGTH: usize = 20;
 const REQUIRE_UPPERCASE: bool = true;
 const REQUIRE_LOWERCASE: bool = true;
 const REQUIRE_DIGIT: bool = true;
@@ -40,6 +41,13 @@ pub fn validate_password(
         return Err(format!(
             "Password must be at least {} characters long",
             MIN_LENGTH
+        ));
+    }
+
+    if password.len() > MAX_LENGTH {
+        return Err(format!(
+            "Password must be at most {} characters long",
+            MAX_LENGTH
         ));
     }
 

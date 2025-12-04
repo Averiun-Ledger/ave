@@ -22,7 +22,7 @@ impl AuthDatabase {
 
         conn.query_row(
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
@@ -36,13 +36,14 @@ impl AuthDatabase {
                     key_prefix: row.get(3)?,
                     name: row.get(4)?,
                     description: row.get(5)?,
-                    created_at: row.get(6)?,
-                    expires_at: row.get(7)?,
-                    revoked: row.get(8)?,
-                    revoked_at: row.get(9)?,
-                    revoked_reason: row.get(10)?,
-                    last_used_at: row.get(11)?,
-                    last_used_ip: row.get(12)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             },
         )
@@ -67,6 +68,7 @@ impl AuthDatabase {
         name: Option<&str>,
         description: Option<&str>,
         expires_in_seconds: Option<i64>,
+        is_management: bool,
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -78,8 +80,8 @@ impl AuthDatabase {
             ));
         }
 
-        // Check max keys per user limit
-        if self.config.api_key.max_keys_per_user > 0 {
+        // Check max keys per user limit (only for service keys)
+        if !is_management && self.config.api_key.max_keys_per_user > 0 {
             let key_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM api_keys WHERE user_id = ?1 AND revoked = 0",
@@ -93,6 +95,41 @@ impl AuthDatabase {
                     "Maximum number of API keys ({}) reached for this user",
                     self.config.api_key.max_keys_per_user
                 )));
+            }
+        }
+
+        // Enforce a single active management key per user
+        if is_management {
+            conn.execute(
+                "UPDATE api_keys
+                 SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = 'rotated management key'
+                 WHERE user_id = ?3 AND is_management = 1 AND revoked = 0",
+                params![Self::now(), Some(user_id), user_id],
+            )
+            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        }
+
+        // Enforce unique active name per user for service keys
+        if !is_management && name.unwrap_or_default().is_empty() {
+            return Err(DatabaseError::ValidationError(
+                "API key name is required".to_string(),
+            ));
+        }
+
+        if !is_management {
+            let exists: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
+                    params![user_id, name.unwrap_or_default()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+            if exists.is_some() {
+                return Err(DatabaseError::DuplicateError(
+                    "API key name already in use for this user".to_string(),
+                ));
             }
         }
 
@@ -129,9 +166,17 @@ impl AuthDatabase {
 
         // Insert API key
         conn.execute(
-            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![user_id, key_hash, key_prefix, name, description, expires_at],
+            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at, is_management)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                user_id,
+                key_hash,
+                key_prefix,
+                name.unwrap_or_default(),
+                description,
+                expires_at,
+                is_management
+            ],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let key_id = conn.last_insert_rowid();
@@ -152,7 +197,7 @@ impl AuthDatabase {
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
@@ -160,7 +205,7 @@ impl AuthDatabase {
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
@@ -181,13 +226,14 @@ impl AuthDatabase {
                     key_prefix: row.get(3)?,
                     name: row.get(4)?,
                     description: row.get(5)?,
-                    created_at: row.get(6)?,
-                    expires_at: row.get(7)?,
-                    revoked: row.get(8)?,
-                    revoked_at: row.get(9)?,
-                    revoked_reason: row.get(10)?,
-                    last_used_at: row.get(11)?,
-                    last_used_ip: row.get(12)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -195,6 +241,31 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         Ok(keys)
+    }
+
+    /// Get an active API key by name for a user
+    pub fn get_active_api_key_by_name(
+        &self,
+        user_id: i64,
+        name: &str,
+    ) -> Result<ApiKeyInfo, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let key_id: i64 = conn
+            .query_row(
+                "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
+                params![user_id, name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .ok_or_else(|| {
+                DatabaseError::NotFoundError(
+                    "API key not found for this user/name".into(),
+                )
+            })?;
+
+        Self::get_api_key_info_internal(&conn, key_id)
     }
 
     /// List all API keys (admin)
@@ -206,14 +277,14 @@ impl AuthDatabase {
 
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
@@ -234,13 +305,14 @@ impl AuthDatabase {
                     key_prefix: row.get(3)?,
                     name: row.get(4)?,
                     description: row.get(5)?,
-                    created_at: row.get(6)?,
-                    expires_at: row.get(7)?,
-                    revoked: row.get(8)?,
-                    revoked_at: row.get(9)?,
-                    revoked_reason: row.get(10)?,
-                    last_used_at: row.get(11)?,
-                    last_used_ip: row.get(12)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -301,18 +373,27 @@ impl AuthDatabase {
         let key_hash = hash_api_key(api_key);
 
         // Get API key from database
-        let (key_id, user_id, revoked, expires_at): (
+        let (key_id, user_id, revoked, expires_at, is_management): (
             i64,
             i64,
             bool,
             Option<i64>,
+            bool,
         ) = conn
             .query_row(
-                "SELECT id, user_id, revoked, expires_at
+                "SELECT id, user_id, revoked, expires_at, is_management
                  FROM api_keys
                  WHERE key_hash = ?1",
                 params![key_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -368,7 +449,13 @@ impl AuthDatabase {
 
         // Get effective permissions - need to drop lock first
         drop(conn);
-        let permissions = self.get_effective_permissions(user_id)?;
+        let mut permissions = self.get_effective_permissions(user_id)?;
+
+        // Service keys cannot carry admin/panel permissions
+        if !is_management {
+            let admin_resources = ["users", "roles", "permissions", "api_keys", "audit"];
+            permissions.retain(|p| !admin_resources.contains(&p.resource.as_str()));
+        }
 
         Ok(AuthContext {
             user_id,
@@ -377,6 +464,7 @@ impl AuthDatabase {
             roles,
             permissions,
             api_key_id: key_id,
+            is_management_key: is_management,
             ip_address: None,
         })
     }

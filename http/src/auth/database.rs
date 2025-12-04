@@ -63,6 +63,9 @@ pub enum DatabaseError {
 
     #[error("Duplicate: {0}")]
     DuplicateError(String),
+
+    #[error("Password change required: {0}")]
+    PasswordChangeRequired(String),
 }
 
 // =============================================================================
@@ -126,6 +129,9 @@ impl AuthDatabase {
         // Bootstrap superadmin if needed
         db.bootstrap_superadmin(password)?;
 
+        // Sync persisted system_config with runtime configuration values
+        db.sync_system_config_with_runtime()?;
+
         Ok(db)
     }
 
@@ -155,6 +161,52 @@ impl AuthDatabase {
         })?;
 
         info!("Database migrations completed successfully");
+        Ok(())
+    }
+
+    /// Update system_config table with current runtime configuration values
+    fn sync_system_config_with_runtime(&self) -> Result<(), DatabaseError> {
+        let conn = self.lock_conn()?;
+        let cfg = self.config.clone();
+
+        let updates: &[(&str, String, &str)] = &[
+            (
+                "api_key_default_ttl_seconds",
+                cfg.api_key.default_ttl_seconds.to_string(),
+                "Default API key TTL in seconds",
+            ),
+            (
+                "max_login_attempts",
+                cfg.lockout.max_attempts.to_string(),
+                "Maximum failed login attempts before account lockout",
+            ),
+            (
+                "lockout_duration_seconds",
+                cfg.lockout.duration_seconds.to_string(),
+                "Account lockout duration in seconds",
+            ),
+            (
+                "rate_limit_window_seconds",
+                cfg.rate_limit.window_seconds.to_string(),
+                "Rate limit time window in seconds",
+            ),
+            (
+                "rate_limit_max_requests",
+                cfg.rate_limit.max_requests.to_string(),
+                "Maximum requests per window",
+            ),
+        ];
+
+        for (key, value, desc) in updates {
+            conn.execute(
+                "INSERT INTO system_config (key, value, description)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = COALESCE(system_config.description, excluded.description)",
+                params![key, value, desc],
+            )
+            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -252,7 +304,7 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
-    /// Create a new user
+    /// Create a new user (defaults to active)
     pub fn create_user(
         &self,
         username: &str,
@@ -261,9 +313,34 @@ impl AuthDatabase {
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
     ) -> Result<User, DatabaseError> {
+        self.create_user_with_active(
+            username,
+            password,
+            is_superadmin,
+            true,
+            role_ids,
+            created_by,
+        )
+    }
+
+    /// Create a new user with explicit active flag
+    pub fn create_user_with_active(
+        &self,
+        username: &str,
+        password: &str,
+        is_superadmin: bool,
+        is_active: bool,
+        role_ids: Option<Vec<i64>>,
+        created_by: Option<i64>,
+    ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
         // Check if username already exists
+        if username.trim().is_empty() {
+            return Err(DatabaseError::ValidationError(
+                "Username cannot be empty".to_string(),
+            ));
+        }
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1 AND is_deleted = 0)",
@@ -293,9 +370,9 @@ impl AuthDatabase {
 
         // Insert user
         conn.execute(
-            "INSERT INTO users (username, password_hash, is_superadmin, is_active)
-             VALUES (?1, ?2, ?3, 1)",
-            params![username, password_hash, is_superadmin],
+            "INSERT INTO users (username, password_hash, is_superadmin, is_active, must_change_password)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            params![username, password_hash, is_superadmin, is_active],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
@@ -321,7 +398,7 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         conn.query_row(
             "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
-                    failed_login_attempts, locked_until, last_login_at, created_at, updated_at
+                    must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
              FROM users
              WHERE id = ?1 AND is_deleted = 0",
             params![user_id],
@@ -333,11 +410,12 @@ impl AuthDatabase {
                     is_superadmin: row.get(3)?,
                     is_active: row.get(4)?,
                     is_deleted: row.get(5)?,
-                    failed_login_attempts: row.get(6)?,
-                    locked_until: row.get(7)?,
-                    last_login_at: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    must_change_password: row.get(6)?,
+                    failed_login_attempts: row.get(7)?,
+                    locked_until: row.get(8)?,
+                    last_login_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
                 })
             },
         )
@@ -361,13 +439,13 @@ impl AuthDatabase {
 
         let query = if include_inactive {
             "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
-                    u.locked_until, u.last_login_at, u.created_at
+                    u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0
              ORDER BY u.username"
         } else {
             "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
-                    u.locked_until, u.last_login_at, u.created_at
+                    u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0 AND u.is_active = 1
              ORDER BY u.username"
@@ -391,6 +469,7 @@ impl AuthDatabase {
                         locked_until: row.get(5)?,
                         last_login_at: row.get(6)?,
                         created_at: row.get(7)?,
+                        must_change_password: row.get(8)?,
                         roles: Vec::new(), // Will be filled below
                     },
                 ))
@@ -434,7 +513,7 @@ impl AuthDatabase {
             })?;
 
             conn.execute(
-                "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                "UPDATE users SET password_hash = ?1, must_change_password = 0, failed_login_attempts = 0, locked_until = NULL WHERE id = ?2",
                 params![password_hash, user_id],
             )
             .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
@@ -560,7 +639,7 @@ impl AuthDatabase {
         let user: User = conn
             .query_row(
                 "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
-                        failed_login_attempts, locked_until, last_login_at, created_at, updated_at
+                        must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
                  FROM users
                  WHERE username = ?1 AND is_deleted = 0",
                 params![username],
@@ -572,11 +651,12 @@ impl AuthDatabase {
                         is_superadmin: row.get(3)?,
                         is_active: row.get(4)?,
                         is_deleted: row.get(5)?,
-                        failed_login_attempts: row.get(6)?,
-                        locked_until: row.get(7)?,
-                        last_login_at: row.get(8)?,
-                        created_at: row.get(9)?,
-                        updated_at: row.get(10)?,
+                        must_change_password: row.get(6)?,
+                        failed_login_attempts: row.get(7)?,
+                        locked_until: row.get(8)?,
+                        last_login_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 },
             )
@@ -641,6 +721,12 @@ impl AuthDatabase {
         )
         .ok();
 
+        if user.must_change_password {
+            return Err(DatabaseError::PasswordChangeRequired(
+                "Password change required".to_string(),
+            ));
+        }
+
         Ok(user)
     }
 
@@ -653,5 +739,133 @@ impl AuthDatabase {
         // This method is already implemented in database_ext.rs via get_user_effective_permissions
         // We'll use that
         self.get_user_effective_permissions(user_id)
+    }
+
+    /// Change password providing current credentials (for forced reset flow)
+    pub fn change_password_with_credentials(
+        &self,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<User, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let mut user = conn
+            .query_row(
+                "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+                        must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
+                 FROM users
+                 WHERE username = ?1 AND is_deleted = 0",
+                params![username],
+                |row| {
+                    Ok(User {
+                        id: row.get(0)?,
+                        username: row.get(1)?,
+                        password_hash: row.get(2)?,
+                        is_superadmin: row.get(3)?,
+                        is_active: row.get(4)?,
+                        is_deleted: row.get(5)?,
+                        must_change_password: row.get(6)?,
+                        failed_login_attempts: row.get(7)?,
+                        locked_until: row.get(8)?,
+                        last_login_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
+                    })
+                },
+            )
+            .map_err(|_| {
+                DatabaseError::PermissionDenied(
+                    "Invalid username or password".to_string(),
+                )
+            })?;
+
+        if !user.is_active {
+            return Err(DatabaseError::PermissionDenied(
+                "Account is disabled".to_string(),
+            ));
+        }
+        if let Some(locked_until) = user.locked_until {
+            if locked_until > Self::now() {
+                return Err(DatabaseError::AccountLocked(
+                    "Account is temporarily locked".to_string(),
+                ));
+            }
+        }
+
+        let password_valid =
+            super::crypto::verify_password(current_password, &user.password_hash)
+                .map_err(|e| {
+                    DatabaseError::CryptoError(format!(
+                        "Password verification failed: {}",
+                        e
+                    ))
+                })?;
+
+        if !password_valid {
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
+        }
+
+        // Validate new password
+        validate_password(new_password)
+            .map_err(DatabaseError::ValidationError)?;
+
+        let password_hash = hash_password(new_password).map_err(|e| {
+            DatabaseError::CryptoError(format!(
+                "Failed to hash password: {}",
+                e
+            ))
+        })?;
+
+        conn.execute(
+            "UPDATE users
+             SET password_hash = ?1, must_change_password = 0, failed_login_attempts = 0, locked_until = NULL, updated_at = strftime('%s','now')
+             WHERE id = ?2",
+            params![password_hash, user.id],
+        )
+        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+        // Refresh user
+        user.must_change_password = false;
+        user.password_hash = password_hash;
+        user.failed_login_attempts = 0;
+        user.locked_until = None;
+
+        Ok(user)
+    }
+
+    /// Admin resets a user's password (forces change on next login)
+    pub fn admin_reset_password(
+        &self,
+        user_id: i64,
+        new_password: &str,
+    ) -> Result<User, DatabaseError> {
+        // Validate password
+        validate_password(new_password)
+            .map_err(DatabaseError::ValidationError)?;
+
+        let password_hash = hash_password(new_password).map_err(|e| {
+            DatabaseError::CryptoError(format!(
+                "Failed to hash password: {}",
+                e
+            ))
+        })?;
+
+        let conn = self.lock_conn()?;
+
+        // Ensure user exists
+        let _ = Self::get_user_by_id_internal(&conn, user_id)?;
+
+        conn.execute(
+            "UPDATE users
+             SET password_hash = ?1, must_change_password = 1, failed_login_attempts = 0, locked_until = NULL, updated_at = strftime('%s','now')
+             WHERE id = ?2",
+            params![password_hash, user_id],
+        )
+        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+        Self::get_user_by_id_internal(&conn, user_id)
     }
 }

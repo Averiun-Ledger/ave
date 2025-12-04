@@ -38,6 +38,7 @@ pub struct User {
     pub is_superadmin: bool,
     pub is_active: bool,
     pub is_deleted: bool,
+    pub must_change_password: bool,
     pub failed_login_attempts: i32,
     pub locked_until: Option<i64>,
     pub last_login_at: Option<i64>,
@@ -55,6 +56,8 @@ pub struct UserInfo {
     pub is_superadmin: bool,
     /// Is account active
     pub is_active: bool,
+    /// Must change password on next login
+    pub must_change_password: bool,
     /// Failed login attempts
     pub failed_login_attempts: i32,
     /// Account locked until (Unix timestamp)
@@ -72,6 +75,7 @@ pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
     pub is_superadmin: Option<bool>,
+    pub is_active: Option<bool>,
     pub role_ids: Option<Vec<i64>>,
 }
 
@@ -89,7 +93,7 @@ pub struct UpdateUserRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Role {
     pub id: i64,
-    pub name: String,
+    pub name: Option<String>,
     pub description: Option<String>,
     pub default_ttl_seconds: Option<i64>,
     pub is_system: bool,
@@ -172,8 +176,9 @@ pub struct ApiKeyInfo {
     pub user_id: i64,
     pub username: String,
     pub key_prefix: String,
-    pub name: Option<String>,
+    pub name: String,
     pub description: Option<String>,
+    pub is_management: bool,
     pub created_at: i64,
     pub expires_at: Option<i64>,
     pub revoked: bool,
@@ -185,7 +190,7 @@ pub struct ApiKeyInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateApiKeyRequest {
-    pub name: Option<String>,
+    pub name: String,
     pub description: Option<String>,
     pub expires_in_seconds: Option<i64>,
 }
@@ -274,6 +279,7 @@ pub struct AuthContext {
     pub roles: Vec<String>,
     pub permissions: Vec<Permission>,
     pub api_key_id: i64,
+    pub is_management_key: bool,
     pub ip_address: Option<String>,
 }
 

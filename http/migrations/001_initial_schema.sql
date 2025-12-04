@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     is_superadmin BOOLEAN NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT 1,
     is_deleted BOOLEAN NOT NULL DEFAULT 0,
+    must_change_password BOOLEAN NOT NULL DEFAULT 0,
     failed_login_attempts INTEGER NOT NULL DEFAULT 0,
     locked_until INTEGER, -- Unix timestamp when account unlock, NULL if not locked
     last_login_at INTEGER, -- Unix timestamp
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE INDEX idx_users_username ON users(username) WHERE is_deleted = 0;
-CREATE INDEX idx_users_active ON users(is_active) WHERE is_deleted = 0;
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE is_deleted = 0;
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active) WHERE is_deleted = 0;
 
 -- =============================================================================
 -- ROLES TABLE
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS roles (
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE INDEX idx_roles_name ON roles(name) WHERE is_deleted = 0;
+CREATE INDEX IF NOT EXISTS idx_roles_name ON roles(name) WHERE is_deleted = 0;
 
 -- =============================================================================
 -- USER_ROLES TABLE (Many-to-Many relationship)
@@ -58,8 +59,8 @@ CREATE TABLE IF NOT EXISTS user_roles (
     UNIQUE(user_id, role_id)
 );
 
-CREATE INDEX idx_user_roles_user ON user_roles(user_id);
-CREATE INDEX idx_user_roles_role ON user_roles(role_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_id);
 
 -- =============================================================================
 -- RESOURCES TABLE
@@ -73,7 +74,7 @@ CREATE TABLE IF NOT EXISTS resources (
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE INDEX idx_resources_name ON resources(name);
+CREATE INDEX IF NOT EXISTS idx_resources_name ON resources(name);
 
 -- =============================================================================
 -- ACTIONS TABLE
@@ -87,7 +88,7 @@ CREATE TABLE IF NOT EXISTS actions (
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE INDEX idx_actions_name ON actions(name);
+CREATE INDEX IF NOT EXISTS idx_actions_name ON actions(name);
 
 -- =============================================================================
 -- ROLE_PERMISSIONS TABLE
@@ -106,9 +107,9 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     UNIQUE(role_id, resource_id, action_id)
 );
 
-CREATE INDEX idx_role_permissions_role ON role_permissions(role_id);
-CREATE INDEX idx_role_permissions_resource ON role_permissions(resource_id);
-CREATE INDEX idx_role_permissions_action ON role_permissions(action_id);
+CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id);
+CREATE INDEX IF NOT EXISTS idx_role_permissions_resource ON role_permissions(resource_id);
+CREATE INDEX IF NOT EXISTS idx_role_permissions_action ON role_permissions(action_id);
 
 -- =============================================================================
 -- USER_PERMISSIONS TABLE
@@ -129,9 +130,9 @@ CREATE TABLE IF NOT EXISTS user_permissions (
     UNIQUE(user_id, resource_id, action_id)
 );
 
-CREATE INDEX idx_user_permissions_user ON user_permissions(user_id);
-CREATE INDEX idx_user_permissions_resource ON user_permissions(resource_id);
-CREATE INDEX idx_user_permissions_action ON user_permissions(action_id);
+CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_permissions_resource ON user_permissions(resource_id);
+CREATE INDEX IF NOT EXISTS idx_user_permissions_action ON user_permissions(action_id);
 
 -- =============================================================================
 -- API_KEYS TABLE
@@ -141,8 +142,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     user_id INTEGER NOT NULL,
     key_hash TEXT NOT NULL UNIQUE, -- SHA-256 hash of the actual key
     key_prefix TEXT NOT NULL, -- First 8 chars for identification (e.g., "ave_v1_a")
-    name TEXT, -- User-friendly name for the key
+    name TEXT NOT NULL, -- User-friendly name for the key (required)
     description TEXT,
+    is_management BOOLEAN NOT NULL DEFAULT 0, -- 1 = login/management key, 0 = service key
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     expires_at INTEGER, -- Unix timestamp, NULL = no expiration
     revoked BOOLEAN NOT NULL DEFAULT 0,
@@ -156,10 +158,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
     FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
-CREATE INDEX idx_api_keys_user ON api_keys(user_id);
-CREATE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE revoked = 0;
-CREATE INDEX idx_api_keys_prefix ON api_keys(key_prefix);
-CREATE INDEX idx_api_keys_active ON api_keys(user_id, revoked, expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked = 0;
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(user_id, revoked, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_name_active ON api_keys(user_id, name) WHERE revoked = 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_management_active ON api_keys(user_id) WHERE revoked = 0 AND is_management = 1;
 
 -- =============================================================================
 -- AUDIT_LOGS TABLE
@@ -184,11 +188,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
 );
 
-CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp);
-CREATE INDEX idx_audit_logs_user ON audit_logs(user_id);
-CREATE INDEX idx_audit_logs_api_key ON audit_logs(api_key_id);
-CREATE INDEX idx_audit_logs_action_type ON audit_logs(action_type);
-CREATE INDEX idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_api_key ON audit_logs(api_key_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
 
 -- =============================================================================
 -- RATE_LIMITS TABLE
@@ -206,9 +210,9 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     UNIQUE(api_key_id, ip_address, endpoint, window_start)
 );
 
-CREATE INDEX idx_rate_limits_api_key ON rate_limits(api_key_id, window_start);
-CREATE INDEX idx_rate_limits_ip ON rate_limits(ip_address, window_start);
-CREATE INDEX idx_rate_limits_cleanup ON rate_limits(window_start);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_api_key ON rate_limits(api_key_id, window_start);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_ip ON rate_limits(ip_address, window_start);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_cleanup ON rate_limits(window_start);
 
 -- =============================================================================
 -- IP_ALLOWLIST TABLE
@@ -229,8 +233,8 @@ CREATE TABLE IF NOT EXISTS ip_restrictions (
     CHECK ((api_key_id IS NOT NULL AND role_id IS NULL) OR (api_key_id IS NULL AND role_id IS NOT NULL))
 );
 
-CREATE INDEX idx_ip_restrictions_api_key ON ip_restrictions(api_key_id);
-CREATE INDEX idx_ip_restrictions_role ON ip_restrictions(role_id);
+CREATE INDEX IF NOT EXISTS idx_ip_restrictions_api_key ON ip_restrictions(api_key_id);
+CREATE INDEX IF NOT EXISTS idx_ip_restrictions_role ON ip_restrictions(role_id);
 
 -- =============================================================================
 -- SYSTEM_CONFIG TABLE
@@ -249,10 +253,10 @@ CREATE TABLE IF NOT EXISTS system_config (
 INSERT OR IGNORE INTO system_config (key, value, description) VALUES
     ('read_only_mode', '0', 'When 1, only read operations are allowed'),
     ('max_login_attempts', '5', 'Maximum failed login attempts before account lockout'),
-    ('lockout_duration_seconds', '900', 'Account lockout duration in seconds (15 minutes)'),
+    ('lockout_duration_seconds', '900', 'Account lockout duration in seconds'),
     ('rate_limit_window_seconds', '60', 'Rate limit time window in seconds'),
     ('rate_limit_max_requests', '100', 'Maximum requests per window'),
-    ('api_key_default_ttl_seconds', '2592000', 'Default API key TTL in seconds (30 days)');
+    ('api_key_default_ttl_seconds', '2592000', 'Default API key TTL in seconds');
 
 -- =============================================================================
 -- INSERT SYSTEM RESOURCES

@@ -262,6 +262,7 @@ pub async fn get_me(
         username: user.username,
         is_superadmin: user.is_superadmin,
         is_active: user.is_active,
+        must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,

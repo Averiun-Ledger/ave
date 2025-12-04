@@ -79,6 +79,11 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         // Check if role already exists
+        if name.trim().is_empty() {
+            return Err(DatabaseError::ValidationError(
+                "Role name cannot be empty".to_string(),
+            ));
+        }
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM roles WHERE name = ?1 AND is_deleted = 0)",

@@ -145,6 +145,12 @@ mod tests {
         let db = common::create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.change_password_with_credentials(
+            "testuser",
+            "TestPass123!",
+            "TestPass123!",
+        )
+        .unwrap();
 
         let user = db.verify_credentials("testuser", "TestPass123!").unwrap();
         assert_eq!(user.username, "testuser");
@@ -181,6 +187,12 @@ mod tests {
         let db = common::create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.change_password_with_credentials(
+            "testuser",
+            "TestPass123!",
+            "TestPass123!",
+        )
+        .unwrap();
 
         // 2 failed attempts
         let _ = db.verify_credentials("testuser", "Wrong1");
@@ -209,7 +221,7 @@ mod tests {
 
         let role = db.create_role("editor", Some("Editor role"), None).unwrap();
 
-        assert_eq!(role.name, "editor");
+        assert_eq!(role.name.unwrap(), "editor");
         assert_eq!(role.description, Some("Editor role".to_string()));
     }
 
@@ -288,10 +300,12 @@ mod tests {
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
-        let (api_key, key_info) = db.create_api_key(user.id, Some("test_key"), None,  None).unwrap();
+        let (api_key, key_info) =
+            db.create_api_key(user.id, Some("test_key"), None, None, false)
+                .unwrap();
 
         assert!(!api_key.is_empty());
-        assert_eq!(key_info.name, Some("test_key".to_string()));
+        assert_eq!(key_info.name, "test_key".to_string());
         assert!(!key_info.revoked);
     }
 
@@ -300,7 +314,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("key_verify"), None, None, false)
+                .unwrap();
 
         let context = db.verify_api_key(&api_key).unwrap();
 
@@ -324,7 +340,9 @@ mod tests {
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
         // Create key with 1 second TTL
-        let (api_key, _) = db.create_api_key(user.id, None, None,  Some(1)).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("ttl1"), None, Some(1), false)
+                .unwrap();
 
         // Should work immediately
         assert!(db.verify_api_key(&api_key).is_ok());
@@ -351,11 +369,15 @@ mod tests {
             .unwrap();
 
         // No TTL provided -> should use system default
-        let (_, info1) = db.create_api_key(user.id, None, None, None).unwrap();
+        let (_, info1) =
+            db.create_api_key(user.id, Some("default1"), None, None, false)
+                .unwrap();
         assert_eq!(info1.expires_at, Some(info1.created_at + 100));
 
         // TTL = 0 provided -> should still use system default
-        let (_, info2) = db.create_api_key(user.id, None, None, Some(0)).unwrap();
+        let (_, info2) =
+            db.create_api_key(user.id, Some("default2"), None, Some(0), false)
+                .unwrap();
         assert_eq!(info2.expires_at, Some(info2.created_at + 100));
     }
 
@@ -374,7 +396,7 @@ mod tests {
             .unwrap();
 
         let (_, capped) = db
-            .create_api_key(user.id, None, None, Some(100))
+            .create_api_key(user.id, Some("capped"), None, Some(100), false)
             .unwrap();
         assert_eq!(capped.expires_at, Some(capped.created_at + 50));
 
@@ -391,7 +413,7 @@ mod tests {
             .unwrap();
 
         let (_, info) = db
-            .create_api_key(user.id, None, None, Some(30))
+            .create_api_key(user.id, Some("capped2"), None, Some(30), false)
             .unwrap();
         assert_eq!(info.expires_at, Some(info.created_at + 30));
     }
@@ -400,8 +422,11 @@ mod tests {
     fn test_revoke_api_key() {
         let db = common::create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false,  None,None).unwrap();
-        let (api_key, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let user =
+            db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let (api_key, key_info) =
+            db.create_api_key(user.id, Some("revoke"), None, None, false)
+                .unwrap();
 
         // Revoke the key
         db.revoke_api_key(key_info.id, None, None).unwrap();
@@ -417,8 +442,8 @@ mod tests {
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
-        db.create_api_key(user.id, Some("key1"), None,  None).unwrap();
-        db.create_api_key(user.id, Some("key2"), None,  None).unwrap();
+        db.create_api_key(user.id, Some("key1"), None, None, false).unwrap();
+        db.create_api_key(user.id, Some("key2"), None, None, false).unwrap();
 
         let keys = db.list_user_api_keys(user.id, false).unwrap();
 
@@ -429,8 +454,11 @@ mod tests {
     fn test_api_key_last_used_tracking() {
         let db = common::create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (api_key, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let user =
+            db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let (api_key, key_info) =
+            db.create_api_key(user.id, Some("tracking"), None, None, false)
+                .unwrap();
 
         assert!(key_info.last_used_at.is_none());
 
@@ -451,7 +479,9 @@ mod tests {
         let user =
             db.create_user("testuser", "TestPass123!", false, None, None)
                 .unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None, None).unwrap();
+        let (_, key_info) =
+            db.create_api_key(user.id, Some("perm_effective"), None, None, false)
+                .unwrap();
 
         // Verify no expiration was set
         let info = db.get_api_key_info(key_info.id).unwrap();
@@ -558,7 +588,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (_, key_info) =
+            db.create_api_key(user.id, Some("rate1"), None, None, false)
+                .unwrap();
 
         // Make 10 requests (well under limit of 100)
         for _ in 0..10 {
@@ -572,7 +604,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (_, key_info) =
+            db.create_api_key(user.id, Some("rate2"), None, None, false)
+                .unwrap();
 
         // Hit rate limit (100 requests)
         for _ in 0..100 {
@@ -601,9 +635,9 @@ mod tests {
             .create_user("testuser", "TestPass123!", false, None, None)
             .unwrap();
         let (_, key1) =
-            db.create_api_key(user.id, None, None, None).unwrap();
+            db.create_api_key(user.id, Some("rlip1"), None, None, false).unwrap();
         let (_, key2) =
-            db.create_api_key(user.id, None, None, None).unwrap();
+            db.create_api_key(user.id, Some("rlip2"), None, None, false).unwrap();
 
         // Two requests from same IP should pass
         assert!(db
@@ -636,7 +670,7 @@ mod tests {
             .create_user("testuser", "TestPass123!", false, None, None)
             .unwrap();
         let (_, key_info) =
-            db.create_api_key(user.id, None, None, None).unwrap();
+            db.create_api_key(user.id, Some("rlkey"), None, None, false).unwrap();
 
         // First request from any IP should pass
         assert!(db
@@ -734,8 +768,9 @@ mod tests {
         let user = db
             .create_user("apiuser", "Pass123!", false, None, None)
             .unwrap();
-        let (_, key) =
-            db.create_api_key(user.id, None, None, None).unwrap();
+        let (_, key) = db
+            .create_api_key(user.id, Some("test_key"), None, None, false)
+            .unwrap();
 
         let ctx = AuthContext {
             user_id: user.id,
@@ -744,6 +779,7 @@ mod tests {
             roles: vec![],
             permissions: vec![],
             api_key_id: key.id,
+            is_management_key: false,
             ip_address: Some("127.0.0.1".to_string()),
         };
 
@@ -792,8 +828,9 @@ mod tests {
         let user = db
             .create_user("apiuser", "Pass123!", false, None, None)
             .unwrap();
-        let (_, key) =
-            db.create_api_key(user.id, None, None, None).unwrap();
+        let (_, key) = db
+            .create_api_key(user.id, Some("test_key2"), None, None, false)
+            .unwrap();
 
         let ctx = AuthContext {
             user_id: user.id,
@@ -802,6 +839,7 @@ mod tests {
             roles: vec![],
             permissions: vec![],
             api_key_id: key.id,
+            is_management_key: false,
             ip_address: Some("127.0.0.1".to_string()),
         };
 

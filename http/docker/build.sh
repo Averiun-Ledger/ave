@@ -97,13 +97,13 @@ if [ "$ENVIRONMENT" = "development" ]; then
     FEATURES_ARRAY=()
 
     if [ "$BUILD_SQLITE" = true ]; then
-        TAG_ARRAY+=("${PROD_TAG_ARRAY[0]}-test")
+        TAG_ARRAY+=("${PROD_TAG_ARRAY[0]}-exp")
         DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[0]}")
         FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[0]}")
     fi
 
     if [ "$BUILD_ROCKSDB" = true ]; then
-        TAG_ARRAY+=("${PROD_TAG_ARRAY[1]}-test")
+        TAG_ARRAY+=("${PROD_TAG_ARRAY[1]}-exp")
         DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[1]}")
         FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[1]}")
     fi
@@ -113,7 +113,7 @@ if [ "$ENVIRONMENT" = "development" ]; then
 
     echo ""
     echo "Development mode enabled:"
-    echo "  - Tag suffix: -test"
+    echo "  - Tag suffix: -exp"
     echo "  - Skip Docker Hub push: yes"
     echo "  - Skip manifest creation: yes"
     echo "  - Build AMD64: $BUILD_AMD64"

@@ -20,8 +20,8 @@ use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{Path, Query},
-    http::{StatusCode, header},
+    extract::{FromRequestParts, Path, Query},
+    http::{Request, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -1238,6 +1238,19 @@ pub fn build_routes(
     };
 
     if let Some(db) = auth_db {
+        // Apply layers in declared order (outer -> inner) using ServiceBuilder.
+        let protected_layers = ServiceBuilder::new()
+            // 1) DB extension must run first so extractors can see it.
+            .layer(Extension(db.clone()))
+            // 2) Extract API key and inject AuthContext.
+            .layer(middleware::from_extractor::<ApiKeyAuthNew>())
+            // 3) Enforce permissions with the injected context.
+            .layer(middleware::from_fn(permission_layer))
+            // 4) Enforce read-only mode.
+            .layer(middleware::from_fn(read_only_layer))
+            // 5) Audit logs (runs outermost).
+            .layer(middleware::from_fn(audit_layer));
+
         let protected_routes = Router::new()
             .route(
                 "/admin/users",
@@ -1249,6 +1262,10 @@ pub fn build_routes(
                 get(admin_handlers::get_user)
                     .put(admin_handlers::update_user)
                     .delete(admin_handlers::delete_user),
+            )
+            .route(
+                "/admin/users/{user_id}/password",
+                post(admin_handlers::reset_user_password),
             )
             .route(
                 "/admin/users/{user_id}/roles/{role_id}",
@@ -1321,7 +1338,7 @@ pub fn build_routes(
                     .get(apikey_handlers::list_my_api_keys),
             )
             .route(
-                "/me/api-keys/{key_id}",
+                "/me/api-keys/{name}",
                 delete(apikey_handlers::revoke_my_api_key),
             )
             .layer(middleware::from_extractor::<ApiKeyAuthNew>());
@@ -1330,16 +1347,13 @@ pub fn build_routes(
         let authed = Router::new()
             .merge(main_routes.clone())
             .merge(protected_routes)
-            .layer(Extension(db.clone()))
-            .layer(middleware::from_extractor::<ApiKeyAuthNew>())
-            .layer(middleware::from_fn(permission_layer))
-            .layer(middleware::from_fn(read_only_layer))
-            .layer(middleware::from_fn(audit_layer));
+            .layer(protected_layers.clone());
 
         // Login remains unauthenticated but needs DB extension
         let mut app = Router::new()
             .route("/login", post(login_handler::login))
-            .layer(Extension(db.clone()))
+            .route("/change-password", post(login_handler::change_password))
+            .layer(ServiceBuilder::new().layer(Extension(db.clone())))
             .merge(authed);
 
         if let Some(doc_routes) = doc_routes {
@@ -1383,18 +1397,49 @@ pub(crate) async fn permission_layer(
         return next.run(req).await;
     }
 
+    let mut req = req;
+
+    // Ensure auth context is present; if not, try to run the extractor inline
     let auth_ctx = match req.extensions().get::<Arc<AuthContext>>().cloned() {
         Some(ctx) => ctx,
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Authentication required".to_string(),
-                }),
-            )
-                .into_response();
+            let (mut parts, body) = req.into_parts();
+            match ApiKeyAuthNew::from_request_parts(&mut parts, &()).await {
+                Ok(_) => {
+                    req = Request::from_parts(parts, body);
+                    match req.extensions().get::<Arc<AuthContext>>().cloned() {
+                        Some(ctx) => ctx,
+                        None => {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Json(ErrorResponse {
+                                    error: "Authentication required"
+                                        .to_string(),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+                Err(rejection) => return rejection.into_response(),
+            }
         }
     };
+
+    // Block service keys from admin and key management endpoints outright
+    if !auth_ctx.is_management_key
+        && (req.uri().path().starts_with("/admin")
+            || req.uri().path().starts_with("/me/api-keys"))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Service API keys cannot access administration or key management endpoints"
+                    .into(),
+            }),
+        )
+            .into_response();
+    }
 
     if let Some((resource, action)) =
         permission_for(req.method(), req.uri().path())
@@ -1463,6 +1508,13 @@ pub(crate) fn permission_for(
             Some(("transfers", "execute"))
         }
 
+        // Self API keys panel (management key required)
+        (&Method::GET, "/me/api-keys") => Some(("api_keys", "list")),
+        (&Method::POST, "/me/api-keys") => Some(("api_keys", "create")),
+        (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
+            Some(("api_keys", "delete"))
+        }
+
         // Ledger info
         (&Method::GET, p) if p.starts_with("/signatures/") => {
             Some(("signatures", "read"))
@@ -1504,7 +1556,6 @@ mod tests {
         routing::{delete, get, post},
         Router,
     };
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     async fn ok_handler() -> StatusCode {
@@ -1512,10 +1563,11 @@ mod tests {
     }
 
     fn build_db() -> Arc<AuthDatabase> {
-        let tmp = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let tmp = tempfile::tempdir().unwrap().into_path();
         let config = AuthConfig {
             enable: true,
-            database_path: PathBuf::from(tmp.path()),
+            database_path: tmp.join("test.db"),
             superadmin: "admin".to_string(),
             api_key: ApiKeyConfig::default(),
             lockout: LockoutConfig::default(),
@@ -1528,13 +1580,15 @@ mod tests {
     fn auth_ctx_for_role(db: &AuthDatabase, role: &str) -> Arc<AuthContext> {
         let role = db.get_role_by_name(role).unwrap();
         let perms = db.get_role_permissions(role.id).unwrap();
+        let role_name = role.name.expect("role name");
         Arc::new(AuthContext {
             user_id: 1,
-            username: role.name.clone(),
+            username: role_name.clone(),
             is_superadmin: false,
-            roles: vec![role.name],
+            roles: vec![role_name],
             permissions: perms,
             api_key_id: 1,
+            is_management_key: true,
             ip_address: None,
         })
     }
@@ -1563,6 +1617,18 @@ mod tests {
             .route("/manual-distribution/abc", post(ok_handler))
             .route("/auth/abc", delete(ok_handler))
             .layer(middleware::from_fn(permission_layer))
+    }
+
+    fn router_with_auth(db: Arc<AuthDatabase>) -> Router {
+        Router::new()
+            .route("/peer-id", get(ok_handler))
+            // Mirror production order using ServiceBuilder.
+            .layer(
+                ServiceBuilder::new()
+                    .layer(Extension(db))
+                    .layer(middleware::from_extractor::<ApiKeyAuthNew>())
+                    .layer(middleware::from_fn(permission_layer)),
+            )
     }
 
     #[tokio::test]
@@ -1618,5 +1684,26 @@ mod tests {
         let status =
             call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_populates_context_for_permission_layer() {
+        let db = build_db();
+        let app = router_with_auth(db.clone());
+
+        // Login to get API key
+        let (api_key, _) = db
+            .create_api_key(1, Some("perm_layer"), None, None, false)
+            .expect("create api key");
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/peer-id")
+            .header("X-API-Key", api_key)
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

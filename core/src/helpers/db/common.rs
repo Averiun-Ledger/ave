@@ -19,7 +19,7 @@ pub struct SubjectDB {
     pub schema_id: String,
     pub owner: String,
     pub creator: String,
-    pub active: String,
+    pub active: bool,
     pub sn: u64,
     pub properties: String,
     pub new_owner: Option<String>,
@@ -32,7 +32,7 @@ pub struct EventDB {
     pub patch: Option<String>,
     pub error: Option<String>,
     pub event_req: String,
-    pub succes: String,
+    pub succes: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

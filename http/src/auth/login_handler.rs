@@ -5,6 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use axum::{Extension, Json, http::StatusCode};
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// Convert DatabaseError to HTTP response tuple
@@ -19,6 +20,9 @@ fn db_error_to_response(
         DatabaseError::AccountLocked(msg) => (StatusCode::UNAUTHORIZED, msg),
         DatabaseError::RateLimitExceeded(msg) => {
             (StatusCode::TOO_MANY_REQUESTS, msg)
+        }
+        DatabaseError::PasswordChangeRequired(msg) => {
+            (StatusCode::FORBIDDEN, msg)
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
@@ -88,6 +92,7 @@ pub async fn login(
             Some(&format!("{}_session", user.username)),
             None, // No description
             None, // Use role's default TTL
+            true, // management key
         )
         .map_err(db_error_to_response)?;
 
@@ -97,6 +102,7 @@ pub async fn login(
         username: user.username.clone(),
         is_superadmin: user.is_superadmin,
         is_active: user.is_active,
+        must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
@@ -126,4 +132,39 @@ pub async fn login(
         user: user_info,
         permissions,
     }))
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
+    pub username: String,
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Endpoint to change password when it is required (no API key needed)
+#[utoipa::path(
+    post,
+    path = "/change-password",
+    operation_id = "changePassword",
+    tag = "Authentication",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed"),
+        (status = 400, description = "Invalid password", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+pub async fn change_password(
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    db.change_password_with_credentials(
+        &req.username,
+        &req.current_password,
+        &req.new_password,
+    )
+    .map_err(db_error_to_response)?;
+
+    Ok(StatusCode::OK)
 }

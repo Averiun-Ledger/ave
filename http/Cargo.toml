@@ -47,10 +47,11 @@ hex = "0.4.3"
 rand = "0.8.5"
 time = "0.3.36"
 thiserror = "2.0.9"
-toml = "0.8.19"
 
 [dev-dependencies]
 tempfile = "3.10.1"
+chrono = "0.4"
+ave-bridge = { path = "../bridge", default-features = false, features = ["openapi", "test"] }
 
 [features]
 default = ["prometheus", "sqlite", "ext-sqlite"]

@@ -135,9 +135,7 @@ impl Querys for SqliteLocal {
             schema_id: subject.schema_id,
             owner: subject.owner,
             creator: subject.creator,
-            active: bool::from_str(&subject.active).map_err(|e| {
-                Error::ExtDB(format!("Can not convert active into bool: {}", e))
-            })?,
+            active: subject.active,
             sn: subject.sn,
             properties: Value::from_str(&subject.properties).map_err(|e| {
                 Error::ExtDB(format!(
@@ -235,7 +233,7 @@ impl Querys for SqliteLocal {
                     } else {
                         None
                     };
-                    Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: bool::from_str(&event.succes).map_err(|e| Error::ExtDB(format!("Can not convert succes into bool: {}", e)))?})
+                    Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: event.succes })
                 }).collect::<std::result::Result<Vec<EventInfo>, Error>>()?;
 
             let prev = if page <= 1 { None } else { Some(page - 1) };
@@ -308,9 +306,7 @@ impl Querys for SqliteLocal {
                     e
                 ))
             })?,
-            succes: bool::from_str(&event.succes).map_err(|e| {
-                Error::ExtDB(format!("Can not convert succes into bool: {}", e))
-            })?,
+            succes: event.succes,
         })
     }
 
@@ -329,7 +325,7 @@ impl Querys for SqliteLocal {
         let reverse = reverse.unwrap_or_default();
         let order = if reverse { "DESC" } else { "ASC" };
         let sucess_condition = if let Some(sucess_value) = sucess {
-            format!("AND succes = '{}'", sucess_value)
+            format!("AND succes = {}", if sucess_value { 1 } else { 0 })
         } else {
             String::default()
         };
@@ -367,7 +363,7 @@ impl Querys for SqliteLocal {
                 } else {
                     None
                 };
-                Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: bool::from_str(&event.succes).map_err(|e| Error::ExtDB(format!("Can not convert succes into bool: {}", e)))?})
+                Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: event.succes })
             }).collect::<std::result::Result<Vec<EventInfo>, Error>>()
         } else {
             return Err(Error::ExtDB(
@@ -490,34 +486,10 @@ impl SqliteLocal {
             Error::ExtDB(format!("SQLite fail open connection: {}", e))
         })?;
 
-        let sql = "CREATE TABLE IF NOT EXISTS request (id TEXT NOT NULL, state TEXT NOT NULL, version INTEGER NOT NULL, error TEXT, PRIMARY KEY (id))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create request table: {}", e))
-        })?;
-
-        let sql = "CREATE TABLE IF NOT EXISTS approval (subject_id TEXT NOT NULL, data TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (subject_id))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create approval table: {}", e))
-        })?;
-
-        let sql = "CREATE TABLE IF NOT EXISTS validations (subject_id TEXT NOT NULL, validators TEXT NOT NULL, PRIMARY KEY (subject_id))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create validations table: {}", e))
-        })?;
-
-        let sql = "CREATE TABLE IF NOT EXISTS events (subject_id TEXT NOT NULL, sn INTEGER NOT NULL, patch TEXT, error TEXT, event_req TEXT NOT NULL, succes TEXT NOT NULL, PRIMARY KEY (subject_id, sn))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create events table: {}", e))
-        })?;
-
-        let sql = "CREATE TABLE IF NOT EXISTS subjects (name TEXT, description TEXT, subject_id TEXT NOT NULL, governance_id TEXT NOT NULL, genesis_gov_version INTEGER NOT NULL, namespace TEXT NOT NULL, schema_id TEXT NOT NULL, owner TEXT NOT NULL, creator TEXT NOT NULL, active TEXT NOT NULL, sn INTEGER NOT NULL, properties TEXT NOT NULL, new_owner Text, PRIMARY KEY (subject_id))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create subjects table: {}", e))
-        })?;
-
-        let sql = "CREATE TABLE IF NOT EXISTS signatures (subject_id TEXT NOT NULL, sn INTEGER NOT NULL, signatures_eval TEXT, signatures_appr TEXT, signatures_vali TEXT NOT NULL, PRIMARY KEY (subject_id))";
-        let _ = conn.execute(sql, ()).map_err(|e| {
-            Error::ExtDB(format!("Can not create signatures table: {}", e))
+        // Run database migrations
+        let migration_001 = include_str!("../../../migrations/001_initial_schema.sql");
+        conn.execute_batch(migration_001).map_err(|e| {
+            Error::ExtDB(format!("Migration 001 failed: {}", e))
         })?;
 
         Ok(SqliteLocal {
@@ -966,7 +938,7 @@ impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
         let subject_id = event.content.subject_id.to_string();
         let sn = event.content.sn;
-        let succes;
+        let succes: i32;
         let Ok(event_req) =
             serde_json::to_string(&json!(event.content.event_request.content))
         else {
@@ -986,7 +958,7 @@ impl Subscriber<SignedLedger> for SqliteLocal {
         let (patch, error): (Option<String>, Option<String>) =
             match event.content.value.clone() {
                 LedgerValue::Patch(value_wrapper) => {
-                    succes = "true".to_owned();
+                    succes = 1;
                     (Some(value_wrapper.0.to_string()), None)
                 }
                 LedgerValue::Error(protocols_error) => {
@@ -1011,7 +983,7 @@ impl Subscriber<SignedLedger> for SqliteLocal {
                         }
                         return;
                     };
-                    succes = "false".to_owned();
+                    succes = 0;
                     (None, Some(string))
                 }
             };
@@ -1068,7 +1040,7 @@ impl Subscriber<SinkDataEvent> for SqliteLocal {
         let schema_id = metadata.schema_id;
         let owner = metadata.owner.to_string();
         let creator = metadata.creator.to_string();
-        let active = metadata.active.to_string();
+        let active = metadata.active as i32;
         let sn = metadata.sn;
         let properties = metadata.properties.0.to_string();
         let new_owner =

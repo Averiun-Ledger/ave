@@ -66,9 +66,10 @@ pub async fn create_api_key_for_user(
     let (api_key, key_info) = db
         .create_api_key(
             user_id,
-            req.name.as_deref(),
+            Some(req.name.as_str()),
             req.description.as_deref(),
             req.expires_in_seconds,
+            false,
         )
         .map_err(db_error_to_response)?;
 
@@ -283,13 +284,12 @@ pub async fn rotate_api_key(
     let (api_key, key_info) = db
         .create_api_key(
             existing.user_id,
-            req.name
-                .as_deref()
-                .or(existing.name.as_deref()),
+            req.name.as_deref().or(Some(existing.name.as_str())),
             req.description
                 .as_deref()
                 .or(existing.description.as_deref()),
             req.expires_in_seconds,
+            existing.is_management,
         )
         .map_err(db_error_to_response)?;
 
@@ -340,12 +340,47 @@ pub async fn create_my_api_key(
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
 > {
+    // Only management key (login) can manage service keys
+    if !auth_ctx.is_management_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only management API key can create service keys".into(),
+            }),
+        ));
+    }
+
+    // Admin-only users without business permissions cannot create service keys
+    let business_resources = [
+        "subjects",
+        "events",
+        "governances",
+        "approvals",
+        "transfers",
+        "signatures",
+        "auth",
+        "system",
+    ];
+    let has_business_perm = auth_ctx.permissions.iter().any(|p| {
+        p.allowed && business_resources.contains(&p.resource.as_str())
+    });
+    if !has_business_perm {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "User has no business permissions; service API key would be unusable"
+                    .into(),
+            }),
+        ));
+    }
+
     let (api_key, key_info) = db
         .create_api_key(
             auth_ctx.user_id,
-            req.name.as_deref(),
+            Some(req.name.as_str()),
             req.description.as_deref(),
             req.expires_in_seconds,
+            false,
         )
         .map_err(db_error_to_response)?;
 
@@ -390,6 +425,15 @@ pub async fn list_my_api_keys(
     Extension(db): Extension<Arc<AuthDatabase>>,
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
+    if !auth_ctx.is_management_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only management API key can list service keys".into(),
+            }),
+        ));
+    }
+
     let keys = db
         .list_user_api_keys(
             auth_ctx.user_id,
@@ -403,11 +447,11 @@ pub async fn list_my_api_keys(
 /// Revoke own API key
 #[utoipa::path(
     delete,
-    path = "/me/api-keys/{key_id}",
+    path = "/me/api-keys/{name}",
     operation_id = "revokeMyApiKey",
     tag = "My Account",
     params(
-        ("key_id" = i64, Path, description = "API Key ID")
+        ("name" = String, Path, description = "API Key name")
     ),
     request_body = RevokeApiKeyRequest,
     responses(
@@ -420,23 +464,25 @@ pub async fn list_my_api_keys(
 pub async fn revoke_my_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key_id): Path<i64>,
-    Json(req): Json<RevokeApiKeyRequest>,
+    Path(name): Path<String>,
+    req: Option<Json<RevokeApiKeyRequest>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    // Verify the key belongs to the user
-    let key_info = db.get_api_key_info(key_id).map_err(db_error_to_response)?;
-
-    if key_info.user_id != auth_ctx.user_id {
+    if !auth_ctx.is_management_key {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Cannot revoke another user's API key".to_string(),
+                error: "Only management API key can revoke service keys".into(),
             }),
         ));
     }
 
+    // Verify the key belongs to the user and is active by name
+    let key_info = db
+        .get_active_api_key_by_name(auth_ctx.user_id, &name)
+        .map_err(db_error_to_response)?;
+
     // Cannot revoke the current key
-    if key_id == auth_ctx.api_key_id {
+    if key_info.id == auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -445,7 +491,19 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    db.revoke_api_key(key_id, Some(auth_ctx.user_id), req.reason.as_deref())
+    // Prevent revoking management key
+    if key_info.is_management {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot revoke the management API key".to_string(),
+            }),
+        ));
+    }
+
+    let reason = req.as_ref().and_then(|r| r.reason.as_deref());
+
+    db.revoke_api_key(key_info.id, Some(auth_ctx.user_id), reason)
         .map_err(db_error_to_response)?;
 
     // Audit log
@@ -454,13 +512,16 @@ pub async fn revoke_my_api_key(
         Some(auth_ctx.api_key_id),
         "api_key_revoked",
         Some("api_key"),
-        Some(&key_id.to_string()),
-        Some(&format!("/me/api-keys/{}", key_id)),
+        Some(&key_info.id.to_string()),
+        Some(&format!("/me/api-keys/{}", name)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
         None,
         None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
+        Some(
+            &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+                .unwrap_or_default(),
+        ),
         true,
         None,
     );

@@ -24,6 +24,16 @@ mod tests {
     }
 
     #[test]
+    fn test_password_too_long() {
+        let db = common::create_test_db();
+
+        let long_pass = "Aa1!Aa1!Aa1!Aa1!Aa1!X"; // 21 chars
+        let result = db.create_user("testuser", long_pass, false, None, None);
+
+        assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    }
+
+    #[test]
     fn test_password_missing_uppercase() {
         let db = common::create_test_db();
 
@@ -76,6 +86,12 @@ mod tests {
         assert!(result.is_ok());
 
         // Should not authenticate as admin
+        db.change_password_with_credentials(
+            malicious_username,
+            "Password123!",
+            "Password123!",
+        )
+        .unwrap();
         let verify_result = db.verify_credentials(malicious_username, "Password123!");
         assert!(verify_result.is_ok());
 
@@ -162,7 +178,9 @@ mod tests {
 
         // Create user and API key
         let user = db.create_user("test_user", "Password123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("concurrent"), None, None, false)
+                .unwrap();
 
         let mut handles = vec![];
 
@@ -239,7 +257,9 @@ mod tests {
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 
         // Create key with 0 TTL (never expires)
-        let (api_key, _) = db.create_api_key(user.id, None, None,  Some(0i64)).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("ttl0"), None, Some(0i64), false)
+                .unwrap();
 
         // Should work immediately
         assert!(db.verify_api_key(&api_key).is_ok());
@@ -268,7 +288,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("lockout"), None, None, false)
+                .unwrap();
 
         // Deactivate user
         db.update_user(user.id, None, Some(false)).unwrap();
@@ -283,7 +305,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
-        let (api_key, _) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (api_key, _) =
+            db.create_api_key(user.id, Some("lockout2"), None, None, false)
+                .unwrap();
 
         // Delete user
         db.delete_user(user.id).unwrap();
@@ -450,7 +474,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
-        let (api_key, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (api_key, key_info) =
+            db.create_api_key(user.id, Some("rl_main"), None, None, false)
+                .unwrap();
 
         // Revoke key
         db.revoke_api_key(key_info.id, None, Some("Security breach")).unwrap();
@@ -465,7 +491,9 @@ mod tests {
         let db = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
-        let (_, key_info) = db.create_api_key(user.id, None, None,  None).unwrap();
+        let (_, key_info) =
+            db.create_api_key(user.id, Some("rl_expire"), None, None, false)
+                .unwrap();
 
         // Revoke key
         db.revoke_api_key(key_info.id, None, None).unwrap();
@@ -526,7 +554,14 @@ mod tests {
 
         // Create 10 API keys
         for i in 0..10 {
-            db.create_api_key(user.id, Some(&format!("key{}", i)), None,  None).unwrap();
+            db.create_api_key(
+                user.id,
+                Some(&format!("key{}", i)),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         }
 
         let keys = db.list_user_api_keys(user.id, false).unwrap();

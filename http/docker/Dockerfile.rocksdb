@@ -41,6 +41,7 @@ COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
+COPY ./ave/core/migrations ./ave/core/migrations
 COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
 COPY ./ave/common/src ./ave/common/src
@@ -117,6 +118,7 @@ COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
+COPY ./ave/core/migrations ./ave/core/migrations
 COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
 COPY ./ave/protocols/tell/src ./ave/protocols/tell/src

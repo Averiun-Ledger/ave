@@ -27,6 +27,9 @@ fn db_error_to_response(
         DatabaseError::RateLimitExceeded(msg) => {
             (StatusCode::TOO_MANY_REQUESTS, msg)
         }
+        DatabaseError::PasswordChangeRequired(msg) => {
+            (StatusCode::FORBIDDEN, msg)
+        }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
 
@@ -62,10 +65,11 @@ pub async fn create_user(
 
     // Create user
     let user = db
-        .create_user(
+        .create_user_with_active(
             &req.username,
             &req.password,
             req.is_superadmin.unwrap_or(false),
+            req.is_active.unwrap_or(true),
             req.role_ids.clone(),
             Some(auth_ctx.user_id),
         )
@@ -79,6 +83,7 @@ pub async fn create_user(
         username: user.username,
         is_superadmin: user.is_superadmin,
         is_active: user.is_active,
+        must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
@@ -173,6 +178,7 @@ pub async fn get_user(
         username: user.username,
         is_superadmin: user.is_superadmin,
         is_active: user.is_active,
+        must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
@@ -240,6 +246,7 @@ pub async fn update_user(
         username: user.username,
         is_superadmin: user.is_superadmin,
         is_active: user.is_active,
+        must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
@@ -265,6 +272,59 @@ pub async fn update_user(
     );
 
     Ok(Json(user_info))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    pub password: String,
+}
+
+/// Reset a user's password (forces change on next login)
+#[utoipa::path(
+    post,
+    path = "/admin/users/{user_id}/password",
+    operation_id = "resetUserPassword",
+    tag = "User Management",
+    params(
+        ("user_id" = i64, Path, description = "User ID")
+    ),
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset, must change on next login"),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn reset_user_password(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(user_id): Path<i64>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "users", "update")?;
+
+    db.admin_reset_password(user_id, &req.password)
+        .map_err(db_error_to_response)?;
+
+    // Audit log
+    let _ = db.create_audit_log(
+        Some(auth_ctx.user_id),
+        Some(auth_ctx.api_key_id),
+        "user_password_reset",
+        Some("user"),
+        Some(&user_id.to_string()),
+        Some(&format!("/admin/users/{}/password", user_id)),
+        Some("POST"),
+        auth_ctx.ip_address.as_deref(),
+        None,
+        None,
+        None,
+        true,
+        None,
+    );
+
+    Ok(StatusCode::OK)
 }
 
 /// Delete user
