@@ -124,7 +124,7 @@ impl Evaluator {
                         contract: schema.contract.clone(),
                         initial_value: schema.initial_value.clone(),
                         contract_path: 
-                        config.contracts_dir.join("contracts").join(format!("{}_{}", governance_id, id))
+                        config.contracts_path.join("contracts").join(format!("{}_{}", governance_id, id))
                     })
                     .await?
             } else {

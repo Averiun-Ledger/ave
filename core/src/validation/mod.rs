@@ -562,6 +562,7 @@ impl Handler<Validation> for Validation {
 pub mod tests {
     use core::panic;
     use std::time::Duration;
+    use tempfile::TempDir;
     use test_log::test;
 
     use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
@@ -596,9 +597,10 @@ pub mod tests {
         ActorRef<Subject>,
         ActorRef<LedgerEvent>,
         DigestIdentifier,
+        Vec<TempDir>
     ) {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-        let (system, ..) = create_system().await;
+        let (system, .., _dirs) = create_system().await;
 
         let node_actor = system
             .create_root_actor("node", Node::initial(node_keys.clone()))
@@ -744,6 +746,7 @@ pub mod tests {
             subject_actor,
             ledger_event_actor,
             metadata.subject_id,
+            _dirs
         )
     }
 
@@ -762,6 +765,7 @@ pub mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dirs
         ) = create_subject_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {

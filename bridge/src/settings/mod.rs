@@ -62,7 +62,7 @@ keypair_algorithm = "Ed25519"
 hash_algorithm = "Blake3"
 ave_db = "/data/ave.db"
 external_db = "/data/ext.db"
-contracts_dir = "/contracts"
+contracts_path = "/contracts"
 always_accept = true
 garbage_collector = 900
 
@@ -159,7 +159,7 @@ node:
   hash_algorithm: Blake3
   ave_db: /data/ave.db
   external_db: /data/ext.db
-  contracts_dir: /contracts
+  contracts_path: /contracts
   always_accept: true
   garbage_collector: 900
   network:
@@ -257,7 +257,7 @@ http:
     "hash_algorithm": "Blake3",
     "ave_db": "/data/ave.db",
     "external_db": "/data/ext.db",
-    "contracts_dir": "/contracts",
+    "contracts_path": "/contracts",
     "always_accept": true,
     "garbage_collector": 900,
     "network": {
@@ -468,7 +468,7 @@ http:
         assert_eq!(node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(node.hash_algorithm, HashAlgorithm::Blake3);
         assert!(node.always_accept);
-        assert_eq!(node.contracts_dir, PathBuf::from("/contracts"));
+        assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(node.garbage_collector, Duration::from_secs(900));
         assert_eq!(
             node.ave_db,
@@ -652,7 +652,7 @@ http:
 
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
-        assert_eq!(config.node.contracts_dir, PathBuf::new());
+        assert_eq!(config.node.contracts_path, PathBuf::new());
         assert_eq!(config.node.ave_db, AveDbConfig::default());
         assert_eq!(config.node.external_db, ExternalDbConfig::default());
         assert_eq!(config.node.garbage_collector, Duration::from_secs(120));

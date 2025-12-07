@@ -803,6 +803,7 @@ mod tests {
         },
     };
     use serde_json::json;
+    use tempfile::TempDir;
     use test_log::test;
 
     use crate::{
@@ -835,6 +836,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dir
         ) = create_subject_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -995,6 +997,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dir
         ) = create_subject_gov().await;
 
         let new_owner = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
@@ -1163,6 +1166,7 @@ mod tests {
         ActorRef<Subject>,
         ActorRef<LedgerEvent>,
         DigestIdentifier,
+        Vec<TempDir>
     ) {
         let (
             system,
@@ -1172,6 +1176,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dir
         ) = create_subject_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1384,6 +1389,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dir
         )
     }
 
@@ -1400,6 +1406,7 @@ mod tests {
         ActorRef<Subject>,
         ActorRef<LedgerEvent>,
         DigestIdentifier,
+        Vec<TempDir>
     ) {
         let (
             system,
@@ -1409,6 +1416,7 @@ mod tests {
             _subject_actor,
             _ledger_event_actor,
             gov_id,
+            _dir
         ) = init_gov_sub().await;
 
         let create_request = EventRequest::Create(crate::CreateRequest {
@@ -1538,6 +1546,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             DigestIdentifier::from_str(&request_id.subject_id).unwrap(),
+            _dir
         )
     }
 
@@ -1556,6 +1565,7 @@ mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
+            _dir
         ) = create_subject().await;
 
         let fact_request = EventRequest::Fact(crate::FactRequest {

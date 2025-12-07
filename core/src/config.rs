@@ -27,7 +27,7 @@ pub struct Config {
     /// Network configuration.
     pub network: NetworkConfig,
     /// Contract dir.
-    pub contracts_dir: PathBuf,
+    pub contracts_path: PathBuf,
     /// Approval mode.
     pub always_accept: bool,
     /// Garbage collector acts
@@ -56,7 +56,7 @@ impl Default for Config {
             ave_db: Default::default(),
             external_db: Default::default(),
             network: Default::default(),
-            contracts_dir: PathBuf::new(),
+            contracts_path: PathBuf::new(),
             always_accept: Default::default(),
             garbage_collector: Duration::from_secs(120),
         }

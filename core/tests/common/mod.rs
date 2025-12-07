@@ -20,23 +20,12 @@ use ave_core::{
 };
 use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
-use std::{fs, path::PathBuf, str::FromStr, time::Duration};
+use tempfile::TempDir;
+use std::{path::PathBuf, str::FromStr, sync::atomic::{AtomicU16, Ordering}, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub fn create_temp_dir() -> PathBuf {
-    let path = temp_dir();
-
-    if fs::metadata(&path).is_err() {
-        fs::create_dir_all(&path).unwrap();
-    }
-    path
-}
-
-fn temp_dir() -> PathBuf {
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
-    dir.path().to_path_buf()
-}
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 
 pub async fn create_node(
     node_type: network::NodeType,
@@ -44,19 +33,24 @@ pub async fn create_node(
     peers: Vec<RoutingNode>,
     always_accept: bool,
     paths: Option<(PathBuf, PathBuf)>,
-) -> (Api, PathBuf, PathBuf, CancellationToken, Vec<JoinHandle<()>>) {
+) -> (Api, PathBuf, PathBuf, CancellationToken, Vec<JoinHandle<()>>, Vec<TempDir>) {
     let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
+    let mut vec_dirs = vec![];
     let (local_db, ext_db) = if let Some((local_db, ext_db)) = paths {
         (local_db, ext_db)
     } else {
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
         let local_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
+        
 
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
         let ext_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
+        
         (local_db, ext_db)
     };
 
@@ -67,13 +61,17 @@ pub async fn create_node(
         peers,
     );
 
+    let contract_dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let contracts_path = contract_dir.path().to_path_buf();
+    vec_dirs.push(contract_dir);
+    
     let config = Config {
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
         ave_db: AveDbConfig::build(&local_db),
         external_db: ExternalDbConfig::build(&ext_db),
         network: network_config,
-        contracts_dir: create_temp_dir(),
+        contracts_path,
         always_accept,
         garbage_collector: Duration::from_secs(500),
     };
@@ -92,7 +90,7 @@ pub async fn create_node(
     .await
     .unwrap();
 
-    (api, local_db, ext_db, token.clone(), runners)
+    (api, local_db, ext_db, token.clone(), runners, vec_dirs)
 }
 
 pub async fn create_nodes_and_connections(
@@ -100,26 +98,28 @@ pub async fn create_nodes_and_connections(
     addressable: Vec<Vec<usize>>,
     ephemeral: Vec<Vec<usize>>,
     always_accept: bool,
-    initial_port: u32,
-) -> Vec<Api> {
+) -> (Vec<Api>, Vec<TempDir>) {
     let mut nodes: Vec<Api> = Vec::new();
+    let mut dirs = vec![];
 
-    let get_node_address = |index: usize| -> String {
-        format!("/memory/{}", initial_port + index as u32)
-    };
+    let mut bootstrap_address = vec![];
 
     // Create Bootstrap nodes
-    for (i, connections) in bootstrap.iter().enumerate() {
-        let listen_address = get_node_address(i);
+    for connections in bootstrap.iter() {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+
+        bootstrap_address.push(listen_address.clone());
+        
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
                 peer_id: nodes[peer_idx].peer_id().clone(),
-                address: vec![get_node_address(peer_idx)],
+                address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
 
-        let (node, ..) = create_node(
+        let (node, .., mut vec_dirs) = create_node(
             network::NodeType::Bootstrap,
             &listen_address,
             peers,
@@ -127,6 +127,7 @@ pub async fn create_nodes_and_connections(
             None,
         )
         .await;
+        dirs.append(&mut vec_dirs);
 
         node_running(&node).await.unwrap();
         nodes.push(node);
@@ -134,17 +135,19 @@ pub async fn create_nodes_and_connections(
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    for (i, connections) in addressable.iter().enumerate() {
-        let listen_address = get_node_address(bootstrap.len() + i);
+    for connections in addressable.iter() {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
                 peer_id: nodes[peer_idx].peer_id().clone(),
-                address: vec![get_node_address(peer_idx)],
+                address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
 
-        let (node, ..) = create_node(
+        let (node, .., mut vec_dirs) = create_node(
             network::NodeType::Addressable,
             &listen_address,
             peers,
@@ -152,23 +155,25 @@ pub async fn create_nodes_and_connections(
             None,
         )
         .await;
+        dirs.append(&mut vec_dirs);
 
         node_running(&node).await.unwrap();
         nodes.push(node);
     }
 
-    for (i, connections) in ephemeral.iter().enumerate() {
-        let listen_address =
-            get_node_address(bootstrap.len() + addressable.len() + i);
+    for connections in ephemeral.iter() {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen_address = format!("/memory/{}", port);
+
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
                 peer_id: nodes[peer_idx].peer_id().clone(),
-                address: vec![get_node_address(peer_idx)],
+                address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
 
-        let (node, ..) = create_node(
+        let (node, .., mut vec_dirs) = create_node(
             network::NodeType::Ephemeral,
             &listen_address,
             peers,
@@ -176,12 +181,13 @@ pub async fn create_nodes_and_connections(
             None,
         )
         .await;
+        dirs.append(&mut vec_dirs);
 
         node_running(&node).await.unwrap();
         nodes.push(node);
     }
 
-    nodes
+    (nodes, dirs)
 }
 
 /// Crea una governance en `owner_node` y lo autoriza en `other_nodes`.

@@ -85,7 +85,8 @@ pub mod tests {
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
-    use std::{fs, path::PathBuf, time::Duration};
+    use tempfile::TempDir;
+    use std::time::Duration;
     use test_log::test;
 
     use super::*;
@@ -95,7 +96,7 @@ pub mod tests {
 
     #[test(tokio::test)]
     async fn test_system() {
-        let (system, _runner) = create_system().await;
+        let (system, _runner, _dirs) = create_system().await;
         let db: Option<Database> = system.get_helper("store").await;
         assert!(db.is_some());
         let ep: Option<EncryptedKey> = system.get_helper("encrypted_key").await;
@@ -104,25 +105,21 @@ pub mod tests {
         assert!(any.is_none());
     }
 
-    pub fn create_temp_dir() -> PathBuf {
-        let path = temp_dir();
+    pub async fn create_system() -> (SystemRef, JoinHandle<()>, Vec<TempDir>) {
+        let mut vec_dirs = vec![];
 
-        if fs::metadata(&path).is_err() {
-            fs::create_dir_all(&path).unwrap();
-        }
-        path
-    }
-
-    fn temp_dir() -> PathBuf {
-        let dir =
+        let dir_ave_db =
             tempfile::tempdir().expect("Can not create temporal directory.");
-        dir.path().to_path_buf()
-    }
+        let ave_path = dir_ave_db.path().to_path_buf();
+        vec_dirs.push(dir_ave_db);
 
-    pub async fn create_system() -> (SystemRef, JoinHandle<()>) {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory.");
-        let path = dir.path().to_path_buf();
+        let dir_ext_db = tempfile::tempdir().expect("Can not create temporal directory.");
+        let ext_path = dir_ext_db.path().to_path_buf();
+        vec_dirs.push(dir_ext_db);
+        
+        let dir_contracts = tempfile::tempdir().expect("Can not create temporal directory.");
+        let contracts_path = dir_contracts.path().to_path_buf();
+        vec_dirs.push(dir_contracts);
 
         let newtork_config = NetworkConfig::new(
             network::NodeType::Bootstrap,
@@ -133,15 +130,15 @@ pub mod tests {
         let config = AveBaseConfig {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
-            ave_db: AveDbConfig::build(&path),
-            external_db: ExternalDbConfig::build(&create_temp_dir()),
+            ave_db: AveDbConfig::build(&ave_path),
+            external_db: ExternalDbConfig::build(&ext_path),
             network: newtork_config,
-            contracts_dir: create_temp_dir(),
+            contracts_path: contracts_path,
             always_accept: false,
             garbage_collector: Duration::from_secs(500),
         };
 
-        let sys = system(
+        let (sys, handlers) = system(
             config.clone(),
             SinkAuth::default(),
             "password",
@@ -149,6 +146,7 @@ pub mod tests {
         )
         .await
         .unwrap();
-        sys
+
+        (sys, handlers, vec_dirs)
     }
 }

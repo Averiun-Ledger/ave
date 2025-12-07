@@ -20,12 +20,11 @@ use test_log::test;
 //  Verificar que se puede crear una gobernanza, sujeto y emitir un evento además de recibir la copia
 async fn test_governance_and_subject_copy_with_approve() {
     // Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0]],
         vec![],
-        false,
-        45000,
+        false
     )
     .await;
     let node1 = &nodes[0];
@@ -213,12 +212,11 @@ async fn test_governance_and_subject_copy_with_approve() {
 // 1 addressable(owner de la gobernanza)
 async fn test_basic_use_case_1b_1e_1a() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0]],
         vec![vec![0]],
-        true,
-        45010,
+        true
     )
     .await;
     let intermediary = &nodes[0];
@@ -322,10 +320,10 @@ async fn test_basic_use_case_1b_1e_1a() {
 
 #[test(tokio::test)]
 async fn test_many_schema_in_one_governance() {
-    let node =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45020)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
-    let owner_governance = &node[0];
+    let owner_governance = &nodes[0];
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![], "").await;
@@ -390,12 +388,11 @@ async fn test_many_schema_in_one_governance() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza
 async fn test_transfer_event_governance_1() {
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0]],
         vec![],
         true,
-        45030,
     )
     .await;
     let future_owner = &nodes[0];
@@ -501,12 +498,11 @@ async fn test_transfer_event_governance_1() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro
 async fn test_transfer_event_governance_2() {
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0]],
         vec![],
-        true,
-        45040,
+        true
     )
     .await;
     let future_owner = &nodes[0];
@@ -647,12 +643,11 @@ async fn test_transfer_event_governance_2() {
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![],
         vec![],
-        false,
-        45050,
+        false
     )
     .await;
     let node1 = &nodes[0];
@@ -717,12 +712,11 @@ async fn test_governance_fail_approve() {
 // Varios approvers y todos dicen que sí, se cumple el quorum.
 async fn test_governance_manual_many_approvers() {
     // Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        false,
-        45060,
+        false
     )
     .await;
     let owner = &nodes[0];
@@ -901,12 +895,11 @@ async fn test_governance_manual_many_approvers() {
 // Varios approvers y todos dicen que sí, se cumple el quorum. de forma automática.
 async fn test_governance_auto_many_approvers() {
     // Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true,
-        45070,
+        true
     )
     .await;
     let owner = &nodes[0];
@@ -1091,12 +1084,11 @@ async fn test_governance_auto_many_approvers() {
 // Varios approvers pero uno dice que no y el quorum no se cumple.
 async fn test_governance_not_quorum_many_approvers() {
     // Bootstrap ≤- Addressable
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        false,
-        45080,
+        false
     )
     .await;
     let owner = &nodes[0];
@@ -1274,12 +1266,11 @@ async fn test_governance_not_quorum_many_approvers() {
 #[test(tokio::test)]
 // Se añade un evaluador, se evalua, se le elimina y se vuelve a evaluar.
 async fn test_change_roles_gov() {
-    let nodes = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0]],
         vec![],
-        true,
-        45090,
+        true
     )
     .await;
     let eval_node = &nodes[0];
@@ -1405,8 +1396,8 @@ async fn test_change_roles_gov() {
 
 #[test(tokio::test)]
 async fn test_delete_schema() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45100)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
     let node1 = &nodes[0];
 
@@ -1553,8 +1544,8 @@ async fn test_delete_schema() {
 
 #[test(tokio::test)]
 async fn test_change_schema() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45110)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
     let node1 = &nodes[0];
 
@@ -1706,8 +1697,8 @@ async fn test_change_schema() {
 // Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
 // uno que esté o que no
 async fn test_gov_no_all_validators() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45120)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
 
     let owner_governance = &nodes[0];
@@ -1803,8 +1794,8 @@ async fn test_gov_no_all_validators() {
 // uno que esté o que no
 // Algunos eventos fallan, por lo que la versión de la governanza no aumenta
 async fn test_gov_fail_no_all_validators() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45130)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
 
     let owner_governance = &nodes[0];
@@ -1910,8 +1901,8 @@ async fn test_gov_fail_no_all_validators() {
 // Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
 // uno que esté o que no.
 async fn test_gov_no_all_evaluators() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45140)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
 
     let owner_governance = &nodes[0];
@@ -2007,8 +1998,8 @@ async fn test_gov_no_all_evaluators() {
 // uno que esté o que no
 // Algunos eventos fallan, por lo que la versión de la governanza no aumenta
 async fn test_gov_fail_no_all_evaluators() {
-    let nodes =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, 45150)
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
             .await;
 
     let owner_governance = &nodes[0];

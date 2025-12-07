@@ -16,7 +16,7 @@ mod tests {
 
     #[test]
     fn test_password_too_short() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.create_user("testuser", "Short1!", false, None, None);
 
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn test_password_too_long() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let long_pass = "Aa1!Aa1!Aa1!Aa1!Aa1!X"; // 21 chars
         let result = db.create_user("testuser", long_pass, false, None, None);
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn test_password_missing_uppercase() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.create_user("testuser", "lowercase123!", false, None, None);
 
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn test_password_missing_lowercase() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.create_user("testuser", "UPPERCASE123!", false, None, None);
 
@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn test_password_missing_digit() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.create_user("testuser", "NoDigitsHere!", false, None, None);
 
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn test_password_with_unicode() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         // Should work with unicode characters
         let result = db.create_user("testuser", "Pass123🔐中文", false, None, None);
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_sql_injection_in_username() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         // Try SQL injection in username
         let malicious_username = "admin' OR '1'='1";
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_sql_injection_in_role_name() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let malicious_role_name = "admin'; DROP TABLE users; --";
         let result = db.create_role(malicious_role_name, Some("Malicious role"), None);
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_user_creation() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
         let db = std::sync::Arc::new(db);
 
         let mut handles = vec![];
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_duplicate_user_creation() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
         let db = std::sync::Arc::new(db);
 
         let mut handles = vec![];
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_api_key_verification() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
         let db = std::sync::Arc::new(db);
 
         // Create user and API key
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_unicode_username() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let unicode_username = "用户名🔐";
         let result = db.create_user(unicode_username, "Password123!", false, None, None);
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_whitespace_in_names() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         // Username with spaces
         let username = "user with spaces";
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_very_long_strings() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         // Very long username (255 chars)
         let long_username = "a".repeat(255);
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_zero_ttl_api_key_never_expires() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_inactive_user_cannot_login() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_inactive_user_api_keys_dont_work() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let (api_key, _) =
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_deleted_user_api_keys_dont_work() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let (api_key, _) =
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_deleted_role_removes_user_permissions() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.get_user_by_id(99999);
 
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_role() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.get_role_by_name("nonexistent_role");
 
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_assign_nonexistent_role() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_assign_role_to_nonexistent_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let role = db.create_role("editor", None, None).unwrap();
 
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_revoke_nonexistent_api_key() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.revoke_api_key(99999, None, None);
 
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_update_nonexistent_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.update_user(99999, Some("NewPass123!"), None);
 
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.delete_user(99999);
 
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_role() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let result = db.delete_role(99999);
 
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_superadmin_bootstrap() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         // Superadmin should exist
         let result = db.verify_credentials("admin", "AdminPass123!");
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_superadmin_has_all_permissions() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let admin = db.verify_credentials("admin", "AdminPass123!").unwrap();
 
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_create_superadmin_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("newsuperadmin", "SuperPass123!", true, None, None).unwrap();
 
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_revoked_api_key_cannot_be_used() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let (api_key, key_info) =
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_double_revoke_api_key() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let (_, key_info) =
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_many_roles_for_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_many_permissions_for_role() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let role = db.create_role("power_user", None, None).unwrap();
 
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_many_api_keys_for_user() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
 

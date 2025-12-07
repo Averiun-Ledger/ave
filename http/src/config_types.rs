@@ -175,7 +175,7 @@ pub struct AveConfigHttp {
     /// Network configuration
     pub network: NetworkConfigHttp,
     /// Directory for smart contracts
-    pub contracts_dir: String,
+    pub contracts_path: String,
     /// Whether to automatically accept all events (development mode)
     pub always_accept: bool,
     /// Garbage collector interval in seconds
@@ -190,7 +190,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             ave_db: value.ave_db.to_string(),
             external_db: value.external_db.to_string(),
             network: NetworkConfigHttp::from(value.network),
-            contracts_dir: value.contracts_dir.to_string_lossy().to_string(),
+            contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
             garbage_collector: value.garbage_collector.as_secs(),
         }

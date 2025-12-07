@@ -12,7 +12,7 @@ mod tests {
 
     #[test]
     fn test_api_keys_revoked_when_role_added() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let (api_key, _) =
@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn test_api_keys_revoked_when_role_removed() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn test_permissions_change_when_role_added() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_permissions_change_when_role_removed() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_multiple_role_changes() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let (api_key1, _) =
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_user_with_multiple_roles_permission_merge() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role1 = db.create_role("reader", None, None).unwrap();
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_user_override_persists_through_role_changes() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_role_permission_modification_affects_all_users() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user1 = db.create_user("user1", "TestPass123!", false, None, None).unwrap();
         let user2 = db.create_user("user2", "TestPass123!", false, None, None).unwrap();
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_deny_permission_overrides_multiple_allows() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role1 = db.create_role("role1", None, None).unwrap();
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_deleted_roles_removed_from_users() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("temp_role", None, None).unwrap();
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_role_with_ttl() {
-        let db = common::create_test_db();
+        let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("temp_editor", None, Some(2)).unwrap(); // 2 second TTL
