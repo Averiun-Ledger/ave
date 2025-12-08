@@ -17,7 +17,7 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
     }
 
 
-    let path = config.keys_path.join("node_private.de");
+    let path = config.keys_path.join("node_private.der");
     match fs::metadata(&path) {
         Ok(_) => {
             let document = Document::read_der_file(path).map_err(|error| {

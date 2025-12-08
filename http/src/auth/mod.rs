@@ -23,15 +23,63 @@ pub mod integration;
 pub mod login_handler;
 pub mod system_handlers;
 
+use std::{sync::Arc, time::Duration};
+
+use ave_bridge::{auth::AuthConfig, settings::command::build_auth_password};
 // Re-exports for convenience
 pub use database::AuthDatabase;
+use tokio::time::interval;
+use tracing::{error, info, warn};
 
+use crate::auth::integration::{cleanup_old_data, initialize_auth_database, log_auth_statistics};
+
+const TARGET_HTTP: &str = "AveHttp";
 const MIN_LENGTH: usize = 8;
 const MAX_LENGTH: usize = 20;
 const REQUIRE_UPPERCASE: bool = true;
 const REQUIRE_LOWERCASE: bool = true;
 const REQUIRE_DIGIT: bool = true;
 const REQUIRE_SPECIAL: bool = true;
+
+pub async fn build_auth(auth_config: &AuthConfig, password: &str) -> Option<Arc<AuthDatabase>> {
+    if auth_config.enable {
+        let mut auth_password = password.to_string();
+        if auth_password.is_empty() {
+            auth_password = build_auth_password();
+        }
+
+        if auth_password.is_empty() {
+            error!(
+                "Auth system is enable but superadmin password is not configured"
+            );
+            return None;
+        }
+
+        let db = initialize_auth_database(&auth_config, &auth_password)
+            .await
+            .map_err(|e| {
+                error!(TARGET_HTTP, "Failed to initialize auth system: {}", e);
+            })
+            .expect("Can not initialize auth database");
+
+        info!(TARGET_HTTP, "Authentication system ENABLED");
+        log_auth_statistics(&db).await;
+        // Background maintenance: cleanup audit logs, rate limits, expired API keys
+        let maintenance_db = db.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(3600));
+            loop {
+                ticker.tick().await;
+                if let Err(e) = cleanup_old_data(&maintenance_db).await {
+                    warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
+                }
+            }
+        });
+        Some(db)
+    } else {
+        None
+    }
+}
 
 /// Validate password against policy
 pub fn validate_password(

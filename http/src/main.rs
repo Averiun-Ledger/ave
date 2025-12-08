@@ -7,15 +7,13 @@ use auth::{
     },
 };
 use ave_bridge::{
-    Bridge,
-    clap::Parser,
-    settings::{
+    Bridge, auth::AuthConfig, clap::Parser, settings::{
         build_config,
         command::{
             Args, build_auth_password, build_config_path, build_key_password,
             build_sink_password,
         },
-    },
+    }
 };
 use axum::{
     BoxError,
@@ -35,6 +33,8 @@ use std::sync::Arc;
 use tokio::{net::TcpListener, time::interval};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
+
+use crate::auth::build_auth;
 
 mod auth;
 mod config_types;
@@ -96,43 +96,7 @@ async fn main() {
 
     let _log_handle = logging::init_logging(&config.logging).await;
 
-    let auth_db: Option<Arc<AuthDatabase>> = if config.auth.enable {
-        let mut auth_password = args.auth_password;
-        if auth_password.is_empty() {
-            auth_password = build_auth_password();
-        }
-
-        if auth_password.is_empty() {
-            error!(
-                "Auth system is enable but superadmin password is not configured"
-            );
-            return;
-        }
-
-        let db = initialize_auth_database(&config.auth, &auth_password)
-            .await
-            .map_err(|e| {
-                error!(TARGET_HTTP, "Failed to initialize auth system: {}", e);
-            })
-            .expect("Can not initialize auth database");
-
-        info!(TARGET_HTTP, "Authentication system ENABLED");
-        log_auth_statistics(&db).await;
-        // Background maintenance: cleanup audit logs, rate limits, expired API keys
-        let maintenance_db = db.clone();
-        tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_secs(3600));
-            loop {
-                ticker.tick().await;
-                if let Err(e) = cleanup_old_data(&maintenance_db).await {
-                    warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
-                }
-            }
-        });
-        Some(db)
-    } else {
-        None
-    };
+    let auth_db: Option<Arc<AuthDatabase>> = build_auth(&config.auth, &args.auth_password).await;
 
     let mut key_password = args.key_password;
     if key_password.is_empty() {
@@ -209,6 +173,8 @@ async fn main() {
         .expect("Can not run axum server");
     }
 }
+
+
 
 async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
     fn make_https(

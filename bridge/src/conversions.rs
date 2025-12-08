@@ -60,12 +60,12 @@ pub fn bridge_to_create_request(
     Ok(CreateRequest {
         name: request.name,
         description: request.description,
-        governance_id: DigestIdentifier::from_str(&request.governance_id)
+        governance_id: DigestIdentifier::from_str(&request.governance_id.unwrap_or_default())
             .map_err(|_| {
                 Error::Bridge("Invalid governance identifier".to_string())
             })?,
         schema_id: request.schema_id,
-        namespace: Namespace::from(request.namespace),
+        namespace: Namespace::from(request.namespace.unwrap_or_default()),
     })
 }
 

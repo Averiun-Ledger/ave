@@ -8,11 +8,11 @@ use ave_bridge::{
         ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct ConfigHttp {
     /// Core AVE configuration
     pub node: AveConfigHttp,
@@ -42,7 +42,7 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AuthConfigHttp {
     pub enable: bool,
     pub database_path: String,
@@ -67,7 +67,7 @@ impl From<AuthConfig> for AuthConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct ApiKeyConfigHttp {
     pub default_ttl_seconds: i64,
     pub max_keys_per_user: u32,
@@ -82,7 +82,7 @@ impl From<ApiKeyConfig> for ApiKeyConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct LockoutConfigHttp {
     pub max_attempts: u32,
     pub duration_seconds: i64,
@@ -97,7 +97,7 @@ impl From<LockoutConfig> for LockoutConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct RateLimitConfigHttp {
     pub enable: bool,
     pub window_seconds: i64,
@@ -120,7 +120,7 @@ impl From<RateLimitConfig> for RateLimitConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SessionConfigHttp {
     pub audit_enable: bool,
     pub audit_retention_days: u32,
@@ -137,7 +137,7 @@ impl From<SessionConfig> for SessionConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct HttpConfigHttp {
     pub http_address: String,
     pub https_address: Option<String>,
@@ -162,7 +162,7 @@ impl From<HttpConfig> for HttpConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AveConfigHttp {
     /// Keypair algorithm
     pub keypair_algorithm: String,
@@ -197,7 +197,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct NetworkConfigHttp {
     /// The node type (Bootstrap, Addressable, Ephemeral)
     pub node_type: String,
@@ -236,7 +236,7 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct TellConfigHttp {
     /// Tell protocol message timeout in seconds
     pub message_timeout_secs: u64,
@@ -253,7 +253,7 @@ impl From<ave_bridge::TellConfig> for TellConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct ReqResConfigHttp {
     /// Request-Response message timeout in seconds
     pub message_timeout_secs: u64,
@@ -270,7 +270,7 @@ impl From<ave_bridge::ReqResConfig> for ReqResConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct RoutingConfigHttp {
     /// Whether to enable random walks in the Kademlia DHT
     pub dht_random_walk: bool,
@@ -302,7 +302,7 @@ impl From<ave_bridge::RoutingConfig> for RoutingConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct ControlListConfigHttp {
     /// Enable control lists (allow/block)
     pub enable: bool,
@@ -331,7 +331,7 @@ impl From<ave_bridge::ControlListConfig> for ControlListConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct RoutingNodeHttp {
     /// Peer ID of the routing node
     pub peer_id: String,
@@ -348,7 +348,7 @@ impl From<ave_bridge::RoutingNode> for RoutingNodeHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct LoggingHttp {
     /// Logging output configuration
     pub output: LoggingOutputHttp,
@@ -377,7 +377,7 @@ impl From<ave_bridge::LoggingConfig> for LoggingHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct LoggingOutputHttp {
     /// Enable logging to stdout
     pub stdout: bool,
@@ -397,7 +397,7 @@ impl From<ave_bridge::LoggingOutput> for LoggingOutputHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkConfigHttp {
     /// Map of sink configurations by name
     pub sinks: BTreeMap<String, Vec<SinkServerHttp>>,
@@ -423,7 +423,7 @@ impl From<ave_bridge::SinkConfig> for SinkConfigHttp {
     }
 }
 
-#[derive(Debug, Serialize, Clone, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct SinkServerHttp {
     /// Server identifier
     pub server: String,

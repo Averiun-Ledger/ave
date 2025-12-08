@@ -45,11 +45,11 @@ pub struct BridgeCreateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     /// The identifier of the governance contract
-    pub governance_id: String,
+    pub governance_id: Option<String>,
     /// The identifier of the schema used to validate the event
     pub schema_id: String,
     /// The namespace of the subject
-    pub namespace: String,
+    pub namespace: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

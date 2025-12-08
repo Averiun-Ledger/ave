@@ -2,19 +2,32 @@
 //
 // Shared utilities and helpers for all auth tests
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU16, Ordering},
+};
 
-use ave_bridge::{Bridge, auth::{
-    ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
-}};
-use ave_http::auth::database::AuthDatabase;
+use ave_bridge::{
+    Bridge,
+    auth::{
+        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
+    },
+};
+use ave_http::{
+    auth::{build_auth, database::AuthDatabase}, server::build_routes
+};
+use reqwest::{Client, StatusCode};
+use serde_json::{Value, json};
+use std::net::SocketAddr;
 use tempfile::TempDir;
-use tokio::task::JoinHandle;
+use tokio::net::TcpListener;
 
 // Port counter to avoid collisions between tests running in parallel
-pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(7000);
+#[allow(dead_code)]
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(7000);
 
 /// Create a test database with default configuration
+#[allow(dead_code)]
 pub fn create_test_db() -> (AuthDatabase, TempDir) {
     let dir = tempfile::tempdir().expect("Can not create temporal directory.");
     let path = dir.path().to_path_buf();
@@ -51,43 +64,59 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
     (db, dir)
 }
 
-pub async fn create_bridge() -> (Bridge, Vec<JoinHandle<()>>, Vec<TempDir>) {
-    // Create temporary directories for databases (each test gets its own)
-    let ave_db_temp_dir = tempfile::tempdir().expect("ave_db temp dir");
-    let external_db_temp_dir =
-        tempfile::tempdir().expect("external_db temp dir");
-    let contracts_temp_dir = tempfile::tempdir().expect("contracts temp dir");
-    let keys_dir = tempfile::tempdir().expect("contracts temp dir");
+#[allow(dead_code)]
+pub struct TestServer {
+    addr: SocketAddr,
+    memory_port: u16,
+    _handle: tokio::task::JoinHandle<()>,
+}
 
-    let ave_db_path = ave_db_temp_dir.path().to_string_lossy().to_string();
-    let external_db_path =
-        external_db_temp_dir.path().to_string_lossy().to_string();
-    let contracts_path =
-        contracts_temp_dir.path().to_string_lossy().to_string();
-    let keys_path = keys_dir.path().to_string_lossy().to_string();
+impl TestServer {
+    #[allow(dead_code)]
+    pub async fn build(
+        enable_auth: bool,
+        always_accept: bool,
+    ) -> (Self, Vec<TempDir>) {
+        // Create temporary directories for databases (each test gets its own)
+        let ave_db_temp_dir = tempfile::tempdir().expect("ave_db temp dir");
+        let external_db_temp_dir =
+            tempfile::tempdir().expect("external_db temp dir");
+        let contracts_temp_dir =
+            tempfile::tempdir().expect("contracts temp dir");
+        let keys_dir = tempfile::tempdir().expect("contracts temp dir");
+        let auth_dir = tempfile::tempdir().expect("contracts temp dir");
 
-    let mut vec_dir = vec![];
-    vec_dir.push(ave_db_temp_dir);
-    vec_dir.push(external_db_temp_dir);
-    vec_dir.push(contracts_temp_dir);
-    vec_dir.push(keys_dir);
+        let ave_db_path = ave_db_temp_dir.path().to_string_lossy().to_string();
+        let external_db_path =
+            external_db_temp_dir.path().to_string_lossy().to_string();
+        let contracts_path =
+            contracts_temp_dir.path().to_string_lossy().to_string();
+        let keys_path = keys_dir.path().to_string_lossy().to_string();
+        let auth_path = auth_dir.path().to_string_lossy().to_string();
 
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    // Create bridge config with memory transport and unique database paths
-    let bridge_config_json = format!(
-        r#"
+        let mut vec_dir = vec![];
+        vec_dir.push(ave_db_temp_dir);
+        vec_dir.push(external_db_temp_dir);
+        vec_dir.push(contracts_temp_dir);
+        vec_dir.push(keys_dir);
+        vec_dir.push(auth_dir);
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        // Create bridge config with memory transport and unique database paths
+        let bridge_config_json = format!(
+            r#"
         {{
-        "keys_path": "{}",
+        "keys_path": "{keys_path}",
         "prometheus": "127.0.0.1:0",
         "node": {{
-            "always_accept": true,
-            "ave_db": "{}",
-            "external_db": "{}",
-            "contracts_path": "{}",
+            "always_accept": {always_accept},
+            "ave_db": "{ave_db_path}",
+            "external_db": "{external_db_path}",
+            "contracts_path": "{contracts_path}",
             "network": {{
             "node_type": "Bootstrap",
             "listen_addresses": [
-                "/memory/{}"
+                "/memory/{port}"
             ]
             }}
         }},
@@ -99,25 +128,148 @@ pub async fn create_bridge() -> (Bridge, Vec<JoinHandle<()>>, Vec<TempDir>) {
             }}
         }},
         "auth": {{
-            "enable": false
+            "enable": {enable_auth},
+            "superadmin": "admin",
+            "database_path": "{auth_path}",
+            "api_key": {{
+                "default_ttl_seconds": 3600,
+                "max_keys_per_user": 20
+            }},
+            "lockout": {{
+                "max_attempts": 3,
+                "duration_seconds": 60
+            }},
+            "rate_limit": {{
+                "enable": true,
+                "window_seconds": 60,
+                "max_requests": 20,
+                "limit_by_key": true,
+                "limit_by_ip": true,
+                "cleanup_interval_seconds": 1800
+            }},
+            "session": {{
+                "audit_enable": true,
+                "audit_retention_days": 30,
+                "log_all_requests": true
+            }}
         }},
         "http": {{
             "enable_doc": false
         }}
         }}
-        "#,
-        keys_path, ave_db_path, external_db_path, contracts_path, port
-    );
+        "#
+        );
 
-    let bridge_config: ave_bridge::config::Config =
-        serde_json::from_str(&bridge_config_json)
-            .expect("Failed to parse bridge config");
+        let bridge_config: ave_bridge::config::Config =
+            serde_json::from_str(&bridge_config_json)
+                .expect("Failed to parse bridge config");
 
-    // Build the bridge
-    let (bridge, _runners) =
-        Bridge::build(&bridge_config, "test", "test", None)
-            .await
-            .expect("Failed to create bridge");
+        let (bridge, _runners) =
+            Bridge::build(&bridge_config, "test", "", None)
+                .await
+                .expect("Failed to create bridge");
 
-    (bridge, _runners, vec_dir)
+        let auth_db: Option<Arc<AuthDatabase>> =
+            build_auth(&bridge_config.auth, "AdminPass123!").await;
+
+        // Build the REAL router using the actual server code
+        let app = build_routes(false, bridge, auth_db);
+
+        // Bind to a random available port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn the server
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Give the server a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        (
+            Self {
+                addr,
+                memory_port: port,
+                _handle: handle,
+            },
+            vec_dir,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+
+    #[allow(dead_code)]
+    pub fn memory_port(&self) -> u16 {
+        self.memory_port
+    }
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+#[allow(dead_code)]
+pub async fn make_request(
+    client: &Client,
+    url: &str,
+    method: &str,
+    api_key: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = match method {
+        "GET" => client.get(url),
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "DELETE" => client.delete(url),
+        "PATCH" => client.patch(url),
+        _ => panic!("Unsupported method: {}", method),
+    };
+
+    if let Some(key) = api_key {
+        req = req.header("X-API-Key", key);
+    }
+
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+
+    let resp = req.send().await.expect("Failed to send request");
+    let status = resp.status();
+    let text = resp.text().await.expect("Failed to read response");
+    let json: Value = serde_json::from_str(&text).unwrap_or(json!({}));
+
+    (status, json)
+}
+
+#[allow(dead_code)]
+pub async fn login(
+    server: &TestServer,
+    client: &Client,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    let (status, body) = make_request(
+        client,
+        &server.url("/login"),
+        "POST",
+        None,
+        Some(json!({
+            "username": username,
+            "password": password
+        })),
+    )
+    .await;
+
+    if status == StatusCode::OK {
+        Ok(body["api_key"].as_str().unwrap_or("").to_string())
+    } else {
+        Err(format!(
+            "Login failed: {}",
+            body["error"].as_str().unwrap_or("unknown")
+        ))
+    }
 }

@@ -10,8 +10,9 @@ use ave_http::auth::models::*;
 
 #[cfg(test)]
 mod tests {
+    use crate::common::create_test_db;
+
     use super::*;
-    use std::path::PathBuf;
 
     use ave_bridge::auth::{
         ApiKeyConfig, AuthConfig, LockoutConfig, SessionConfig,
@@ -54,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_create_user_success() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -66,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_create_user_duplicate() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let result = db.create_user("testuser", "TestPass123!", false, None, None);
@@ -76,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_get_user_by_id() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let created = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let fetched = db.get_user_by_id(created.id).unwrap();
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_update_user() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -101,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_deactivate_user() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -115,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_list_users() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("user1", "TestPass123!", false, None, None).unwrap();
         db.create_user("user2", "TestPass123!", false, None, None).unwrap();
@@ -128,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_delete_user() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -145,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_verify_credentials_success() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         db.change_password_with_credentials(
@@ -161,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_verify_credentials_wrong_password() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -171,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_account_lockout_after_failed_attempts() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -187,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_failed_attempts_reset_on_success() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         db.change_password_with_credentials(
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_create_role() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let role = db.create_role("editor", Some("Editor role"), None).unwrap();
 
@@ -230,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_create_role_duplicate() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         db.create_role("editor", None, None).unwrap();
         let result = db.create_role("editor", None, None);
@@ -240,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_assign_role_to_user() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -253,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_remove_role_from_user() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -267,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_user_with_multiple_roles() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role1 = db.create_role("editor", None, None).unwrap();
@@ -283,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_delete_role() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let role = db.create_role("temp_role", None, None).unwrap();
 
@@ -299,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_create_api_key() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -314,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_verify_api_key_success() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let (api_key, _) =
@@ -329,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_verify_api_key_invalid() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let result = db.verify_api_key("invalid_key_12345");
 
@@ -338,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_api_key_expiration() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -423,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_revoke_api_key() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user =
             db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
@@ -441,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_list_user_api_keys() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -455,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_api_key_last_used_tracking() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user =
             db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
@@ -477,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_apply_ttl_to_legacy_api_keys() {
-        let (mut db, _dir) = common::create_test_db();
+        let (mut db, _dir) = create_test_db();
 
         let user =
             db.create_user("testuser", "TestPass123!", false, None, None)
@@ -505,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_set_role_permission() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let role = db.create_role("editor", None, None).unwrap();
 
@@ -523,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_set_user_permission_override() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
@@ -541,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_user_effective_permissions() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -561,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_user_override_denies_role_permission() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
@@ -588,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_rate_limit_within_limit() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let (_, key_info) =
@@ -604,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_rate_limit_exceeded() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
         let (_, key_info) =
@@ -889,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_list_system_config() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let config = db.list_system_config().unwrap();
 
@@ -899,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_update_system_config() {
-        let (db, _dirs) = common::create_test_db();
+        let (db, _dirs) = create_test_db();
 
         let updated = db.update_system_config("read_only_mode", "1", None).unwrap();
 
