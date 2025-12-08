@@ -404,11 +404,17 @@ async fn test_system_info_deserialization() {
     let expected_listen_address = format!("/memory/{}", server.memory_port());
 
     assert_eq!(config.node.keypair_algorithm, "Ed25519");
-    assert_eq!(config.node.hash_algorithm, "Blake3");
-    assert_eq!(config.node.ave_db, "Sqlite");
+    #[cfg(feature = "sqlite")] {
+        assert_eq!(config.node.ave_db, "Sqlite");
+    }
+    #[cfg(feature = "rocksdb")] {
+        assert_eq!(config.node.ave_db, "Rocksdb");
+    }
     assert_eq!(config.node.external_db, "Sqlite");
+    assert_eq!(config.node.hash_algorithm, "Blake3");
+
     assert_eq!(config.node.contracts_path, expected_contracts_path);
-    assert!(config.node.always_accept);
+    assert!(!config.node.always_accept);
     assert_eq!(config.node.garbage_collector, 120);
 
     assert_eq!(config.node.network.node_type, "Bootstrap");

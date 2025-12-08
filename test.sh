@@ -109,11 +109,18 @@ normalize_combo() {
 }
 
 extract_failures() {
+  # Extract test names from "failures:" section
   awk '
     /^failures:[[:space:]]*$/ { in=1; next }
-    in && NF==0 { in=0 }
-    in { sub(/^[[:space:]]+/, "", $0); print $0 }
-  ' "$1" 2>/dev/null || echo ""
+    in && /^[[:space:]]*$/ { in=0 }
+    in {
+      sub(/^[[:space:]]+/, "", $0)
+      if ($0 != "") print $0
+    }
+  ' "$1" 2>/dev/null
+
+  # Also try to extract from "---- test_name stdout ----" format
+  grep -oP '^---- \K[^ ]+(?= (stdout|stderr) ----)' "$1" 2>/dev/null | sort -u
 }
 
 extract_test_stats() {
@@ -362,9 +369,36 @@ print_summary() {
     echo "${BOLD}${RED}✖ FAILED TESTS (${#FAIL_LABELS[@]}):${RESET}"
     for ((i=0; i<${#FAIL_LABELS[@]}; i++)); do
       echo
-      echo "  ${RED}⚠${RESET} ${BOLD}${FAIL_LABELS[$i]}${RESET}"
+      local label="${FAIL_LABELS[$i]}"
+      local package=$(echo "$label" | sed -n 's/.*📦 \([^ ]*\).*/\1/p')
+      local features=$(echo "$label" | grep -oP 'Flags: \K.*' || echo "default")
+
+      if [ -n "$package" ]; then
+        echo "  ${RED}⚠${RESET} ${BOLD}Package:${RESET} ${CYAN}${package}${RESET}"
+        echo "     ${BOLD}Features:${RESET} ${YELLOW}${features}${RESET}"
+      else
+        echo "  ${RED}⚠${RESET} ${BOLD}${label}${RESET}"
+      fi
       echo "     ${DIM}Log: ${FAIL_LOGS[$i]}${RESET}"
-      echo "     ${FAIL_DETAILS[$i]}" | sed 's/^/     /'
+      echo
+
+      # Show failed test names
+      local failed_list
+      failed_list="$(extract_failures "${FAIL_LOGS[$i]}")"
+      if [ -n "${failed_list}" ]; then
+        echo "     ${BOLD}Failed tests:${RESET}"
+        echo "${failed_list}" | while IFS= read -r test_name; do
+          [ -n "$test_name" ] && echo "       ${RED}✖${RESET} ${test_name}"
+        done
+      fi
+      echo
+
+      # Show summary line if present
+      local summary
+      summary="$(grep -E 'test result:' "${FAIL_LOGS[$i]}" | tail -1 || echo "")"
+      if [ -n "${summary}" ]; then
+        echo "     ${DIM}${summary}${RESET}"
+      fi
     done
     echo
   fi
