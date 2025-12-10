@@ -20,7 +20,7 @@ mod common;
 
 #[tokio::test]
 async fn test_login_success() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
 
     let result = login(&server, &client, "admin", "AdminPass123!").await;
@@ -30,7 +30,7 @@ async fn test_login_success() {
 
 #[tokio::test]
 async fn test_login_wrong_password() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
 
     let (status, body) = make_request(
@@ -48,7 +48,7 @@ async fn test_login_wrong_password() {
 
 #[tokio::test]
 async fn test_login_nonexistent_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
 
     let (status, _) = make_request(
@@ -69,7 +69,7 @@ async fn test_login_nonexistent_user() {
 
 #[tokio::test]
 async fn test_list_users() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -91,7 +91,7 @@ async fn test_list_users() {
 
 #[tokio::test]
 async fn test_create_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -119,7 +119,7 @@ async fn test_create_user() {
 
 #[tokio::test]
 async fn test_create_user_duplicate() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -155,7 +155,7 @@ async fn test_create_user_duplicate() {
 
 #[tokio::test]
 async fn test_create_user_weak_password() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -183,7 +183,7 @@ async fn test_create_user_weak_password() {
 
 #[tokio::test]
 async fn test_get_user_by_id() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -206,7 +206,7 @@ async fn test_get_user_by_id() {
 
 #[tokio::test]
 async fn test_update_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -241,7 +241,7 @@ async fn test_update_user() {
 
 #[tokio::test]
 async fn test_delete_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -290,7 +290,7 @@ async fn test_delete_user() {
 
 #[tokio::test]
 async fn test_list_roles() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -311,7 +311,7 @@ async fn test_list_roles() {
 
 #[tokio::test]
 async fn test_create_role() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -334,7 +334,7 @@ async fn test_create_role() {
 
 #[tokio::test]
 async fn test_create_role_duplicate() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -368,7 +368,7 @@ async fn test_create_role_duplicate() {
 
 #[tokio::test]
 async fn test_get_role() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -402,7 +402,7 @@ async fn test_get_role() {
 
 #[tokio::test]
 async fn test_update_role() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -437,7 +437,7 @@ async fn test_update_role() {
 
 #[tokio::test]
 async fn test_delete_role() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -475,7 +475,7 @@ async fn test_delete_role() {
 
 #[tokio::test]
 async fn test_list_resources() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -497,7 +497,7 @@ async fn test_list_resources() {
 
 #[tokio::test]
 async fn test_list_actions() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -519,7 +519,7 @@ async fn test_list_actions() {
 
 #[tokio::test]
 async fn test_set_role_permission() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -553,7 +553,7 @@ async fn test_set_role_permission() {
 
 #[tokio::test]
 async fn test_get_role_permissions() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -592,7 +592,7 @@ async fn test_get_role_permissions() {
 
 #[tokio::test]
 async fn test_list_all_api_keys() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -613,7 +613,7 @@ async fn test_list_all_api_keys() {
 
 #[tokio::test]
 async fn test_create_api_key_for_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -649,7 +649,7 @@ async fn test_create_api_key_for_user() {
 
 #[tokio::test]
 async fn test_get_api_key_info() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -693,7 +693,7 @@ async fn test_get_api_key_info() {
 
 #[tokio::test]
 async fn test_revoke_api_key() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -737,7 +737,7 @@ async fn test_revoke_api_key() {
 
 #[tokio::test]
 async fn test_rotate_api_key() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -788,7 +788,7 @@ async fn test_rotate_api_key() {
 
 #[tokio::test]
 async fn test_get_me() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -805,7 +805,7 @@ async fn test_get_me() {
 
 #[tokio::test]
 async fn test_get_my_permissions() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -826,7 +826,7 @@ async fn test_get_my_permissions() {
 
 #[tokio::test]
 async fn test_get_my_permissions_detailed() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -852,7 +852,7 @@ async fn test_get_my_permissions_detailed() {
 
 #[tokio::test]
 async fn test_query_audit_logs() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -873,7 +873,7 @@ async fn test_query_audit_logs() {
 
 #[tokio::test]
 async fn test_get_audit_stats() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -894,7 +894,7 @@ async fn test_get_audit_stats() {
 
 #[tokio::test]
 async fn test_get_rate_limit_stats() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -920,7 +920,7 @@ async fn test_get_rate_limit_stats() {
 
 #[tokio::test]
 async fn test_list_system_config() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -941,7 +941,7 @@ async fn test_list_system_config() {
 
 #[tokio::test]
 async fn test_update_system_config() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -967,7 +967,7 @@ async fn test_update_system_config() {
 
 #[tokio::test]
 async fn test_protected_endpoint_without_auth() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
 
     let (status, body) =
@@ -980,7 +980,7 @@ async fn test_protected_endpoint_without_auth() {
 
 #[tokio::test]
 async fn test_invalid_api_key() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
 
     let (status, body) = make_request(
@@ -998,7 +998,7 @@ async fn test_invalid_api_key() {
 
 #[tokio::test]
 async fn test_get_nonexistent_user() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -1019,7 +1019,7 @@ async fn test_get_nonexistent_user() {
 
 #[tokio::test]
 async fn test_create_user_empty_username() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await
@@ -1040,7 +1040,7 @@ async fn test_create_user_empty_username() {
 
 #[tokio::test]
 async fn test_create_role_empty_name() {
-    let (server, _dir) = TestServer::build(true, true).await;
+    let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
     let api_key = login(&server, &client, "admin", "AdminPass123!")
         .await

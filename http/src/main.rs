@@ -2,15 +2,12 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use auth::{
     AuthDatabase,
-    integration::{
-        cleanup_old_data, initialize_auth_database, log_auth_statistics,
-    },
 };
 use ave_bridge::{
-    Bridge, auth::AuthConfig, clap::Parser, settings::{
+    Bridge, clap::Parser, settings::{
         build_config,
         command::{
-            Args, build_auth_password, build_config_path, build_key_password,
+            Args, build_config_path, build_key_password,
             build_sink_password,
         },
     }
@@ -30,9 +27,9 @@ use futures::future::join_all;
 use middleware::tower_trace;
 use server::build_routes;
 use std::sync::Arc;
-use tokio::{net::TcpListener, time::interval};
+use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::auth::build_auth;
 

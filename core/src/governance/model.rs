@@ -880,17 +880,6 @@ impl Hash for RoleCreator {
     }
 }
 
-impl RoleCreator {
-    pub fn create(name: &str, namespace: Namespace) -> Self {
-        Self {
-            name: name.to_owned(),
-            namespace,
-            witnesses: BTreeSet::default(),
-            quantity: CreatorQuantity::Infinity,
-        }
-    }
-}
-
 impl PartialOrd for RoleCreator {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -911,6 +900,19 @@ impl PartialEq for RoleCreator {
 }
 
 impl Eq for RoleCreator {}
+
+impl RoleCreator {
+    pub fn create(name: &str, namespace: Namespace) -> Self {
+        Self {
+            name: name.to_owned(),
+            namespace,
+            witnesses: BTreeSet::default(),
+            quantity: CreatorQuantity::Infinity,
+        }
+    }
+}
+
+
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct RoleGovIssuer {

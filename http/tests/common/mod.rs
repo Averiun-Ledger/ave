@@ -14,8 +14,10 @@ use ave_bridge::{
     },
 };
 use ave_http::{
-    auth::{build_auth, database::AuthDatabase}, server::build_routes
+    auth::{build_auth, database::AuthDatabase},
+    server::build_routes,
 };
+use futures::future::join_all;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -76,6 +78,7 @@ impl TestServer {
     pub async fn build(
         enable_auth: bool,
         always_accept: bool,
+        node: Option<(String, u16)>
     ) -> (Self, Vec<TempDir>) {
         // Create temporary directories for databases (each test gets its own)
         let ave_db_temp_dir = tempfile::tempdir().expect("ave_db temp dir");
@@ -101,6 +104,21 @@ impl TestServer {
         vec_dir.push(keys_dir);
         vec_dir.push(auth_dir);
 
+
+        let boot_nodes = if let Some((peer_id,node_port)) = node {
+            format!(r#"
+            ,
+                "boot_nodes": [
+                    {{
+                        "peer_id": "{peer_id}",
+                        "address": ["/memory/{node_port}"]
+                    }}
+                ]
+            "#)
+        } else {
+            "".to_string()
+        };
+
         let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         // Create bridge config with memory transport and unique database paths
         let bridge_config_json = format!(
@@ -114,10 +132,10 @@ impl TestServer {
             "external_db": "{external_db_path}",
             "contracts_path": "{contracts_path}",
             "network": {{
-            "node_type": "Bootstrap",
-            "listen_addresses": [
-                "/memory/{port}"
-            ]
+                "node_type": "Bootstrap",
+                "listen_addresses": [
+                    "/memory/{port}"
+        ]{boot_nodes}
             }}
         }},
         "logging": {{
@@ -164,10 +182,9 @@ impl TestServer {
             serde_json::from_str(&bridge_config_json)
                 .expect("Failed to parse bridge config");
 
-        let (bridge, _runners) =
-            Bridge::build(&bridge_config, "test", "", None)
-                .await
-                .expect("Failed to create bridge");
+        let (bridge, runners) = Bridge::build(&bridge_config, "test", "", None)
+            .await
+            .expect("Failed to create bridge");
 
         let auth_db: Option<Arc<AuthDatabase>> =
             build_auth(&bridge_config.auth, "AdminPass123!").await;
@@ -181,7 +198,12 @@ impl TestServer {
 
         // Spawn the server
         let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    join_all(runners).await;
+                })
+                .await
+                .expect("Can not run axum server");
         });
 
         // Give the server a moment to start

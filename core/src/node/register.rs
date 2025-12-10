@@ -3,6 +3,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
+use std::{collections::HashSet, hash::Hash};
 use ave_actors::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use crate::{db::Storable, model::common::emit_fail};
 const TARGET_REGISTER: &str = "Ave-Node-Register";
 
 #[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize
 )]
 pub struct RegisterDataSubj {
     pub subject_id: String,
@@ -23,6 +24,33 @@ pub struct RegisterDataSubj {
     pub name: Option<String>,
     pub description: Option<String>,
 }
+
+impl Hash for RegisterDataSubj {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.subject_id.hash(state)
+    }
+}
+
+impl PartialOrd for RegisterDataSubj {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RegisterDataSubj {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.subject_id.clone())
+            .cmp(&(other.subject_id.clone()))
+    }
+}
+
+impl PartialEq for RegisterDataSubj {
+    fn eq(&self, other: &Self) -> bool {
+        self.subject_id == other.subject_id
+    }
+}
+
+impl Eq for RegisterDataSubj {}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -52,7 +80,7 @@ pub struct GovsData {
 )]
 pub struct Register {
     register_gov: HashMap<String, RegisterDataGov>,
-    register_subj: HashMap<String, Vec<RegisterDataSubj>>,
+    register_subj: HashMap<String, HashSet<RegisterDataSubj>>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,13 +262,13 @@ impl PersistentActor for Register {
         match event {
             RegisterEvent::RegisterGov { gov_id, data } => {
                 self.register_gov.insert(gov_id.clone(), data.clone());
-                self.register_subj.insert(gov_id.clone(), vec![]);
+                self.register_subj.insert(gov_id.clone(), HashSet::new());
             }
             RegisterEvent::RegisterSubj { gov_id, data } => {
                 self.register_subj
                     .entry(gov_id.clone())
                     .or_default()
-                    .push(data.clone());
+                    .replace(data.clone());
             }
         };
 
