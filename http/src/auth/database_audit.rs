@@ -5,6 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
 use rusqlite::{OptionalExtension, Result as SqliteResult, params};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 // =============================================================================
 // AUDIT LOG OPERATIONS
@@ -17,8 +18,6 @@ impl AuthDatabase {
         user_id: Option<i64>,
         api_key_id: Option<i64>,
         action_type: &str,
-        resource_type: Option<&str>,
-        resource_id: Option<&str>,
         endpoint: Option<&str>,
         http_method: Option<&str>,
         ip_address: Option<&str>,
@@ -37,16 +36,14 @@ impl AuthDatabase {
 
         conn.execute(
             "INSERT INTO audit_logs (
-                user_id, api_key_id, action_type, resource_type, resource_id,
+                user_id, api_key_id, action_type,
                 endpoint, http_method, ip_address, user_agent, request_id,
                 details, success, error_message
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 user_id,
                 api_key_id,
                 action_type,
-                resource_type,
-                resource_id,
                 endpoint,
                 http_method,
                 ip_address,
@@ -82,8 +79,6 @@ impl AuthDatabase {
             Some(ctx.user_id),
             Some(ctx.api_key_id),
             "api_request",
-            None,
-            None,
             Some(path),
             Some(method),
             ip_address,
@@ -103,8 +98,8 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let mut sql = String::from(
-            "SELECT id, timestamp, user_id, api_key_id, action_type, resource_type,
-                    resource_id, endpoint, http_method, ip_address, user_agent,
+            "SELECT id, timestamp, user_id, api_key_id, action_type,
+                    endpoint, http_method, ip_address, user_agent,
                     request_id, details, success, error_message
              FROM audit_logs
              WHERE 1=1"
@@ -117,14 +112,24 @@ impl AuthDatabase {
             params_vec.push(Box::new(uid));
         }
 
-        if let Some(ref action) = query.action_type {
-            sql.push_str(" AND action_type = ?");
-            params_vec.push(Box::new(action.clone()));
+        if let Some(api_key_id) = query.api_key_id {
+            sql.push_str(" AND api_key_id = ?");
+            params_vec.push(Box::new(api_key_id));
         }
 
-        if let Some(ref resource) = query.resource_type {
-            sql.push_str(" AND resource_type = ?");
-            params_vec.push(Box::new(resource.clone()));
+        if let Some(ref endpoint) = query.endpoint {
+            sql.push_str(" AND endpoint = ?");
+            params_vec.push(Box::new(endpoint.clone()));
+        }
+
+        if let Some(ref method) = query.http_method {
+            sql.push_str(" AND http_method = ?");
+            params_vec.push(Box::new(method.clone()));
+        }
+
+        if let Some(ref ip) = query.ip_address {
+            sql.push_str(" AND ip_address = ?");
+            params_vec.push(Box::new(ip.clone()));
         }
 
         if let Some(success) = query.success {
@@ -169,16 +174,14 @@ impl AuthDatabase {
                     user_id: row.get(2)?,
                     api_key_id: row.get(3)?,
                     action_type: row.get(4)?,
-                    resource_type: row.get(5)?,
-                    resource_id: row.get(6)?,
-                    endpoint: row.get(7)?,
-                    http_method: row.get(8)?,
-                    ip_address: row.get(9)?,
-                    user_agent: row.get(10)?,
-                    request_id: row.get(11)?,
-                    details: row.get(12)?,
-                    success: row.get(13)?,
-                    error_message: row.get(14)?,
+                    endpoint: row.get(5)?,
+                    http_method: row.get(6)?,
+                    ip_address: row.get(7)?,
+                    user_agent: row.get(8)?,
+                    request_id: row.get(9)?,
+                    details: row.get(10)?,
+                    success: row.get(11)?,
+                    error_message: row.get(12)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -246,23 +249,70 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
-        // Top action types
-        let mut stmt = conn
-            .prepare(
-                "SELECT action_type, COUNT(*) as count
+        // Common helper to fetch top-N aggregated counts
+        let top_n = |sql: &str| -> Result<Vec<(String, i64)>, DatabaseError> {
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            stmt.query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+                .collect::<SqliteResult<Vec<_>>>()
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))
+        };
+
+        let top_actions = top_n(
+            "SELECT action_type, COUNT(*) as count
              FROM audit_logs
              WHERE timestamp >= ?1
              GROUP BY action_type
              ORDER BY count DESC
              LIMIT 10",
-            )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        )?;
 
-        let top_actions: Vec<(String, i64)> = stmt
-            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-            .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        let top_users = top_n(
+            "SELECT CAST(user_id AS TEXT) as user_id, COUNT(*) as count
+             FROM audit_logs
+             WHERE timestamp >= ?1 AND user_id IS NOT NULL
+             GROUP BY user_id
+             ORDER BY count DESC
+             LIMIT 10",
+        )?;
+
+        let top_api_keys = top_n(
+            "SELECT CAST(api_key_id AS TEXT) as api_key_id, COUNT(*) as count
+             FROM audit_logs
+             WHERE timestamp >= ?1 AND api_key_id IS NOT NULL
+             GROUP BY api_key_id
+             ORDER BY count DESC
+             LIMIT 10",
+        )?;
+
+        let top_endpoints = top_n(
+            "SELECT endpoint, COUNT(*) as count
+             FROM audit_logs
+             WHERE timestamp >= ?1 AND endpoint IS NOT NULL
+             GROUP BY endpoint
+             ORDER BY count DESC
+             LIMIT 10",
+        )?;
+
+        let top_methods = top_n(
+            "SELECT http_method, COUNT(*) as count
+             FROM audit_logs
+             WHERE timestamp >= ?1 AND http_method IS NOT NULL
+             GROUP BY http_method
+             ORDER BY count DESC
+             LIMIT 10",
+        )?;
+
+        let top_ips = top_n(
+            "SELECT ip_address, COUNT(*) as count
+             FROM audit_logs
+             WHERE timestamp >= ?1 AND ip_address IS NOT NULL
+             GROUP BY ip_address
+             ORDER BY count DESC
+             LIMIT 10",
+        )?;
 
         Ok(serde_json::json!({
             "total_logs": total,
@@ -270,6 +320,11 @@ impl AuthDatabase {
             "failure_count": failure_count,
             "success_rate": if total > 0 { (success_count as f64 / total as f64) * 100.0 } else { 0.0 },
             "top_action_types": top_actions,
+            "top_users": top_users,
+            "top_api_keys": top_api_keys,
+            "top_endpoints": top_endpoints,
+            "top_http_methods": top_methods,
+            "top_ip_addresses": top_ips,
         }))
     }
 }
@@ -391,14 +446,25 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         let total_requests: i64 = data.iter().map(|(_, count)| count).sum();
+        let requests_per_window: Vec<(String, i64)> = data
+            .into_iter()
+            .map(|(ts, count)| (format_ts(ts), count))
+            .collect();
 
         Ok(serde_json::json!({
             "total_requests": total_requests,
             "window_seconds": self.config.rate_limit.window_seconds,
             "max_requests_per_window": self.config.rate_limit.max_requests,
-            "data_points": data,
+            "requests_per_window": requests_per_window,
         }))
     }
+}
+
+fn format_ts(ts: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(ts)
+        .ok()
+        .and_then(|dt| dt.format(&Rfc3339).ok())
+        .unwrap_or_else(|| ts.to_string())
 }
 
 // =============================================================================
@@ -427,15 +493,6 @@ impl AuthDatabase {
             },
         )
         .map_err(|e| DatabaseError::QueryError(e.to_string()))
-    }
-
-    /// Get system config value
-    pub fn get_system_config(
-        &self,
-        key: &str,
-    ) -> Result<SystemConfig, DatabaseError> {
-        let conn = self.lock_conn()?;
-        Self::get_system_config_internal(&conn, key)
     }
 
     /// List all system config
@@ -486,9 +543,4 @@ impl AuthDatabase {
         Self::get_system_config_internal(&conn, key)
     }
 
-    /// Check if system is in read-only mode
-    pub fn is_read_only_mode(&self) -> Result<bool, DatabaseError> {
-        let config = self.get_system_config("read_only_mode")?;
-        Ok(config.value == "1" || config.value.to_lowercase() == "true")
-    }
 }

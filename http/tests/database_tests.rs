@@ -511,12 +511,12 @@ mod tests {
         let role = db.create_role("editor", None, None).unwrap();
 
         // Grant read permission on subjects
-        db.set_role_permission(role.id, "subjects", "read", true).unwrap();
+        db.set_role_permission(role.id, "subjects", "get", true).unwrap();
 
         let permissions = db.get_role_permissions(role.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "subjects" && p.action == "read")
+            .find(|p| p.resource == "subjects" && p.action == "get")
             .unwrap();
 
         assert!(perm.allowed);
@@ -529,12 +529,12 @@ mod tests {
         let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
 
         // Set user-specific permission
-        db.set_user_permission(user.id, "users", "update", false, None).unwrap();
+        db.set_user_permission(user.id, "users", "put", false, None).unwrap();
 
         let permissions = db.get_user_permissions(user.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "users" && p.action == "update")
+            .find(|p| p.resource == "users" && p.action == "put")
             .unwrap();
 
         assert!(!perm.allowed);
@@ -548,13 +548,13 @@ mod tests {
         let role = db.create_role("editor", None, None).unwrap();
 
         // Role grants read on events
-        db.set_role_permission(role.id, "events", "read", true).unwrap();
+        db.set_role_permission(role.id, "events", "get", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         let permissions = db.get_user_effective_permissions(user.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "events" && p.action == "read");
+            .find(|p| p.resource == "events" && p.action == "get");
 
         assert!(perm.is_some());
         assert!(perm.unwrap().allowed);
@@ -732,8 +732,6 @@ mod tests {
             None,
             None,
             "login",
-            None,
-            None,
             Some("/login"),
             Some("POST"),
             None,
@@ -747,8 +745,10 @@ mod tests {
 
         let query = AuditLogQuery {
             user_id: None,
-            action_type: None,
-            resource_type: None,
+            api_key_id: None,
+            endpoint: None,
+            http_method: None,
+            ip_address: None,
             success: None,
             start_timestamp: None,
             end_timestamp: None,
@@ -808,8 +808,10 @@ mod tests {
 
         let query = AuditLogQuery {
             user_id: Some(user.id),
-            action_type: Some("api_request".to_string()),
-            resource_type: None,
+            api_key_id: None,
+            endpoint: None,
+            http_method: None,
+            ip_address: None,
             success: Some(true),
             start_timestamp: None,
             end_timestamp: None,
@@ -871,8 +873,10 @@ mod tests {
 
         let query = AuditLogQuery {
             user_id: Some(user.id),
-            action_type: Some("api_request".to_string()),
-            resource_type: None,
+            api_key_id: None,
+            endpoint: None,
+            http_method: None,
+            ip_address: None,
             success: None,
             start_timestamp: None,
             end_timestamp: None,
@@ -902,9 +906,8 @@ mod tests {
     fn test_update_system_config() {
         let (db, _dirs) = create_test_db();
 
-        let updated = db.update_system_config("read_only_mode", "1", None).unwrap();
+        let result = db.update_system_config("read_only_mode", "1", None);
 
-        assert_eq!(updated.key, "read_only_mode");
-        assert_eq!(updated.value, "1");
+        assert!(result.is_err());
     }
 }

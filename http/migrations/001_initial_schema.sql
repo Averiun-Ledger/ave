@@ -79,10 +79,10 @@ CREATE INDEX IF NOT EXISTS idx_resources_name ON resources(name);
 -- =============================================================================
 -- ACTIONS TABLE
 -- =============================================================================
--- Actions represent operations on resources
+-- Actions represent operations on resources (aligned with HTTP verbs)
 CREATE TABLE IF NOT EXISTS actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE, -- e.g., "create", "read", "update", "delete", "list"
+    name TEXT NOT NULL UNIQUE, -- e.g., "get", "post", "put", "patch", "delete", "all"
     description TEXT,
     is_system BOOLEAN NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -174,8 +174,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     user_id INTEGER, -- NULL for anonymous/failed auth attempts
     api_key_id INTEGER,
     action_type TEXT NOT NULL, -- e.g., "login_success", "login_failed", "api_key_created"
-    resource_type TEXT, -- e.g., "user", "role", "api_key", "subject"
-    resource_id TEXT, -- ID of the affected resource
     endpoint TEXT, -- HTTP endpoint called
     http_method TEXT, -- GET, POST, PUT, DELETE, etc.
     ip_address TEXT,
@@ -192,7 +190,6 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_api_key ON audit_logs(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
 
 -- =============================================================================
 -- RATE_LIMITS TABLE
@@ -251,7 +248,6 @@ CREATE TABLE IF NOT EXISTS system_config (
 
 -- Insert default system config
 INSERT OR IGNORE INTO system_config (key, value, description) VALUES
-    ('read_only_mode', '0', 'When 1, only read operations are allowed'),
     ('max_login_attempts', '5', 'Maximum failed login attempts before account lockout'),
     ('lockout_duration_seconds', '900', 'Account lockout duration in seconds'),
     ('rate_limit_window_seconds', '60', 'Rate limit time window in seconds'),
@@ -280,13 +276,12 @@ INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
 -- INSERT SYSTEM ACTIONS
 -- =============================================================================
 INSERT OR IGNORE INTO actions (name, description, is_system) VALUES
-    ('create', 'Create new resources', 1),
-    ('read', 'Read/view resources', 1),
-    ('update', 'Modify existing resources', 1),
+    ('get', 'Read/view resources', 1),
+    ('post', 'Create resources or trigger operations', 1),
+    ('put', 'Replace or update resources', 1),
+    ('patch', 'Partial update or custom action', 1),
     ('delete', 'Delete resources', 1),
-    ('list', 'List/query resources', 1),
-    ('execute', 'Execute operations (e.g., approve, transfer)', 1),
-    ('manage', 'Full management access', 1);
+    ('all', 'Full access to the resource', 1);
 
 -- =============================================================================
 -- INSERT SYSTEM ROLES

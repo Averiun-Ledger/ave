@@ -4,9 +4,13 @@
 
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
-use axum::{Extension, Json, http::StatusCode};
+use axum::{
+    Extension, Json,
+    extract::ConnectInfo,
+    http::{HeaderMap, StatusCode},
+};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Convert DatabaseError to HTTP response tuple
 fn db_error_to_response(
@@ -51,8 +55,12 @@ fn db_error_to_response(
 )]
 pub async fn login(
     Extension(db): Extension<Arc<AuthDatabase>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (ip_address, user_agent) = extract_request_meta(&headers, addr);
+
     // Verify credentials and get user
     let user = db
         .verify_credentials(&req.username, &req.password)
@@ -62,12 +70,10 @@ pub async fn login(
                 None, // No user_id for failed login
                 None, // No API key yet
                 "login_failed",
-                Some("auth"),
-                None,
                 Some("/login"),
                 Some("POST"),
-                None, // IP address would come from middleware
-                None, // User agent would come from middleware
+                ip_address.as_deref(),
+                user_agent.as_deref(),
                 None,
                 Some(&format!("Failed login for username: {}", req.username)),
                 false,
@@ -115,12 +121,10 @@ pub async fn login(
         Some(user.id),
         Some(key_info.id),
         "login_success",
-        Some("auth"),
-        None,
         Some("/login"),
         Some("POST"),
-        None,
-        None,
+        ip_address.as_deref(),
+        user_agent.as_deref(),
         None,
         Some(&format!("User {} logged in successfully", user.username)),
         true,
@@ -139,6 +143,25 @@ pub struct ChangePasswordRequest {
     pub username: String,
     pub current_password: String,
     pub new_password: String,
+}
+
+fn extract_request_meta(
+    headers: &HeaderMap,
+    addr: SocketAddr,
+) -> (Option<String>, Option<String>) {
+    let header_ip = headers
+        .get("X-Forwarded-For")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("X-Real-IP").and_then(|v| v.to_str().ok()))
+        .map(|s| s.to_string());
+    let ip_address = header_ip.or_else(|| Some(addr.ip().to_string()));
+
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    (ip_address, user_agent)
 }
 
 /// Endpoint to change password when it is required (no API key needed)

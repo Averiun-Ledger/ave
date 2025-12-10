@@ -5,7 +5,6 @@ use crate::{
         AuthDatabase, admin_handlers, apikey_handlers, login_handler,
         middleware::{
             ApiKeyAuthNew, audit_log_middleware, check_permission,
-            read_only_middleware,
         },
         models::{AuthContext, ErrorResponse},
         system_handlers,
@@ -1341,7 +1340,10 @@ pub fn build_routes(
                 "/me/api-keys/{name}",
                 delete(apikey_handlers::revoke_my_api_key),
             )
-            .layer(middleware::from_extractor::<ApiKeyAuthNew>());
+            // Authentication is enforced by the outer `protected_layers`.
+            // Avoid adding the extractor here to prevent double execution
+            // (which was incrementing rate-limit counters twice).
+            ;
 
         // Routes that require authentication & permission checks
         let authed = Router::new()
@@ -1374,8 +1376,7 @@ async fn read_only_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    let db = req.extensions().get::<Arc<AuthDatabase>>().cloned();
-    read_only_middleware(db, req, next).await
+    next.run(req).await
 }
 
 async fn audit_layer(
@@ -1463,35 +1464,35 @@ pub(crate) fn permission_for(
 
     match (method, path) {
         // Events / requests
-        (&Method::POST, "/event-request") => Some(("events", "create")),
+        (&Method::POST, "/event-request") => Some(("events", "post")),
         (&Method::GET, p) if p.starts_with("/event-request/") => {
-            Some(("events", "read"))
+            Some(("events", "get"))
         }
         (&Method::GET, p) if p.starts_with("/events-first-last/") => {
-            Some(("events", "list"))
+            Some(("events", "get"))
         }
         (&Method::GET, p) if p.starts_with("/events/") => {
-            Some(("events", "list"))
+            Some(("events", "get"))
         }
         (&Method::GET, p) if p.starts_with("/event/") => {
-            Some(("events", "read"))
+            Some(("events", "get"))
         }
 
         // Approvals
         (&Method::GET, p) if p.starts_with("/approval-request/") => {
-            Some(("approvals", "read"))
+            Some(("approvals", "get"))
         }
         (&Method::PATCH, p) if p.starts_with("/approval-request/") => {
-            Some(("approvals", "execute"))
+            Some(("approvals", "patch"))
         }
 
         // Subjects / auth
-        (&Method::GET, "/auth") => Some(("auth", "list")),
+        (&Method::GET, "/auth") => Some(("auth", "get")),
         (&Method::GET, p) if p.starts_with("/auth/") => {
-            Some(("auth", "read"))
+            Some(("auth", "get"))
         }
         (&Method::PUT, p) if p.starts_with("/auth/") => {
-            Some(("auth", "create"))
+            Some(("auth", "put"))
         }
         (&Method::DELETE, p) if p.starts_with("/auth/") => {
             Some(("auth", "delete"))
@@ -1499,45 +1500,45 @@ pub(crate) fn permission_for(
 
         // Updates / transfers
         (&Method::POST, p) if p.starts_with("/update/") => {
-            Some(("subjects", "update"))
+            Some(("subjects", "post"))
         }
         (&Method::POST, p) if p.starts_with("/check-transfer/") => {
-            Some(("transfers", "execute"))
+            Some(("transfers", "post"))
         }
         (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
-            Some(("transfers", "execute"))
+            Some(("transfers", "post"))
         }
 
         // Self API keys panel (management key required)
-        (&Method::GET, "/me/api-keys") => Some(("api_keys", "list")),
-        (&Method::POST, "/me/api-keys") => Some(("api_keys", "create")),
+        (&Method::GET, "/me/api-keys") => Some(("api_keys", "get")),
+        (&Method::POST, "/me/api-keys") => Some(("api_keys", "post")),
         (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
             Some(("api_keys", "delete"))
         }
 
         // Ledger info
         (&Method::GET, p) if p.starts_with("/signatures/") => {
-            Some(("signatures", "read"))
+            Some(("signatures", "get"))
         }
         (&Method::GET, p) if p.starts_with("/state/") => {
-            Some(("subjects", "read"))
+            Some(("subjects", "get"))
         }
         (&Method::GET, p) if p.starts_with("/register-subjects/") => {
-            Some(("subjects", "list"))
+            Some(("subjects", "get"))
         }
         (&Method::GET, "/register-governances") => {
-            Some(("governances", "list"))
+            Some(("governances", "get"))
         }
         (&Method::GET, p) if p.starts_with("/events/") => {
-            Some(("events", "list"))
+            Some(("events", "get"))
         }
 
         // System/info
-        (&Method::GET, "/controller-id") => Some(("system", "read")),
-        (&Method::GET, "/peer-id") => Some(("system", "read")),
-        (&Method::GET, "/config") => Some(("system", "read")),
-        (&Method::GET, "/keys") => Some(("system", "read")),
-        (&Method::GET, "/pending-transfers") => Some(("transfers", "read")),
+        (&Method::GET, "/controller-id") => Some(("system", "get")),
+        (&Method::GET, "/peer-id") => Some(("system", "get")),
+        (&Method::GET, "/config") => Some(("system", "get")),
+        (&Method::GET, "/keys") => Some(("system", "get")),
+        (&Method::GET, "/pending-transfers") => Some(("transfers", "get")),
 
         _ => None,
     }

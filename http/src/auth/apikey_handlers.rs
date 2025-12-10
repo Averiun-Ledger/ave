@@ -61,7 +61,7 @@ pub async fn create_api_key_for_user(
     (StatusCode, Json<ErrorResponse>),
 > {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "create")?;
+    check_permission(&auth_ctx, "api_keys", "post")?;
 
     let (api_key, key_info) = db
         .create_api_key(
@@ -80,8 +80,6 @@ pub async fn create_api_key_for_user(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "api_key_created",
-        Some("api_key"),
-        Some(&response.key_info.id.to_string()),
         Some(&format!("/admin/api-keys/user/{}", user_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -116,7 +114,7 @@ pub async fn list_all_api_keys(
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "list")?;
+    check_permission(&auth_ctx, "api_keys", "get")?;
 
     let keys = db
         .list_all_api_keys(params.include_revoked.unwrap_or(false))
@@ -154,7 +152,7 @@ pub async fn list_user_api_keys_admin(
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "list")?;
+    check_permission(&auth_ctx, "api_keys", "get")?;
 
     let keys = db
         .list_user_api_keys(user_id, params.include_revoked.unwrap_or(false))
@@ -185,7 +183,7 @@ pub async fn get_api_key(
     Path(key_id): Path<i64>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "read")?;
+    check_permission(&auth_ctx, "api_keys", "get")?;
 
     let key_info = db.get_api_key_info(key_id).map_err(db_error_to_response)?;
 
@@ -226,8 +224,6 @@ pub async fn revoke_api_key(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "api_key_revoked",
-        Some("api_key"),
-        Some(&key_id.to_string()),
         Some(&format!("/admin/api-keys/{}", key_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
@@ -265,7 +261,7 @@ pub async fn rotate_api_key(
     Json(req): Json<RotateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "create")?;
+    check_permission(&auth_ctx, "api_keys", "post")?;
 
     // Fetch existing key for user and defaults
     let existing = db
@@ -300,8 +296,6 @@ pub async fn rotate_api_key(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "api_key_rotated",
-        Some("api_key"),
-        Some(&key_id.to_string()),
         Some(&format!("/admin/api-keys/{}/rotate", key_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -391,8 +385,6 @@ pub async fn create_my_api_key(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "api_key_created",
-        Some("api_key"),
-        Some(&response.key_info.id.to_string()),
         Some("/me/api-keys"),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -511,8 +503,6 @@ pub async fn revoke_my_api_key(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "api_key_revoked",
-        Some("api_key"),
-        Some(&key_info.id.to_string()),
         Some(&format!("/me/api-keys/{}", name)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),

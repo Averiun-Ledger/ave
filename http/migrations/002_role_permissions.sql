@@ -11,10 +11,10 @@ INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed
 SELECT
     (SELECT id FROM roles WHERE name = 'superadmin'),
     r.id,
-    a.id,
+    (SELECT id FROM actions WHERE name = 'all'),
     1
 FROM resources r
-CROSS JOIN actions a;
+;
 
 -- =============================================================================
 -- ADMIN ROLE PERMISSIONS
@@ -27,60 +27,48 @@ INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'users'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('create', 'read', 'update', 'delete', 'list', 'manage');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
 -- Roles management
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'roles'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('create', 'read', 'update', 'delete', 'list', 'manage');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
 -- Permissions management
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'permissions'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('create', 'read', 'update', 'delete', 'list', 'manage');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
 -- API keys management
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'api_keys'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('create', 'read', 'update', 'delete', 'list', 'manage');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
--- Audit logs (read-only)
+-- Audit logs
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'audit'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('read', 'list');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
--- System config (read and update)
+-- System config
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
 SELECT
     (SELECT id FROM roles WHERE name = 'admin'),
     (SELECT id FROM resources WHERE name = 'system'),
-    a.id,
-    1
-FROM actions a
-WHERE a.name IN ('read', 'update', 'list');
+    (SELECT id FROM actions WHERE name = 'all'),
+    1;
 
 -- DENY admin access to ledger endpoints
 INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed)
@@ -122,10 +110,10 @@ CROSS JOIN actions a
 WHERE
     (
         r.name IN ('signatures', 'subjects', 'events', 'governances', 'approvals', 'auth', 'transfers', 'system')
-        AND a.name IN ('read', 'list')
+        AND a.name IN ('get')
     )
-    OR (r.name = 'subjects' AND a.name = 'update')
-    OR (r.name = 'transfers' AND a.name = 'execute');
+    OR (r.name = 'subjects' AND a.name = 'post')
+    OR (r.name = 'transfers' AND a.name = 'post');
 
 -- =============================================================================
 -- WRITE ROLE PERMISSIONS
@@ -140,12 +128,12 @@ SELECT
 FROM resources r
 CROSS JOIN actions a
 WHERE (r.name, a.name) IN (
-    ('approvals', 'read'), ('approvals', 'execute'),
-    ('events', 'create'), ('events', 'read'),
-    ('transfers', 'read'), ('transfers', 'execute'),
-    ('subjects', 'update'),
-    ('auth', 'create'), ('auth', 'update'), ('auth', 'delete'), ('auth', 'read'), ('auth', 'list'),
-    ('system', 'read')
+    ('approvals', 'get'), ('approvals', 'patch'),
+    ('events', 'post'), ('events', 'get'),
+    ('transfers', 'get'), ('transfers', 'post'),
+    ('subjects', 'post'),
+    ('auth', 'post'), ('auth', 'put'), ('auth', 'delete'), ('auth', 'get'),
+    ('system', 'get')
 );
 
 -- =============================================================================
@@ -156,5 +144,5 @@ INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed
 SELECT
     (SELECT id FROM roles WHERE name = 'sender'),
     (SELECT id FROM resources WHERE name = 'events'),
-    (SELECT id FROM actions WHERE name = 'create'),
+    (SELECT id FROM actions WHERE name = 'post'),
     1;

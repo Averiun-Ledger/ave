@@ -6,12 +6,12 @@ use super::database::AuthDatabase;
 use super::models::{AuthContext, ErrorResponse};
 use axum::{
     Json,
-    extract::{FromRequestParts, Request},
+    extract::{ConnectInfo, FromRequestParts, Request},
     http::{StatusCode, request::Parts},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 // =============================================================================
 // API KEY AUTHENTICATION EXTRACTOR
@@ -196,7 +196,7 @@ pub async fn audit_log_middleware(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     // Get IP address from headers
-    let ip_address = req
+    let header_ip = req
         .headers()
         .get("X-Forwarded-For")
         .and_then(|v| v.to_str().ok())
@@ -204,6 +204,12 @@ pub async fn audit_log_middleware(
             req.headers().get("X-Real-IP").and_then(|v| v.to_str().ok())
         })
         .map(|s| s.to_string());
+    // Fallback to socket address if available (ConnectInfo from axum)
+    let socket_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip().to_string());
+    let ip_address = header_ip.or(socket_ip);
 
     // Get user agent
     let user_agent = req
@@ -214,6 +220,11 @@ pub async fn audit_log_middleware(
 
     // Process request
     let response = next.run(req).await;
+
+    // Avoid double logging for login (explicitly logged elsewhere)
+    if path == "/login" {
+        return response;
+    }
 
     // Log to audit if database is available and logging is enabled
     if let (Some(db), Some(ctx)) = (auth_db, auth_ctx) {
@@ -237,40 +248,6 @@ pub async fn audit_log_middleware(
     }
 
     response
-}
-
-// =============================================================================
-// READ-ONLY MODE MIDDLEWARE
-// =============================================================================
-
-/// Middleware to enforce read-only mode
-pub async fn read_only_middleware(
-    auth_db: Option<Arc<AuthDatabase>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    // Check if read-only mode is enabled
-    if let Some(db) = auth_db {
-        if let Ok(true) = db.is_read_only_mode() {
-            // Only allow GET, HEAD, OPTIONS
-            if !matches!(
-                req.method(),
-                &axum::http::Method::GET
-                    | &axum::http::Method::HEAD
-                    | &axum::http::Method::OPTIONS
-            ) {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ErrorResponse {
-                        error: "System is in read-only mode".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    next.run(req).await
 }
 
 // Need to add uuid dependency

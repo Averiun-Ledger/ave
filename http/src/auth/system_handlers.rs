@@ -5,7 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{Extension, Json, extract::Query, http::StatusCode};
+use axum::{Extension, Json, extract::{Path, Query}, http::StatusCode};
 use std::sync::Arc;
 
 /// Convert DatabaseError to HTTP response tuple
@@ -48,7 +48,7 @@ pub async fn list_resources(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<Resource>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "read")?;
+    check_permission(&auth_ctx, "system", "get")?;
 
     let resources = db.list_resources().map_err(db_error_to_response)?;
 
@@ -72,7 +72,7 @@ pub async fn list_actions(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<Action>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "read")?;
+    check_permission(&auth_ctx, "system", "get")?;
 
     let actions = db.list_actions().map_err(db_error_to_response)?;
 
@@ -91,8 +91,10 @@ pub async fn list_actions(
     tag = "Audit Logs",
     params(
         ("user_id" = Option<i64>, Query, description = "Filter by user ID"),
-        ("action_type" = Option<String>, Query, description = "Filter by action type"),
-        ("resource_type" = Option<String>, Query, description = "Filter by resource type"),
+        ("api_key_id" = Option<i64>, Query, description = "Filter by API key ID"),
+        ("endpoint" = Option<String>, Query, description = "Filter by endpoint path"),
+        ("http_method" = Option<String>, Query, description = "Filter by HTTP method"),
+        ("ip_address" = Option<String>, Query, description = "Filter by IP address"),
         ("success" = Option<bool>, Query, description = "Filter by success status"),
         ("start_timestamp" = Option<i64>, Query, description = "Start timestamp (Unix)"),
         ("end_timestamp" = Option<i64>, Query, description = "End timestamp (Unix)"),
@@ -111,7 +113,7 @@ pub async fn query_audit_logs(
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<Vec<AuditLog>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "audit", "read")?;
+    check_permission(&auth_ctx, "audit", "get")?;
 
     let logs = db.query_audit_logs(&query).map_err(db_error_to_response)?;
 
@@ -139,7 +141,7 @@ pub async fn get_audit_stats(
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "audit", "read")?;
+    check_permission(&auth_ctx, "audit", "get")?;
 
     let stats = db
         .get_audit_stats(params.days.unwrap_or(7))
@@ -174,7 +176,7 @@ pub async fn list_system_config(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<SystemConfig>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "read")?;
+    check_permission(&auth_ctx, "system", "get")?;
 
     let config = db.list_system_config().map_err(db_error_to_response)?;
 
@@ -201,14 +203,14 @@ pub async fn list_system_config(
 pub async fn update_system_config(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    axum::extract::Path(key): axum::extract::Path<String>,
+    Path(key): Path<String>,
     Json(req): Json<UpdateSystemConfigRequest>,
 ) -> Result<Json<SystemConfig>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "update")?;
+    check_permission(&auth_ctx, "system", "put")?;
 
     let config = db
-        .update_system_config(&key, &req.value, Some(auth_ctx.user_id))
+        .update_system_config(&key, &req.value.to_string(), Some(auth_ctx.user_id))
         .map_err(db_error_to_response)?;
 
     // Audit log
@@ -216,8 +218,6 @@ pub async fn update_system_config(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "config_updated",
-        Some("system_config"),
-        Some(&key),
         Some(&format!("/admin/config/{}", key)),
         Some("PUT"),
         auth_ctx.ip_address.as_deref(),
@@ -344,6 +344,9 @@ pub async fn get_my_permissions_detailed(
     path = "/admin/rate-limits/stats",
     operation_id = "getRateLimitStats",
     tag = "Audit Logs",
+    params(
+        ("hours" = Option<u32>, Query, description = "Time window in hours (default 24)")
+    ),
     responses(
         (status = 200, description = "Rate limit statistics"),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -353,13 +356,21 @@ pub async fn get_my_permissions_detailed(
 pub async fn get_rate_limit_stats(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
+    Query(query): Query<RateLimitStatsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "audit", "read")?;
+    check_permission(&auth_ctx, "audit", "get")?;
+
+    let hours = query.hours.unwrap_or(24);
 
     let stats = db
-        .get_rate_limit_stats(None, 24)
+        .get_rate_limit_stats(None, hours)
         .map_err(db_error_to_response)?;
     Ok(Json(stats))
+}
+
+#[derive(serde::Deserialize)]
+pub struct RateLimitStatsQuery {
+    pub hours: Option<u32>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]

@@ -8,13 +8,38 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use utoipa::ToSchema;
+
+fn serialize_ts<S>(ts: &i64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_ts_opt(&Some(*ts), serializer)
+}
+
+fn serialize_ts_opt<S>(
+    ts: &Option<i64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let formatted = ts
+        .and_then(|v| {
+            OffsetDateTime::from_unix_timestamp(v)
+                .ok()
+                .and_then(|dt| dt.format(&Rfc3339).ok())
+        })
+        .unwrap_or_default();
+    serializer.serialize_str(&formatted)
+}
 
 // =============================================================================
 // COMMON ERROR RESPONSE
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -29,7 +54,7 @@ impl IntoResponse for ErrorResponse {
 // USER MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct User {
     pub id: i64,
     pub username: String,
@@ -40,13 +65,17 @@ pub struct User {
     pub is_deleted: bool,
     pub must_change_password: bool,
     pub failed_login_attempts: i32,
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub locked_until: Option<i64>,
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub last_login_at: Option<i64>,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct UserInfo {
     /// User ID
     pub id: i64,
@@ -60,11 +89,17 @@ pub struct UserInfo {
     pub must_change_password: bool,
     /// Failed login attempts
     pub failed_login_attempts: i32,
-    /// Account locked until (Unix timestamp)
+    #[serde(
+        serialize_with = "serialize_ts_opt",
+        skip_deserializing
+    )]
     pub locked_until: Option<i64>,
-    /// Last login timestamp
+    #[serde(
+        serialize_with = "serialize_ts_opt",
+        skip_deserializing
+    )]
     pub last_login_at: Option<i64>,
-    /// Account created timestamp
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
     /// Roles assigned to this user
     pub roles: Vec<String>,
@@ -75,7 +110,6 @@ pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
     pub is_superadmin: Option<bool>,
-    pub is_active: Option<bool>,
     pub role_ids: Option<Vec<i64>>,
 }
 
@@ -90,7 +124,7 @@ pub struct UpdateUserRequest {
 // ROLE MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Role {
     pub id: i64,
     pub name: Option<String>,
@@ -98,17 +132,20 @@ pub struct Role {
     pub default_ttl_seconds: Option<i64>,
     pub is_system: bool,
     pub is_deleted: bool,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RoleInfo {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
     pub default_ttl_seconds: Option<i64>,
     pub is_system: bool,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
     pub permission_count: i64,
 }
@@ -130,21 +167,23 @@ pub struct UpdateRoleRequest {
 // RESOURCE AND ACTION MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Resource {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
     pub is_system: bool,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Action {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
     pub is_system: bool,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
 }
 
@@ -170,7 +209,7 @@ pub struct SetPermissionRequest {
 // API KEY MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiKeyInfo {
     pub id: i64,
     pub user_id: i64,
@@ -179,11 +218,15 @@ pub struct ApiKeyInfo {
     pub name: String,
     pub description: Option<String>,
     pub is_management: bool,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub expires_at: Option<i64>,
     pub revoked: bool,
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub revoked_at: Option<i64>,
     pub revoked_reason: Option<String>,
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub last_used_at: Option<i64>,
     pub last_used_ip: Option<String>,
 }
@@ -204,7 +247,7 @@ pub struct RotateApiKeyRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CreateApiKeyResponse {
     pub api_key: String,
     pub key_info: ApiKeyInfo,
@@ -219,15 +262,14 @@ pub struct RevokeApiKeyRequest {
 // AUDIT LOG MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AuditLog {
     pub id: i64,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub timestamp: i64,
     pub user_id: Option<i64>,
     pub api_key_id: Option<i64>,
     pub action_type: String,
-    pub resource_type: Option<String>,
-    pub resource_id: Option<String>,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
     pub ip_address: Option<String>,
@@ -241,8 +283,10 @@ pub struct AuditLog {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditLogQuery {
     pub user_id: Option<i64>,
-    pub action_type: Option<String>,
-    pub resource_type: Option<String>,
+    pub api_key_id: Option<i64>,
+    pub endpoint: Option<String>,
+    pub http_method: Option<String>,
+    pub ip_address: Option<String>,
     pub success: Option<bool>,
     pub start_timestamp: Option<i64>,
     pub end_timestamp: Option<i64>,
@@ -260,7 +304,7 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub api_key: String,
     pub user: UserInfo,
@@ -297,12 +341,19 @@ impl AuthContext {
         let mut has_deny = false;
 
         for perm in &self.permissions {
-            if perm.resource == resource && perm.action == action {
-                if perm.allowed {
-                    has_allow = true;
-                } else {
-                    has_deny = true;
-                }
+            if perm.resource != resource {
+                continue;
+            }
+
+            // "all" acts as wildcard over actions
+            if perm.action != action && perm.action != "all" {
+                continue;
+            }
+
+            if perm.allowed {
+                has_allow = true;
+            } else {
+                has_deny = true;
             }
         }
 
@@ -320,16 +371,17 @@ impl AuthContext {
 // SYSTEM CONFIG MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SystemConfig {
     pub key: String,
     pub value: String,
     pub description: Option<String>,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub updated_at: i64,
     pub updated_by: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSystemConfigRequest {
-    pub value: String,
+    pub value: i64,
 }

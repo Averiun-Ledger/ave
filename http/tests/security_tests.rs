@@ -328,19 +328,19 @@ mod tests {
         let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
-        db.set_role_permission(role.id, "subjects", "read", true).unwrap();
+        db.set_role_permission(role.id, "subjects", "get", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // User has permission
         let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_before.iter().any(|p| p.resource == "subjects" && p.action == "read" && p.allowed));
+        assert!(perms_before.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
 
         // Delete role
         db.delete_role(role.id).unwrap();
 
         // User should no longer have permission
         let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_after.iter().any(|p| p.resource == "subjects" && p.action == "read" && p.allowed));
+        assert!(!perms_after.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
     }
 
     // =============================================================================
@@ -533,7 +533,7 @@ mod tests {
         // Use actual system resources and actions from schema
         let resources = vec!["subjects", "events", "governances", "approvals", "transfers",
                             "signatures", "auth", "users", "roles", "permissions"];
-        let actions = vec!["create", "read", "update", "delete", "list", "execute", "manage"];
+        let actions = vec!["get", "post", "put", "patch", "delete", "all"];
 
         // Grant permissions for all combinations
         for resource in &resources {

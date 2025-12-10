@@ -60,18 +60,18 @@ mod tests {
         let role = db.create_role("editor", None, None).unwrap();
 
         // Role has read permission
-        db.set_role_permission(role.id, "subjects", "read", true).unwrap();
+        db.set_role_permission(role.id, "subjects", "get", true).unwrap();
 
         // User doesn't have permission yet
         let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_before.iter().any(|p| p.resource == "subjects" && p.action == "read" && p.allowed));
+        assert!(!perms_before.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
 
         // Assign role
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // User should now have permission
         let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_after.iter().any(|p| p.resource == "subjects" && p.action == "read" && p.allowed));
+        assert!(perms_after.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
     }
 
     #[test]
@@ -82,19 +82,19 @@ mod tests {
         let role = db.create_role("editor", None, None).unwrap();
 
         // Role has update permission
-        db.set_role_permission(role.id, "events", "update", true).unwrap();
+        db.set_role_permission(role.id, "events", "post", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // User has permission
         let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_before.iter().any(|p| p.resource == "events" && p.action == "update" && p.allowed));
+        assert!(perms_before.iter().any(|p| p.resource == "events" && p.action == "post" && p.allowed));
 
         // Remove role
         db.remove_role_from_user(user.id, role.id).unwrap();
 
         // User should no longer have permission
         let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_after.iter().any(|p| p.resource == "events" && p.action == "update" && p.allowed));
+        assert!(!perms_after.iter().any(|p| p.resource == "events" && p.action == "post" && p.allowed));
     }
 
     #[test]
@@ -134,10 +134,10 @@ mod tests {
         let role2 = db.create_role("writer", None, None).unwrap();
 
         // role1 grants read
-        db.set_role_permission(role1.id, "subjects", "read", true).unwrap();
+        db.set_role_permission(role1.id, "subjects", "get", true).unwrap();
 
         // role2 grants update
-        db.set_role_permission(role2.id, "subjects", "update", true).unwrap();
+        db.set_role_permission(role2.id, "subjects", "post", true).unwrap();
 
         // Assign both roles
         db.assign_role_to_user(user.id, role1.id, None).unwrap();
@@ -146,8 +146,8 @@ mod tests {
         // User should have both permissions
         let perms = db.get_user_effective_permissions(user.id).unwrap();
 
-        assert!(perms.iter().any(|p| p.resource == "subjects" && p.action == "read" && p.allowed));
-        assert!(perms.iter().any(|p| p.resource == "subjects" && p.action == "update" && p.allowed));
+        assert!(perms.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
+        assert!(perms.iter().any(|p| p.resource == "subjects" && p.action == "post" && p.allowed));
     }
 
     #[test]
@@ -185,24 +185,24 @@ mod tests {
         db.assign_role_to_user(user2.id, role.id, None).unwrap();
 
         // Grant permission to role
-        db.set_role_permission(role.id, "subjects", "update", true).unwrap();
+        db.set_role_permission(role.id, "subjects", "post", true).unwrap();
 
         // Both users should have the permission
         let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
         let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
 
-        assert!(perms1.iter().any(|p| p.resource == "subjects" && p.action == "update" && p.allowed));
-        assert!(perms2.iter().any(|p| p.resource == "subjects" && p.action == "update" && p.allowed));
+        assert!(perms1.iter().any(|p| p.resource == "subjects" && p.action == "post" && p.allowed));
+        assert!(perms2.iter().any(|p| p.resource == "subjects" && p.action == "post" && p.allowed));
 
         // Revoke permission from role
-        db.set_role_permission(role.id, "subjects", "update", false).unwrap();
+        db.set_role_permission(role.id, "subjects", "post", false).unwrap();
 
         // Both users should lose the permission
         let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
         let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
 
-        assert!(!perms1.iter().any(|p| p.resource == "subjects" && p.action == "update" && p.allowed));
-        assert!(!perms2.iter().any(|p| p.resource == "subjects" && p.action == "update" && p.allowed));
+        assert!(!perms1.iter().any(|p| p.resource == "subjects" && p.action == "post" && p.allowed));
+        assert!(!perms2.iter().any(|p| p.resource == "subjects" && p.action == "post" && p.allowed));
     }
 
     #[test]

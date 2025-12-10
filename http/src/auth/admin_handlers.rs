@@ -61,15 +61,14 @@ pub async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserInfo>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "create")?;
+    check_permission(&auth_ctx, "users", "post")?;
 
     // Create user
     let user = db
-        .create_user_with_active(
+        .create_user(
             &req.username,
             &req.password,
             req.is_superadmin.unwrap_or(false),
-            req.is_active.unwrap_or(true),
             req.role_ids.clone(),
             Some(auth_ctx.user_id),
         )
@@ -96,8 +95,6 @@ pub async fn create_user(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_created",
-        Some("user"),
-        Some(&user_info.id.to_string()),
         Some("/admin/users"),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -132,7 +129,7 @@ pub async fn list_users(
     Query(params): Query<ListUsersQuery>,
 ) -> Result<Json<Vec<UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "list")?;
+    check_permission(&auth_ctx, "users", "get")?;
 
     let users = db
         .list_users(params.include_inactive.unwrap_or(false))
@@ -168,7 +165,7 @@ pub async fn get_user(
     Path(user_id): Path<i64>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "read")?;
+    check_permission(&auth_ctx, "users", "get")?;
 
     let user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
     let roles = db.get_user_roles(user_id).map_err(db_error_to_response)?;
@@ -214,7 +211,7 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "update")?;
+    check_permission(&auth_ctx, "users", "put")?;
 
     // Update user
     let user = db
@@ -251,7 +248,7 @@ pub async fn update_user(
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
         created_at: user.created_at,
-        roles,
+        roles
     };
 
     // Audit log
@@ -259,8 +256,6 @@ pub async fn update_user(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_updated",
-        Some("user"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}", user_id)),
         Some("PUT"),
         auth_ctx.ip_address.as_deref(),
@@ -302,7 +297,7 @@ pub async fn reset_user_password(
     Path(user_id): Path<i64>,
     Json(req): Json<ResetPasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "users", "update")?;
+    check_permission(&auth_ctx, "users", "post")?;
 
     db.admin_reset_password(user_id, &req.password)
         .map_err(db_error_to_response)?;
@@ -312,8 +307,6 @@ pub async fn reset_user_password(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_password_reset",
-        Some("user"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}/password", user_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -368,8 +361,6 @@ pub async fn delete_user(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_deleted",
-        Some("user"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}", user_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
@@ -406,7 +397,7 @@ pub async fn assign_role(
     Path((user_id, role_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "manage")?;
+    check_permission(&auth_ctx, "users", "all")?;
 
     db.assign_role_to_user(user_id, role_id, Some(auth_ctx.user_id))
         .map_err(db_error_to_response)?;
@@ -416,8 +407,6 @@ pub async fn assign_role(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "role_assigned",
-        Some("user"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -454,7 +443,7 @@ pub async fn remove_role(
     Path((user_id, role_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "users", "manage")?;
+    check_permission(&auth_ctx, "users", "all")?;
 
     db.remove_role_from_user(user_id, role_id)
         .map_err(db_error_to_response)?;
@@ -464,8 +453,6 @@ pub async fn remove_role(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "role_removed",
-        Some("user"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
@@ -504,7 +491,7 @@ pub async fn create_role(
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "roles", "create")?;
+    check_permission(&auth_ctx, "roles", "post")?;
 
     let role = db
         .create_role(
@@ -519,8 +506,6 @@ pub async fn create_role(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "role_created",
-        Some("role"),
-        Some(&role.id.to_string()),
         Some("/admin/roles"),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -551,7 +536,7 @@ pub async fn list_roles(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<RoleInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "roles", "list")?;
+    check_permission(&auth_ctx, "roles", "get")?;
 
     let roles = db.list_roles().map_err(db_error_to_response)?;
 
@@ -580,7 +565,7 @@ pub async fn get_role(
     Path(role_id): Path<i64>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "roles", "read")?;
+    check_permission(&auth_ctx, "roles", "get")?;
 
     let role = db.get_role_by_id(role_id).map_err(db_error_to_response)?;
 
@@ -612,7 +597,7 @@ pub async fn update_role(
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<Role>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "roles", "update")?;
+    check_permission(&auth_ctx, "roles", "put")?;
 
     let role = db
         .update_role(
@@ -627,8 +612,6 @@ pub async fn update_role(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "role_updated",
-        Some("role"),
-        Some(&role_id.to_string()),
         Some(&format!("/admin/roles/{}", role_id)),
         Some("PUT"),
         auth_ctx.ip_address.as_deref(),
@@ -673,8 +656,6 @@ pub async fn delete_role(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "role_deleted",
-        Some("role"),
-        Some(&role_id.to_string()),
         Some(&format!("/admin/roles/{}", role_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
@@ -710,7 +691,7 @@ pub async fn get_role_permissions(
     Path(role_id): Path<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "permissions", "read")?;
+    check_permission(&auth_ctx, "permissions", "get")?;
 
     let permissions = db
         .get_role_permissions(role_id)
@@ -744,7 +725,7 @@ pub async fn set_role_permission(
     Json(req): Json<SetPermissionRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "permissions", "manage")?;
+    check_permission(&auth_ctx, "permissions", "all")?;
 
     db.set_role_permission(role_id, &req.resource, &req.action, req.allowed)
         .map_err(db_error_to_response)?;
@@ -754,8 +735,6 @@ pub async fn set_role_permission(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "permission_set",
-        Some("role"),
-        Some(&role_id.to_string()),
         Some(&format!("/admin/roles/{}/permissions", role_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -790,7 +769,7 @@ pub async fn get_user_permissions(
     Extension(db): Extension<Arc<AuthDatabase>>,
     Path(user_id): Path<i64>,
 ) -> Result<Json<Vec<Permission>>, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "permissions", "read")?;
+    check_permission(&auth_ctx, "permissions", "get")?;
 
     // Ensure user exists
     db.get_user_by_id(user_id).map_err(db_error_to_response)?;
@@ -825,7 +804,7 @@ pub async fn set_user_permission(
     Path(user_id): Path<i64>,
     Json(req): Json<Permission>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "permissions", "manage")?;
+    check_permission(&auth_ctx, "permissions", "all")?;
 
     // Ensure user exists
     db.get_user_by_id(user_id).map_err(db_error_to_response)?;
@@ -844,8 +823,6 @@ pub async fn set_user_permission(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_permission_set",
-        Some("user_permission"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}/permissions", user_id)),
         Some("POST"),
         auth_ctx.ip_address.as_deref(),
@@ -882,7 +859,7 @@ pub async fn remove_user_permission(
     Path(user_id): Path<i64>,
     Json(req): Json<Permission>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "permissions", "manage")?;
+    check_permission(&auth_ctx, "permissions", "all")?;
 
     // Ensure user exists
     db.get_user_by_id(user_id).map_err(db_error_to_response)?;
@@ -895,8 +872,6 @@ pub async fn remove_user_permission(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "user_permission_removed",
-        Some("user_permission"),
-        Some(&user_id.to_string()),
         Some(&format!("/admin/users/{}/permissions", user_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),
@@ -935,7 +910,7 @@ pub async fn remove_role_permission(
     Query(params): Query<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "permissions", "manage")?;
+    check_permission(&auth_ctx, "permissions", "all")?;
 
     db.remove_role_permission(role_id, &params.resource, &params.action)
         .map_err(db_error_to_response)?;
@@ -945,8 +920,6 @@ pub async fn remove_role_permission(
         Some(auth_ctx.user_id),
         Some(auth_ctx.api_key_id),
         "permission_removed",
-        Some("role"),
-        Some(&role_id.to_string()),
         Some(&format!("/admin/roles/{}/permissions", role_id)),
         Some("DELETE"),
         auth_ctx.ip_address.as_deref(),

@@ -304,32 +304,12 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
-    /// Create a new user (defaults to active)
+    /// Create a new user with explicit active flag
     pub fn create_user(
         &self,
         username: &str,
         password: &str,
         is_superadmin: bool,
-        role_ids: Option<Vec<i64>>,
-        created_by: Option<i64>,
-    ) -> Result<User, DatabaseError> {
-        self.create_user_with_active(
-            username,
-            password,
-            is_superadmin,
-            true,
-            role_ids,
-            created_by,
-        )
-    }
-
-    /// Create a new user with explicit active flag
-    pub fn create_user_with_active(
-        &self,
-        username: &str,
-        password: &str,
-        is_superadmin: bool,
-        is_active: bool,
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
     ) -> Result<User, DatabaseError> {
@@ -372,7 +352,7 @@ impl AuthDatabase {
         conn.execute(
             "INSERT INTO users (username, password_hash, is_superadmin, is_active, must_change_password)
              VALUES (?1, ?2, ?3, ?4, 1)",
-            params![username, password_hash, is_superadmin, is_active],
+            params![username, password_hash, is_superadmin, true],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
@@ -403,7 +383,7 @@ impl AuthDatabase {
              WHERE id = ?1 AND is_deleted = 0",
             params![user_id],
             |row| {
-                Ok(User {
+                let user = User {
                     id: row.get(0)?,
                     username: row.get(1)?,
                     password_hash: row.get(2)?,
@@ -416,7 +396,8 @@ impl AuthDatabase {
                     last_login_at: row.get(9)?,
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
-                })
+                };
+                Ok(user)
             },
         )
         .optional()
@@ -463,16 +444,16 @@ impl AuthDatabase {
                     UserInfo {
                         id: user_id,
                         username: row.get(1)?,
-                        is_superadmin: row.get(2)?,
-                        is_active: row.get(3)?,
-                        failed_login_attempts: row.get(4)?,
+                    is_superadmin: row.get(2)?,
+                    is_active: row.get(3)?,
+                    failed_login_attempts: row.get(4)?,
                         locked_until: row.get(5)?,
                         last_login_at: row.get(6)?,
                         created_at: row.get(7)?,
-                        must_change_password: row.get(8)?,
-                        roles: Vec::new(), // Will be filled below
-                    },
-                ))
+                    must_change_password: row.get(8)?,
+                    roles: Vec::new(), // Will be filled below
+                },
+            ))
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -644,7 +625,7 @@ impl AuthDatabase {
                  WHERE username = ?1 AND is_deleted = 0",
                 params![username],
                 |row| {
-                    Ok(User {
+                    let user = User {
                         id: row.get(0)?,
                         username: row.get(1)?,
                         password_hash: row.get(2)?,
@@ -657,7 +638,8 @@ impl AuthDatabase {
                         last_login_at: row.get(9)?,
                         created_at: row.get(10)?,
                         updated_at: row.get(11)?,
-                    })
+                    };
+                    Ok(user)
                 },
             )
             .map_err(|_| {
@@ -758,7 +740,7 @@ impl AuthDatabase {
                  WHERE username = ?1 AND is_deleted = 0",
                 params![username],
                 |row| {
-                    Ok(User {
+                    let mut user = User {
                         id: row.get(0)?,
                         username: row.get(1)?,
                         password_hash: row.get(2)?,
@@ -771,7 +753,8 @@ impl AuthDatabase {
                         last_login_at: row.get(9)?,
                         created_at: row.get(10)?,
                         updated_at: row.get(11)?,
-                    })
+                    };
+                    Ok(user)
                 },
             )
             .map_err(|_| {

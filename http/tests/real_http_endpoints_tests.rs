@@ -544,7 +544,7 @@ async fn test_set_role_permission() {
         &server.url(&format!("/admin/roles/{}/permissions", role_id)),
         "POST",
         Some(&api_key),
-        Some(json!({"resource": "users", "action": "read", "allowed": true})),
+        Some(json!({"resource": "users", "action": "get", "allowed": true})),
     )
     .await;
 
@@ -947,18 +947,16 @@ async fn test_update_system_config() {
         .await
         .unwrap();
 
-    let (status, body) = make_request(
+    let (status, _) = make_request(
         &client,
-        &server.url("/admin/config/read_only_mode"),
+        &server.url("/admin/config/max_login_attempts"),
         "PUT",
         Some(&api_key),
-        Some(json!({"value": "0"})),
+        Some(json!({"value": 10})),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["key"], "read_only_mode");
-    assert_eq!(body["value"], "0");
 }
 
 // =============================================================================

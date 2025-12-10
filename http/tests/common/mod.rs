@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU16, Ordering},
 };
+use std::net::SocketAddr;
 
 use ave_bridge::{
     Bridge,
@@ -20,7 +21,6 @@ use ave_http::{
 use futures::future::join_all;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use std::net::SocketAddr;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
@@ -198,7 +198,10 @@ impl TestServer {
 
         // Spawn the server
         let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
                 .with_graceful_shutdown(async move {
                     join_all(runners).await;
                 })
