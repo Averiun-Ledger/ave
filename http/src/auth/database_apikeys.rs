@@ -453,7 +453,13 @@ impl AuthDatabase {
 
         // Service keys cannot carry admin/panel permissions
         if !is_management {
-            let admin_resources = ["users", "roles", "permissions", "api_keys", "audit"];
+            let admin_resources = [
+                "admin_users",
+                "admin_roles",
+                "admin_api_keys",
+                "admin_system",
+                "user_apikey",
+            ];
             permissions.retain(|p| !admin_resources.contains(&p.resource.as_str()));
         }
 

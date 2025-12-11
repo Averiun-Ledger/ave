@@ -57,7 +57,7 @@ mod tests {
     fn test_create_user_success() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         assert_eq!(user.username, "testuser");
         assert!(!user.is_superadmin);
@@ -69,8 +69,8 @@ mod tests {
     fn test_create_user_duplicate() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
-        let result = db.create_user("testuser", "TestPass123!", false, None, None);
+        db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
+        let result = db.create_user("testuser", "TestPass123!", false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
     }
@@ -79,7 +79,7 @@ mod tests {
     fn test_get_user_by_id() {
         let (db, _dirs) = create_test_db();
 
-        let created = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let created = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let fetched = db.get_user_by_id(created.id).unwrap();
 
         assert_eq!(fetched.username, "testuser");
@@ -90,7 +90,7 @@ mod tests {
     fn test_update_user() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         // Update password
         db.update_user(user.id, Some("NewPass456!"), None).unwrap();
@@ -104,7 +104,7 @@ mod tests {
     fn test_deactivate_user() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         // Deactivate
         db.update_user(user.id, None, Some(false)).unwrap();
@@ -118,8 +118,8 @@ mod tests {
     fn test_list_users() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("user1", "TestPass123!", false, None, None).unwrap();
-        db.create_user("user2", "TestPass123!", false, None, None).unwrap();
+        db.create_user("user1", "TestPass123!", false, None, None, None).unwrap();
+        db.create_user("user2", "TestPass123!", false, None, None, None).unwrap();
 
         let users = db.list_users(false).unwrap();
 
@@ -131,7 +131,7 @@ mod tests {
     fn test_delete_user() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         db.delete_user(user.id).unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
     fn test_verify_credentials_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         db.change_password_with_credentials(
             "testuser",
             "TestPass123!",
@@ -164,7 +164,7 @@ mod tests {
     fn test_verify_credentials_wrong_password() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         let result = db.verify_credentials("testuser", "WrongPassword");
         assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
@@ -174,7 +174,7 @@ mod tests {
     fn test_account_lockout_after_failed_attempts() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         // 5 failed attempts (lockout threshold)
         for _ in 0..5 {
@@ -190,7 +190,7 @@ mod tests {
     fn test_failed_attempts_reset_on_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         db.change_password_with_credentials(
             "testuser",
             "TestPass123!",
@@ -243,7 +243,7 @@ mod tests {
     fn test_assign_role_to_user() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
@@ -256,7 +256,7 @@ mod tests {
     fn test_remove_role_from_user() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
@@ -270,7 +270,7 @@ mod tests {
     fn test_user_with_multiple_roles() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let role1 = db.create_role("editor", None, None).unwrap();
         let role2 = db.create_role("viewer", None, None).unwrap();
 
@@ -302,7 +302,7 @@ mod tests {
     fn test_create_api_key() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         let (api_key, key_info) =
             db.create_api_key(user.id, Some("test_key"), None, None, false)
@@ -317,7 +317,7 @@ mod tests {
     fn test_verify_api_key_success() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let (api_key, _) =
             db.create_api_key(user.id, Some("key_verify"), None, None, false)
                 .unwrap();
@@ -341,7 +341,7 @@ mod tests {
     fn test_api_key_expiration() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         // Create key with 1 second TTL
         let (api_key, _) =
@@ -369,7 +369,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None)
+            .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
 
         // No TTL provided -> should use system default
@@ -396,7 +396,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None)
+            .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
 
         let (_, capped) = db
@@ -413,7 +413,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser2", "TestPass123!", false, None, None)
+            .create_user("testuser2", "TestPass123!", false, None, None, None)
             .unwrap();
 
         let (_, info) = db
@@ -427,7 +427,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user =
-            db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+            db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let (api_key, key_info) =
             db.create_api_key(user.id, Some("revoke"), None, None, false)
                 .unwrap();
@@ -444,7 +444,7 @@ mod tests {
     fn test_list_user_api_keys() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         db.create_api_key(user.id, Some("key1"), None, None, false).unwrap();
         db.create_api_key(user.id, Some("key2"), None, None, false).unwrap();
@@ -459,7 +459,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user =
-            db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+            db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let (api_key, key_info) =
             db.create_api_key(user.id, Some("tracking"), None, None, false)
                 .unwrap();
@@ -481,7 +481,7 @@ mod tests {
         let (mut db, _dir) = create_test_db();
 
         let user =
-            db.create_user("testuser", "TestPass123!", false, None, None)
+            db.create_user("testuser", "TestPass123!", false, None, None, None)
                 .unwrap();
         let (_, key_info) =
             db.create_api_key(user.id, Some("perm_effective"), None, None, false)
@@ -511,12 +511,12 @@ mod tests {
         let role = db.create_role("editor", None, None).unwrap();
 
         // Grant read permission on subjects
-        db.set_role_permission(role.id, "subjects", "get", true).unwrap();
+        db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
 
         let permissions = db.get_role_permissions(role.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "subjects" && p.action == "get")
+            .find(|p| p.resource == "node_subject" && p.action == "get")
             .unwrap();
 
         assert!(perm.allowed);
@@ -526,15 +526,15 @@ mod tests {
     fn test_set_user_permission_override() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
 
         // Set user-specific permission
-        db.set_user_permission(user.id, "users", "put", false, None).unwrap();
+        db.set_user_permission(user.id, "admin_users", "put", false, None).unwrap();
 
         let permissions = db.get_user_permissions(user.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "users" && p.action == "put")
+            .find(|p| p.resource == "admin_users" && p.action == "put")
             .unwrap();
 
         assert!(!perm.allowed);
@@ -544,17 +544,17 @@ mod tests {
     fn test_user_effective_permissions() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
         // Role grants read on events
-        db.set_role_permission(role.id, "events", "get", true).unwrap();
+        db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         let permissions = db.get_user_effective_permissions(user.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "events" && p.action == "get");
+            .find(|p| p.resource == "node_subject" && p.action == "get");
 
         assert!(perm.is_some());
         assert!(perm.unwrap().allowed);
@@ -564,20 +564,20 @@ mod tests {
     fn test_user_override_denies_role_permission() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
         // Role grants permission
-        db.set_role_permission(role.id, "subjects", "delete", true).unwrap();
+        db.set_role_permission(role.id, "node_subject", "delete", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // User override denies it
-        db.set_user_permission(user.id, "subjects", "delete", false, None).unwrap();
+        db.set_user_permission(user.id, "node_subject", "delete", false, None).unwrap();
 
         let permissions = db.get_user_effective_permissions(user.id).unwrap();
 
         let perm = permissions.iter()
-            .find(|p| p.resource == "subjects" && p.action == "delete")
+            .find(|p| p.resource == "node_subject" && p.action == "delete")
             .unwrap();
 
         assert!(!perm.allowed);
@@ -591,7 +591,7 @@ mod tests {
     fn test_rate_limit_within_limit() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let (_, key_info) =
             db.create_api_key(user.id, Some("rate1"), None, None, false)
                 .unwrap();
@@ -607,7 +607,7 @@ mod tests {
     fn test_rate_limit_exceeded() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
         let (_, key_info) =
             db.create_api_key(user.id, Some("rate2"), None, None, false)
                 .unwrap();
@@ -636,7 +636,7 @@ mod tests {
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None)
+            .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
         let (_, key1) =
             db.create_api_key(user.id, Some("rlip1"), None, None, false).unwrap();
@@ -671,7 +671,7 @@ mod tests {
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None)
+            .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
         let (_, key_info) =
             db.create_api_key(user.id, Some("rlkey"), None, None, false).unwrap();
@@ -750,6 +750,7 @@ mod tests {
             http_method: None,
             ip_address: None,
             success: None,
+            user_agent: None,
             start_timestamp: None,
             end_timestamp: None,
             limit: None,
@@ -775,7 +776,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", false, None, None)
+            .create_user("apiuser", "Pass123!", false, None, None, None)
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key"), None, None, false)
@@ -814,6 +815,7 @@ mod tests {
             ip_address: None,
             success: Some(true),
             start_timestamp: None,
+            user_agent: None,
             end_timestamp: None,
             limit: None,
             offset: None,
@@ -840,7 +842,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", false, None, None)
+            .create_user("apiuser", "Pass123!", false, None, None, None)
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key2"), None, None, false)
@@ -879,6 +881,7 @@ mod tests {
             ip_address: None,
             success: None,
             start_timestamp: None,
+            user_agent: None,
             end_timestamp: None,
             limit: None,
             offset: None,

@@ -61,7 +61,7 @@ pub async fn create_api_key_for_user(
     (StatusCode, Json<ErrorResponse>),
 > {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "post")?;
+    check_permission(&auth_ctx, "admin_api_keys", "post")?;
 
     let (api_key, key_info) = db
         .create_api_key(
@@ -114,7 +114,7 @@ pub async fn list_all_api_keys(
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "get")?;
+    check_permission(&auth_ctx, "admin_api_keys", "get")?;
 
     let keys = db
         .list_all_api_keys(params.include_revoked.unwrap_or(false))
@@ -152,7 +152,7 @@ pub async fn list_user_api_keys_admin(
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "get")?;
+    check_permission(&auth_ctx, "admin_api_keys", "get")?;
 
     let keys = db
         .list_user_api_keys(user_id, params.include_revoked.unwrap_or(false))
@@ -183,7 +183,7 @@ pub async fn get_api_key(
     Path(key_id): Path<i64>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "get")?;
+    check_permission(&auth_ctx, "admin_api_keys", "get")?;
 
     let key_info = db.get_api_key_info(key_id).map_err(db_error_to_response)?;
 
@@ -214,7 +214,7 @@ pub async fn revoke_api_key(
     Json(req): Json<RevokeApiKeyRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "delete")?;
+    check_permission(&auth_ctx, "admin_api_keys", "delete")?;
 
     db.revoke_api_key(key_id, Some(auth_ctx.user_id), req.reason.as_deref())
         .map_err(db_error_to_response)?;
@@ -261,7 +261,7 @@ pub async fn rotate_api_key(
     Json(req): Json<RotateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "api_keys", "post")?;
+    check_permission(&auth_ctx, "admin_api_keys", "post")?;
 
     // Fetch existing key for user and defaults
     let existing = db
@@ -344,25 +344,12 @@ pub async fn create_my_api_key(
         ));
     }
 
-    // Admin-only users without business permissions cannot create service keys
-    let business_resources = [
-        "subjects",
-        "events",
-        "governances",
-        "approvals",
-        "transfers",
-        "signatures",
-        "auth",
-        "system",
-    ];
-    let has_business_perm = auth_ctx.permissions.iter().any(|p| {
-        p.allowed && business_resources.contains(&p.resource.as_str())
-    });
-    if !has_business_perm {
+    // Require permission to manage personal API keys
+    if !auth_ctx.has_permission("user_apikey", "post") {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "User has no business permissions; service API key would be unusable"
+                error: "User is not allowed to manage personal API keys"
                     .into(),
             }),
         ));
@@ -426,6 +413,15 @@ pub async fn list_my_api_keys(
         ));
     }
 
+    if !auth_ctx.has_permission("user_apikey", "get") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "User is not allowed to view personal API keys".into(),
+            }),
+        ));
+    }
+
     let keys = db
         .list_user_api_keys(
             auth_ctx.user_id,
@@ -464,6 +460,15 @@ pub async fn revoke_my_api_key(
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "Only management API key can revoke service keys".into(),
+            }),
+        ));
+    }
+
+    if !auth_ctx.has_permission("user_apikey", "delete") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "User is not allowed to revoke personal API keys".into(),
             }),
         ));
     }

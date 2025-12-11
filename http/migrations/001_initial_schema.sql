@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_id);
 -- Resources represent API endpoints or groups of endpoints
 CREATE TABLE IF NOT EXISTS resources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE, -- e.g., "subjects", "events", "governances", "users", "roles"
+    name TEXT NOT NULL UNIQUE, -- e.g., "node_subject", "admin_system", "user"
     description TEXT,
     is_system BOOLEAN NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -258,19 +258,16 @@ INSERT OR IGNORE INTO system_config (key, value, description) VALUES
 -- INSERT SYSTEM RESOURCES
 -- =============================================================================
 INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
-    ('subjects', 'Subject management endpoints', 1),
-    ('events', 'Event query and management endpoints', 1),
-    ('governances', 'Governance query endpoints', 1),
-    ('approvals', 'Approval request endpoints', 1),
-    ('transfers', 'Transfer management endpoints', 1),
-    ('signatures', 'Signature query endpoints', 1),
-    ('auth', 'Authorization management endpoints', 1),
-    ('users', 'User management endpoints', 1),
-    ('roles', 'Role management endpoints', 1),
-    ('permissions', 'Permission management endpoints', 1),
-    ('api_keys', 'API key management endpoints', 1),
-    ('system', 'System configuration and info endpoints', 1),
-    ('audit', 'Audit log endpoints', 1);
+    ('user', 'User self-service endpoints', 1),
+    ('admin_system', 'Administrative system endpoints', 1),
+    ('admin_api_keys', 'Administrative API key endpoints', 1),
+    ('admin_roles', 'Administrative role and permission endpoints', 1),
+    ('admin_users', 'Administrative user management endpoints', 1),
+    ('node_keys', 'Node key export endpoints', 1),
+    ('node_system', 'Node information endpoints', 1),
+    ('node_subject', 'Ledger subject and governance endpoints', 1),
+    ('node_request', 'Ledger request submission endpoints', 1),
+    ('user_apikey', 'User self-service API key endpoints', 1);
 
 -- =============================================================================
 -- INSERT SYSTEM ACTIONS
@@ -290,9 +287,9 @@ INSERT OR IGNORE INTO roles (name, description, is_system, default_ttl_seconds) 
     ('superadmin', 'Full system access with all privileges', 1, NULL),
     ('admin', 'Administrative access to users, roles, and API keys', 1, 2592000),
     ('owner', 'Full access to business endpoints (non-admin)', 1, NULL),
-    ('read', 'Read access to selected business endpoints', 1, NULL),
-    ('write', 'Write access to selected business endpoints', 1, NULL),
-    ('sender', 'Limited to sending event requests', 1, NULL);
+    ('sender', 'Limited to sending event requests', 1, NULL),
+    ('manager', 'Business manager with operational control', 1, NULL),
+    ('data', 'Read-only access to business data', 1, NULL);
 
 -- Get role IDs
 -- Note: We'll set up permissions programmatically in Rust to handle the dynamic IDs

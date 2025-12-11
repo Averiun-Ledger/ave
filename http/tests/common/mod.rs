@@ -228,6 +228,11 @@ impl TestServer {
     }
 
     #[allow(dead_code)]
+    pub fn get_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    #[allow(dead_code)]
     pub fn memory_port(&self) -> u16 {
         self.memory_port
     }

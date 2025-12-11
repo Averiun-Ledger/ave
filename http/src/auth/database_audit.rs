@@ -132,6 +132,11 @@ impl AuthDatabase {
             params_vec.push(Box::new(ip.clone()));
         }
 
+        if let Some(ref ua) = query.user_agent {
+            sql.push_str(" AND user_agent = ?");
+            params_vec.push(Box::new(ua.clone()));
+        }
+
         if let Some(success) = query.success {
             sql.push_str(" AND success = ?");
             params_vec.push(Box::new(success));

@@ -111,6 +111,7 @@ pub struct CreateUserRequest {
     pub password: String,
     pub is_superadmin: Option<bool>,
     pub role_ids: Option<Vec<i64>>,
+    pub must_change_password: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -287,6 +288,7 @@ pub struct AuditLogQuery {
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
     pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
     pub success: Option<bool>,
     pub start_timestamp: Option<i64>,
     pub end_timestamp: Option<i64>,

@@ -18,7 +18,7 @@ mod tests {
     fn test_password_too_short() {
         let (db, _dirs) = common::create_test_db();
 
-        let result = db.create_user("testuser", "Short1!", false, None, None);
+        let result = db.create_user("testuser", "Short1!", false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -28,7 +28,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let long_pass = "Aa1!Aa1!Aa1!Aa1!Aa1!X"; // 21 chars
-        let result = db.create_user("testuser", long_pass, false, None, None);
+        let result = db.create_user("testuser", long_pass, false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -37,7 +37,7 @@ mod tests {
     fn test_password_missing_uppercase() {
         let (db, _dirs) = common::create_test_db();
 
-        let result = db.create_user("testuser", "lowercase123!", false, None, None);
+        let result = db.create_user("testuser", "lowercase123!", false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -46,7 +46,7 @@ mod tests {
     fn test_password_missing_lowercase() {
         let (db, _dirs) = common::create_test_db();
 
-        let result = db.create_user("testuser", "UPPERCASE123!", false, None, None);
+        let result = db.create_user("testuser", "UPPERCASE123!", false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -55,7 +55,7 @@ mod tests {
     fn test_password_missing_digit() {
         let (db, _dirs) = common::create_test_db();
 
-        let result = db.create_user("testuser", "NoDigitsHere!", false, None, None);
+        let result = db.create_user("testuser", "NoDigitsHere!", false, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -65,7 +65,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         // Should work with unicode characters
-        let result = db.create_user("testuser", "Pass123🔐中文", false, None, None);
+        let result = db.create_user("testuser", "Pass123🔐中文", false, None, None, None);
 
         assert!(result.is_ok());
     }
@@ -80,7 +80,7 @@ mod tests {
 
         // Try SQL injection in username
         let malicious_username = "admin' OR '1'='1";
-        let result = db.create_user(malicious_username, "Password123!", false, None, None);
+        let result = db.create_user(malicious_username, "Password123!", false, None, None, None);
 
         // Should create user with literal string, not execute SQL
         assert!(result.is_ok());
@@ -129,7 +129,7 @@ mod tests {
         for i in 0..10 {
             let db_clone = db.clone();
             let handle = std::thread::spawn(move || {
-                db_clone.create_user(&format!("user{}", i), "Password123!", false, None, None)
+                db_clone.create_user(&format!("user{}", i), "Password123!", false, None, None, None)
             });
             handles.push(handle);
         }
@@ -152,7 +152,7 @@ mod tests {
         for _ in 0..10 {
             let db_clone = db.clone();
             let handle = std::thread::spawn(move || {
-                db_clone.create_user("duplicate_user", "Password123!", false, None, None)
+                db_clone.create_user("duplicate_user", "Password123!", false, None, None, None)
             });
             handles.push(handle);
         }
@@ -177,7 +177,7 @@ mod tests {
         let db = std::sync::Arc::new(db);
 
         // Create user and API key
-        let user = db.create_user("test_user", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("test_user", "Password123!", false, None, None, None).unwrap();
         let (api_key, _) =
             db.create_api_key(user.id, Some("concurrent"), None, None, false)
                 .unwrap();
@@ -208,7 +208,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let unicode_username = "用户名🔐";
-        let result = db.create_user(unicode_username, "Password123!", false, None, None);
+        let result = db.create_user(unicode_username, "Password123!", false, None, None, None);
 
         assert!(result.is_ok());
 
@@ -222,7 +222,7 @@ mod tests {
 
         // Username with spaces
         let username = "user with spaces";
-        let result = db.create_user(username, "Password123!", false, None, None);
+        let result = db.create_user(username, "Password123!", false, None, None, None);
         assert!(result.is_ok());
 
         // Role with tabs
@@ -237,7 +237,7 @@ mod tests {
 
         // Very long username (255 chars)
         let long_username = "a".repeat(255);
-        let result = db.create_user(&long_username, "Password123!", false, None, None);
+        let result = db.create_user(&long_username, "Password123!", false, None, None, None);
         assert!(result.is_ok());
 
         // Very long role name
@@ -254,7 +254,7 @@ mod tests {
     fn test_zero_ttl_api_key_never_expires() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
 
         // Create key with 0 TTL (never expires)
         let (api_key, _) =
@@ -273,7 +273,7 @@ mod tests {
     fn test_inactive_user_cannot_login() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
 
         // Deactivate user
         db.update_user(user.id, None, Some(false)).unwrap();
@@ -287,7 +287,7 @@ mod tests {
     fn test_inactive_user_api_keys_dont_work() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
         let (api_key, _) =
             db.create_api_key(user.id, Some("lockout"), None, None, false)
                 .unwrap();
@@ -304,7 +304,7 @@ mod tests {
     fn test_deleted_user_api_keys_dont_work() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
         let (api_key, _) =
             db.create_api_key(user.id, Some("lockout2"), None, None, false)
                 .unwrap();
@@ -325,22 +325,22 @@ mod tests {
     fn test_deleted_role_removes_user_permissions() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
         let role = db.create_role("editor", None, None).unwrap();
 
-        db.set_role_permission(role.id, "subjects", "get", true).unwrap();
+        db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // User has permission
         let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_before.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
+        assert!(perms_before.iter().any(|p| p.resource == "node_subject" && p.action == "get" && p.allowed));
 
         // Delete role
         db.delete_role(role.id).unwrap();
 
         // User should no longer have permission
         let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_after.iter().any(|p| p.resource == "subjects" && p.action == "get" && p.allowed));
+        assert!(!perms_after.iter().any(|p| p.resource == "node_subject" && p.action == "get" && p.allowed));
     }
 
     // =============================================================================
@@ -369,7 +369,7 @@ mod tests {
     fn test_assign_nonexistent_role() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
 
         let result = db.assign_role_to_user(user.id, 99999, None);
 
@@ -460,7 +460,7 @@ mod tests {
     fn test_create_superadmin_user() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("newsuperadmin", "SuperPass123!", true, None, None).unwrap();
+        let user = db.create_user("newsuperadmin", "SuperPass123!", true, None, None, None).unwrap();
 
         assert!(user.is_superadmin);
     }
@@ -473,7 +473,7 @@ mod tests {
     fn test_revoked_api_key_cannot_be_used() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
         let (api_key, key_info) =
             db.create_api_key(user.id, Some("rl_main"), None, None, false)
                 .unwrap();
@@ -490,7 +490,7 @@ mod tests {
     fn test_double_revoke_api_key() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
         let (_, key_info) =
             db.create_api_key(user.id, Some("rl_expire"), None, None, false)
                 .unwrap();
@@ -512,7 +512,7 @@ mod tests {
     fn test_many_roles_for_user() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
 
         // Create and assign 50 roles
         for i in 0..50 {
@@ -531,8 +531,17 @@ mod tests {
         let role = db.create_role("power_user", None, None).unwrap();
 
         // Use actual system resources and actions from schema
-        let resources = vec!["subjects", "events", "governances", "approvals", "transfers",
-                            "signatures", "auth", "users", "roles", "permissions"];
+        let resources = vec![
+            "user",
+            "admin_system",
+            "admin_api_keys",
+            "admin_roles",
+            "admin_users",
+            "node_keys",
+            "node_system",
+            "node_subject",
+            "node_request",
+        ];
         let actions = vec!["get", "post", "put", "patch", "delete", "all"];
 
         // Grant permissions for all combinations
@@ -550,7 +559,7 @@ mod tests {
     fn test_many_api_keys_for_user() {
         let (db, _dirs) = common::create_test_db();
 
-        let user = db.create_user("testuser", "Password123!", false, None, None).unwrap();
+        let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
 
         // Create 10 API keys
         for i in 0..10 {

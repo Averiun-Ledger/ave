@@ -48,7 +48,7 @@ pub async fn list_resources(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<Resource>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let resources = db.list_resources().map_err(db_error_to_response)?;
 
@@ -72,7 +72,7 @@ pub async fn list_actions(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<Action>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let actions = db.list_actions().map_err(db_error_to_response)?;
 
@@ -95,6 +95,7 @@ pub async fn list_actions(
         ("endpoint" = Option<String>, Query, description = "Filter by endpoint path"),
         ("http_method" = Option<String>, Query, description = "Filter by HTTP method"),
         ("ip_address" = Option<String>, Query, description = "Filter by IP address"),
+        ("user_agent" = Option<String>, Query, description = "Filter by User-Agent"),
         ("success" = Option<bool>, Query, description = "Filter by success status"),
         ("start_timestamp" = Option<i64>, Query, description = "Start timestamp (Unix)"),
         ("end_timestamp" = Option<i64>, Query, description = "End timestamp (Unix)"),
@@ -113,7 +114,7 @@ pub async fn query_audit_logs(
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<Vec<AuditLog>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "audit", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let logs = db.query_audit_logs(&query).map_err(db_error_to_response)?;
 
@@ -141,7 +142,7 @@ pub async fn get_audit_stats(
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "audit", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let stats = db
         .get_audit_stats(params.days.unwrap_or(7))
@@ -176,7 +177,7 @@ pub async fn list_system_config(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<Vec<SystemConfig>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let config = db.list_system_config().map_err(db_error_to_response)?;
 
@@ -207,7 +208,7 @@ pub async fn update_system_config(
     Json(req): Json<UpdateSystemConfigRequest>,
 ) -> Result<Json<SystemConfig>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
-    check_permission(&auth_ctx, "system", "put")?;
+    check_permission(&auth_ctx, "admin_system", "put")?;
 
     let config = db
         .update_system_config(&key, &req.value.to_string(), Some(auth_ctx.user_id))
@@ -358,7 +359,7 @@ pub async fn get_rate_limit_stats(
     Extension(db): Extension<Arc<AuthDatabase>>,
     Query(query): Query<RateLimitStatsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    check_permission(&auth_ctx, "audit", "get")?;
+    check_permission(&auth_ctx, "admin_system", "get")?;
 
     let hours = query.hours.unwrap_or(24);
 

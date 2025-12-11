@@ -544,7 +544,7 @@ async fn test_set_role_permission() {
         &server.url(&format!("/admin/roles/{}/permissions", role_id)),
         "POST",
         Some(&api_key),
-        Some(json!({"resource": "users", "action": "get", "allowed": true})),
+        Some(json!({"resource": "node_subject", "action": "get", "allowed": true})),
     )
     .await;
 

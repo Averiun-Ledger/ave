@@ -312,6 +312,7 @@ impl AuthDatabase {
         is_superadmin: bool,
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
+        must_change_password: Option<bool>,
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -349,10 +350,11 @@ impl AuthDatabase {
         })?;
 
         // Insert user
+        let must_change = must_change_password.unwrap_or(true);
         conn.execute(
             "INSERT INTO users (username, password_hash, is_superadmin, is_active, must_change_password)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            params![username, password_hash, is_superadmin, true],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![username, password_hash, is_superadmin, true, must_change],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
@@ -740,7 +742,7 @@ impl AuthDatabase {
                  WHERE username = ?1 AND is_deleted = 0",
                 params![username],
                 |row| {
-                    let mut user = User {
+                    let user = User {
                         id: row.get(0)?,
                         username: row.get(1)?,
                         password_hash: row.get(2)?,

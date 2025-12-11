@@ -1463,82 +1463,83 @@ pub(crate) fn permission_for(
     }
 
     match (method, path) {
-        // Events / requests
-        (&Method::POST, "/event-request") => Some(("events", "post")),
+        // Event requests
+        (&Method::POST, "/event-request") => Some(("node_request", "post")),
         (&Method::GET, p) if p.starts_with("/event-request/") => {
-            Some(("events", "get"))
+            Some(("node_request", "get"))
         }
+
+        // Ledger subject queries
         (&Method::GET, p) if p.starts_with("/events-first-last/") => {
-            Some(("events", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::GET, p) if p.starts_with("/events/") => {
-            Some(("events", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::GET, p) if p.starts_with("/event/") => {
-            Some(("events", "get"))
+            Some(("node_subject", "get"))
         }
 
         // Approvals
         (&Method::GET, p) if p.starts_with("/approval-request/") => {
-            Some(("approvals", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::PATCH, p) if p.starts_with("/approval-request/") => {
-            Some(("approvals", "patch"))
+            Some(("node_subject", "patch"))
         }
 
-        // Subjects / auth
-        (&Method::GET, "/auth") => Some(("auth", "get")),
+        // Authorization / subjects
+        (&Method::GET, "/auth") => Some(("node_subject", "get")),
         (&Method::GET, p) if p.starts_with("/auth/") => {
-            Some(("auth", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::PUT, p) if p.starts_with("/auth/") => {
-            Some(("auth", "put"))
+            Some(("node_subject", "put"))
         }
         (&Method::DELETE, p) if p.starts_with("/auth/") => {
-            Some(("auth", "delete"))
+            Some(("node_subject", "delete"))
         }
 
         // Updates / transfers
         (&Method::POST, p) if p.starts_with("/update/") => {
-            Some(("subjects", "post"))
+            Some(("node_subject", "post"))
         }
         (&Method::POST, p) if p.starts_with("/check-transfer/") => {
-            Some(("transfers", "post"))
+            Some(("node_subject", "post"))
         }
         (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
-            Some(("transfers", "post"))
+            Some(("node_subject", "post"))
         }
 
         // Self API keys panel (management key required)
-        (&Method::GET, "/me/api-keys") => Some(("api_keys", "get")),
-        (&Method::POST, "/me/api-keys") => Some(("api_keys", "post")),
+        (&Method::GET, "/me/api-keys") => Some(("user_apikey", "get")),
+        (&Method::POST, "/me/api-keys") => Some(("user_apikey", "post")),
         (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
-            Some(("api_keys", "delete"))
+            Some(("user_apikey", "delete"))
         }
 
         // Ledger info
         (&Method::GET, p) if p.starts_with("/signatures/") => {
-            Some(("signatures", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::GET, p) if p.starts_with("/state/") => {
-            Some(("subjects", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::GET, p) if p.starts_with("/register-subjects/") => {
-            Some(("subjects", "get"))
+            Some(("node_subject", "get"))
         }
         (&Method::GET, "/register-governances") => {
-            Some(("governances", "get"))
+            Some(("node_subject", "get"))
         }
-        (&Method::GET, p) if p.starts_with("/events/") => {
-            Some(("events", "get"))
+        (&Method::GET, "/pending-transfers") => {
+            Some(("node_subject", "get"))
         }
 
-        // System/info
-        (&Method::GET, "/controller-id") => Some(("system", "get")),
-        (&Method::GET, "/peer-id") => Some(("system", "get")),
-        (&Method::GET, "/config") => Some(("system", "get")),
-        (&Method::GET, "/keys") => Some(("system", "get")),
-        (&Method::GET, "/pending-transfers") => Some(("transfers", "get")),
+        // Node/system info
+        (&Method::GET, "/controller-id") => Some(("node_system", "get")),
+        (&Method::GET, "/peer-id") => Some(("node_system", "get")),
+        (&Method::GET, "/config") => Some(("node_system", "get")),
+        (&Method::GET, "/keys") => Some(("node_keys", "get")),
 
         _ => None,
     }
@@ -1633,28 +1634,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_role_allows_reads_but_not_writes() {
+    async fn data_role_limited_to_reads() {
         let db = build_db();
-        let ctx = auth_ctx_for_role(&db, "read");
+        let ctx = auth_ctx_for_role(&db, "data");
         let app = router();
 
         let status =
             call(&app, Method::GET, "/signatures/abc", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
+        let status = call(&app, Method::GET, "/event-request/123", ctx.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
         let status =
-            call(&app, Method::POST, "/event-request", ctx.clone()).await;
+            call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
+                .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let status =
+            call(&app, Method::POST, "/event-request", ctx).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn write_role_allows_event_request_write() {
+    async fn manager_role_allows_subject_writes_but_not_event_post() {
         let db = build_db();
-        let ctx = auth_ctx_for_role(&db, "write");
+        let ctx = auth_ctx_for_role(&db, "manager");
         let app = router();
 
-        let status = call(&app, Method::POST, "/event-request", ctx).await;
+        let status =
+            call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
+                .await;
         assert_eq!(status, StatusCode::OK);
+
+        let status =
+            call(&app, Method::POST, "/event-request", ctx).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1667,8 +1683,12 @@ mod tests {
             call(&app, Method::POST, "/event-request", ctx.clone()).await;
         assert_eq!(ok_status, StatusCode::OK);
 
+        let ok_get =
+            call(&app, Method::GET, "/event-request/123", ctx.clone()).await;
+        assert_eq!(ok_get, StatusCode::OK);
+
         let forbidden =
-            call(&app, Method::GET, "/event-request/123", ctx).await;
+            call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
