@@ -495,11 +495,7 @@ pub async fn create_role(
     check_permission(&auth_ctx, "admin_roles", "post")?;
 
     let role = db
-        .create_role(
-            &req.name,
-            req.description.as_deref(),
-            req.default_ttl_seconds,
-        )
+        .create_role(&req.name, req.description.as_deref())
         .map_err(db_error_to_response)?;
 
     // Audit log
@@ -601,11 +597,7 @@ pub async fn update_role(
     check_permission(&auth_ctx, "admin_roles", "put")?;
 
     let role = db
-        .update_role(
-            role_id,
-            req.description.as_deref(),
-            req.default_ttl_seconds,
-        )
+        .update_role(role_id, req.description.as_deref())
         .map_err(db_error_to_response)?;
 
     // Audit log

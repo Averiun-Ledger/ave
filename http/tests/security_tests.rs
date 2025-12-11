@@ -105,7 +105,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let malicious_role_name = "admin'; DROP TABLE users; --";
-        let result = db.create_role(malicious_role_name, Some("Malicious role"), None);
+        let result = db.create_role(malicious_role_name, Some("Malicious role"));
 
         // Should safely handle
         assert!(result.is_ok());
@@ -227,7 +227,7 @@ mod tests {
 
         // Role with tabs
         let role_name = "role\twith\ttabs";
-        let role = db.create_role(role_name, None, None);
+        let role = db.create_role(role_name, None);
         assert!(role.is_ok());
     }
 
@@ -242,7 +242,7 @@ mod tests {
 
         // Very long role name
         let long_role_name = "b".repeat(255);
-        let role = db.create_role(&long_role_name, None, None);
+        let role = db.create_role(&long_role_name, None);
         assert!(role.is_ok());
     }
 
@@ -326,7 +326,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db.create_user("testuser", "Password123!", false, None, None, None).unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
@@ -380,7 +380,7 @@ mod tests {
     fn test_assign_role_to_nonexistent_user() {
         let (db, _dirs) = common::create_test_db();
 
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         let result = db.assign_role_to_user(99999, role.id, None);
 
@@ -516,7 +516,7 @@ mod tests {
 
         // Create and assign 50 roles
         for i in 0..50 {
-            let role = db.create_role(&format!("role{}", i), None, None).unwrap();
+            let role = db.create_role(&format!("role{}", i), None).unwrap();
             db.assign_role_to_user(user.id, role.id, None).unwrap();
         }
 
@@ -528,13 +528,13 @@ mod tests {
     fn test_many_permissions_for_role() {
         let (db, _dirs) = common::create_test_db();
 
-        let role = db.create_role("power_user", None, None).unwrap();
+        let role = db.create_role("power_user", None).unwrap();
 
         // Use actual system resources and actions from schema
         let resources = vec![
             "user",
             "admin_system",
-            "admin_api_keys",
+            "admin_api_key",
             "admin_roles",
             "admin_users",
             "node_keys",

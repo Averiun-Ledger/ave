@@ -223,7 +223,7 @@ mod tests {
     fn test_create_role() {
         let (db, _dirs) = create_test_db();
 
-        let role = db.create_role("editor", Some("Editor role"), None).unwrap();
+        let role = db.create_role("editor", Some("Editor role")).unwrap();
 
         assert_eq!(role.name.unwrap(), "editor");
         assert_eq!(role.description, Some("Editor role".to_string()));
@@ -233,8 +233,8 @@ mod tests {
     fn test_create_role_duplicate() {
         let (db, _dirs) = create_test_db();
 
-        db.create_role("editor", None, None).unwrap();
-        let result = db.create_role("editor", None, None);
+        db.create_role("editor", None).unwrap();
+        let result = db.create_role("editor", None);
 
         assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
     }
@@ -244,7 +244,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
@@ -257,7 +257,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
         db.remove_role_from_user(user.id, role.id).unwrap();
@@ -271,8 +271,8 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
-        let role1 = db.create_role("editor", None, None).unwrap();
-        let role2 = db.create_role("viewer", None, None).unwrap();
+        let role1 = db.create_role("editor", None).unwrap();
+        let role2 = db.create_role("viewer", None).unwrap();
 
         db.assign_role_to_user(user.id, role1.id, None).unwrap();
         db.assign_role_to_user(user.id, role2.id, None).unwrap();
@@ -286,7 +286,7 @@ mod tests {
     fn test_delete_role() {
         let (db, _dirs) = create_test_db();
 
-        let role = db.create_role("temp_role", None, None).unwrap();
+        let role = db.create_role("temp_role", None).unwrap();
 
         db.delete_role(role.id).unwrap();
 
@@ -508,7 +508,7 @@ mod tests {
     fn test_set_role_permission() {
         let (db, _dirs) = create_test_db();
 
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         // Grant read permission on subjects
         db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
@@ -545,7 +545,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         // Role grants read on events
         db.set_role_permission(role.id, "node_subject", "get", true).unwrap();
@@ -565,7 +565,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db.create_user("testuser", "TestPass123!", false, None, None, None).unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         // Role grants permission
         db.set_role_permission(role.id, "node_subject", "delete", true).unwrap();

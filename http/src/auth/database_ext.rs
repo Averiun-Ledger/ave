@@ -17,7 +17,7 @@ impl AuthDatabase {
         role_id: i64,
     ) -> Result<Role, DatabaseError> {
         conn.query_row(
-            "SELECT id, name, description, default_ttl_seconds, is_system, is_deleted,
+            "SELECT id, name, description, is_system, is_deleted,
                     created_at, updated_at
              FROM roles
              WHERE id = ?1 AND is_deleted = 0",
@@ -27,11 +27,10 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    default_ttl_seconds: row.get(3)?,
-                    is_system: row.get(4)?,
-                    is_deleted: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    is_system: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )
@@ -46,7 +45,7 @@ impl AuthDatabase {
         name: &str,
     ) -> Result<Role, DatabaseError> {
         conn.query_row(
-            "SELECT id, name, description, default_ttl_seconds, is_system, is_deleted,
+            "SELECT id, name, description, is_system, is_deleted,
                     created_at, updated_at
              FROM roles
              WHERE name = ?1 AND is_deleted = 0",
@@ -56,11 +55,10 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    default_ttl_seconds: row.get(3)?,
-                    is_system: row.get(4)?,
-                    is_deleted: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    is_system: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )
@@ -74,7 +72,6 @@ impl AuthDatabase {
         &self,
         name: &str,
         description: Option<&str>,
-        default_ttl_seconds: Option<i64>,
     ) -> Result<Role, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -100,9 +97,9 @@ impl AuthDatabase {
         }
 
         conn.execute(
-            "INSERT INTO roles (name, description, default_ttl_seconds)
-             VALUES (?1, ?2, ?3)",
-            params![name, description, default_ttl_seconds],
+            "INSERT INTO roles (name, description)
+             VALUES (?1, ?2)",
+            params![name, description],
         )
         .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
@@ -127,7 +124,7 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.name, r.description, r.default_ttl_seconds, r.is_system, r.created_at,
+            "SELECT r.id, r.name, r.description, r.is_system, r.created_at,
                     (SELECT COUNT(*) FROM role_permissions WHERE role_id = r.id) as permission_count
              FROM roles r
              WHERE r.is_deleted = 0
@@ -140,10 +137,9 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    default_ttl_seconds: row.get(3)?,
-                    is_system: row.get(4)?,
-                    created_at: row.get(5)?,
-                    permission_count: row.get(6)?,
+                    is_system: row.get(3)?,
+                    created_at: row.get(4)?,
+                    permission_count: row.get(5)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -158,7 +154,6 @@ impl AuthDatabase {
         &self,
         role_id: i64,
         description: Option<&str>,
-        default_ttl_seconds: Option<i64>,
     ) -> Result<Role, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -174,14 +169,6 @@ impl AuthDatabase {
             conn.execute(
                 "UPDATE roles SET description = ?1 WHERE id = ?2",
                 params![desc, role_id],
-            )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
-        }
-
-        if let Some(ttl) = default_ttl_seconds {
-            conn.execute(
-                "UPDATE roles SET default_ttl_seconds = ?1 WHERE id = ?2",
-                params![ttl, role_id],
             )
             .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
         }

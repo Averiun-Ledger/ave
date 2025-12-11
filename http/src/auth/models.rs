@@ -130,7 +130,6 @@ pub struct Role {
     pub id: i64,
     pub name: Option<String>,
     pub description: Option<String>,
-    pub default_ttl_seconds: Option<i64>,
     pub is_system: bool,
     pub is_deleted: bool,
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
@@ -144,7 +143,6 @@ pub struct RoleInfo {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub default_ttl_seconds: Option<i64>,
     pub is_system: bool,
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,
@@ -155,13 +153,11 @@ pub struct RoleInfo {
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
-    pub default_ttl_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateRoleRequest {
     pub description: Option<String>,
-    pub default_ttl_seconds: Option<i64>,
 }
 
 // =============================================================================

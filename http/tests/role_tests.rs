@@ -26,7 +26,7 @@ mod tests {
         // Verify key works
         assert!(db.verify_api_key(&api_key).is_ok());
 
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
         // API key should be revoked
@@ -41,7 +41,7 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
@@ -67,7 +67,7 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         // Role has read permission
         db.set_role_permission(role.id, "node_subject", "get", true)
@@ -96,7 +96,7 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         // Role has update permission
         db.set_role_permission(role.id, "node_request", "post", true)
@@ -130,7 +130,7 @@ mod tests {
             .create_api_key(user.id, Some("key1"), None, None, false)
             .unwrap();
 
-        let role1 = db.create_role("role1", None, None).unwrap();
+        let role1 = db.create_role("role1", None).unwrap();
         db.assign_role_to_user(user.id, role1.id, None).unwrap();
 
         // First key should be revoked
@@ -144,7 +144,7 @@ mod tests {
             .create_api_key(user.id, Some("key2"), None, None, false)
             .unwrap();
 
-        let role2 = db.create_role("role2", None, None).unwrap();
+        let role2 = db.create_role("role2", None).unwrap();
         db.assign_role_to_user(user.id, role2.id, None).unwrap();
 
         // Second key should be revoked
@@ -167,8 +167,8 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role1 = db.create_role("reader", None, None).unwrap();
-        let role2 = db.create_role("writer", None, None).unwrap();
+        let role1 = db.create_role("reader", None).unwrap();
+        let role2 = db.create_role("writer", None).unwrap();
 
         // role1 grants read
         db.set_role_permission(role1.id, "node_subject", "get", true)
@@ -206,7 +206,7 @@ mod tests {
             .unwrap();
 
         // Add role that grants delete
-        let role = db.create_role("user_admin", None, None).unwrap();
+        let role = db.create_role("user_admin", None).unwrap();
         db.set_role_permission(role.id, "admin_users", "delete", true)
             .unwrap();
         db.assign_role_to_user(user.id, role.id, None).unwrap();
@@ -231,7 +231,7 @@ mod tests {
         let user2 = db
             .create_user("user2", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role = db.create_role("editor", None, None).unwrap();
+        let role = db.create_role("editor", None).unwrap();
 
         db.assign_role_to_user(user1.id, role.id, None).unwrap();
         db.assign_role_to_user(user2.id, role.id, None).unwrap();
@@ -274,8 +274,8 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role1 = db.create_role("role1", None, None).unwrap();
-        let role2 = db.create_role("role2", None, None).unwrap();
+        let role1 = db.create_role("role1", None).unwrap();
+        let role2 = db.create_role("role2", None).unwrap();
 
         // Both roles grant permission
         db.set_role_permission(role1.id, "node_subject", "delete", true)
@@ -307,7 +307,7 @@ mod tests {
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
-        let role = db.create_role("temp_role", None, None).unwrap();
+        let role = db.create_role("temp_role", None).unwrap();
 
         db.assign_role_to_user(user.id, role.id, None).unwrap();
 
@@ -323,26 +323,6 @@ mod tests {
         assert!(!roles_after.contains(&"temp_role".to_string()));
     }
 
-    #[test]
-    fn test_role_with_ttl() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
-            .unwrap();
-        let role = db.create_role("temp_editor", None, Some(2)).unwrap(); // 2 second TTL
-
-        // Assign role
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // Should have role immediately
-        let roles = db.get_user_roles(user.id).unwrap();
-        assert!(roles.contains(&"temp_editor".to_string()));
-
-        // Note: TTL expiration would need to be implemented in get_user_roles
-        // For now, this test verifies that roles with TTL can be created and assigned
-        // The actual TTL enforcement would happen at query time
-    }
 }
 
 // =============================================================================
@@ -1365,7 +1345,7 @@ mod endpoint_access_tests {
 
         // Manager should have access to:
         // - User resources (all actions)
-        // - Node-Request (get only)
+        // - Node-Request (all actions)
         // - Node-Subject (all actions)
         // - Node-System (all actions)
         // But NOT to Node-Keys or Admin-* resources
@@ -1450,6 +1430,11 @@ mod endpoint_access_tests {
             (
                 "GET",
                 "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+                true,
+            ),
+            (
+                "POST",
+                "/event-request",
                 true,
             ),
         ];

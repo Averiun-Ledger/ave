@@ -1512,10 +1512,10 @@ pub(crate) fn permission_for(
         }
 
         // Self API keys panel (management key required)
-        (&Method::GET, "/me/api-keys") => Some(("user_apikey", "get")),
-        (&Method::POST, "/me/api-keys") => Some(("user_apikey", "post")),
+        (&Method::GET, "/me/api-keys") => Some(("user_api_key", "get")),
+        (&Method::POST, "/me/api-keys") => Some(("user_api_key", "post")),
         (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
-            Some(("user_apikey", "delete"))
+            Some(("user_api_key", "delete"))
         }
 
         // Ledger info
@@ -1658,7 +1658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_role_allows_subject_writes_but_not_event_post() {
+    async fn manager_role_allows_subject_writes() {
         let db = build_db();
         let ctx = auth_ctx_for_role(&db, "manager");
         let app = router();
@@ -1670,7 +1670,7 @@ mod tests {
 
         let status =
             call(&app, Method::POST, "/event-request", ctx).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

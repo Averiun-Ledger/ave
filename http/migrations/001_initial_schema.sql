@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS roles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
-    default_ttl_seconds INTEGER, -- Default API key TTL for this role (NULL = no expiration)
     is_system BOOLEAN NOT NULL DEFAULT 0, -- System roles cannot be deleted
     is_deleted BOOLEAN NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
@@ -51,7 +50,6 @@ CREATE TABLE IF NOT EXISTS user_roles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     role_id INTEGER NOT NULL,
-    assigned_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     assigned_by INTEGER, -- User ID who assigned this role
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
@@ -215,24 +213,6 @@ CREATE INDEX IF NOT EXISTS idx_rate_limits_cleanup ON rate_limits(window_start);
 -- IP_ALLOWLIST TABLE
 -- =============================================================================
 -- Optional IP allowlist/denylist per API key or role
-CREATE TABLE IF NOT EXISTS ip_restrictions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    api_key_id INTEGER,
-    role_id INTEGER,
-    cidr TEXT NOT NULL, -- CIDR notation, e.g., "192.168.1.0/24"
-    is_allowlist BOOLEAN NOT NULL DEFAULT 1, -- TRUE = allow, FALSE = deny
-    description TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    created_by INTEGER,
-    FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE,
-    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
-    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
-    CHECK ((api_key_id IS NOT NULL AND role_id IS NULL) OR (api_key_id IS NULL AND role_id IS NOT NULL))
-);
-
-CREATE INDEX IF NOT EXISTS idx_ip_restrictions_api_key ON ip_restrictions(api_key_id);
-CREATE INDEX IF NOT EXISTS idx_ip_restrictions_role ON ip_restrictions(role_id);
-
 -- =============================================================================
 -- SYSTEM_CONFIG TABLE
 -- =============================================================================
@@ -260,14 +240,14 @@ INSERT OR IGNORE INTO system_config (key, value, description) VALUES
 INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
     ('user', 'User self-service endpoints', 1),
     ('admin_system', 'Administrative system endpoints', 1),
-    ('admin_api_keys', 'Administrative API key endpoints', 1),
+    ('admin_api_key', 'Administrative API key endpoints', 1),
     ('admin_roles', 'Administrative role and permission endpoints', 1),
     ('admin_users', 'Administrative user management endpoints', 1),
     ('node_keys', 'Node key export endpoints', 1),
     ('node_system', 'Node information endpoints', 1),
     ('node_subject', 'Ledger subject and governance endpoints', 1),
     ('node_request', 'Ledger request submission endpoints', 1),
-    ('user_apikey', 'User self-service API key endpoints', 1);
+    ('user_api_key', 'User self-service API key endpoints', 1);
 
 -- =============================================================================
 -- INSERT SYSTEM ACTIONS
@@ -283,13 +263,13 @@ INSERT OR IGNORE INTO actions (name, description, is_system) VALUES
 -- =============================================================================
 -- INSERT SYSTEM ROLES
 -- =============================================================================
-INSERT OR IGNORE INTO roles (name, description, is_system, default_ttl_seconds) VALUES
-    ('superadmin', 'Full system access with all privileges', 1, NULL),
-    ('admin', 'Administrative access to users, roles, and API keys', 1, 2592000),
-    ('owner', 'Full access to business endpoints (non-admin)', 1, NULL),
-    ('sender', 'Limited to sending event requests', 1, NULL),
-    ('manager', 'Business manager with operational control', 1, NULL),
-    ('data', 'Read-only access to business data', 1, NULL);
+INSERT OR IGNORE INTO roles (name, description, is_system) VALUES
+    ('superadmin', 'Full system access with all privileges', 1),
+    ('admin', 'Administrative access to users, roles, and API keys', 1),
+    ('owner', 'Full access to business endpoints (non-admin)', 1),
+    ('sender', 'Limited to sending event requests', 1),
+    ('manager', 'Business manager with operational control', 1),
+    ('data', 'Read-only access to business data', 1);
 
 -- Get role IDs
 -- Note: We'll set up permissions programmatically in Rust to handle the dynamic IDs

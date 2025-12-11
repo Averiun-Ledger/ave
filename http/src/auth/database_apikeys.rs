@@ -456,9 +456,9 @@ impl AuthDatabase {
             let admin_resources = [
                 "admin_users",
                 "admin_roles",
-                "admin_api_keys",
+                "admin_api_key",
                 "admin_system",
-                "user_apikey",
+                "user_api_key",
             ];
             permissions.retain(|p| !admin_resources.contains(&p.resource.as_str()));
         }
