@@ -2,9 +2,7 @@
 //
 // This module provides database operations for API keys
 
-use super::crypto::{
-    extract_key_prefix, generate_api_key, hash_api_key,
-};
+use super::crypto::{extract_key_prefix, generate_api_key, hash_api_key};
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
 use rusqlite::{OptionalExtension, Result as SqliteResult, params};
@@ -19,7 +17,6 @@ impl AuthDatabase {
         conn: &rusqlite::Connection,
         key_id: i64,
     ) -> Result<ApiKeyInfo, DatabaseError> {
-
         conn.query_row(
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
@@ -429,12 +426,12 @@ impl AuthDatabase {
         }
 
         // Check if account is locked
-        if let Some(locked_until) = user.locked_until {
-            if locked_until > Self::now() {
-                return Err(DatabaseError::AccountLocked(
-                    "Account is temporarily locked".to_string(),
-                ));
-            }
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Self::now()
+        {
+            return Err(DatabaseError::AccountLocked(
+                "Account is temporarily locked".to_string(),
+            ));
         }
 
         // Get user roles
@@ -445,7 +442,8 @@ impl AuthDatabase {
         conn.execute(
             "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
             params![now, key_id],
-        ).ok(); // Ignore errors on usage tracking
+        )
+        .ok(); // Ignore errors on usage tracking
 
         // Get effective permissions - need to drop lock first
         drop(conn);
@@ -460,7 +458,8 @@ impl AuthDatabase {
                 "admin_system",
                 "user_api_key",
             ];
-            permissions.retain(|p| !admin_resources.contains(&p.resource.as_str()));
+            permissions
+                .retain(|p| !admin_resources.contains(&p.resource.as_str()));
         }
 
         Ok(AuthContext {

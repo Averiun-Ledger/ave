@@ -89,8 +89,8 @@ pub fn verify_password(password: &str, hash: &str) -> CryptoResult<bool> {
 /// * `String` - The generated API key
 pub fn generate_api_key() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random_bytes: [u8; 20] = rng.r#gen();
+    let mut rng = rand::rng();
+    let random_bytes: [u8; 20] = rng.random();
     let random_hex = hex::encode(random_bytes);
 
     format!("{API_KEY_PREFIX}{random_hex}")
@@ -161,13 +161,11 @@ mod tests {
     fn test_api_key_generation() {
         let key = generate_api_key();
 
-        
         // Check format
         assert!(key.starts_with("ave_node_"));
         // Length should be 7 (prefix) + 40 (hex) = 47
         assert_eq!(key.len(), 49);
     }
-
 
     #[test]
     fn test_api_key_uniqueness() {

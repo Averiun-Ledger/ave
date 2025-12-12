@@ -5,7 +5,11 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{Extension, Json, extract::{Path, Query}, http::StatusCode};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query},
+    http::StatusCode,
+};
 use std::sync::Arc;
 
 /// Convert DatabaseError to HTTP response tuple
@@ -211,23 +215,27 @@ pub async fn update_system_config(
     check_permission(&auth_ctx, "admin_system", "put")?;
 
     let config = db
-        .update_system_config(&key, &req.value.to_string(), Some(auth_ctx.user_id))
+        .update_system_config(
+            &key,
+            &req.value.to_string(),
+            Some(auth_ctx.user_id),
+        )
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "config_updated",
-        Some(&format!("/admin/config/{}", key)),
-        Some("PUT"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "config_updated",
+        endpoint: Some(&format!("/admin/config/{}", key)),
+        http_method: Some("PUT"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(config))
 }
@@ -311,13 +319,13 @@ pub async fn get_my_permissions_detailed(
     // Get role permissions
     let mut role_permissions = Vec::new();
     for role_name in &auth_ctx.roles {
-        if let Ok(role) = db.get_role_by_name(role_name) {
-            if let Ok(perms) = db.get_role_permissions(role.id) {
-                role_permissions.push(RolePermissionsInfo {
-                    role_name: role_name.clone(),
-                    permissions: perms,
-                });
-            }
+        if let Ok(role) = db.get_role_by_name(role_name)
+            && let Ok(perms) = db.get_role_permissions(role.id)
+        {
+            role_permissions.push(RolePermissionsInfo {
+                role_name: role_name.clone(),
+                permissions: perms,
+            });
         }
     }
 

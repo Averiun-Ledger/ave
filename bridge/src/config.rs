@@ -1,6 +1,6 @@
 use core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
-use std::path::PathBuf;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 use crate::{auth::AuthConfig, http::HttpConfig};
 

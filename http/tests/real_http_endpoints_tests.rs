@@ -9,7 +9,6 @@
 use reqwest::{Client, StatusCode};
 use serde_json::json;
 
-
 use crate::common::{TestServer, login, make_request};
 
 mod common;

@@ -3,7 +3,7 @@ use core::error::Error;
 use tracing::error;
 
 pub mod command;
-use crate::{config::Config as BridgeConfig};
+use crate::config::Config as BridgeConfig;
 
 const TARGET_SETTING: &str = "Ave-Bridge-Settings";
 
@@ -525,21 +525,10 @@ http:
         assert_eq!(node.network.req_res.get_max_concurrent_streams(), 167);
         assert!(!node.network.routing.get_dht_random_walk());
         assert_eq!(node.network.routing.get_discovery_limit(), 25);
-        assert!(node
-            .network
-            .routing
-            .get_allow_private_address_in_dht());
+        assert!(node.network.routing.get_allow_private_address_in_dht());
         assert!(node.network.routing.get_allow_dns_address_in_dht());
-        assert!(node
-            .network
-            .routing
-            .get_allow_loop_back_address_in_dht());
-        assert!(
-            !node
-                .network
-                .routing
-                .get_kademlia_disjoint_query_paths()
-        );
+        assert!(node.network.routing.get_allow_loop_back_address_in_dht());
+        assert!(!node.network.routing.get_kademlia_disjoint_query_paths());
         assert!(node.network.control_list.get_enable());
         assert_eq!(
             node.network.control_list.get_allow_list(),
@@ -550,15 +539,11 @@ http:
             vec!["Peer1", "Peer2"]
         );
         assert_eq!(
-            node.network
-                .control_list
-                .get_service_allow_list(),
+            node.network.control_list.get_service_allow_list(),
             vec!["http://allow.local/list"]
         );
         assert_eq!(
-            node.network
-                .control_list
-                .get_service_block_list(),
+            node.network.control_list.get_service_block_list(),
             vec!["http://block.local/list"]
         );
         assert_eq!(
@@ -575,7 +560,10 @@ http:
                 api: true
             }
         );
-        assert_eq!(logging.api_url.as_deref(), Some("https://example.com/logs"));
+        assert_eq!(
+            logging.api_url.as_deref(),
+            Some("https://example.com/logs")
+        );
         assert_eq!(logging.file_path, PathBuf::from("/tmp/my.log"));
         assert_eq!(logging.rotation, LoggingRotation::Hourly);
         assert_eq!(logging.max_size, 52_428_800);

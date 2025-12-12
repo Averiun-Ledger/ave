@@ -3,8 +3,8 @@
 // This module provides helper functions to integrate the auth system into the server
 
 use super::database::AuthDatabase;
-use std::sync::Arc;
 use ave_bridge::auth::AuthConfig;
+use std::sync::Arc;
 use tracing::{error, info};
 
 const TARGET: &str = "AveHttpAuth";
@@ -16,7 +16,7 @@ const TARGET: &str = "AveHttpAuth";
 /// Returns an Arc-wrapped database ready for use
 pub async fn initialize_auth_database(
     config: &AuthConfig,
-    password: &str
+    password: &str,
 ) -> Result<Arc<AuthDatabase>, String> {
     if !config.enable {
         return Err("Authentication system is disabled".to_string());

@@ -46,7 +46,9 @@ pub use core::{
     approval::approver::ApprovalStateRes,
     auth::AuthWitness,
     config::Config as AveConfig,
-    config::{LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer},
+    config::{
+        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer,
+    },
     error::Error,
     model::request::EventRequest,
 };
@@ -100,7 +102,7 @@ impl Bridge {
         password_sink: &str,
         token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
-        let keys = key_pair(&settings, password)?;
+        let keys = key_pair(settings, password)?;
 
         let auth_token = if !settings.sink.auth.is_empty() {
             Some(

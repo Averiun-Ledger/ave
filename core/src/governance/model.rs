@@ -912,8 +912,6 @@ impl RoleCreator {
     }
 }
 
-
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct RoleGovIssuer {
     pub users: BTreeSet<MemberName>,

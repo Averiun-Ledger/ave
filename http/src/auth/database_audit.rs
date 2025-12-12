@@ -5,27 +5,43 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
 use rusqlite::{OptionalExtension, Result as SqliteResult, params};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // =============================================================================
 // AUDIT LOG OPERATIONS
 // =============================================================================
 
+/// Parameters for creating an audit log entry
+pub struct AuditLogParams<'a> {
+    pub user_id: Option<i64>,
+    pub api_key_id: Option<i64>,
+    pub action_type: &'a str,
+    pub endpoint: Option<&'a str>,
+    pub http_method: Option<&'a str>,
+    pub ip_address: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+    pub details: Option<&'a str>,
+    pub success: bool,
+    pub error_message: Option<&'a str>,
+}
+
+/// Parameters for logging an API request
+pub struct ApiRequestParams<'a> {
+    pub path: &'a str,
+    pub method: &'a str,
+    pub ip_address: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub request_id: &'a str,
+    pub success: bool,
+    pub error_message: Option<&'a str>,
+}
+
 impl AuthDatabase {
     /// Create an audit log entry
     pub fn create_audit_log(
         &self,
-        user_id: Option<i64>,
-        api_key_id: Option<i64>,
-        action_type: &str,
-        endpoint: Option<&str>,
-        http_method: Option<&str>,
-        ip_address: Option<&str>,
-        user_agent: Option<&str>,
-        request_id: Option<&str>,
-        details: Option<&str>,
-        success: bool,
-        error_message: Option<&str>,
+        params: AuditLogParams,
     ) -> Result<i64, DatabaseError> {
         // Respect global audit toggle
         if !self.config.session.audit_enable {
@@ -41,17 +57,17 @@ impl AuthDatabase {
                 details, success, error_message
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
-                user_id,
-                api_key_id,
-                action_type,
-                endpoint,
-                http_method,
-                ip_address,
-                user_agent,
-                request_id,
-                details,
-                success,
-                error_message
+                params.user_id,
+                params.api_key_id,
+                params.action_type,
+                params.endpoint,
+                params.http_method,
+                params.ip_address,
+                params.user_agent,
+                params.request_id,
+                params.details,
+                params.success,
+                params.error_message
             ],
         )
         .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
@@ -63,31 +79,25 @@ impl AuthDatabase {
     pub fn log_api_request(
         &self,
         ctx: &crate::auth::models::AuthContext,
-        path: &str,
-        method: &str,
-        ip_address: Option<&str>,
-        user_agent: Option<&str>,
-        request_id: &str,
-        success: bool,
-        error_message: Option<&str>,
+        req_params: ApiRequestParams,
     ) -> Result<i64, DatabaseError> {
         if !self.config.session.log_all_requests {
             return Ok(0);
         }
 
-        self.create_audit_log(
-            Some(ctx.user_id),
-            Some(ctx.api_key_id),
-            "api_request",
-            Some(path),
-            Some(method),
-            ip_address,
-            user_agent,
-            Some(request_id),
-            None,
-            success,
-            error_message,
-        )
+        self.create_audit_log(AuditLogParams {
+            user_id: Some(ctx.user_id),
+            api_key_id: Some(ctx.api_key_id),
+            action_type: "api_request",
+            endpoint: Some(req_params.path),
+            http_method: Some(req_params.method),
+            ip_address: req_params.ip_address,
+            user_agent: req_params.user_agent,
+            request_id: Some(req_params.request_id),
+            details: None,
+            success: req_params.success,
+            error_message: req_params.error_message,
+        })
     }
 
     /// Query audit logs
@@ -102,7 +112,7 @@ impl AuthDatabase {
                     endpoint, http_method, ip_address, user_agent,
                     request_id, details, success, error_message
              FROM audit_logs
-             WHERE 1=1"
+             WHERE 1=1",
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -259,10 +269,12 @@ impl AuthDatabase {
             let mut stmt = conn
                 .prepare(sql)
                 .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
-            stmt.query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-                .collect::<SqliteResult<Vec<_>>>()
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))
+            stmt.query_map(params![cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))
         };
 
         let top_actions = top_n(
@@ -351,10 +363,16 @@ impl AuthDatabase {
         }
 
         // Respect configuration for which dimensions participate in the limit
-        let api_key_id =
-            if self.config.rate_limit.limit_by_key { api_key_id } else { None };
-        let ip_address =
-            if self.config.rate_limit.limit_by_ip { ip_address } else { None };
+        let api_key_id = if self.config.rate_limit.limit_by_key {
+            api_key_id
+        } else {
+            None
+        };
+        let ip_address = if self.config.rate_limit.limit_by_ip {
+            ip_address
+        } else {
+            None
+        };
 
         let conn = self.lock_conn()?;
 
@@ -547,5 +565,4 @@ impl AuthDatabase {
 
         Self::get_system_config_internal(&conn, key)
     }
-
 }

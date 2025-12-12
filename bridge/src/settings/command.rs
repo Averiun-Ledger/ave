@@ -1,6 +1,6 @@
 use std::env;
 
-use clap::{Parser, command};
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

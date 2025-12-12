@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::{Path, PathBuf}, process::Command};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -68,7 +72,7 @@ impl Compiler {
 
     async fn compile_contract(
         contract: &str,
-        contract_path: &PathBuf,
+        contract_path: &Path,
     ) -> Result<(), Error> {
         // Write contract.
         let Ok(decode_base64) = BASE64_STANDARD.decode(contract) else {
@@ -80,30 +84,22 @@ impl Compiler {
 
         let dir = contract_path.join("src");
         if !Path::new(&dir).exists() {
-            fs::create_dir_all(&dir)
-                .await
-                .map_err(|e| {
-                    Error::Node(format!("Can not create src dir: {}", e))
-                })?;
+            fs::create_dir_all(&dir).await.map_err(|e| {
+                Error::Node(format!("Can not create src dir: {}", e))
+            })?;
         }
 
         let toml: String = Self::compilation_toml();
         let cargo = contract_path.join("Cargo.toml");
         // We write cargo.toml
-        fs::write(&cargo, toml)
-            .await
-            .map_err(|e| {
-                Error::Node(format!("Can not create Cargo.toml file: {}", e))
-            })?;
+        fs::write(&cargo, toml).await.map_err(|e| {
+            Error::Node(format!("Can not create Cargo.toml file: {}", e))
+        })?;
 
-        
         fs::write(contract_path.join("src").join("lib.rs"), decode_base64)
             .await
             .map_err(|e| {
-                Error::Compiler(format!(
-                    "Can not create lib.rs file: {}",
-                    e
-                ))
+                Error::Compiler(format!("Can not create lib.rs file: {}", e))
             })?;
 
         // Compiling contract
@@ -116,33 +112,35 @@ impl Compiler {
             .output()
             // Does not show stdout. Generates child process and waits
             .map_err(|e| {
-                Error::Compiler(format!(
-                    "Can not compile contract: {}",
-                    e
-                ))
+                Error::Compiler(format!("Can not compile contract: {}", e))
             })?;
 
         // Is success
         if !status.status.success() {
-            return Err(Error::Compiler("Can not compile contract".to_string()));
+            return Err(Error::Compiler(
+                "Can not compile contract".to_string(),
+            ));
         }
 
         Ok(())
     }
 
     async fn check_wasm(
-        contract_path: &PathBuf,
+        contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, Error> {
         // Read compile contract
-        
-        let file = fs::read(contract_path.join("target").join("wasm32-unknown-unknown").join("release").join("contract.wasm"))
+
+        let file = fs::read(
+            contract_path
+                .join("target")
+                .join("wasm32-unknown-unknown")
+                .join("release")
+                .join("contract.wasm"),
+        )
         .await
         .map_err(|e| {
-            Error::Compiler(format!(
-                "Can not read contract.wasm: {}",
-                e
-            ))
+            Error::Compiler(format!("Can not read contract.wasm: {}", e))
         })?;
 
         // Use the same secure configuration as the runner to ensure consistency
@@ -186,12 +184,16 @@ impl Compiler {
                     }
                 }
                 _ => {
-                    return Err(Error::Compiler("Module has a import that is not function".to_owned()));
+                    return Err(Error::Compiler(
+                        "Module has a import that is not function".to_owned(),
+                    ));
                 }
             }
         }
         if !pending_sdk.is_empty() {
-            return Err(Error::Compiler("Module has not all imports of sdk".to_owned()));
+            return Err(Error::Compiler(
+                "Module has not all imports of sdk".to_owned(),
+            ));
         }
 
         // We create a context from the state and the event.

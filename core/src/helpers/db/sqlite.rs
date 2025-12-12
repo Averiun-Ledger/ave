@@ -487,7 +487,8 @@ impl SqliteLocal {
         })?;
 
         // Run database migrations
-        let migration_001 = include_str!("../../../migrations/001_initial_schema.sql");
+        let migration_001 =
+            include_str!("../../../migrations/001_initial_schema.sql");
         conn.execute_batch(migration_001).map_err(|e| {
             Error::ExtDB(format!("Migration 001 failed: {}", e))
         })?;

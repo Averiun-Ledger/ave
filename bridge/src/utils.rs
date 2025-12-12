@@ -16,7 +16,6 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
         })?;
     }
 
-
     let path = config.keys_path.join("node_private.der");
     match fs::metadata(&path) {
         Ok(_) => {
@@ -50,13 +49,12 @@ pub fn key_pair(config: &Config, password: &str) -> Result<KeyPair, Error> {
             Ok(key_pair)
         }
         Err(_) => {
-            let key_pair = config
-                .node
-                .keypair_algorithm
-                .generate_keypair()
-                .map_err(|e| {
-                    Error::Bridge(format!("Error generating KeyPair {}", e))
-                })?;
+            let key_pair =
+                config.node.keypair_algorithm.generate_keypair().map_err(
+                    |e| {
+                        Error::Bridge(format!("Error generating KeyPair {}", e))
+                    },
+                )?;
 
             let der = key_pair.to_secret_der().map_err(|error| {
                 Error::Bridge(format!("Error getting secret der: {}", error))

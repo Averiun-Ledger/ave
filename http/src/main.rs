@@ -1,16 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use auth::{
-    AuthDatabase,
-};
+use auth::AuthDatabase;
 use ave_bridge::{
-    Bridge, clap::Parser, settings::{
+    Bridge,
+    clap::Parser,
+    settings::{
         build_config,
         command::{
-            Args, build_config_path, build_key_password,
-            build_sink_password,
+            Args, build_config_path, build_key_password, build_sink_password,
         },
-    }
+    },
 };
 use axum::{
     BoxError,
@@ -73,9 +72,10 @@ async fn main() {
         })
         .expect("Can not build config");
 
-    let listener_http = tokio::net::TcpListener::bind(&config.http.http_address)
-        .await
-        .expect("Can not build TCP listener with http address");
+    let listener_http =
+        tokio::net::TcpListener::bind(&config.http.http_address)
+            .await
+            .expect("Can not build TCP listener with http address");
 
     let cors = CorsLayer::new()
         .allow_methods([
@@ -93,7 +93,8 @@ async fn main() {
 
     let _log_handle = logging::init_logging(&config.logging).await;
 
-    let auth_db: Option<Arc<AuthDatabase>> = build_auth(&config.auth, &args.auth_password).await;
+    let auth_db: Option<Arc<AuthDatabase>> =
+        build_auth(&config.auth, &args.auth_password).await;
 
     let mut key_password = args.key_password;
     if key_password.is_empty() {
@@ -107,12 +108,16 @@ async fn main() {
 
     let (bridge, runners) =
         Bridge::build(&config, &key_password, &sink_password, None)
-            .await.map_err(|e| {
+            .await
+            .map_err(|e| {
                 error!("Can not build Bridge: {}", e);
-            }).expect("Can not build Bridge");
+            })
+            .expect("Can not build Bridge");
 
     if let Some(https_address) = config.http.https_address {
-        let https_address = https_address.parse::<SocketAddr>().expect("Can not parse Https address as SocketAddr");
+        let https_address = https_address
+            .parse::<SocketAddr>()
+            .expect("Can not parse Https address as SocketAddr");
 
         tokio::spawn(redirect_http_to_https(
             https_address.port(),
@@ -122,7 +127,10 @@ async fn main() {
             .install_default()
             .expect("Can not install ring for RustTLS");
 
-        let (cert, private_key) = match (config.http.https_cert_path, config.http.https_private_key_path) {
+        let (cert, private_key) = match (
+            config.http.https_cert_path,
+            config.http.https_private_key_path,
+        ) {
             (Some(cert), Some(private_key)) => (cert, private_key),
             _ => {
                 error!("Https must have cert and private key");
@@ -130,12 +138,12 @@ async fn main() {
             }
         };
 
-
         let tls = RustlsConfig::from_pem_file(
             PathBuf::from(&cert),
             PathBuf::from(&private_key),
         )
-        .await.expect("Can not build tls");
+        .await
+        .expect("Can not build tls");
 
         let handle = Handle::new();
 
@@ -149,9 +157,13 @@ async fn main() {
         axum_server::bind_rustls(https_address, tls)
             .handle(handle_clone)
             .serve(
-                tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
-                    .layer(cors)
-                    .into_make_service_with_connect_info::<SocketAddr>(),
+                tower_trace(build_routes(
+                    config.http.enable_doc,
+                    bridge,
+                    auth_db,
+                ))
+                .layer(cors)
+                .into_make_service_with_connect_info::<SocketAddr>(),
             )
             .await
             .expect("Can not run axum server");
@@ -170,8 +182,6 @@ async fn main() {
         .expect("Can not run axum server");
     }
 }
-
-
 
 async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
     fn make_https(
@@ -211,7 +221,11 @@ async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
 
     let ports = Ports {
         https: https.to_string(),
-        http: listener_http.local_addr().expect("Invalid listener http").port().to_string(),
+        http: listener_http
+            .local_addr()
+            .expect("Invalid listener http")
+            .port()
+            .to_string(),
     };
 
     let redirect = move |Host(host): Host, uri: Uri| async move {

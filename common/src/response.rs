@@ -247,7 +247,9 @@ pub struct RequestData {
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Ord, PartialEq, PartialOrd, Eq)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, Ord, PartialEq, PartialOrd, Eq,
+)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct RegisterDataSubj {
     pub subject_id: String,

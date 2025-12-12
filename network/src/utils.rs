@@ -295,9 +295,7 @@ pub fn is_tcp(addr: &Multiaddr) -> bool {
 #[serde(default)]
 pub struct ReqResConfig {
     /// message timeout
-    #[serde(
-        deserialize_with = "deserialize_duration_secs"
-    )]
+    #[serde(deserialize_with = "deserialize_duration_secs")]
     pub message_timeout: Duration,
     /// max concurrent streams
     pub max_concurrent_streams: usize,

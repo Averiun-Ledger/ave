@@ -672,7 +672,7 @@ impl Intermediary {
     fn to_peer_id(public_key: &PublicKey) -> Result<PeerId, Error> {
         match public_key.algorithm() {
             DSAlgorithm::Ed25519 => {
-                let pk_ed = PublicKeyEd25519::try_from_bytes(public_key.as_bytes()).map_err(|e| 
+                let pk_ed = PublicKeyEd25519::try_from_bytes(public_key.as_bytes()).map_err(|e|
                     Error::NetworkHelper(format!("Invalid Ed25519 public key, can not convert to PeerID: {}", e)))?;
 
                 let pk = network::PublicKeyLibP2P::from(pk_ed);

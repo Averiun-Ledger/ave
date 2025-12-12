@@ -1,7 +1,12 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
-    ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest, BridgeTransferRequest, EventInfo, EventRequestInfo, GovsData, Namespace, PaginatorEvents, RegisterDataSubj, RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject, identity::{KeyPair, keys::Ed25519Signer}
+    ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
+    BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
+    BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RegisterDataSubj,
+    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    identity::{KeyPair, keys::Ed25519Signer},
 };
 use ave_http::config_types::ConfigHttp;
 // Ave HTTP - Bridge Info Tests
@@ -1544,12 +1549,11 @@ async fn test_subject_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let paginator_reverse: PaginatorEvents = serde_json::from_value(body).unwrap();
+    let paginator_reverse: PaginatorEvents =
+        serde_json::from_value(body).unwrap();
     assert_eq!(paginator_reverse.paginator.next, None);
     assert_eq!(paginator_reverse.paginator.prev, None);
     assert_eq!(paginator_reverse.paginator.pages, 1);
-
-
 
     assert_eq!(paginator_reverse.events.len(), 7);
     assert_eq!(paginator_reverse.events[0].subject_id, governance_id);
@@ -1557,102 +1561,106 @@ async fn test_subject_deserialization() {
     assert!(paginator_reverse.events[0].patch.is_some());
     assert!(paginator_reverse.events[0].error.is_none());
     assert!(paginator_reverse.events[0].succes);
-    let EventRequestInfo::EOL(request) = paginator_reverse.events[0].event_req.clone() else {
+    let EventRequestInfo::EOL(request) =
+        paginator_reverse.events[0].event_req.clone()
+    else {
         panic!("Invalid Request expect EOL");
     };
     assert_eq!(request.subject_id, governance_id);
-
-
 
     assert_eq!(paginator_reverse.events[1].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[1].sn, 5);
     assert!(paginator_reverse.events[1].patch.is_some());
     assert!(paginator_reverse.events[1].error.is_none());
     assert!(paginator_reverse.events[1].succes);
-    let EventRequestInfo::Confirm(request) = paginator_reverse.events[1].event_req.clone() else {
+    let EventRequestInfo::Confirm(request) =
+        paginator_reverse.events[1].event_req.clone()
+    else {
         panic!("Invalid Request expect Confirm");
     };
     assert_eq!(request.subject_id, governance_id);
     assert_eq!(request.name_old_owner, Some("Old_Owner".to_string()));
-
-
 
     assert_eq!(paginator_reverse.events[2].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[2].sn, 4);
     assert!(paginator_reverse.events[2].patch.is_some());
     assert!(paginator_reverse.events[2].error.is_none());
     assert!(paginator_reverse.events[2].succes);
-    let EventRequestInfo::Transfer(request) = paginator_reverse.events[2].event_req.clone() else {
+    let EventRequestInfo::Transfer(request) =
+        paginator_reverse.events[2].event_req.clone()
+    else {
         panic!("Invalid Request expect Transfer");
     };
     assert_eq!(request.subject_id, governance_id);
     assert_eq!(request.new_owner, controller_id_2);
-
-
 
     assert_eq!(paginator_reverse.events[3].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[3].sn, 3);
     assert!(paginator_reverse.events[3].patch.is_some());
     assert!(paginator_reverse.events[3].error.is_none());
     assert!(paginator_reverse.events[3].succes);
-    let EventRequestInfo::Reject(request) = paginator_reverse.events[3].event_req.clone() else {
+    let EventRequestInfo::Reject(request) =
+        paginator_reverse.events[3].event_req.clone()
+    else {
         panic!("Invalid Request expect Reject");
     };
     assert_eq!(request.subject_id, governance_id);
-
-
 
     assert_eq!(paginator_reverse.events[4].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[4].sn, 2);
     assert!(paginator_reverse.events[4].patch.is_some());
     assert!(paginator_reverse.events[4].error.is_none());
     assert!(paginator_reverse.events[4].succes);
-    let EventRequestInfo::Transfer(request) = paginator_reverse.events[4].event_req.clone() else {
+    let EventRequestInfo::Transfer(request) =
+        paginator_reverse.events[4].event_req.clone()
+    else {
         panic!("Invalid Request expect Transfer");
     };
     assert_eq!(request.subject_id, governance_id);
     assert_eq!(request.new_owner, controller_id_2);
-
-
 
     assert_eq!(paginator_reverse.events[5].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[5].sn, 1);
     assert!(paginator_reverse.events[5].patch.is_some());
     assert!(paginator_reverse.events[5].error.is_none());
     assert!(paginator_reverse.events[5].succes);
-    let EventRequestInfo::Fact(request) = paginator_reverse.events[5].event_req.clone() else {
+    let EventRequestInfo::Fact(request) =
+        paginator_reverse.events[5].event_req.clone()
+    else {
         panic!("Invalid Request expect Fact");
     };
     assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.payload, json!({
-                "members": {
-                    "add": [
-                        {
-                            "name": "Node1",
-                            "key": controller_id_2
-                        }
-                    ]
-                },
-                        "roles": {
-                "governance": {
-                    "add": {
-                        "witness": [
-                            "Node1"
-                        ]
+    assert_eq!(
+        request.payload,
+        json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Node1",
+                        "key": controller_id_2
                     }
-                },
-            }
-            }));
-
-    
-
+                ]
+            },
+                    "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Node1"
+                    ]
+                }
+            },
+        }
+        })
+    );
 
     assert_eq!(paginator_reverse.events[6].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[6].sn, 0);
     assert!(paginator_reverse.events[6].patch.is_some());
     assert!(paginator_reverse.events[6].error.is_none());
     assert!(paginator_reverse.events[6].succes);
-    let EventRequestInfo::Create(request) = paginator_reverse.events[6].event_req.clone() else {
+    let EventRequestInfo::Create(request) =
+        paginator_reverse.events[6].event_req.clone()
+    else {
         panic!("Invalid Request expect Create");
     };
 
@@ -1688,7 +1696,10 @@ async fn test_subject_deserialization() {
     // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events-first-last/{}?quantity=2&reverse=true", governance_id)),
+        &server2.url(&format!(
+            "/events-first-last/{}?quantity=2&reverse=true",
+            governance_id
+        )),
         "GET",
         None,
         None,
@@ -1707,8 +1718,6 @@ async fn test_subject_deserialization() {
     };
     assert_eq!(request.subject_id, governance_id);
 
-
-
     assert_eq!(events[1].subject_id, governance_id);
     assert_eq!(events[1].sn, 5);
     assert!(events[1].patch.is_some());
@@ -1720,13 +1729,10 @@ async fn test_subject_deserialization() {
     assert_eq!(request.subject_id, governance_id);
     assert_eq!(request.name_old_owner, Some("Old_Owner".to_string()));
 
-
-
-
-
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/events-first-last/{}?quantity=2", governance_id)),
+        &server2
+            .url(&format!("/events-first-last/{}?quantity=2", governance_id)),
         "GET",
         None,
         None,
@@ -1750,8 +1756,6 @@ async fn test_subject_deserialization() {
     assert_eq!(request.schema_id, "governance".to_string());
     assert_eq!(request.namespace, Namespace::new());
 
-
-
     assert_eq!(events[1].subject_id, governance_id);
     assert_eq!(events[1].sn, 1);
     assert!(events[1].patch.is_some());
@@ -1761,26 +1765,28 @@ async fn test_subject_deserialization() {
         panic!("Invalid Request expect Fact");
     };
     assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.payload, json!({
-                "members": {
-                    "add": [
-                        {
-                            "name": "Node1",
-                            "key": controller_id_2
-                        }
-                    ]
-                },
-                        "roles": {
-                "governance": {
-                    "add": {
-                        "witness": [
-                            "Node1"
-                        ]
+    assert_eq!(
+        request.payload,
+        json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Node1",
+                        "key": controller_id_2
                     }
-                },
-            }
-            }));
-
+                ]
+            },
+                    "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Node1"
+                    ]
+                }
+            },
+        }
+        })
+    );
 }
 
 // --- Signature Endpoints ---

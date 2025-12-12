@@ -178,13 +178,9 @@ async fn test_prueba() {
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY
 async fn test_limits_in_subjects() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+            .await;
 
     let owner_governance = &nodes[0];
     let emit_events = &nodes[1];
@@ -468,7 +464,7 @@ async fn test_namespace_in_role_1() {
         vec![vec![]],
         vec![vec![0], vec![0], vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
     let evaluator = &nodes[0];
@@ -733,7 +729,7 @@ async fn test_namespace_in_role_2() {
         vec![vec![]],
         vec![vec![0], vec![0], vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
     let evaluator = &nodes[0];
@@ -993,13 +989,9 @@ async fn test_namespace_in_role_2() {
 #[test(tokio::test)]
 // Testear la transferencia de sujeto
 async fn test_subject_transfer_event_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+            .await;
     let future_owner = &nodes[0];
     let owner_governance = &nodes[1];
 
@@ -1242,7 +1234,7 @@ async fn test_subject_transfer_event_2() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -1560,7 +1552,7 @@ async fn test_subject_transfer_event_3() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -1879,7 +1871,7 @@ async fn test_dynamic_witnesses_1() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -2110,7 +2102,7 @@ async fn test_dynamic_witnesses_2() {
         vec![vec![]],
         vec![vec![0], vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -2394,7 +2386,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -2566,7 +2558,7 @@ async fn test_dynamic_witnesses_explicit_2() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -2796,7 +2788,7 @@ async fn test_dynamic_witnesses_explicit_3() {
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
-        true
+        true,
     )
     .await;
 
@@ -2982,8 +2974,7 @@ async fn test_dynamic_witnesses_explicit_3() {
 // Un testigo nuevo le pide la copia a otro testigo viejo.
 async fn test_no_subject_validator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 
@@ -3056,8 +3047,7 @@ async fn test_no_subject_validator() {
 // Un testigo nuevo le pide la copia a otro testigo viejo.
 async fn test_no_subject_evaluator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 
@@ -3163,8 +3153,7 @@ async fn test_no_subject_evaluator() {
 // Un testigo nuevo le pide la copia a otro testigo viejo.
 async fn test_no_subject_issuer() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 
@@ -3264,8 +3253,7 @@ async fn test_no_subject_issuer() {
 // Testear 1000 eventos sin cooldown para un sujeto
 async fn test_1000_events() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 
@@ -3388,8 +3376,7 @@ async fn test_1000_events() {
 // uno que esté o que no
 async fn test_subj_no_all_validators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 
@@ -3545,8 +3532,7 @@ async fn test_subj_no_all_validators() {
 // uno que esté o que no
 async fn test_subj_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true)
-            .await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
     let owner_governance = &nodes[0];
 

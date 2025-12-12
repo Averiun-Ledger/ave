@@ -67,17 +67,22 @@ pub async fn login(
         .map_err(|e| {
             // Log failed login attempt
             let _ = db.create_audit_log(
-                None, // No user_id for failed login
-                None, // No API key yet
-                "login_failed",
-                Some("/login"),
-                Some("POST"),
-                ip_address.as_deref(),
-                user_agent.as_deref(),
-                None,
-                Some(&format!("Failed login for username: {}", req.username)),
-                false,
-                Some(&e.to_string()),
+                crate::auth::database_audit::AuditLogParams {
+                    user_id: None,    // No user_id for failed login
+                    api_key_id: None, // No API key yet
+                    action_type: "login_failed",
+                    endpoint: Some("/login"),
+                    http_method: Some("POST"),
+                    ip_address: ip_address.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    request_id: None,
+                    details: Some(&format!(
+                        "Failed login for username: {}",
+                        req.username
+                    )),
+                    success: false,
+                    error_message: Some(&e.to_string()),
+                },
             );
 
             db_error_to_response(e)
@@ -117,19 +122,22 @@ pub async fn login(
     };
 
     // Log successful login
-    let _ = db.create_audit_log(
-        Some(user.id),
-        Some(key_info.id),
-        "login_success",
-        Some("/login"),
-        Some("POST"),
-        ip_address.as_deref(),
-        user_agent.as_deref(),
-        None,
-        Some(&format!("User {} logged in successfully", user.username)),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(user.id),
+        api_key_id: Some(key_info.id),
+        action_type: "login_success",
+        endpoint: Some("/login"),
+        http_method: Some("POST"),
+        ip_address: ip_address.as_deref(),
+        user_agent: user_agent.as_deref(),
+        request_id: None,
+        details: Some(&format!(
+            "User {} logged in successfully",
+            user.username
+        )),
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(LoginResponse {
         api_key,

@@ -202,9 +202,7 @@ impl std::error::Error for InboundFailure {}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    #[serde(
-        deserialize_with = "deserialize_duration_secs"
-    )]
+    #[serde(deserialize_with = "deserialize_duration_secs")]
     pub message_timeout: Duration,
     pub max_concurrent_streams: usize,
 }

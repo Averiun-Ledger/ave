@@ -3,9 +3,7 @@ use std::sync::Arc;
 use crate::{
     auth::{
         AuthDatabase, admin_handlers, apikey_handlers, login_handler,
-        middleware::{
-            ApiKeyAuthNew, audit_log_middleware, check_permission,
-        },
+        middleware::{ApiKeyAuthNew, audit_log_middleware, check_permission},
         models::{AuthContext, ErrorResponse},
         system_handlers,
     },
@@ -60,9 +58,9 @@ pub struct EventFirstLastQuery {
 }
 
 use crate::doc::ApiDoc;
+use axum::http::Method;
 use utoipa::OpenApi;
 use utoipa_rapidoc::RapiDoc;
-use axum::http::Method;
 
 /// Send Event Request
 ///
@@ -100,10 +98,12 @@ async fn send_event_request(
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
 ) -> Result<Json<RequestData>, Error> {
-    match bridge.send_event_request(request).await {
-        Ok(response) => Ok(Json(RequestData::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .send_event_request(request)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Request State
@@ -143,10 +143,12 @@ async fn get_request_state(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<RequestInfo>, Error> {
-    match bridge.get_request_state(request_id).await {
-        Ok(response) => Ok(Json(RequestInfo::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_request_state(request_id)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Approvals
@@ -179,10 +181,12 @@ async fn get_approval(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<ApproveInfo>, Error> {
-    match bridge.get_approval(subject_id).await {
-        Ok(response) => Ok(Json(ApproveInfo::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_approval(subject_id)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Approval
@@ -546,12 +550,12 @@ async fn get_all_govs(
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, Error> {
-    match bridge.get_all_govs(parameters.active).await {
-        Ok(response) => Ok(Json(
-            response.iter().map(|x| GovsData::from(x.clone())).collect(),
-        )),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_all_govs(parameters.active)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// All Subjects
@@ -597,18 +601,12 @@ async fn get_all_subjects(
     Path(governance_id): Path<String>,
     Query(parameters): Query<SubjectQuery>,
 ) -> Result<Json<Vec<RegisterDataSubj>>, Error> {
-    match bridge
-        .get_all_subjs(governance_id, parameters.active, parameters.schema)
-        .await
-    {
-        Ok(response) => Ok(Json(
-            response
-                .iter()
-                .map(|x| RegisterDataSubj::from(x.clone()))
-                .collect(),
-        )),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_all_subjs(governance_id, parameters.active, parameters.schema)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Subject Events
@@ -669,18 +667,17 @@ async fn get_events(
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventsQuery>,
 ) -> Result<Json<PaginatorEvents>, Error> {
-    match bridge
-        .get_events(
-            subject_id,
-            parameters.quantity,
-            parameters.page,
-            parameters.reverse,
-        )
-        .await
-    {
-        Ok(response) => Ok(Json(PaginatorEvents::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_events(
+                subject_id,
+                parameters.quantity,
+                parameters.page,
+                parameters.reverse,
+            )
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Subject State
@@ -804,10 +801,12 @@ async fn get_state(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SubjectInfo>, Error> {
-    match bridge.get_subject(subject_id).await {
-        Ok(response) => Ok(Json(SubjectInfo::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_subject(subject_id)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Subject Signatures
@@ -858,10 +857,12 @@ async fn get_signatures(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SignaturesInfo>, Error> {
-    match bridge.get_signatures(subject_id).await {
-        Ok(response) => Ok(Json(SignaturesInfo::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_signatures(subject_id)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Controller-id
@@ -1068,10 +1069,12 @@ async fn get_event_sn(
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventSnQuery>,
 ) -> Result<Json<EventInfo>, Error> {
-    match bridge.get_event_sn(subject_id, parameters.sn).await {
-        Ok(response) => Ok(Json(EventInfo::from(response))),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_event_sn(subject_id, parameters.sn)
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// First or End Events
@@ -1130,23 +1133,17 @@ async fn get_first_or_end_events(
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventFirstLastQuery>,
 ) -> Result<Json<Vec<EventInfo>>, Error> {
-    match bridge
-        .get_first_or_end_events(
-            subject_id,
-            parameters.quantity,
-            parameters.reverse,
-            parameters.success,
-        )
-        .await
-    {
-        Ok(response) => Ok(Json(
-            response
-                .iter()
-                .map(|x| EventInfo::from(x.clone()))
-                .collect(),
-        )),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_first_or_end_events(
+                subject_id,
+                parameters.quantity,
+                parameters.reverse,
+                parameters.success,
+            )
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 /// Pending Transfers
@@ -1177,15 +1174,12 @@ async fn get_pending_transfers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<TransferSubject>>, Error> {
-    match bridge.get_pending_transfers().await {
-        Ok(response) => Ok(Json(
-            response
-                .iter()
-                .map(|x| TransferSubject::from(x.clone()))
-                .collect(),
-        )),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
+    Ok(Json(
+        bridge
+            .get_pending_transfers()
+            .await
+            .map_err(|e| Error::Ave(e.to_string()))?,
+    ))
 }
 
 pub fn build_routes(
@@ -1444,10 +1438,9 @@ pub(crate) async fn permission_layer(
 
     if let Some((resource, action)) =
         permission_for(req.method(), req.uri().path())
+        && let Err(resp) = check_permission(&auth_ctx, resource, action)
     {
-        if let Err(resp) = check_permission(&auth_ctx, resource, action) {
-            return resp.into_response();
-        }
+        return resp.into_response();
     }
 
     next.run(req).await
@@ -1531,9 +1524,7 @@ pub(crate) fn permission_for(
         (&Method::GET, "/register-governances") => {
             Some(("node_subject", "get"))
         }
-        (&Method::GET, "/pending-transfers") => {
-            Some(("node_subject", "get"))
-        }
+        (&Method::GET, "/pending-transfers") => Some(("node_subject", "get")),
 
         // Node/system info
         (&Method::GET, "/controller-id") => Some(("node_system", "get")),
@@ -1552,11 +1543,11 @@ mod tests {
         ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
     };
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         routing::{delete, get, post},
-        Router,
     };
     use tower::ServiceExt;
 
@@ -1643,8 +1634,8 @@ mod tests {
             call(&app, Method::GET, "/signatures/abc", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
-        let status = call(&app, Method::GET, "/event-request/123", ctx.clone())
-            .await;
+        let status =
+            call(&app, Method::GET, "/event-request/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         let status =
@@ -1652,8 +1643,7 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        let status =
-            call(&app, Method::POST, "/event-request", ctx).await;
+        let status = call(&app, Method::POST, "/event-request", ctx).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -1668,8 +1658,7 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::OK);
 
-        let status =
-            call(&app, Method::POST, "/event-request", ctx).await;
+        let status = call(&app, Method::POST, "/event-request", ctx).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -1698,8 +1687,7 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "owner");
         let app = router();
 
-        let status =
-            call(&app, Method::DELETE, "/auth/abc", ctx.clone()).await;
+        let status = call(&app, Method::DELETE, "/auth/abc", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         let status =

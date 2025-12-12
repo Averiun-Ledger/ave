@@ -597,7 +597,7 @@ pub mod tests {
         ActorRef<Subject>,
         ActorRef<LedgerEvent>,
         DigestIdentifier,
-        Vec<TempDir>
+        Vec<TempDir>,
     ) {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
@@ -746,7 +746,7 @@ pub mod tests {
             subject_actor,
             ledger_event_actor,
             metadata.subject_id,
-            _dirs
+            _dirs,
         )
     }
 
@@ -765,7 +765,7 @@ pub mod tests {
             subject_actor,
             ledger_event_actor,
             subject_id,
-            _dirs
+            _dirs,
         ) = create_subject_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {

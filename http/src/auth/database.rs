@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 // =============================================================================
 // ERROR TYPE
@@ -84,9 +84,9 @@ impl AuthDatabase {
     pub(crate) fn lock_conn(
         &self,
     ) -> Result<MutexGuard<'_, Connection>, DatabaseError> {
-        self.connection
-            .lock()
-            .map_err(|e| DatabaseError::ConnectionError(format!("DB lock poisoned: {}", e)))
+        self.connection.lock().map_err(|e| {
+            DatabaseError::ConnectionError(format!("DB lock poisoned: {}", e))
+        })
     }
 
     /// Create a new AuthDatabase instance
@@ -95,7 +95,10 @@ impl AuthDatabase {
     /// 1. Create the database file if it doesn't exist
     /// 2. Run migrations to set up the schema
     /// 3. Bootstrap the superadmin account if configured
-    pub fn new(config: AuthConfig, password: &str) -> Result<Self, DatabaseError> {
+    pub fn new(
+        config: AuthConfig,
+        password: &str,
+    ) -> Result<Self, DatabaseError> {
         // Create parent directory if it doesn't exist
         let path = config.database_path.clone();
         if !Path::new(&path).exists() {
@@ -211,7 +214,10 @@ impl AuthDatabase {
     }
 
     /// Bootstrap superadmin account on first run
-    pub fn bootstrap_superadmin(&self, password: &str) -> Result<(), DatabaseError> {
+    pub fn bootstrap_superadmin(
+        &self,
+        password: &str,
+    ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
         // Check if any users exist
@@ -235,19 +241,15 @@ impl AuthDatabase {
             "admin".to_owned()
         };
 
-        info!(
-            "Bootstrapping superadmin account: {}",
-            superadmin
-        );
+        info!("Bootstrapping superadmin account: {}", superadmin);
 
         // Hash password
-        let password_hash = hash_password(&password)
-            .map_err(|e| {
-                DatabaseError::CryptoError(format!(
-                    "Failed to hash superadmin password: {}",
-                    e
-                ))
-            })?;
+        let password_hash = hash_password(password).map_err(|e| {
+            DatabaseError::CryptoError(format!(
+                "Failed to hash superadmin password: {}",
+                e
+            ))
+        })?;
 
         // Create superadmin user
         conn.execute(
@@ -338,8 +340,7 @@ impl AuthDatabase {
         }
 
         // Validate password
-        validate_password(password)
-            .map_err(DatabaseError::ValidationError)?;
+        validate_password(password).map_err(DatabaseError::ValidationError)?;
 
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
@@ -446,16 +447,16 @@ impl AuthDatabase {
                     UserInfo {
                         id: user_id,
                         username: row.get(1)?,
-                    is_superadmin: row.get(2)?,
-                    is_active: row.get(3)?,
-                    failed_login_attempts: row.get(4)?,
+                        is_superadmin: row.get(2)?,
+                        is_active: row.get(3)?,
+                        failed_login_attempts: row.get(4)?,
                         locked_until: row.get(5)?,
                         last_login_at: row.get(6)?,
                         created_at: row.get(7)?,
-                    must_change_password: row.get(8)?,
-                    roles: Vec::new(), // Will be filled below
-                },
-            ))
+                        must_change_password: row.get(8)?,
+                        roles: Vec::new(), // Will be filled below
+                    },
+                ))
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
@@ -485,8 +486,7 @@ impl AuthDatabase {
 
         // Update password if provided
         if let Some(pwd) = password {
-            validate_password(pwd)
-                .map_err(DatabaseError::ValidationError)?;
+            validate_password(pwd).map_err(DatabaseError::ValidationError)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {
                 DatabaseError::CryptoError(format!(
@@ -577,12 +577,12 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         // Revoke API keys
-            Self::revoke_user_api_keys_internal(
-                &conn,
-                user_id,
-                assigned_by,
-                "Role changed",
-            )?;
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user_id,
+            assigned_by,
+            "Role changed",
+        )?;
 
         Ok(())
     }
@@ -602,12 +602,12 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
 
         // Revoke API keys
-            Self::revoke_user_api_keys_internal(
-                &conn,
-                user_id,
-                None,
-                "Role changed",
-            )?;
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user_id,
+            None,
+            "Role changed",
+        )?;
         Ok(())
     }
 
@@ -658,13 +658,13 @@ impl AuthDatabase {
         }
 
         // Lockout check
-        if let Some(locked_until) = user.locked_until {
-            if locked_until > Self::now() {
-                return Err(DatabaseError::AccountLocked(format!(
-                    "Account is locked until timestamp {}",
-                    locked_until
-                )));
-            }
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Self::now()
+        {
+            return Err(DatabaseError::AccountLocked(format!(
+                "Account is locked until timestamp {}",
+                locked_until
+            )));
         }
 
         // Verify password
@@ -770,22 +770,24 @@ impl AuthDatabase {
                 "Account is disabled".to_string(),
             ));
         }
-        if let Some(locked_until) = user.locked_until {
-            if locked_until > Self::now() {
-                return Err(DatabaseError::AccountLocked(
-                    "Account is temporarily locked".to_string(),
-                ));
-            }
+        if let Some(locked_until) = user.locked_until
+            && locked_until > Self::now()
+        {
+            return Err(DatabaseError::AccountLocked(
+                "Account is temporarily locked".to_string(),
+            ));
         }
 
-        let password_valid =
-            super::crypto::verify_password(current_password, &user.password_hash)
-                .map_err(|e| {
-                    DatabaseError::CryptoError(format!(
-                        "Password verification failed: {}",
-                        e
-                    ))
-                })?;
+        let password_valid = super::crypto::verify_password(
+            current_password,
+            &user.password_hash,
+        )
+        .map_err(|e| {
+            DatabaseError::CryptoError(format!(
+                "Password verification failed: {}",
+                e
+            ))
+        })?;
 
         if !password_valid {
             return Err(DatabaseError::PermissionDenied(

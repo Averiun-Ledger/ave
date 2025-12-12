@@ -2,6 +2,8 @@
 //
 // Authentication and authorization middleware for Axum
 
+use crate::auth::middleware::uuid::Uuid;
+
 use super::database::AuthDatabase;
 use super::models::{AuthContext, ErrorResponse};
 use axum::{
@@ -11,6 +13,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use std::fmt::Display;
 use std::{net::SocketAddr, sync::Arc};
 
 // =============================================================================
@@ -29,91 +32,85 @@ where
 {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
-    fn from_request_parts(
+    async fn from_request_parts(
         parts: &mut Parts,
         _state: &S,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send
-    {
-        async move {
-            // Check if auth database is available
-            let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
+    ) -> Result<Self, Self::Rejection> {
+        // Check if auth database is available
+        let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
 
-            // If no auth database, auth is disabled - allow request
-            if auth_db.is_none() {
-                return Ok(ApiKeyAuthNew);
-            }
-
-            // Auth is enabled - validate API key
-            let api_key = parts
-                .headers
-                .get("X-API-Key")
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    (
-                        StatusCode::UNAUTHORIZED,
-                        Json(ErrorResponse {
-                            error: "Missing X-API-Key header".to_string(),
-                        }),
-                    )
-                })?;
-
-            // Verify API key and get auth context
-            let Some(db) = auth_db else {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "Authentication database unavailable"
-                            .to_string(),
-                    }),
-                ));
-            };
-            let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: format!("Authentication failed: {}", e),
-                    }),
-                )
-            })?;
-
-            // Extract IP address
-            let ip_address = parts
-                .headers
-                .get("X-Forwarded-For")
-                .and_then(|v| v.to_str().ok())
-                .or_else(|| {
-                    parts.headers.get("X-Real-IP").and_then(|v| v.to_str().ok())
-                })
-                .map(|s| s.to_string());
-
-            auth_ctx.ip_address = ip_address.clone();
-
-            // Update API key last used
-            let _ = db.update_api_key_usage(
-                auth_ctx.api_key_id,
-                ip_address.as_deref(),
-            );
-
-            // Check rate limit
-            db.check_rate_limit(
-                Some(auth_ctx.api_key_id),
-                ip_address.as_deref(),
-                parts.uri.path().into(),
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: format!("Rate limit exceeded: {}", e),
-                    }),
-                )
-            })?;
-
-            // Store auth context in request extensions for later use
-            parts.extensions.insert(Arc::new(auth_ctx));
-
-            Ok(ApiKeyAuthNew)
+        // If no auth database, auth is disabled - allow request
+        if auth_db.is_none() {
+            return Ok(ApiKeyAuthNew);
         }
+
+        // Auth is enabled - validate API key
+        let api_key = parts
+            .headers
+            .get("X-API-Key")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "Missing X-API-Key header".to_string(),
+                    }),
+                )
+            })?;
+
+        // Verify API key and get auth context
+        let Some(db) = auth_db else {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Authentication database unavailable".to_string(),
+                }),
+            ));
+        };
+        let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: format!("Authentication failed: {}", e),
+                }),
+            )
+        })?;
+
+        // Extract IP address
+        let ip_address = parts
+            .headers
+            .get("X-Forwarded-For")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                parts.headers.get("X-Real-IP").and_then(|v| v.to_str().ok())
+            })
+            .map(|s| s.to_string());
+
+        auth_ctx.ip_address = ip_address.clone();
+
+        // Update API key last used
+        let _ =
+            db.update_api_key_usage(auth_ctx.api_key_id, ip_address.as_deref());
+
+        // Check rate limit
+        db.check_rate_limit(
+            Some(auth_ctx.api_key_id),
+            ip_address.as_deref(),
+            parts.uri.path().into(),
+        )
+        .map_err(|e| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: format!("Rate limit exceeded: {}", e),
+                }),
+            )
+        })?;
+
+        // Store auth context in request extensions for later use
+        parts.extensions.insert(Arc::new(auth_ctx));
+
+        Ok(ApiKeyAuthNew)
     }
 }
 
@@ -132,28 +129,24 @@ where
 {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
-    fn from_request_parts(
+    async fn from_request_parts(
         parts: &mut Parts,
         _state: &S,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send
-    {
-        async move {
-            let auth_ctx = parts
-                .extensions
-                .get::<Arc<AuthContext>>()
-                .cloned()
-                .ok_or_else(|| {
-                    (
-                        StatusCode::UNAUTHORIZED,
-                        Json(ErrorResponse {
-                            error: "No authentication context found"
-                                .to_string(),
-                        }),
-                    )
-                })?;
+    ) -> Result<Self, Self::Rejection> {
+        let auth_ctx = parts
+            .extensions
+            .get::<Arc<AuthContext>>()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "No authentication context found".to_string(),
+                    }),
+                )
+            })?;
 
-            Ok(AuthContextExtractor(auth_ctx))
-        }
+        Ok(AuthContextExtractor(auth_ctx))
     }
 }
 
@@ -237,13 +230,15 @@ pub async fn audit_log_middleware(
 
         let _ = db.log_api_request(
             &ctx,
-            &path,
-            &method,
-            ip_address.as_deref(),
-            user_agent.as_deref(),
-            &request_id,
-            success,
-            error_message.as_deref(),
+            crate::auth::database_audit::ApiRequestParams {
+                path: &path,
+                method: &method,
+                ip_address: ip_address.as_deref(),
+                user_agent: user_agent.as_deref(),
+                request_id: &request_id,
+                success,
+                error_message: error_message.as_deref(),
+            },
         );
     }
 
@@ -259,18 +254,22 @@ mod uuid {
         pub fn new_v4() -> Self {
             Uuid
         }
+    }
+}
 
-        pub fn to_string(&self) -> String {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            format!(
-                "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-                rng.r#gen::<u32>(),
-                rng.r#gen::<u16>(),
-                rng.r#gen::<u16>(),
-                rng.r#gen::<u16>(),
-                rng.r#gen::<u64>() & 0xFFFF_FFFF_FFFF,
-            )
-        }
+impl Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use rand::Rng;
+        let mut rng = rand::rng();
+
+        write!(
+            f,
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            rng.random::<u32>(),
+            rng.random::<u16>(),
+            rng.random::<u16>(),
+            rng.random::<u16>(),
+            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
+        )
     }
 }

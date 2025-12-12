@@ -44,9 +44,7 @@ pub struct Config {
     service_block_list: Vec<String>,
 
     /// Time interval to be used for queries updating the lists
-    #[serde(
-        deserialize_with = "deserialize_duration_secs"
-    )]
+    #[serde(deserialize_with = "deserialize_duration_secs")]
     interval_request: Duration,
 }
 

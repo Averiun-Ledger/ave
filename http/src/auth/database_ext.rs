@@ -36,7 +36,12 @@ impl AuthDatabase {
         )
         .optional()
         .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-        .ok_or_else(|| DatabaseError::NotFoundError(format!("Role with id {} not found", role_id)))
+        .ok_or_else(|| {
+            DatabaseError::NotFoundError(format!(
+                "Role with id {} not found",
+                role_id
+            ))
+        })
     }
 
     /// Internal: Get role by name without acquiring lock
@@ -64,7 +69,9 @@ impl AuthDatabase {
         )
         .optional()
         .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-        .ok_or_else(|| DatabaseError::NotFoundError(format!("Role '{}' not found", name)))
+        .ok_or_else(|| {
+            DatabaseError::NotFoundError(format!("Role '{}' not found", name))
+        })
     }
 
     /// Create a new role
@@ -317,7 +324,6 @@ impl AuthDatabase {
 
         Ok(actions)
     }
-
 }
 
 // =============================================================================
@@ -336,7 +342,8 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         // Get resource and action IDs
-        let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
+        let resource_id =
+            Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
 
         // Insert or replace permission
@@ -358,7 +365,8 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
+        let resource_id =
+            Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
 
         conn.execute(
@@ -415,7 +423,8 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
+        let resource_id =
+            Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
 
         conn.execute(
@@ -436,7 +445,8 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let resource_id = Self::get_resource_by_name_internal(&conn, resource)?.id;
+        let resource_id =
+            Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
 
         conn.execute(

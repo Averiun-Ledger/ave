@@ -37,7 +37,7 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
             logging: LoggingHttp::from(value.logging),
             sink: SinkConfigHttp::from(value.sink),
             auth: AuthConfigHttp::from(value.auth),
-            http: HttpConfigHttp::from(value.http)
+            http: HttpConfigHttp::from(value.http),
         }
     }
 }

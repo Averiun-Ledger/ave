@@ -2,11 +2,11 @@
 //
 // Shared utilities and helpers for all auth tests
 
+use std::net::SocketAddr;
 use std::sync::{
     Arc,
     atomic::{AtomicU16, Ordering},
 };
-use std::net::SocketAddr;
 
 use ave_bridge::{
     Bridge,
@@ -78,7 +78,7 @@ impl TestServer {
     pub async fn build(
         enable_auth: bool,
         always_accept: bool,
-        node: Option<(String, u16)>
+        node: Option<(String, u16)>,
     ) -> (Self, Vec<TempDir>) {
         // Create temporary directories for databases (each test gets its own)
         let ave_db_temp_dir = tempfile::tempdir().expect("ave_db temp dir");
@@ -104,9 +104,9 @@ impl TestServer {
         vec_dir.push(keys_dir);
         vec_dir.push(auth_dir);
 
-
-        let boot_nodes = if let Some((peer_id,node_port)) = node {
-            format!(r#"
+        let boot_nodes = if let Some((peer_id, node_port)) = node {
+            format!(
+                r#"
             ,
                 "boot_nodes": [
                     {{
@@ -114,7 +114,8 @@ impl TestServer {
                         "address": ["/memory/{node_port}"]
                     }}
                 ]
-            "#)
+            "#
+            )
         } else {
             "".to_string()
         };
@@ -202,11 +203,11 @@ impl TestServer {
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
             )
-                .with_graceful_shutdown(async move {
-                    join_all(runners).await;
-                })
-                .await
-                .expect("Can not run axum server");
+            .with_graceful_shutdown(async move {
+                join_all(runners).await;
+            })
+            .await
+            .expect("Can not run axum server");
         });
 
         // Give the server a moment to start

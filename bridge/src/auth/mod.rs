@@ -47,7 +47,6 @@ impl Default for AuthConfig {
     }
 }
 
-
 /// API key configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -91,7 +90,6 @@ impl Default for LockoutConfig {
     }
 }
 
-
 /// Rate limiting configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -127,8 +125,6 @@ impl Default for RateLimitConfig {
         }
     }
 }
-
-
 
 /// Session configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]

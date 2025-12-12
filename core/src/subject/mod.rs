@@ -794,8 +794,10 @@ impl Subject {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.clone(),
-                    contract_path: 
-                        config.contracts_path.join("contracts").join(format!("{}_{}",subject_id, id))
+                    contract_path: config
+                        .contracts_path
+                        .join("contracts")
+                        .join(format!("{}_{}", subject_id, id)),
                 })
                 .await?;
         }
@@ -880,8 +882,10 @@ impl Subject {
                         contract_name: format!("{}_{}", subject_id, id),
                         contract: schema.contract.clone(),
                         initial_value: schema.initial_value.clone(),
-                        contract_path: 
-                        config.contracts_path.join("contracts").join(format!("{}_{}",subject_id, id))
+                        contract_path: config
+                            .contracts_path
+                            .join("contracts")
+                            .join(format!("{}_{}", subject_id, id)),
                     })
                     .await?;
             } else {

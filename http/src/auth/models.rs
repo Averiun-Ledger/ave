@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use utoipa::ToSchema;
 
 fn serialize_ts<S>(ts: &i64, serializer: S) -> Result<S::Ok, S::Error>
@@ -89,15 +89,9 @@ pub struct UserInfo {
     pub must_change_password: bool,
     /// Failed login attempts
     pub failed_login_attempts: i32,
-    #[serde(
-        serialize_with = "serialize_ts_opt",
-        skip_deserializing
-    )]
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub locked_until: Option<i64>,
-    #[serde(
-        serialize_with = "serialize_ts_opt",
-        skip_deserializing
-    )]
+    #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub last_login_at: Option<i64>,
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub created_at: i64,

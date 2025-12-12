@@ -322,7 +322,6 @@ mod tests {
         let roles_after = db.get_user_roles(user.id).unwrap();
         assert!(!roles_after.contains(&"temp_role".to_string()));
     }
-
 }
 
 // =============================================================================
@@ -1190,11 +1189,7 @@ mod endpoint_access_tests {
         // But NOT to other Node-* resources or Admin-* resources
 
         let sender_node_access = [
-            (
-                "POST",
-                "/event-request",
-                true,
-            ),
+            ("POST", "/event-request", true),
             (
                 "GET",
                 "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
@@ -1432,11 +1427,7 @@ mod endpoint_access_tests {
                 "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
                 true,
             ),
-            (
-                "POST",
-                "/event-request",
-                true,
-            ),
+            ("POST", "/event-request", true),
         ];
 
         // Test with management key - limited Node access

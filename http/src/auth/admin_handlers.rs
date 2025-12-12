@@ -5,7 +5,11 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use axum::{Extension, Json, extract::{Path, Query}, http::StatusCode};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query},
+    http::StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -92,19 +96,19 @@ pub async fn create_user(
     };
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_created",
-        Some("/admin/users"),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_created",
+        endpoint: Some("/admin/users"),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok((StatusCode::CREATED, Json(user_info)))
 }
@@ -249,23 +253,23 @@ pub async fn update_user(
         locked_until: user.locked_until,
         last_login_at: user.last_login_at,
         created_at: user.created_at,
-        roles
+        roles,
     };
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_updated",
-        Some(&format!("/admin/users/{}", user_id)),
-        Some("PUT"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_updated",
+        endpoint: Some(&format!("/admin/users/{}", user_id)),
+        http_method: Some("PUT"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(user_info))
 }
@@ -304,19 +308,19 @@ pub async fn reset_user_password(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_password_reset",
-        Some(&format!("/admin/users/{}/password", user_id)),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        None,
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_password_reset",
+        endpoint: Some(&format!("/admin/users/{}/password", user_id)),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::OK)
 }
@@ -358,19 +362,19 @@ pub async fn delete_user(
     db.delete_user(user_id).map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_deleted",
-        Some(&format!("/admin/users/{}", user_id)),
-        Some("DELETE"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        None,
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_deleted",
+        endpoint: Some(&format!("/admin/users/{}", user_id)),
+        http_method: Some("DELETE"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -404,19 +408,19 @@ pub async fn assign_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "role_assigned",
-        Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "role_assigned",
+        endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::OK)
 }
@@ -450,19 +454,19 @@ pub async fn remove_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "role_removed",
-        Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
-        Some("DELETE"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "role_removed",
+        endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
+        http_method: Some("DELETE"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -499,19 +503,19 @@ pub async fn create_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "role_created",
-        Some("/admin/roles"),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "role_created",
+        endpoint: Some("/admin/roles"),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok((StatusCode::CREATED, Json(role)))
 }
@@ -601,19 +605,19 @@ pub async fn update_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "role_updated",
-        Some(&format!("/admin/roles/{}", role_id)),
-        Some("PUT"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "role_updated",
+        endpoint: Some(&format!("/admin/roles/{}", role_id)),
+        http_method: Some("PUT"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(role))
 }
@@ -645,19 +649,19 @@ pub async fn delete_role(
     db.delete_role(role_id).map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "role_deleted",
-        Some(&format!("/admin/roles/{}", role_id)),
-        Some("DELETE"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        None,
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "role_deleted",
+        endpoint: Some(&format!("/admin/roles/{}", role_id)),
+        http_method: Some("DELETE"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -724,19 +728,19 @@ pub async fn set_role_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "permission_set",
-        Some(&format!("/admin/roles/{}/permissions", role_id)),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "permission_set",
+        endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::OK)
 }
@@ -812,19 +816,19 @@ pub async fn set_user_permission(
     .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_permission_set",
-        Some(&format!("/admin/users/{}/permissions", user_id)),
-        Some("POST"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&req).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_permission_set",
+        endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
+        http_method: Some("POST"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::OK)
 }
@@ -862,19 +866,19 @@ pub async fn remove_user_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "user_permission_removed",
-        Some(&format!("/admin/users/{}/permissions", user_id)),
-        Some("DELETE"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&params).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "user_permission_removed",
+        endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
+        http_method: Some("DELETE"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&params).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -910,19 +914,19 @@ pub async fn remove_role_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(
-        Some(auth_ctx.user_id),
-        Some(auth_ctx.api_key_id),
-        "permission_removed",
-        Some(&format!("/admin/roles/{}/permissions", role_id)),
-        Some("DELETE"),
-        auth_ctx.ip_address.as_deref(),
-        None,
-        None,
-        Some(&serde_json::to_string(&params).unwrap_or_default()),
-        true,
-        None,
-    );
+    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+        user_id: Some(auth_ctx.user_id),
+        api_key_id: Some(auth_ctx.api_key_id),
+        action_type: "permission_removed",
+        endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
+        http_method: Some("DELETE"),
+        ip_address: auth_ctx.ip_address.as_deref(),
+        user_agent: None,
+        request_id: None,
+        details: Some(&serde_json::to_string(&params).unwrap_or_default()),
+        success: true,
+        error_message: None,
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

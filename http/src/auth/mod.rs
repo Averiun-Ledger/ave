@@ -11,7 +11,7 @@
 pub mod crypto;
 pub mod database;
 mod database_apikeys;
-mod database_audit;
+pub mod database_audit;
 mod database_ext;
 pub mod middleware;
 pub mod models;
@@ -31,7 +31,9 @@ pub use database::AuthDatabase;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
-use crate::auth::integration::{cleanup_old_data, initialize_auth_database, log_auth_statistics};
+use crate::auth::integration::{
+    cleanup_old_data, initialize_auth_database, log_auth_statistics,
+};
 
 const TARGET_HTTP: &str = "AveHttp";
 const MIN_LENGTH: usize = 8;
@@ -41,7 +43,10 @@ const REQUIRE_LOWERCASE: bool = true;
 const REQUIRE_DIGIT: bool = true;
 const REQUIRE_SPECIAL: bool = true;
 
-pub async fn build_auth(auth_config: &AuthConfig, password: &str) -> Option<Arc<AuthDatabase>> {
+pub async fn build_auth(
+    auth_config: &AuthConfig,
+    password: &str,
+) -> Option<Arc<AuthDatabase>> {
     if auth_config.enable {
         let mut auth_password = password.to_string();
         if auth_password.is_empty() {
@@ -55,7 +60,7 @@ pub async fn build_auth(auth_config: &AuthConfig, password: &str) -> Option<Arc<
             return None;
         }
 
-        let db = initialize_auth_database(&auth_config, &auth_password)
+        let db = initialize_auth_database(auth_config, &auth_password)
             .await
             .map_err(|e| {
                 error!(TARGET_HTTP, "Failed to initialize auth system: {}", e);
@@ -82,9 +87,7 @@ pub async fn build_auth(auth_config: &AuthConfig, password: &str) -> Option<Arc<
 }
 
 /// Validate password against policy
-pub fn validate_password(
-    password: &str,
-) -> Result<(), String> {
+pub fn validate_password(password: &str) -> Result<(), String> {
     if password.len() < MIN_LENGTH {
         return Err(format!(
             "Password must be at least {} characters long",
@@ -115,8 +118,7 @@ pub fn validate_password(
         return Err("Password must contain at least one digit".to_string());
     }
 
-    if REQUIRE_SPECIAL && !password.chars().any(|c| !c.is_alphanumeric())
-    {
+    if REQUIRE_SPECIAL && !password.chars().any(|c| !c.is_alphanumeric()) {
         return Err(
             "Password must contain at least one special character".to_string()
         );

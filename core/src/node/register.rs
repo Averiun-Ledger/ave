@@ -3,11 +3,11 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use std::{collections::HashSet, hash::Hash};
 use ave_actors::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::{collections::HashSet, hash::Hash};
 use tracing::{error, warn};
 
 use crate::{db::Storable, model::common::emit_fail};
@@ -15,7 +15,7 @@ use crate::{db::Storable, model::common::emit_fail};
 const TARGET_REGISTER: &str = "Ave-Node-Register";
 
 #[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub struct RegisterDataSubj {
     pub subject_id: String,
@@ -39,8 +39,7 @@ impl PartialOrd for RegisterDataSubj {
 
 impl Ord for RegisterDataSubj {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.subject_id.clone())
-            .cmp(&(other.subject_id.clone()))
+        (self.subject_id.clone()).cmp(&(other.subject_id.clone()))
     }
 }
 

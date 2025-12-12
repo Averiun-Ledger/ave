@@ -20,8 +20,13 @@ use ave_core::{
 };
 use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::atomic::{AtomicU16, Ordering},
+    time::Duration,
+};
 use tempfile::TempDir;
-use std::{path::PathBuf, str::FromStr, sync::atomic::{AtomicU16, Ordering}, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +38,14 @@ pub async fn create_node(
     peers: Vec<RoutingNode>,
     always_accept: bool,
     paths: Option<(PathBuf, PathBuf)>,
-) -> (Api, PathBuf, PathBuf, CancellationToken, Vec<JoinHandle<()>>, Vec<TempDir>) {
+) -> (
+    Api,
+    PathBuf,
+    PathBuf,
+    CancellationToken,
+    Vec<JoinHandle<()>>,
+    Vec<TempDir>,
+) {
     let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
     let mut vec_dirs = vec![];
@@ -44,13 +56,12 @@ pub async fn create_node(
             tempfile::tempdir().expect("Can not create temporal directory.");
         let local_db = dir.path().to_path_buf();
         vec_dirs.push(dir);
-        
 
         let dir =
             tempfile::tempdir().expect("Can not create temporal directory.");
         let ext_db = dir.path().to_path_buf();
         vec_dirs.push(dir);
-        
+
         (local_db, ext_db)
     };
 
@@ -61,10 +72,11 @@ pub async fn create_node(
         peers,
     );
 
-    let contract_dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let contract_dir =
+        tempfile::tempdir().expect("Can not create temporal directory.");
     let contracts_path = contract_dir.path().to_path_buf();
     vec_dirs.push(contract_dir);
-    
+
     let config = Config {
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
@@ -110,7 +122,7 @@ pub async fn create_nodes_and_connections(
         let listen_address = format!("/memory/{}", port);
 
         bootstrap_address.push(listen_address.clone());
-        
+
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {

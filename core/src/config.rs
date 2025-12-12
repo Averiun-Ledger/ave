@@ -1,7 +1,10 @@
 //! # Configuration module
 
 use std::{
-    collections::{BTreeMap, BTreeSet}, fmt::{self, Display}, path::PathBuf, time::Duration
+    collections::{BTreeMap, BTreeSet},
+    fmt::{self, Display},
+    path::PathBuf,
+    time::Duration,
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
@@ -31,9 +34,7 @@ pub struct Config {
     /// Approval mode.
     pub always_accept: bool,
     /// Garbage collector acts
-    #[serde(
-        deserialize_with = "deserialize_duration_secs"
-    )]
+    #[serde(deserialize_with = "deserialize_duration_secs")]
     pub garbage_collector: Duration,
 }
 
@@ -46,7 +47,6 @@ where
     let u: u64 = u64::deserialize(deserializer)?;
     Ok(Duration::from_secs(u))
 }
-
 
 impl Default for Config {
     fn default() -> Self {
@@ -113,9 +113,13 @@ impl AveDbConfig {
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "rocksdb")]
-        return Ok(AveDbConfig::Rocksdb { path: PathBuf::from(path) });
+        return Ok(AveDbConfig::Rocksdb {
+            path: PathBuf::from(path),
+        });
         #[cfg(feature = "sqlite")]
-        return Ok(AveDbConfig::Sqlite { path: PathBuf::from(path) });
+        return Ok(AveDbConfig::Sqlite {
+            path: PathBuf::from(path),
+        });
     }
 }
 
@@ -166,7 +170,9 @@ impl ExternalDbConfig {
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "ext-sqlite")]
-        return Ok(ExternalDbConfig::Sqlite { path: PathBuf::from(path) });
+        return Ok(ExternalDbConfig::Sqlite {
+            path: PathBuf::from(path),
+        });
     }
 }
 
@@ -227,7 +233,7 @@ pub struct LoggingConfig {
     pub api_url: Option<String>,
     pub file_path: PathBuf, // ruta base de logs
     pub rotation: LoggingRotation,
-    pub max_size: usize, // bytes
+    pub max_size: usize,  // bytes
     pub max_files: usize, // copias a conservar
 }
 
