@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -10,6 +10,7 @@ use borsh::{BorshDeserialize, to_vec};
 use json_patch::diff;
 use serde::{Deserialize, Serialize};
 use serde_json::to_value;
+use tokio::sync::RwLock;
 use tracing::error;
 use types::{ContractResult, EvaluateType, RunnerResult};
 use wasmtime::{Engine, Module, Store};
@@ -27,7 +28,7 @@ use crate::{
     model::{
         Namespace,
         common::{
-            MAX_FUEL, MemoryManager, create_secure_wasmtime_config,
+            MAX_FUEL, MemoryManager,
             generate_linker,
         },
         patch::apply_patch,
@@ -46,7 +47,8 @@ pub struct Runner {}
 
 impl Runner {
     async fn execute_contract(
-        state: &ValueWrapper,
+        ctx: &mut ActorContext<Runner>,
+        state: ValueWrapper,
         evaluate_type: EvaluateType,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<String>), Error> {
@@ -57,7 +59,8 @@ impl Runner {
                 payload,
             } => {
                 Self::execute_fact_not_gov(
-                    state,
+                    ctx,
+                    &state,
                     &init_state,
                     &payload,
                     &contract,
@@ -66,10 +69,10 @@ impl Runner {
                 .await
             }
             EvaluateType::GovFact { payload } => {
-                Self::execute_fact_gov(state, &payload).await
+                Self::execute_fact_gov(&state, &payload).await
             }
             EvaluateType::GovTransfer { new_owner } => {
-                Self::execute_transfer_gov(state.clone(), &new_owner)
+                Self::execute_transfer_gov(state, &new_owner)
             }
             EvaluateType::AllSchemasTransfer {
                 new_owner,
@@ -77,7 +80,7 @@ impl Runner {
                 namespace,
                 schema_id,
             } => Self::execute_transfer_not_gov(
-                state.clone(),
+                state,
                 &new_owner,
                 &old_owner,
                 namespace,
@@ -86,7 +89,7 @@ impl Runner {
             EvaluateType::GovConfirm {
                 old_owner_name,
                 new_owner,
-            } => Self::execute_confirm_gov(state, old_owner_name, &new_owner),
+            } => Self::execute_confirm_gov(&state, old_owner_name, &new_owner),
         }
     }
 
@@ -294,18 +297,31 @@ impl Runner {
     }
 
     async fn execute_fact_not_gov(
+        ctx: &mut ActorContext<Runner>,
         state: &ValueWrapper,
         init_state: &ValueWrapper,
         payload: &ValueWrapper,
-        contract: &[u8],
+        contract_name: &str,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<String>), Error> {
-        // Create secure Wasmtime configuration with resource limits
-        let config = create_secure_wasmtime_config();
-        let engine = Engine::new(&config).map_err(|e| {
-            Error::Runner(format!("Error creating the engine: {}", e))
-        })?;
+        let Some(engine) = ctx.system().get_helper::<Arc<Engine>>("engine").await
+        else {
+            return Err(Error::Runner("Can not get engine from helper".to_owned()));
+        };
 
+        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts").await
+        else {
+            return Err(Error::Runner("Can not get engine from helper".to_owned()));
+        };
+
+        let contract = {
+            let contracts = contracts.read().await;
+            let Some(contract) = contracts.get(contract_name) else {
+                return Err(Error::Runner(format!("Can not get contract {} from contracts", contract_name)));
+            };
+            contract.to_vec()
+        };
+        
         // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
@@ -1135,10 +1151,10 @@ impl Handler<Runner> for Runner {
         &mut self,
         _sender: ActorPath,
         msg: RunnerMessage,
-        _ctx: &mut ActorContext<Runner>,
+        ctx: &mut ActorContext<Runner>,
     ) -> Result<RunnerResponse, ActorError> {
         let (result, compilations) =
-            Self::execute_contract(&msg.state, msg.evaluate_type, msg.is_owner)
+            Self::execute_contract(ctx, msg.state, msg.evaluate_type, msg.is_owner)
                 .await
                 .map_err(|e| {
                     error!(TARGET_RUNNER, "A problem running contract: {}", e);

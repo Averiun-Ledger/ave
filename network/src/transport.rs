@@ -46,7 +46,6 @@ pub fn build_transport(
     keys: &Keypair,
 ) -> Result<AveTransport, Error> {
     // Allow TCP transport.
-    // port_reuse(true) for use the same port to send / receive communication.
     #[cfg(not(feature = "test"))]
     let transport = tcp::tokio::Transport::new(Config::default());
     #[cfg(feature = "test")]

@@ -19,7 +19,7 @@ use crate::{
         event::{ProofEvent, ProtocolsSignatures},
     },
     request::manager::{RequestManager, RequestManagerMessage},
-    subject::Metadata,
+    subject::Metadata, system::ConfigHelper,
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
@@ -27,7 +27,9 @@ use ave_actors::{
 };
 
 use async_trait::async_trait;
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use proof::ValidationProof;
 use request::ValidationReq;
@@ -111,6 +113,7 @@ impl Validation {
         validation_info: ValidationInfo,
         previous_proof: Option<ValidationProof>,
         prev_event_validation_response: Vec<ProtocolsSignatures>,
+        derivator: HashAlgorithm,
     ) -> Result<ValidationReq, ActorError> {
         let prev_evet_hash =
             if let Some(previous_proof) = previous_proof.clone() {
@@ -120,8 +123,12 @@ impl Validation {
             };
 
         // Create proof from validation info
-        let proof = ValidationProof::from_info(validation_info, prev_evet_hash)
-            .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
+        let proof = ValidationProof::from_info(
+            validation_info,
+            prev_evet_hash,
+            derivator,
+        )
+        .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
 
         Ok(ValidationReq {
             proof: proof.clone(),
@@ -281,11 +288,20 @@ impl Handler<Validation> for Validation {
                 last_proof,
                 prev_event_validation_response,
             } => {
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
+                };
+
                 let validation_req = match self
                     .create_validation_req(
                         *info.clone(),
                         *last_proof,
                         prev_event_validation_response,
+                        hash,
                     )
                     .await
                 {

@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Command,
+    process::Command, sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -11,23 +11,22 @@ use ave_actors::{
 };
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
+    identity::{DigestIdentifier, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::fs;
+use serde_json::Value;
+use tokio::{fs, sync::RwLock};
 
 use tracing::error;
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    CONTRACTS, Error, HASH_ALGORITHM,
-    model::common::{
-        MAX_FUEL_COMPILATION, MemoryManager, create_secure_wasmtime_config,
+    Error, model::common::{
+        MAX_FUEL_COMPILATION, MemoryManager,
         generate_linker,
-    },
+    }, system::ConfigHelper
 };
 
 const TARGET_COMPILER: &str = "Ave-Evaluation-Compiler";
@@ -109,14 +108,14 @@ impl Compiler {
             .arg("--target")
             .arg("wasm32-unknown-unknown")
             .arg("--release")
-            .output()
+            .status()
             // Does not show stdout. Generates child process and waits
             .map_err(|e| {
                 Error::Compiler(format!("Can not compile contract: {}", e))
             })?;
 
         // Is success
-        if !status.status.success() {
+        if !status.success() {
             return Err(Error::Compiler(
                 "Can not compile contract".to_string(),
             ));
@@ -126,11 +125,16 @@ impl Compiler {
     }
 
     async fn check_wasm(
+        ctx: &mut ActorContext<Compiler>,
         contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, Error> {
+        // Use the same secure configuration as the runner to ensure consistency
+        let Some(engine) = ctx.system().get_helper::<Arc<Engine>>("engine").await
+        else {
+            return Err(Error::Compiler("Can not get engine from helper".to_owned()));
+        };
         // Read compile contract
-
         let file = fs::read(
             contract_path
                 .join("target")
@@ -143,12 +147,6 @@ impl Compiler {
             Error::Compiler(format!("Can not read contract.wasm: {}", e))
         })?;
 
-        // Use the same secure configuration as the runner to ensure consistency
-        let config = create_secure_wasmtime_config();
-        let engine = Engine::new(&config).map_err(|e| {
-            Error::Compiler(format!("Error creating the engine: {}", e))
-        })?;
-
         // Precompilation
         let contract_bytes = engine.precompile_module(&file).map_err(|e| {
             Error::Compiler(format!(
@@ -157,17 +155,17 @@ impl Compiler {
             ))
         })?;
 
+        drop(file);
+
         // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
-            Module::deserialize(&engine, contract_bytes.clone()).map_err(
-                |e| {
-                    Error::Compiler(format!(
-                        "Error deserializing the contract in wastime: {}",
-                        e
-                    ))
-                },
-            )?
+            Module::deserialize(&engine, &contract_bytes).map_err(|e| {
+                Error::Compiler(format!(
+                    "Error deserializing the contract in wastime: {}",
+                    e
+                ))
+            })?
         };
 
         // Obtain imports
@@ -293,13 +291,10 @@ impl Compiler {
         Ok((context, state_ptr as u32))
     }
 
-    fn get_sdk_functions_identifier() -> HashSet<String> {
-        HashSet::from_iter(vec![
-            "alloc".to_owned(),
-            "write_byte".to_owned(),
-            "pointer_len".to_owned(),
-            "read_byte".to_owned(),
-        ])
+    fn get_sdk_functions_identifier() -> HashSet<&'static str> {
+        ["alloc", "write_byte", "pointer_len", "read_byte"]
+            .into_iter()
+            .collect()
     }
 }
 
@@ -330,7 +325,7 @@ impl Handler<Compiler> for Compiler {
         &mut self,
         _sender: ActorPath,
         msg: CompilerMessage,
-        _ctx: &mut ActorContext<Compiler>,
+        ctx: &mut ActorContext<Compiler>,
     ) -> Result<(), ActorError> {
         match msg {
             CompilerMessage::Compile {
@@ -339,28 +334,28 @@ impl Handler<Compiler> for Compiler {
                 contract_path,
                 initial_value,
             } => {
-                let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-                    *hash
-                } else {
-                    error!(TARGET_COMPILER, "Error getting hash algorithm");
-                    HashAlgorithm::Blake3
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
-                let contract_wrapper = ValueWrapper(json!({"raw": contract}));
-                let contract_hash =
-                    match hash_borsh(&*hash.hasher(), &contract_wrapper) {
-                        Ok(hash) => hash,
-                        Err(e) => {
-                            error!(
-                                TARGET_COMPILER,
-                                "Compile, Can not hash contract: {}", e
-                            );
-                            return Err(ActorError::Functional(format!(
-                                "Can not hash contract: {}",
-                                e
-                            )));
-                        }
-                    };
+                let contract_hash = match hash_borsh(&*hash.hasher(), &contract)
+                {
+                    Ok(hash) => hash,
+                    Err(e) => {
+                        error!(
+                            TARGET_COMPILER,
+                            "Compile, Can not hash contract: {}", e
+                        );
+                        return Err(ActorError::Functional(format!(
+                            "Can not hash contract: {}",
+                            e
+                        )));
+                    }
+                };
 
                 if contract_hash != self.contract {
                     if let Err(e) =
@@ -374,6 +369,7 @@ impl Handler<Compiler> for Compiler {
                     };
 
                     let contract = match Self::check_wasm(
+                        ctx,
                         &contract_path,
                         ValueWrapper(initial_value),
                     )
@@ -390,8 +386,12 @@ impl Handler<Compiler> for Compiler {
                     };
 
                     {
-                        let mut contracts = CONTRACTS.write().await;
-                        contracts.insert(contract_name.clone(), contract);
+                        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts").await else {
+                            return Err(ActorError::FunctionalFail("Can not obtain contracts helper".to_owned()));
+                        };
+                        
+                        let mut contracts = contracts.write().await;
+                        contracts.insert(contract_name, contract);
                     }
 
                     self.contract = contract_hash;

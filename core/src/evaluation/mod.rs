@@ -10,10 +10,7 @@ mod runner;
 pub mod schema;
 
 use crate::{
-    HASH_ALGORITHM,
-    auth::WitnessesAuth,
-    governance::{Governance, Quorum, model::ProtocolTypes},
-    model::{
+    auth::WitnessesAuth, governance::{Governance, Quorum, model::ProtocolTypes}, model::{
         SignTypesNode,
         common::{
             emit_fail, get_metadata, get_sign, get_signers_quorum_gov_version,
@@ -21,9 +18,7 @@ use crate::{
         },
         event::{LedgerValue, ProtocolsError, ProtocolsSignatures},
         request::EventRequest,
-    },
-    request::manager::{RequestManager, RequestManagerMessage},
-    subject::Metadata,
+    }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata, system::ConfigHelper
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
@@ -33,7 +28,7 @@ use ave_actors::{
 use async_trait::async_trait;
 use ave_common::{
     ValueWrapper,
-    identity::{HashAlgorithm, PublicKey, Signature, Signed, hash_borsh},
+    identity::{PublicKey, Signature, Signed, hash_borsh},
 };
 use evaluator::{Evaluator, EvaluatorMessage};
 use request::{EvaluationReq, SubjectContext};
@@ -184,12 +179,13 @@ impl Evaluation {
         &self,
         ctx: &mut ActorContext<Evaluation>,
     ) -> Result<EvalLedgerResponse, ActorError> {
-        let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-            *hash
-        } else {
-            error!(TARGET_EVALUATION, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
-        };
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
+                };
 
         let (state, gov_id) = if let Some(req) = self.signed_eval_req.clone() {
             let gov_id = if req.content.context.governance_id.is_empty() {

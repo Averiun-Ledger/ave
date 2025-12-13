@@ -8,7 +8,6 @@ use crate::{
         approver::{Approver, InitApprover, VotationType},
     },
     auth::WitnessesAuth,
-    config::Config,
     db::Storable,
     distribution::{Distribution, DistributionType},
     evaluation::{
@@ -39,6 +38,7 @@ use crate::{
         },
         transfer,
     },
+    system::ConfigHelper,
     update::TransferResponse,
     validation::{
         Validation,
@@ -460,9 +460,11 @@ impl Subject {
             who: our_key.clone(),
             role: RoleTypes::Approver,
         }) {
-            let Some(config): Option<Config> =
-                ctx.system().get_helper("config").await
-            else {
+            let always_accept = if let Some(config) =
+                ctx.system().get_helper::<ConfigHelper>("config").await
+            {
+                config.always_accept
+            } else {
                 return Err(ActorError::NotHelper("config".to_owned()));
             };
 
@@ -471,7 +473,7 @@ impl Subject {
                 version: 0,
                 node: our_key.clone(),
                 subject_id: subject_id.to_string(),
-                pass_votation: VotationType::from(config.always_accept),
+                pass_votation: VotationType::from(always_accept),
             };
 
             let approver_actor = ctx
@@ -575,9 +577,11 @@ impl Subject {
                 }
             }
             (false, true) => {
-                let Some(config): Option<Config> =
-                    ctx.system().get_helper("config").await
-                else {
+                let always_accept = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.always_accept
+                } else {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
@@ -586,7 +590,7 @@ impl Subject {
                     version: 0,
                     node: our_key.clone(),
                     subject_id: subject_id.to_string(),
-                    pass_votation: VotationType::from(config.always_accept),
+                    pass_votation: VotationType::from(always_accept),
                 };
 
                 let approver_actor = ctx
@@ -667,9 +671,11 @@ impl Subject {
         subject_id: DigestIdentifier,
         ext_db: ExternalDB,
     ) -> Result<(), ActorError> {
-        let Some(config): Option<Config> =
-            ctx.system().get_helper("config").await
-        else {
+        let always_accept = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.always_accept
+        } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
@@ -687,7 +693,7 @@ impl Subject {
             version: 0,
             node: our_key.clone(),
             subject_id: subject_id.to_string(),
-            pass_votation: VotationType::from(config.always_accept),
+            pass_votation: VotationType::from(always_accept),
         };
 
         let approver_actor = ctx
@@ -773,9 +779,11 @@ impl Subject {
         schemas: BTreeMap<String, Schema>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config): Option<Config> =
-            ctx.system().get_helper("config").await
-        else {
+        let contracts_path = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.contracts_path
+        } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
@@ -789,13 +797,14 @@ impl Subject {
                     ctx.create_child(&actor_name, Compiler::default()).await?
                 };
 
+            let Schema { contract, initial_value } = schema;
+
             compiler
                 .tell(CompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
-                    contract: schema.contract.clone(),
-                    initial_value: schema.initial_value.clone(),
-                    contract_path: config
-                        .contracts_path
+                    contract,
+                    initial_value,
+                    contract_path: contracts_path
                         .join("contracts")
                         .join(format!("{}_{}", subject_id, id)),
                 })
@@ -867,9 +876,11 @@ impl Subject {
         schemas: HashMap<String, Schema>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config): Option<Config> =
-            ctx.system().get_helper("config").await
-        else {
+        let contracts_path = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.contracts_path
+        } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
@@ -882,8 +893,7 @@ impl Subject {
                         contract_name: format!("{}_{}", subject_id, id),
                         contract: schema.contract.clone(),
                         initial_value: schema.initial_value.clone(),
-                        contract_path: config
-                            .contracts_path
+                        contract_path: contracts_path
                             .join("contracts")
                             .join(format!("{}_{}", subject_id, id)),
                     })
@@ -1092,7 +1102,7 @@ impl Subject {
 
         let valid_last_event = verify_protocols_state(
             EventRequestType::from(
-                last_ledger.content.event_request.content.clone(),
+                &last_ledger.content.event_request.content,
             ),
             last_ledger.content.eval_success,
             last_ledger.content.appr_success,
@@ -1113,7 +1123,7 @@ impl Subject {
 
         let valid_new_event = verify_protocols_state(
             EventRequestType::from(
-                new_ledger.content.event_request.content.clone(),
+                &new_ledger.content.event_request.content,
             ),
             new_ledger.content.eval_success,
             new_ledger.content.appr_success,
@@ -1124,7 +1134,7 @@ impl Subject {
 
         // Si el nuevo evento a registrar fue correcto.
         if valid_new_event {
-            match new_ledger.content.event_request.content.clone() {
+            match &new_ledger.content.event_request.content {
                 EventRequest::Create(_start_request) => {
                     return Err(Error::Subject("A creation event is being logged when the subject has already been created previously".to_owned()));
                 }
@@ -1247,7 +1257,7 @@ impl Subject {
 
     async fn verify_first_ledger_event(
         &self,
-        event: SignedLedger,
+        event: &SignedLedger,
     ) -> Result<(), Error> {
         let is_gov = if let EventRequest::Create(event_req) =
             event.content.event_request.content.clone()
@@ -1385,7 +1395,7 @@ impl Subject {
         let owner = self.owner.to_string();
         let schema_id = self.schema_id.clone();
 
-        let event_to_sink = match event.clone() {
+        let event_to_sink = match event {
             EventRequest::Create(..) => SinkDataMessage::Create {
                 governance_id: gov_id,
                 subject_id: sub_id,
@@ -1439,28 +1449,29 @@ impl Subject {
     async fn verify_new_ledger_events_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
-        events: &[SignedLedger],
+        events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let mut events = events.to_vec();
+        let mut iter = events.into_iter();
         let last_ledger = self.get_last_ledger_state(ctx).await?;
 
         let mut last_ledger = if let Some(last_ledger) = last_ledger {
             last_ledger
         } else {
+            let Some(first) = iter.next() else { return Ok(()); };
             if let Err(e) =
-                self.verify_first_ledger_event(events[0].clone()).await
+                self.verify_first_ledger_event(&first).await
             {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
 
-            self.on_event(events[0].clone(), ctx).await;
+            self.on_event(first.clone(), ctx).await;
             self.register(ctx, true).await?;
 
-            events.remove(0)
+            first
         };
 
-        for event in events {
+        for event in iter {
             let last_event_is_ok = match self
                 .verify_new_ledger_event(&last_ledger, &event)
                 .await
@@ -1614,15 +1625,17 @@ impl Subject {
     async fn verify_new_ledger_events_not_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
-        events: &[SignedLedger],
+        events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let mut events = events.to_vec();
+        let mut iter = events.into_iter();
         let last_ledger = self.get_last_ledger_state(ctx).await?;
 
         let gov = get_gov(ctx, &self.governance_id.to_string()).await?;
 
+        let Some(first) = iter.next() else { return Ok(()); };
+
         let Some(max_quantity) = gov.max_creations(
-            &events[0].signature.signer,
+            &first.signature.signer,
             &self.schema_id,
             self.namespace.clone(),
         ) else {
@@ -1632,7 +1645,10 @@ impl Subject {
             ));
         };
 
+        let mut pending = Vec::new();
+
         let mut last_ledger = if let Some(last_ledger) = last_ledger {
+            pending.push(first);
             last_ledger
         } else {
             self.register_relation(
@@ -1643,19 +1659,21 @@ impl Subject {
             .await?;
 
             if let Err(e) =
-                self.verify_first_ledger_event(events[0].clone()).await
+                self.verify_first_ledger_event(&first).await
             {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
 
-            self.on_event(events[0].clone(), ctx).await;
+            self.on_event(first.clone(), ctx).await;
             self.register(ctx, true).await?;
 
-            events.remove(0)
+            first
         };
 
-        for event in events {
+        pending.extend(iter);
+
+        for event in pending {
             let last_event_is_ok = match self
                 .verify_new_ledger_event(&last_ledger, &event)
                 .await
@@ -1778,7 +1796,7 @@ impl Subject {
     async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Subject>,
-        events: &[SignedLedger],
+        events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
         let our_key = self.get_node_key(ctx).await?;
         let current_sn = self.sn;
@@ -2291,15 +2309,15 @@ impl Subject {
         value: &LedgerValue,
         state_hash: &DigestIdentifier,
     ) -> Result<(), Error> {
-        let LedgerValue::Patch(json_patch) = value.clone() else {
+        let LedgerValue::Patch(json_patch) = value else {
             return Err(Error::Subject("The event was successful but does not have a json patch to apply".to_owned()));
         };
 
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0.clone())
             .map_err(|e| {
                 Error::Subject(format!("Failed to extract event patch: {}", e))
             })?;
-        let mut properties = (*self.properties).clone();
+        let mut properties = self.properties.0.clone();
         let Ok(()) = patch(&mut properties, &patch_json) else {
             return Err(Error::Subject(
                 "Failed to apply event patch".to_owned(),
@@ -2583,7 +2601,7 @@ impl Handler<Subject> for Subject {
             }
             SubjectMessage::UpdateLedger { events } => {
                 if let Err(e) =
-                    self.verify_new_ledger_events(ctx, events.as_slice()).await
+                    self.verify_new_ledger_events(ctx, events).await
                 {
                     warn!(
                         TARGET_SUBJECT,
@@ -2679,7 +2697,7 @@ impl PersistentActor for Subject {
         };
 
         let valid_event = match verify_protocols_state(
-            EventRequestType::from(event.content.event_request.content.clone()),
+            EventRequestType::from(&event.content.event_request.content),
             event.content.eval_success,
             event.content.appr_success,
             event.content.appr_required,

@@ -24,7 +24,7 @@ use approval::approver::ApprovalStateRes;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
 use ave_common::identity::keys::KeyPair;
-use ave_common::identity::{DigestIdentifier, HashAlgorithm, Signed};
+use ave_common::identity::{DigestIdentifier, Signed};
 use config::Config as AveBaseConfig;
 use error::Error;
 use governance::Governance;
@@ -39,7 +39,6 @@ use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use model::event::Event;
 use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
-use tokio::sync::RwLock;
 
 pub use network::MonitorNetworkState;
 
@@ -59,10 +58,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use validation::{Validation, ValidationInfo, ValidationMessage};
 
-use lazy_static::lazy_static;
-
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use crate::config::SinkAuth;
 
@@ -77,16 +72,6 @@ compile_error!("You must enable 'ext-sqlite'.");
 
 const TARGET_API: &str = "Ave-Api";
 
-lazy_static! {
-    /// The digest derivator for the system.
-    pub static ref HASH_ALGORITHM: Mutex<HashAlgorithm> = Mutex::new(HashAlgorithm::Blake3);
-
-    pub static ref CONTRACTS: RwLock<HashMap<String, Vec<u8>>> = {
-        let contracts = HashMap::new();
-
-        RwLock::new(contracts)
-    };
-}
 
 #[derive(Clone)]
 pub struct Api {
@@ -244,12 +229,12 @@ impl Api {
         ))
     }
 
-    pub fn peer_id(&self) -> String {
-        self.peer_id.clone()
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
     }
 
-    pub fn controller_id(&self) -> String {
-        self.controller_id.clone()
+    pub fn controller_id(&self) -> &str {
+        &self.controller_id
     }
 
     pub async fn get_network_state(

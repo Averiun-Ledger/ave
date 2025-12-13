@@ -95,7 +95,7 @@ impl Handler<LedgerEvent> for LedgerEvent {
 
                 if let Err(e) = verify_protocols_state(
                     EventRequestType::from(
-                        event.content.event_request.content.clone(),
+                        &event.content.event_request.content,
                     ),
                     event.content.eval_success,
                     event.content.appr_success,

@@ -894,7 +894,7 @@ async fn get_controller_id(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
-    Json(bridge.controller_id())
+    Json(bridge.controller_id().to_string())
 }
 
 /// Peer-id
@@ -925,7 +925,7 @@ async fn get_peer_id(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
-    Json(bridge.peer_id())
+    Json(bridge.peer_id().to_string())
 }
 
 /// Config

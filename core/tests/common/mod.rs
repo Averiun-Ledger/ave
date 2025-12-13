@@ -126,7 +126,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().clone(),
+                peer_id: nodes[peer_idx].peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
@@ -154,7 +154,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().clone(),
+                peer_id: nodes[peer_idx].peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
@@ -180,7 +180,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().clone(),
+                peer_id: nodes[peer_idx].peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();

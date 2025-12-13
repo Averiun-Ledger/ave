@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
-use crate::HASH_ALGORITHM;
 use crate::subject::SignedLedger;
+use crate::system::ConfigHelper;
 use crate::{
     ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Subject,
     SubjectMessage, SubjectResponse, Validation, ValidationInfo,
@@ -275,14 +275,8 @@ impl RequestManager {
         signatures: Vec<ProtocolsSignatures>,
         result: bool,
         errors: &str,
+        hash: HashAlgorithm,
     ) -> Result<(Ledger, AveEvent), Error> {
-        let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-            *hash
-        } else {
-            error!(TARGET_MANAGER, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
-        };
-
         let (value, state_hash) = {
             if result {
                 (
@@ -602,11 +596,12 @@ impl RequestManager {
         state_hash: Option<DigestIdentifier>,
         protocols_result: ProtocolsResult,
     ) -> Result<DataProofEvent, ActorError> {
-        let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-            *hash
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
         } else {
-            error!(TARGET_MANAGER, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
+            return Err(ActorError::NotHelper("config".to_owned()));
         };
 
         let gov = get_gov(ctx, &self.subject_id).await?;
@@ -1409,11 +1404,20 @@ impl Handler<RequestManager> for RequestManager {
                     return Err(emit_fail(ctx, e).await);
                 };
 
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.hash_algorithm
+                } else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
+                };
+
                 let (ledger, event) = match self.create_ledger_event(
                     *val_info,
                     signatures.clone(),
                     result,
                     &errors,
+                    hash,
                 ) {
                     Ok(data) => data,
                     Err(e) => {

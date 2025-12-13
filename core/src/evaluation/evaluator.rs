@@ -1,8 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    CONTRACTS, Error, EventRequest, HASH_ALGORITHM, Subject,
-    config::Config,
+    Error, EventRequest, Subject,
     evaluation::response::Response as EvalRes,
     governance::{Governance, Schema},
     helpers::network::{NetworkMessage, intermediary::Intermediary},
@@ -15,6 +14,7 @@ use crate::{
         network::{RetryNetwork, TimeOutResponse},
     },
     subject::{SubjectMessage, SubjectResponse},
+    system::ConfigHelper,
 };
 
 use crate::helpers::network::ActorMessage;
@@ -99,9 +99,11 @@ impl Evaluator {
         schemas: BTreeMap<String, Schema>,
         governance_id: &str,
     ) -> Result<(), ActorError> {
-        let Some(config): Option<Config> =
-            ctx.system().get_helper("config").await
-        else {
+        let contracts_path = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.contracts_path
+        } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
@@ -123,8 +125,7 @@ impl Evaluator {
                         contract_name: format!("{}_{}", governance_id, id),
                         contract: schema.contract.clone(),
                         initial_value: schema.initial_value.clone(),
-                        contract_path: config
-                            .contracts_path
+                        contract_path: contracts_path
                             .join("contracts")
                             .join(format!("{}_{}", governance_id, id)),
                     })
@@ -205,27 +206,19 @@ impl Evaluator {
                         evaluation_req.state.clone(),
                     )
                 } else {
-                    let contracts = { CONTRACTS.read().await };
-
-                    if let Some(contract) = contracts.get(&format!(
-                        "{}_{}",
-                        governance_id, evaluation_req.context.schema_id
-                    )) {
-                        (
-                            EvaluateType::AllSchemasFact {
-                                contract: contract.to_vec(),
-                                init_state: evaluation_req
-                                    .gov_state_init_state
-                                    .clone(),
-                                payload: fact_event.payload,
-                            },
-                            evaluation_req.state.clone(),
-                        )
-                    } else {
-                        return Err(ActorError::Functional(
-                            "Contract not found".to_owned(),
-                        ));
-                    }
+                    (
+                        EvaluateType::AllSchemasFact {
+                            contract: format!(
+                                "{}_{}",
+                                governance_id, evaluation_req.context.schema_id
+                            ),
+                            init_state: evaluation_req
+                                .gov_state_init_state
+                                .clone(),
+                            payload: fact_event.payload,
+                        },
+                        evaluation_req.state.clone(),
+                    )
                 }
             }
             EventRequest::Transfer(transfer_event) => {
@@ -362,14 +355,8 @@ impl Evaluator {
         evaluation: RunnerResult,
         evaluation_req: EvaluationReq,
         is_governance: bool,
+        hash: HashAlgorithm,
     ) -> EvaluationRes {
-        let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-            *hash
-        } else {
-            error!(TARGET_EVALUATOR, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
-        };
-
         let (patch, state_hash) = match evaluation_req
             .event_request
             .content
@@ -505,6 +492,14 @@ impl Handler<Evaluator> for Evaluator {
                     evaluation_req.context.governance_id.clone()
                 };
 
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.hash_algorithm
+                } else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
+                };
+
                 let evaluation = match self
                     .evaluate(
                         ctx,
@@ -519,6 +514,7 @@ impl Handler<Evaluator> for Evaluator {
                             evaluation,
                             evaluation_req,
                             is_governance,
+                            hash,
                         )
                         .await
                     }
@@ -811,10 +807,23 @@ impl Handler<Evaluator> for Evaluator {
                         .await
                     {
                         Ok(evaluation) => {
+                            let hash = if let Some(config) = ctx
+                                .system()
+                                .get_helper::<ConfigHelper>("config")
+                                .await
+                            {
+                                config.hash_algorithm
+                            } else {
+                                return Err(ActorError::NotHelper(
+                                    "config".to_owned(),
+                                ));
+                            };
+
                             Self::build_response(
                                 evaluation,
                                 evaluation_req.content.clone(),
                                 is_governance,
+                                hash,
                             )
                             .await
                         }

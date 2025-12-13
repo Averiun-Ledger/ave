@@ -179,11 +179,11 @@ impl Bridge {
         });
     }
 
-    pub fn peer_id(&self) -> String {
+    pub fn peer_id(&self) -> &str {
         self.api.peer_id()
     }
 
-    pub fn controller_id(&self) -> String {
+    pub fn controller_id(&self) -> &str {
         self.api.controller_id()
     }
 

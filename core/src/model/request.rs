@@ -33,8 +33,8 @@ pub enum SignerTypes {
     List(HashSet<PublicKey>, bool),
 }
 
-impl From<EventRequest> for EventRequestType {
-    fn from(value: EventRequest) -> Self {
+impl From<&EventRequest> for EventRequestType {
+    fn from(value: &EventRequest) -> Self {
         match value {
             EventRequest::Create(_start_request) => Self::Create,
             EventRequest::Fact(_fact_request) => Self::Fact,

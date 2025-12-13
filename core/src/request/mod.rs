@@ -5,7 +5,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    DigestIdentifier, PublicKey, Signed, hash_borsh,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
@@ -14,9 +14,9 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{error, info};
 use types::ReqManInitMessage;
 
-use crate::HASH_ALGORITHM;
 use crate::request::manager::InitRequestManager;
 use crate::subject::CreateSubjectData;
+use crate::system::ConfigHelper;
 use crate::{
     CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
     approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
@@ -76,12 +76,13 @@ impl RequestHandler {
         create_req: CreateRequest,
         request: Signed<EventRequest>,
     ) -> Result<DigestIdentifier, ActorError> {
-        let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-            *hash
-        } else {
-            error!(TARGET_REQUEST, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
-        };
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
+                };
 
         let subject_id = hash_borsh(&*hash.hasher(), &request)
             .map_err(|e| ActorError::Functional(e.to_string()))?;
@@ -471,11 +472,12 @@ impl Handler<RequestHandler> for RequestHandler {
                     )));
                 };
 
-                let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-                    *hash
-                } else {
-                    error!(TARGET_REQUEST, "Error getting hash algorithm");
-                    HashAlgorithm::Blake3
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
                 let subject_id = request.content.get_subject_id();
@@ -851,11 +853,12 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Ok(RequestHandlerResponse::None);
                 }
 
-                let hash = if let Ok(hash) = HASH_ALGORITHM.lock() {
-                    *hash
-                } else {
-                    error!(TARGET_REQUEST, "Error getting hash algorithm");
-                    HashAlgorithm::Blake3
+                let hash = if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config").await {
+                        config.hash_algorithm
+                }
+                else {
+                    return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
                 let event = if let Some(events) = self.in_queue.get(&subject_id)

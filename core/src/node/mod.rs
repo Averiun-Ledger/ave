@@ -14,7 +14,6 @@ use transfer::TransferRegister;
 use crate::{
     Error, EventRequest, Subject, SubjectMessage, SubjectResponse,
     auth::{Auth, AuthMessage, AuthResponse},
-    config::Config,
     db::Storable,
     distribution::distributor::Distributor,
     governance::Governance,
@@ -22,6 +21,7 @@ use crate::{
     manual_distribution::ManualDistribution,
     model::{Namespace, SignTypesNode, event::LedgerValue},
     subject::{CreateSubjectData, SignedLedger},
+    system::ConfigHelper,
 };
 
 use ave_common::identity::{
@@ -219,13 +219,15 @@ impl Node {
     async fn build_compilation_dir(
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let Some(config): Option<Config> =
-            ctx.system().get_helper("config").await
-        else {
+        let contracts_path = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.contracts_path
+        } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
 
-        let dir = config.contracts_path.join("contracts");
+        let dir = contracts_path.join("contracts");
 
         if !Path::new(&dir).exists() {
             fs::create_dir_all(&dir).await.map_err(|e| {

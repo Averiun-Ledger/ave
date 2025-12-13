@@ -1,7 +1,7 @@
 use super::ValidationInfo;
 
 use crate::{
-    Error, HASH_ALGORITHM, error,
+    Error,
     model::{Namespace, request::EventRequest},
 };
 use ave_common::identity::{
@@ -10,8 +10,6 @@ use ave_common::identity::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-
-const TARGET_PROOF: &str = "Ave-Validation-Proof";
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(
@@ -168,14 +166,8 @@ impl ValidationProof {
     pub fn from_info(
         info: ValidationInfo,
         prev_event_hash: DigestIdentifier,
+        derivator: HashAlgorithm
     ) -> Result<Self, Error> {
-        let derivator = if let Ok(derivator) = HASH_ALGORITHM.lock() {
-            *derivator
-        } else {
-            error!(TARGET_PROOF, "Error getting hash algorithm");
-            HashAlgorithm::Blake3
-        };
-
         let event_hash = hash_borsh(&*derivator.hasher(), &info.event_proof)
             .map_err(|e| {
                 Error::Hash(format!("Can not obtain event proof hash: {}", e))

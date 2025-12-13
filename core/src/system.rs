@@ -1,31 +1,56 @@
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
 use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
-use ave_common::identity::hash_borsh;
-use tokio::task::JoinHandle;
+use ave_common::identity::{HashAlgorithm, hash_borsh};
+use serde::{Deserialize, Serialize};
+use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use wasmtime::Engine;
 
 use crate::{
-    AveBaseConfig, Error, HASH_ALGORITHM,
-    config::SinkAuth,
+    Error,config::{Config, SinkAuth},
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink},
+    helpers::{db::ExternalDB, sink::AveSink}, model::common::create_secure_wasmtime_config,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigHelper {
+    pub contracts_path: PathBuf,
+    pub always_accept: bool,
+    pub hash_algorithm: HashAlgorithm
+}
+
+impl From<Config> for ConfigHelper {
+    fn from(value: Config) -> Self {
+        Self {
+            contracts_path: value.contracts_path,
+            always_accept: value.always_accept,
+            hash_algorithm: value.hash_algorithm
+        }
+    }
+}
+
 pub async fn system(
-    config: AveBaseConfig,
+    config: Config,
     sink_auth: SinkAuth,
     password: &str,
     token: CancellationToken,
 ) -> Result<(SystemRef, JoinHandle<()>), Error> {
-    // Update statics.
-    if let Ok(mut derivator) = HASH_ALGORITHM.lock() {
-        *derivator = config.hash_algorithm;
-    }
-
     // Create de actor system.
     let (system, mut runner) = ActorSystem::create(token);
 
-    system.add_helper("config", config.clone()).await;
+    system.add_helper("config", ConfigHelper::from(config.clone())).await;
+
+    // Create secure Wasmtime configuration with resource limits
+    let engine = Engine::new(&create_secure_wasmtime_config()).map_err(|e| {
+        Error::System(format!("Error creating the engine: {}", e))
+    })?;
+
+    system.add_helper("engine", Arc::new(engine)).await;
+
+    let contracts: HashMap::<String, Vec<u8>> = HashMap::new();
+    system.add_helper("contracts", Arc::new(RwLock::new(contracts))).await;
 
     // Build database manager.
     let db = Database::open(&config.ave_db)
@@ -129,7 +154,7 @@ pub mod tests {
             vec![],
             vec![],
         );
-        let config = AveBaseConfig {
+        let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
             ave_db: AveDbConfig::build(&ave_path),

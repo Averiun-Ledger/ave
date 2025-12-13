@@ -24,7 +24,7 @@ pub struct RunnerResult {
 #[derive(Debug, Clone)]
 pub enum EvaluateType {
     AllSchemasFact {
-        contract: Vec<u8>,
+        contract: String,
         init_state: ValueWrapper,
         payload: ValueWrapper,
     },
