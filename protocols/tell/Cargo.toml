@@ -21,6 +21,7 @@ futures-bounded = { version = "0.3.0", features = ["futures-timer"]}
 libp2p = { workspace = true, default_features = false, features = [
 	"identify",
 ]}
+bytes = { workspace = true }
 once_cell = { workspace = true }
 serde = { workspace = true, features = ["derive"]}
 serde_json = { workspace = true, optional = true }

@@ -2,6 +2,7 @@
 //! A "tell" codec using binary data for messasges.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::prelude::*;
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::StreamProtocol;
@@ -35,7 +36,7 @@ impl Clone for Codec {
 #[async_trait]
 impl super::Codec for Codec {
     type Protocol = StreamProtocol;
-    type Message = Vec<u8>;
+    type Message = Bytes;
 
     async fn read_message<T>(
         &mut self,
@@ -47,7 +48,7 @@ impl super::Codec for Codec {
     {
         let mut vec = Vec::new();
         io.take(self.max_message_size).read_to_end(&mut vec).await?;
-        Ok(vec)
+        Ok(Bytes::from(vec))
     }
 
     async fn write_message<T>(
@@ -68,13 +69,14 @@ impl super::Codec for Codec {
 mod tests {
 
     use super::super::Codec as _;
+    use bytes::Bytes;
     use futures::AsyncWriteExt;
     use futures_ringbuf::Endpoint;
     use libp2p::StreamProtocol;
 
     #[tokio::test]
     async fn test_codec() {
-        let expected_message = b"Hello, World!".to_vec();
+        let expected_message = Bytes::from("Hello, World!");
         let protocol = StreamProtocol::new("/test_json/1");
         let mut codec = super::Codec::default();
 

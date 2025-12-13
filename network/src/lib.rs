@@ -22,8 +22,7 @@ pub use error::Error;
 pub use libp2p::{
     PeerId,
     identity::{
-        PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519,
-        secp256k1::PublicKey as PublicKeysecp256k1,
+        PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519
     },
 };
 pub use monitor::*;
@@ -34,6 +33,7 @@ pub use utils::NetworkState;
 pub use worker::NetworkWorker;
 
 use serde::{Deserialize, Serialize};
+use bytes::Bytes;
 
 pub use crate::utils::ReqResConfig;
 
@@ -117,7 +117,7 @@ pub enum Command {
         /// The peer to send the message to.
         peer: PeerId,
         /// The message to send.
-        message: Vec<u8>,
+        message: Bytes,
     },
 }
 
@@ -145,7 +145,7 @@ where
     /// Received a message.
     ReceivedMessage {
         /// The message received.
-        message: Vec<u8>,
+        message: Bytes,
     },
 }
 

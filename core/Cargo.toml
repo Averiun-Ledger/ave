@@ -37,6 +37,7 @@ tokio-util = { workspace = true }
 reqwest = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true } 

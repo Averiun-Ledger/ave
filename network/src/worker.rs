@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
 use std::collections::{HashMap, VecDeque};
+use bytes::Bytes;
 
 const TARGET_WORKER: &str = "AveNetwork-Worker";
 
@@ -92,9 +93,9 @@ where
     retrys: u8,
 
     /// Pendings outbound messages to the peer
-    pending_outbound_messages: HashMap<PeerId, VecDeque<Vec<u8>>>,
+    pending_outbound_messages: HashMap<PeerId, VecDeque<Bytes>>,
 
-    pending_inbound_messages: HashMap<PeerId, VecDeque<Vec<u8>>>,
+    pending_inbound_messages: HashMap<PeerId, VecDeque<Bytes>>,
 
     /// Ephemeral responses.
     ephemeral_responses:
@@ -363,7 +364,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn send_message(
         &mut self,
         peer: PeerId,
-        message: Vec<u8>,
+        message: Bytes,
     ) -> Result<(), Error> {
         if let Some(responses) = self.ephemeral_responses.get_mut(&peer) {
             while let Some(response_channel) = responses.pop_front() {
@@ -411,8 +412,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     /// Add pending message to peer.
-    fn add_pending_outbound_message(&mut self, peer: PeerId, message: Vec<u8>) {
-        let pending_messages: &mut VecDeque<Vec<u8>> =
+    fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
+        let pending_messages: &mut VecDeque<Bytes> =
             self.pending_outbound_messages.entry(peer).or_default();
         pending_messages.push_back(message);
     }
@@ -435,7 +436,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             for message in messages.iter() {
                 self.swarm
                     .behaviour_mut()
-                    .send_message(&peer, message.clone());
+                    .send_message(&peer, message.clone(),
+                    &self.node_type
+                );
             }
         }
 
@@ -1132,14 +1135,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         );
                         if self.peer_identify.contains(&peer_id) {
                             self.message_to_helper(MessagesHelper::Single(
-                                message.message,
+                                Bytes::from(message.message),
                             ))
                             .await;
                         } else {
                             self.pending_inbound_messages
                                 .entry(peer_id)
                                 .or_default()
-                                .push_back(message.message);
+                                .push_back(Bytes::from(message.message));
                         }
 
                         self.messages_metric

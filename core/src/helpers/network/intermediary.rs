@@ -21,6 +21,7 @@ use ave_common::identity::{DSAlgorithm, PublicKey};
 use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
+use bytes::Bytes;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::io::Cursor;
@@ -110,7 +111,7 @@ impl Intermediary {
                     .network_sender
                     .send(NetworkCommand::SendMessage {
                         peer: node_peer,
-                        message: network_message,
+                        message: Bytes::from(network_message),
                     })
                     .await
                 {
@@ -121,7 +122,7 @@ impl Intermediary {
                 };
             }
             Command::ReceivedMessage { message } => {
-                let cur = Cursor::new(message);
+                let cur = Cursor::new(message.to_vec());
                 let mut de = Deserializer::new(cur);
 
                 let message: NetworkMessage =

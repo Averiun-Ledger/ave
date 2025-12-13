@@ -16,17 +16,17 @@ use libp2p::{
         self, Config as ReqResConfig, ProtocolSupport, ResponseChannel,
     },
     swarm::{
-        ConnectionId, NetworkBehaviour, StreamUpgradeError,
-        behaviour::toggle::Toggle,
+        ConnectionId, NetworkBehaviour, StreamUpgradeError
     },
 };
 use tell::{
-    Event as TellEvent, ProtocolSupport as TellProtocol, TellMessage, binary,
+    Event as TellEvent, ProtocolSupport as TellProtocol, binary as TellBinary,
 };
 
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, iter};
 use tokio_util::sync::CancellationToken;
+use bytes::Bytes;
 
 /// The network composed behaviour.
 #[derive(NetworkBehaviour)]
@@ -39,7 +39,7 @@ pub struct Behaviour {
     req_res: request_response::cbor::Behaviour<ReqResMessage, ReqResMessage>,
 
     /// The `tell` behaviour.
-    tell: Toggle<binary::Behaviour>,
+    tell: TellBinary::Behaviour,
 
     /// The `routing` behaviour.
     routing: routing::Behaviour,
@@ -57,18 +57,19 @@ impl Behaviour {
     ) -> (Self, HashSet<StreamProtocol>) {
         let mut stream_protocols = HashSet::new();
 
-        let tell = match config.node_type {
-            NodeType::Bootstrap | NodeType::Addressable => {
-                Some(binary::Behaviour::new(
+        let tell_protocol = if config.node_type == NodeType::Ephemeral {
+            TellProtocol::Outbound
+        } else {
+            TellProtocol::InboundOutbound
+        };
+
+        let tell = TellBinary::Behaviour::new(
                     iter::once((
                         StreamProtocol::new("/Ave/tell/1.0.0"),
-                        TellProtocol::InboundOutbound,
+                        tell_protocol,
                     )),
                     config.tell,
-                ))
-            }
-            NodeType::Ephemeral => None,
-        };
+                );
 
         let protocol_reqres = StreamProtocol::new("/ave/reqres/1.0.0");
         stream_protocols.insert(protocol_reqres.clone());
@@ -110,7 +111,7 @@ impl Behaviour {
                     )
                     .with_agent_version("ave/0.8.0".to_string()),
                 ),
-                tell: Toggle::from(tell),
+                tell: tell,
                 req_res: request_response::cbor::Behaviour::new(
                     protocol_rqrs,
                     config_req_res,
@@ -170,11 +171,11 @@ impl Behaviour {
     }
 
     /// Send request messasge to peer.
-    pub fn send_message(&mut self, peer_id: &PeerId, message: Vec<u8>) {
-        if let Some(tell) = self.tell.as_mut() {
-            tell.send_message(peer_id, message);
-        } else {
+    pub fn send_message(&mut self, peer_id: &PeerId, message: Bytes, node_type: &NodeType) {
+        if node_type == &NodeType::Ephemeral {
             self.req_res.send_request(peer_id, ReqResMessage(message));
+        } else {
+            self.tell.send_message(peer_id, message);
         }
     }
 
@@ -182,7 +183,7 @@ impl Behaviour {
     pub fn send_response(
         &mut self,
         channel: ResponseChannel<ReqResMessage>,
-        message: Vec<u8>,
+        message: Bytes,
     ) -> Result<(), Error> {
         self.req_res
             .send_response(channel, ReqResMessage(message))
@@ -218,7 +219,7 @@ pub enum Event {
     /// Tell message recieved from a peer.
     TellMessage {
         peer_id: PeerId,
-        message: TellMessage<Vec<u8>>,
+        message: tell::TellMessage<Bytes>,
     },
 
     /// Closets peers founded.
@@ -269,8 +270,8 @@ impl From<identify::Event> for Event {
     }
 }
 
-impl From<TellEvent<Vec<u8>>> for Event {
-    fn from(event: TellEvent<Vec<u8>>) -> Self {
+impl From<TellEvent<Bytes>> for Event {
+    fn from(event: TellEvent<Bytes>) -> Self {
         match event {
             TellEvent::Message { peer_id, message } => {
                 Event::TellMessage { peer_id, message }
@@ -303,7 +304,8 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
 
 /// Wrapper for request-response message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReqResMessage(pub Vec<u8>);
+pub struct ReqResMessage(pub Bytes);
+
 
 #[cfg(test)]
 mod tests {
@@ -332,17 +334,17 @@ mod tests {
         let boot_nodes = vec![];
 
         // Build node a.
-        let config =
+        let config_a =
             create_config(boot_nodes.clone(), false, NodeType::Ephemeral);
-        let mut node_a = build_node(config);
+        let mut node_a = build_node(config_a);
         node_a.behaviour_mut().finish_prerouting_state();
         let node_a_addr: Multiaddr = "/memory/1000".parse().unwrap();
         let _ = node_a.listen_on(node_a_addr.clone());
 
         // Build node b.
-        let config =
+        let config_b =
             create_config(boot_nodes.clone(), true, NodeType::Addressable);
-        let mut node_b = build_node(config);
+        let mut node_b = build_node(config_b);
         node_b.behaviour_mut().finish_prerouting_state();
         let node_b_addr: Multiaddr = "/memory/1001".parse().unwrap();
         let _ = node_b.listen_on(node_b_addr.clone());
@@ -365,7 +367,7 @@ mod tests {
                                 // Send response to node a.
                                 let _ = node_b.behaviour_mut().send_response(
                                     channel,
-                                    b"Hello Node A".to_vec(),
+                                    Bytes::from("Hello Node A"),
                                 );
                             }
                             Message::Response { .. } => {}
@@ -387,7 +389,8 @@ mod tests {
                         for _ in 0..100 {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
-                                b"Hello Node B".to_vec(),
+                                Bytes::from("Hello Node B"),
+                                &NodeType::Ephemeral,
                             );
                         }
                     }
@@ -451,7 +454,7 @@ mod tests {
                         // Send response to node a.
                         let _ = node_b
                             .behaviour_mut()
-                            .send_message(&peer_id, b"Hello Node A".to_vec());
+                            .send_message(&peer_id, Bytes::from("Hello Node A"), &NodeType::Addressable);
                     }
                     _ => {}
                 }
@@ -469,7 +472,7 @@ mod tests {
                         //node_a.behaviour_mut().add_identified_peer(peer_id, *info);
                         node_a
                             .behaviour_mut()
-                            .send_message(&peer_id, b"Hello Node B".to_vec());
+                            .send_message(&peer_id, Bytes::from("Hello Node B"), &NodeType::Addressable);
                     }
                     SwarmEvent::Behaviour(Event::TellMessage {
                         peer_id,
@@ -482,7 +485,8 @@ mod tests {
                         } else {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
-                                b"Hello Node B".to_vec(),
+                                Bytes::from("Hello Node B"),
+                                &NodeType::Addressable
                             );
                         }
                     }
@@ -577,7 +581,7 @@ mod tests {
                                 // Send response to node a.
                                 let _ = node_b.behaviour_mut().send_response(
                                     channel,
-                                    b"Hello Node A".to_vec(),
+                                    Bytes::from("Hello Node A"),
                                 );
                             }
                             Message::Response { .. } => {}
@@ -605,7 +609,8 @@ mod tests {
                         if peer_id == node_b_peer_id {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
-                                b"Hello Node B".to_vec(),
+                                Bytes::from("Hello Node B"),
+                                &NodeType::Ephemeral,
                             );
                         } else {
                             node_a.behaviour_mut().discover(&node_b_peer_id);

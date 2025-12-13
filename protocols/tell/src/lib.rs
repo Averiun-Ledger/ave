@@ -806,6 +806,7 @@ impl Connection {
 mod tests {
 
     use super::*;
+    use bytes::Bytes;
     //use futures::prelude::*;
     use libp2p::{PeerId, StreamProtocol, Swarm};
     use libp2p_swarm_test::SwarmExt;
@@ -815,14 +816,14 @@ mod tests {
 
     // Simple Ping Protocol
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    struct Ping(Vec<u8>);
+    struct Ping(Bytes);
 
     #[tokio::test]
     async fn test_ping_protocol() {
         use crate::codec::binary::Behaviour;
         use rand::Rng;
 
-        let ping = Ping("ping".to_string().into_bytes());
+        let ping = Ping(Bytes::from("ping"));
 
         let protocols = iter::once((
             StreamProtocol::new("/ping/1"),
@@ -915,7 +916,7 @@ mod tests {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::from_default_env())
             .try_init();
-        let ping = Ping("ping".to_string().into_bytes());
+        let ping = Ping(Bytes::from("ping"));
         let offline_peer = PeerId::random();
         let mut swarm1 = Swarm::new_ephemeral(|_| {
             Behaviour::new(

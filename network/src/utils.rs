@@ -5,6 +5,7 @@ use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
 use tracing::error;
+use bytes::Bytes;
 
 use std::{
     cmp::Ordering,
@@ -103,8 +104,8 @@ pub enum Fact {
 }
 
 pub enum MessagesHelper {
-    Single(Vec<u8>),
-    Vec(VecDeque<Vec<u8>>),
+    Single(Bytes),
+    Vec(VecDeque<Bytes>),
 }
 
 /// Method that update allow and block lists
