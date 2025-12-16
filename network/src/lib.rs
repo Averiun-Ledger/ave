@@ -53,12 +53,6 @@ pub struct Config {
     /// Bootnodes to connect to.
     pub boot_nodes: Vec<RoutingNode>,
 
-    /// Tell configuration.
-    pub tell: tell::Config,
-
-    /// ReqRes configuration.
-    pub req_res: ReqResConfig,
-
     /// Routing configuration.
     pub routing: routing::Config,
 
@@ -79,8 +73,6 @@ impl Config {
             node_type,
             listen_addresses,
             external_addresses,
-            tell: tell::Config::default(),
-            req_res: ReqResConfig::default(),
             routing: routing::Config::new(),
             control_list: control_list::Config::default(),
         }

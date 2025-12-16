@@ -5,6 +5,9 @@ use crate::{
     Config, Error, NodeType,
     control_list::{self, build_control_lists_updaters},
     routing::{self},
+    utils::{
+        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL, TELL_PROTOCOL, USER_AGENT
+    },
 };
 
 use libp2p::{
@@ -15,18 +18,16 @@ use libp2p::{
     request_response::{
         self, Config as ReqResConfig, ProtocolSupport, ResponseChannel,
     },
-    swarm::{
-        ConnectionId, NetworkBehaviour, StreamUpgradeError
-    },
+    swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError},
 };
 use tell::{
     Event as TellEvent, ProtocolSupport as TellProtocol, binary as TellBinary,
 };
 
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, iter};
-use tokio_util::sync::CancellationToken;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use std::{iter, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 /// The network composed behaviour.
 #[derive(NetworkBehaviour)]
@@ -50,48 +51,58 @@ pub struct Behaviour {
 
 impl Behaviour {
     /// Create a new `Behaviour`.
-    pub fn build(
+    pub fn new(
         public_key: &PublicKey,
         config: Config,
         token: CancellationToken,
-    ) -> (Self, HashSet<StreamProtocol>) {
-        let mut stream_protocols = HashSet::new();
+        limits: LimitsConfig,
+    ) -> Self {
+        let stream_tell = StreamProtocol::new(TELL_PROTOCOL);
+        let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
+        let stream_routing = StreamProtocol::new(ROUTING_PROTOCOL);
 
+        // TELL
         let tell_protocol = if config.node_type == NodeType::Ephemeral {
-            TellProtocol::Outbound
+            TellProtocol::Inbound
         } else {
-            TellProtocol::InboundOutbound
+            TellProtocol::Full
         };
 
+        let config_tell = tell::Config::default()
+            .with_max_concurrent_streams(limits.tell_max_concurrent_streams)
+            .with_request_timeout(Duration::from_secs(
+                limits.tell_request_timeout,
+            ));
+
         let tell = TellBinary::Behaviour::new(
-                    iter::once((
-                        StreamProtocol::new("/Ave/tell/1.0.0"),
-                        tell_protocol,
-                    )),
-                    config.tell,
-                );
+            iter::once((stream_tell, tell_protocol)),
+            config_tell,
+        );
 
-        let protocol_reqres = StreamProtocol::new("/ave/reqres/1.0.0");
-        stream_protocols.insert(protocol_reqres.clone());
-        stream_protocols.insert(StreamProtocol::new("/ipfs/id/1.0.0"));
+        // REQRES
+        let reqres_protocol = if config.node_type == NodeType::Ephemeral {
+            ProtocolSupport::Outbound
+        } else {
+            ProtocolSupport::Inbound
+        };
 
-        let protocol_rqrs =
-            iter::once((protocol_reqres, ProtocolSupport::Full));
-        let boot_nodes = config.boot_nodes;
-        let is_dht_random_walk = config.routing.get_dht_random_walk()
-            && config.node_type == NodeType::Bootstrap;
-        let config_routing =
-            config.routing.with_dht_random_walk(is_dht_random_walk);
         let config_req_res = ReqResConfig::default()
-            .with_max_concurrent_streams(
-                config.req_res.get_max_concurrent_streams(),
-            )
-            .with_request_timeout(config.req_res.get_message_timeout());
+            .with_max_concurrent_streams(limits.reqres_max_concurrent_streams)
+            .with_request_timeout(Duration::from_secs(
+                limits.reqres_request_timeout,
+            ));
+
+        let req_res = request_response::cbor::Behaviour::new(
+            iter::once((stream_reqres, reqres_protocol)),
+            config_req_res,
+        );
+
+        let boot_nodes = config.boot_nodes;
 
         let control_list_receiver =
             build_control_lists_updaters(&config.control_list, token);
 
-        (
+        
             Self {
                 control_list: control_list::Behaviour::new(
                     config.control_list,
@@ -100,25 +111,25 @@ impl Behaviour {
                 ),
                 routing: routing::Behaviour::new(
                     PeerId::from_public_key(public_key),
-                    config_routing,
-                    StreamProtocol::new("/ave/routing/1.0.0"),
+                    config.routing,
+                    stream_routing,
                     config.node_type,
                 ),
                 identify: identify::Behaviour::new(
                     identify::Config::new(
-                        "/ave/1.0.0".to_owned(),
+                        IDENTIFY_PROTOCOL.to_owned(),
                         public_key.clone(),
                     )
-                    .with_agent_version("ave/0.8.0".to_string()),
+                    .with_agent_version(USER_AGENT.to_string())
+                    .with_interval(Duration::from_secs(
+                        limits.identify_interval,
+                    ))
+                    .with_cache_size(limits.identify_cache),
                 ),
-                tell: tell,
-                req_res: request_response::cbor::Behaviour::new(
-                    protocol_rqrs,
-                    config_req_res,
-                ),
-            },
-            stream_protocols,
-        )
+                tell,
+                req_res,
+            }
+            
     }
 
     pub fn clean_peer_to_remove(&mut self, peer_id: &PeerId) {
@@ -171,7 +182,12 @@ impl Behaviour {
     }
 
     /// Send request messasge to peer.
-    pub fn send_message(&mut self, peer_id: &PeerId, message: Bytes, node_type: &NodeType) {
+    pub fn send_message(
+        &mut self,
+        peer_id: &PeerId,
+        message: Bytes,
+        node_type: &NodeType,
+    ) {
         if node_type == &NodeType::Ephemeral {
             self.req_res.send_request(peer_id, ReqResMessage(message));
         } else {
@@ -305,7 +321,6 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
 /// Wrapper for request-response message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReqResMessage(pub Bytes);
-
 
 #[cfg(test)]
 mod tests {
@@ -452,9 +467,11 @@ mod tests {
                         // Message received from node a.
                         assert_eq!(message.message, b"Hello Node B".to_vec());
                         // Send response to node a.
-                        let _ = node_b
-                            .behaviour_mut()
-                            .send_message(&peer_id, Bytes::from("Hello Node A"), &NodeType::Addressable);
+                        let _ = node_b.behaviour_mut().send_message(
+                            &peer_id,
+                            Bytes::from("Hello Node A"),
+                            &NodeType::Addressable,
+                        );
                     }
                     _ => {}
                 }
@@ -470,9 +487,11 @@ mod tests {
                         ..
                     }) => {
                         //node_a.behaviour_mut().add_identified_peer(peer_id, *info);
-                        node_a
-                            .behaviour_mut()
-                            .send_message(&peer_id, Bytes::from("Hello Node B"), &NodeType::Addressable);
+                        node_a.behaviour_mut().send_message(
+                            &peer_id,
+                            Bytes::from("Hello Node B"),
+                            &NodeType::Addressable,
+                        );
                     }
                     SwarmEvent::Behaviour(Event::TellMessage {
                         peer_id,
@@ -486,7 +505,7 @@ mod tests {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
                                 Bytes::from("Hello Node B"),
-                                &NodeType::Addressable
+                                &NodeType::Addressable,
                             );
                         }
                     }
@@ -649,10 +668,13 @@ mod tests {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        let (behaviour, _) = Behaviour::build(
+        let limits = LimitsConfig::build(&config.node_type);
+
+        let behaviour = Behaviour::new(
             &local_key.public(),
             config,
             CancellationToken::new(),
+            limits,
         );
         Swarm::new(
             transport,
@@ -677,11 +699,9 @@ mod tests {
         Config {
             boot_nodes,
             node_type,
-            tell: Default::default(),
             routing: config,
             external_addresses: vec![],
             listen_addresses: vec![],
-            req_res: Default::default(),
             control_list: Default::default(),
         }
     }

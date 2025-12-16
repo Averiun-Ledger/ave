@@ -219,13 +219,13 @@ async fn test_basic_use_case_1b_1e_1a() {
         true,
     )
     .await;
-    let intermediary = &nodes[0];
-    let owner_governance = &nodes[1];
-    let emit_events = &nodes[2];
+    let bootstrap = &nodes[0];
+    let addressable = &nodes[1];
+    let ephimeral = &nodes[2];
 
     let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![intermediary, emit_events],
+        addressable,
+        vec![bootstrap, ephimeral],
         "",
     )
     .await;
@@ -236,11 +236,11 @@ async fn test_basic_use_case_1b_1e_1a() {
             "add": [
                 {
                     "name": "AveNode2",
-                    "key": intermediary.controller_id()
+                    "key": bootstrap.controller_id()
                 },
                 {
                     "name": "AveNode3",
-                    "key": emit_events.controller_id()
+                    "key": ephimeral.controller_id()
                 }
             ]
         },
@@ -253,11 +253,11 @@ async fn test_basic_use_case_1b_1e_1a() {
         }
     });
 
-    emit_fact(owner_governance, governance_id.clone(), json, true)
+    emit_fact(addressable, governance_id.clone(), json, true)
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, governance_id.clone(), None)
+    let state = get_subject(addressable, governance_id.clone(), None)
         .await
         .unwrap();
 
@@ -266,17 +266,17 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.genesis_gov_version, 0);
     assert_eq!(state.namespace, "");
     assert_eq!(state.schema_id, "governance");
-    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.owner, addressable.controller_id());
     assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.creator, addressable.controller_id());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":intermediary.controller_id(),"AveNode3":emit_events.controller_id(),"Owner":owner_governance.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.controller_id(),"AveNode3":ephimeral.controller_id(),"Owner":addressable.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 
-    let state = get_subject(intermediary, governance_id.clone(), Some(1))
+    let state = get_subject(bootstrap, governance_id.clone(), Some(1))
         .await
         .unwrap();
 
@@ -285,21 +285,17 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.genesis_gov_version, 0);
     assert_eq!(state.namespace, "");
     assert_eq!(state.schema_id, "governance");
-    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.owner, addressable.controller_id());
     assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.creator, addressable.controller_id());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":intermediary.controller_id(),"AveNode3":emit_events.controller_id(),"Owner":owner_governance.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.controller_id(),"AveNode3":ephimeral.controller_id(),"Owner":addressable.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 
-    emit_events
-        .update_subject(governance_id.clone())
-        .await
-        .unwrap();
-    let state = get_subject(emit_events, governance_id.clone(), Some(1))
+    let state = get_subject(ephimeral, governance_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -307,14 +303,14 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.genesis_gov_version, 0);
     assert_eq!(state.namespace, "");
     assert_eq!(state.schema_id, "governance");
-    assert_eq!(state.owner, owner_governance.controller_id());
+    assert_eq!(state.owner, addressable.controller_id());
     assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, owner_governance.controller_id());
+    assert_eq!(state.creator, addressable.controller_id());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":intermediary.controller_id(),"AveNode3":emit_events.controller_id(),"Owner":owner_governance.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.controller_id(),"AveNode3":ephimeral.controller_id(),"Owner":addressable.controller_id()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"users":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"users":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 }
 

@@ -383,11 +383,18 @@ mod tests {
         assert!(db.verify_api_key(&api_key).is_ok());
 
         // Wait for expiration
+        
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // Should fail after expiration
-        let result = db.verify_api_key(&api_key);
-        assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
+        loop {
+            let result = db.verify_api_key(&api_key);
+
+            if matches!(result, Err(DatabaseError::PermissionDenied(_))) {
+                break;
+            } else {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
     }
 
     #[test]

@@ -75,14 +75,6 @@ boot_nodes = [
     { peer_id = "12D3KooWNode2", address = ["/ip4/2.2.2.2/tcp/2000"] }
 ]
 
-[node.network.tell]
-message_timeout = 58
-max_concurrent_streams = 166
-
-[node.network.req_res]
-message_timeout = 59
-max_concurrent_streams = 167
-
 [node.network.routing]
 dht_random_walk = false
 discovery_only_if_under_num = 25
@@ -176,12 +168,6 @@ node:
       - peer_id: 12D3KooWNode2
         address:
           - /ip4/2.2.2.2/tcp/2000
-    tell:
-      message_timeout: 58
-      max_concurrent_streams: 166
-    req_res:
-      message_timeout: 59
-      max_concurrent_streams: 167
     routing:
       dht_random_walk: false
       discovery_only_if_under_num: 25
@@ -279,14 +265,6 @@ http:
           "address": ["/ip4/2.2.2.2/tcp/2000"]
         }
       ],
-      "tell": {
-        "message_timeout": 58,
-        "max_concurrent_streams": 166
-      },
-      "req_res": {
-        "message_timeout": 59,
-        "max_concurrent_streams": 167
-      },
       "routing": {
         "dht_random_walk": false,
         "discovery_only_if_under_num": 25,
@@ -513,16 +491,6 @@ http:
             };
             assert_eq!(actual.address, expected.address);
         }
-        assert_eq!(
-            node.network.tell.get_message_timeout(),
-            Duration::from_secs(58)
-        );
-        assert_eq!(
-            node.network.req_res.get_message_timeout(),
-            Duration::from_secs(59)
-        );
-        assert_eq!(node.network.tell.get_max_concurrent_streams(), 166);
-        assert_eq!(node.network.req_res.get_max_concurrent_streams(), 167);
         assert!(!node.network.routing.get_dht_random_walk());
         assert_eq!(node.network.routing.get_discovery_limit(), 25);
         assert!(node.network.routing.get_allow_private_address_in_dht());
@@ -652,10 +620,5 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
-        assert_eq!(
-            config.node.network.req_res.get_message_timeout(),
-            Duration::from_secs(10)
-        );
-        assert_eq!(config.node.network.tell.get_max_concurrent_streams(), 100);
     }
 }

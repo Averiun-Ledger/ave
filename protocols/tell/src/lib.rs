@@ -240,7 +240,7 @@ impl Default for Config {
 
 impl Config {
     /// Sets the timeout for inbound and outbound requests.
-    pub fn with_message_timeout(mut self, timeout: Duration) -> Self {
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.message_timeout = timeout;
         self
     }
@@ -827,7 +827,7 @@ mod tests {
 
         let protocols = iter::once((
             StreamProtocol::new("/ping/1"),
-            ProtocolSupport::InboundOutbound,
+            ProtocolSupport::Full,
         ));
         let cfg = Config::default();
         let mut swarm1 = Swarm::new_ephemeral(|_| {
@@ -922,7 +922,7 @@ mod tests {
             Behaviour::new(
                 vec![(
                     StreamProtocol::new("/ping/1"),
-                    ProtocolSupport::InboundOutbound,
+                    ProtocolSupport::Full,
                 )],
                 Config::default(),
             )

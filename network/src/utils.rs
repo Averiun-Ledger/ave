@@ -1,4 +1,4 @@
-use crate::{Error, routing::RoutingNode};
+use crate::{Error, NodeType, routing::RoutingNode};
 use ip_network::IpNetwork;
 use libp2p::{Multiaddr, PeerId, multiaddr::Protocol, swarm::ConnectionId};
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
@@ -16,6 +16,60 @@ use std::{
 };
 
 const TARGET_UTILS: &str = "AveNetwork-Utils";
+pub const NOISE_PROTOCOL: &str = "ave-p2p-v1";
+pub const TELL_PROTOCOL: &str = "/ave/tell/1.0.0";
+pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
+pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
+pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
+pub const USER_AGENT: &str = "ave/0.8.0";
+
+#[derive(Clone)]
+pub struct LimitsConfig {
+    pub yamux_max_num_streams: usize,
+    pub tcp_listen_backlog: u32,
+    pub tcp_nodelay: bool,
+    pub reqres_max_concurrent_streams: usize,
+    pub reqres_request_timeout: u64,
+    pub tell_max_concurrent_streams: usize,
+    pub tell_request_timeout: u64,
+    pub identify_interval: u64,
+    // TODO mirar en un futuro.
+    pub identify_cache: usize
+
+}
+
+impl LimitsConfig {
+    pub fn build(node_type: &NodeType) -> Self {
+        match node_type {
+            NodeType::Bootstrap | NodeType::Addressable => {
+                Self {
+                    yamux_max_num_streams: 512,
+                    tcp_listen_backlog: 8192,
+                    tcp_nodelay: true,
+                    reqres_max_concurrent_streams: 2048,
+                    reqres_request_timeout: 15,
+                    tell_max_concurrent_streams: 2048,
+                    tell_request_timeout: 15,
+                    identify_interval: 60 * 15,
+                    identify_cache: 1024
+                }
+            }
+            NodeType::Ephemeral => {
+                Self {
+                    yamux_max_num_streams: 128,
+                    tcp_listen_backlog: 512,
+                    tcp_nodelay: true,
+                    reqres_max_concurrent_streams: 128,
+                    reqres_request_timeout: 10,
+                    tell_max_concurrent_streams: 128,
+                    tell_request_timeout: 10,
+                    identify_interval: 60 * 60,
+                    identify_cache: 0
+                }
+            },
+        }
+    }
+}
 
 pub enum ScheduleType {
     Discover,

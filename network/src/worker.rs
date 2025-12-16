@@ -8,15 +8,16 @@ use crate::{
     service::NetworkService,
     transport::build_transport,
     utils::{
-        Action, Due, Fact, MessagesHelper, MetricLabels, NetworkState,
-        RetryKind, RetryState, ScheduleType, convert_addresses,
-        convert_boot_nodes,
+        Action, Due, Fact, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
+        MetricLabels, NetworkState, REQRES_PROTOCOL, RetryKind, RetryState,
+        ScheduleType, TELL_PROTOCOL, convert_addresses, convert_boot_nodes,
     },
 };
 
 use std::{
     collections::{BinaryHeap, HashSet},
     fmt::Debug,
+    num::{NonZeroU8, NonZeroUsize},
     pin::Pin,
     time::Duration,
 };
@@ -44,8 +45,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
-use std::collections::{HashMap, VecDeque};
 use bytes::Bytes;
+use std::collections::{HashMap, VecDeque};
 
 const TARGET_WORKER: &str = "AveNetwork-Worker";
 
@@ -106,8 +107,6 @@ where
 
     /// Successful dials
     successful_dials: u64,
-
-    protocols: HashSet<StreamProtocol>,
 
     peer_identify: HashSet<PeerId>,
 
@@ -170,12 +169,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         // Is Ephemeral?
         let node_type = config.node_type.clone();
+        let limits = LimitsConfig::build(&node_type);
 
         // Build transport.
-        let transport = build_transport(registry, &key)?;
+        let transport = build_transport(registry, &key, limits.clone())?;
 
-        let (behaviour, protocols) =
-            Behaviour::build(&key.public(), config.clone(), cancel.clone());
+        let behaviour = Behaviour::new(
+            &key.public(),
+            config.clone(),
+            cancel.clone(),
+            limits,
+        );
 
         // Create the swarm.
         let mut swarm = Swarm::new(
@@ -183,7 +187,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             behaviour,
             local_peer_id,
             swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_secs(5)),
+                .with_idle_connection_timeout(Duration::from_secs(60))
+                .with_max_negotiating_inbound_streams(32)
+                .with_dial_concurrency_factor(NonZeroU8::new(2).expect("2 > 0"))
+                .with_notify_handler_buffer_size(
+                    NonZeroUsize::new(16).expect("16 > 0"),
+                )
+                .with_per_connection_event_buffer_size(16),
         );
 
         // Register metrics
@@ -246,7 +256,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             ephemeral_responses: HashMap::default(),
             messages_metric,
             successful_dials: 0,
-            protocols,
             peer_identify: HashSet::new(),
             retry_by_peer: HashMap::new(),
             retry_queue: BinaryHeap::new(),
@@ -434,10 +443,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
         if let Some(messages) = self.pending_outbound_messages.remove(&peer) {
             for message in messages.iter() {
-                self.swarm
-                    .behaviour_mut()
-                    .send_message(&peer, message.clone(),
-                    &self.node_type
+                self.swarm.behaviour_mut().send_message(
+                    &peer,
+                    message.clone(),
+                    &self.node_type,
                 );
             }
         }
@@ -875,8 +884,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .cloned()
             .collect::<HashSet<StreamProtocol>>();
 
-        protocol_version == "/ave/1.0.0"
-            && self.protocols.is_subset(&supp_protocols)
+        let is_ok = match self.node_type {
+            NodeType::Bootstrap | NodeType::Addressable => {
+                supp_protocols.contains(&StreamProtocol::new(TELL_PROTOCOL))
+            }
+            NodeType::Ephemeral => {
+                supp_protocols.contains(&StreamProtocol::new(REQRES_PROTOCOL))
+            }
+        };
+
+        protocol_version == IDENTIFY_PROTOCOL && is_ok
     }
 
     /// Run network worker.
@@ -1135,14 +1152,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         );
                         if self.peer_identify.contains(&peer_id) {
                             self.message_to_helper(MessagesHelper::Single(
-                                Bytes::from(message.message),
+                                message.message,
                             ))
                             .await;
                         } else {
                             self.pending_inbound_messages
                                 .entry(peer_id)
                                 .or_default()
-                                .push_back(Bytes::from(message.message));
+                                .push_back(message.message);
                         }
 
                         self.messages_metric
@@ -1347,8 +1364,6 @@ mod tests {
         Config {
             boot_nodes,
             node_type,
-            tell: Default::default(),
-            req_res: Default::default(),
             routing: config,
             external_addresses: vec![],
             listen_addresses,

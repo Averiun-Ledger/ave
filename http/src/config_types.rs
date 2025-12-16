@@ -207,10 +207,6 @@ pub struct NetworkConfigHttp {
     pub external_addresses: Vec<String>,
     /// Bootstrap nodes to connect to
     pub boot_nodes: Vec<RoutingNodeHttp>,
-    /// Tell protocol configuration
-    pub tell: TellConfigHttp,
-    /// Request-Response protocol configuration
-    pub req_res: ReqResConfigHttp,
     /// Routing configuration (DHT and discovery settings)
     pub routing: RoutingConfigHttp,
     /// Control list configuration (allow/deny lists)
@@ -228,44 +224,8 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .into_iter()
                 .map(RoutingNodeHttp::from)
                 .collect(),
-            tell: TellConfigHttp::from(value.tell),
-            req_res: ReqResConfigHttp::from(value.req_res),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-pub struct TellConfigHttp {
-    /// Tell protocol message timeout in seconds
-    pub message_timeout_secs: u64,
-    /// Maximum concurrent streams for Tell protocol
-    pub max_concurrent_streams: usize,
-}
-
-impl From<ave_bridge::TellConfig> for TellConfigHttp {
-    fn from(value: ave_bridge::TellConfig) -> Self {
-        Self {
-            message_timeout_secs: value.message_timeout.as_secs(),
-            max_concurrent_streams: value.max_concurrent_streams,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-pub struct ReqResConfigHttp {
-    /// Request-Response message timeout in seconds
-    pub message_timeout_secs: u64,
-    /// Maximum concurrent streams
-    pub max_concurrent_streams: usize,
-}
-
-impl From<ave_bridge::ReqResConfig> for ReqResConfigHttp {
-    fn from(value: ave_bridge::ReqResConfig) -> Self {
-        Self {
-            message_timeout_secs: value.message_timeout.as_secs(),
-            max_concurrent_streams: value.max_concurrent_streams,
         }
     }
 }

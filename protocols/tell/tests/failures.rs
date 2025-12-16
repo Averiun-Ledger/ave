@@ -150,9 +150,9 @@ fn new_swarm_with_timeout(
 ) -> (PeerId, Swarm<ave_tell::Behaviour<TestCodec>>) {
     let protocols = iter::once((
         StreamProtocol::new("/test/1"),
-        ProtocolSupport::InboundOutbound,
+        ProtocolSupport::Full,
     ));
-    let cfg = ave_tell::Config::default().with_message_timeout(timeout);
+    let cfg = ave_tell::Config::default().with_request_timeout(timeout);
 
     let swarm = Swarm::new_ephemeral(|_| {
         ave_tell::Behaviour::<TestCodec>::new(protocols, cfg)

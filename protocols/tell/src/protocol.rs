@@ -17,14 +17,14 @@ pub enum ProtocolSupport {
     /// The protocol is only supported for outbound requests.
     Outbound,
     /// The protocol is supported for both inbound and outbound requests.
-    InboundOutbound,
+    Full,
 }
 
 impl ProtocolSupport {
     /// Whether inbound requests are supported.
     pub fn inbound(&self) -> bool {
         match self {
-            ProtocolSupport::Inbound | ProtocolSupport::InboundOutbound => true,
+            ProtocolSupport::Inbound | ProtocolSupport::Full => true,
             ProtocolSupport::Outbound => false,
         }
     }
@@ -32,7 +32,7 @@ impl ProtocolSupport {
     /// Whether outbound requests are supported.
     pub fn outbound(&self) -> bool {
         match self {
-            ProtocolSupport::Outbound | ProtocolSupport::InboundOutbound => {
+            ProtocolSupport::Outbound | ProtocolSupport::Full => {
                 true
             }
             ProtocolSupport::Inbound => false,
@@ -106,7 +106,7 @@ mod tests {
         assert!(!support.inbound());
         assert!(support.outbound());
 
-        let support = ProtocolSupport::InboundOutbound;
+        let support = ProtocolSupport::Full;
         assert!(support.inbound());
         assert!(support.outbound());
     }

@@ -98,7 +98,7 @@ impl Behaviour {
 
         Self {
             kademlia: kad,
-            next_random_walk: if dht_random_walk {
+            next_random_walk: if dht_random_walk && node_type == NodeType::Bootstrap {
                 Some(Delay::new(Duration::new(0, 0)))
             } else {
                 None

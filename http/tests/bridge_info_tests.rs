@@ -1906,10 +1906,6 @@ async fn test_system_info_deserialization() {
     );
     assert!(config.node.network.external_addresses.is_empty());
     assert!(config.node.network.boot_nodes.is_empty());
-    assert_eq!(config.node.network.tell.message_timeout_secs, 10);
-    assert_eq!(config.node.network.tell.max_concurrent_streams, 100);
-    assert_eq!(config.node.network.req_res.message_timeout_secs, 10);
-    assert_eq!(config.node.network.req_res.max_concurrent_streams, 100);
     assert!(config.node.network.routing.dht_random_walk);
     assert_eq!(
         config.node.network.routing.discovery_only_if_under_num,
