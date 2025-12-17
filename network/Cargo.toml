@@ -33,7 +33,8 @@ libp2p = { workspace = true, default_features = false, features = [
 	"dns",
 	"metrics",
 	"request-response",
-	"cbor"
+	"cbor",
+	"memory-connection-limits"
 ] }
 metrics = { workspace = true }
 prometheus-client = { workspace = true }

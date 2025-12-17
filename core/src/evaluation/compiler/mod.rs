@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Command, sync::Arc,
+    process::{Command, Stdio}, sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -108,8 +108,9 @@ impl Compiler {
             .arg("--target")
             .arg("wasm32-unknown-unknown")
             .arg("--release")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
-            // Does not show stdout. Generates child process and waits
             .map_err(|e| {
                 Error::Compiler(format!("Can not compile contract: {}", e))
             })?;

@@ -2259,10 +2259,6 @@ async fn test_dynamic_witnesses_2() {
         ]
     }});
 
-    emit_fact(owner_governance, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
     new_witness
         .auth_subject(
             governance_id.clone(),
@@ -2283,10 +2279,10 @@ async fn test_dynamic_witnesses_2() {
         .await
         .unwrap();
 
-    new_witness
-        .update_subject(governance_id.clone())
+    emit_fact(owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
+
     let _ = get_subject(new_witness, governance_id.clone(), None)
         .await
         .unwrap();

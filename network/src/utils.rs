@@ -34,8 +34,14 @@ pub struct LimitsConfig {
     pub tell_request_timeout: u64,
     pub identify_interval: u64,
     // TODO mirar en un futuro.
-    pub identify_cache: usize
-
+    pub identify_cache: usize,
+    pub kademlia_query_timeout: u64,
+    pub conn_limmits_max_pending_incoming : Option<u32>,
+    pub conn_limmits_max_pending_outgoing : Option<u32>,
+    pub conn_limmits_max_established_incoming : Option<u32>,
+    pub conn_limmits_max_established_outgoing : Option<u32>,
+    pub conn_limmits_max_established_per_peer : Option<u32>,
+    pub conn_limmits_max_established_total : Option<u32>,
 }
 
 impl LimitsConfig {
@@ -51,7 +57,14 @@ impl LimitsConfig {
                     tell_max_concurrent_streams: 2048,
                     tell_request_timeout: 15,
                     identify_interval: 60 * 15,
-                    identify_cache: 1024
+                    identify_cache: 1024,
+                    kademlia_query_timeout: 25,
+                    conn_limmits_max_pending_incoming: Some(512),
+                    conn_limmits_max_pending_outgoing: Some(128),
+                    conn_limmits_max_established_incoming: Some(8000),
+                    conn_limmits_max_established_outgoing: Some(1000),
+                    conn_limmits_max_established_per_peer: Some(2),
+                    conn_limmits_max_established_total: Some(9000)
                 }
             }
             NodeType::Ephemeral => {
@@ -64,7 +77,14 @@ impl LimitsConfig {
                     tell_max_concurrent_streams: 128,
                     tell_request_timeout: 10,
                     identify_interval: 60 * 60,
-                    identify_cache: 0
+                    identify_cache: 0,
+                    kademlia_query_timeout: 15,
+                    conn_limmits_max_pending_incoming: Some(50),
+                    conn_limmits_max_pending_outgoing: Some(100),
+                    conn_limmits_max_established_incoming: Some(100),
+                    conn_limmits_max_established_outgoing: Some(200),
+                    conn_limmits_max_established_per_peer: Some(2),
+                    conn_limmits_max_established_total: Some(300)
                 }
             },
         }

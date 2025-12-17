@@ -54,6 +54,7 @@ pub use core::{
 };
 use core::{config::SinkAuth, helpers::sink::obtain_token};
 pub use network::MonitorNetworkState;
+pub use network::MemoryLimit;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
     RoutingNode, TellConfig,

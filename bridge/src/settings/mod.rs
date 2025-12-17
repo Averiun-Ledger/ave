@@ -91,6 +91,9 @@ service_allow_list = ["http://allow.local/list"]
 service_block_list = ["http://block.local/list"]
 interval_request = 42
 
+[node.network.memory_limit]
+Bytes = 1073741824
+
 [logging]
 output = { stdout = false, file = true, api = true }
 api_url = "https://example.com/logs"
@@ -182,6 +185,8 @@ node:
       service_allow_list: [http://allow.local/list]
       service_block_list: [http://block.local/list]
       interval_request: 42
+    memory_limit:
+      Bytes: 1073741824
 logging:
   output:
     stdout: false
@@ -280,6 +285,9 @@ http:
         "service_allow_list": ["http://allow.local/list"],
         "service_block_list": ["http://block.local/list"],
         "interval_request": 42
+      },
+      "memory_limit": {
+        "Bytes": 1073741824
       }
     }
   },
@@ -518,6 +526,10 @@ http:
             node.network.control_list.get_interval_request(),
             Duration::from_secs(42)
         );
+        match &node.network.memory_limit {
+            network::MemoryLimit::Bytes(bytes) => assert_eq!(*bytes, 1073741824),
+            _ => panic!("Expected Bytes variant for memory_limit"),
+        }
 
         let logging = &config.logging;
         assert_eq!(
@@ -620,5 +632,9 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
+        match &config.node.network.memory_limit {
+            network::MemoryLimit::Percentage(p) => assert_eq!(*p, 0.90),
+            _ => panic!("Expected Percentage variant for default memory_limit"),
+        }
     }
 }

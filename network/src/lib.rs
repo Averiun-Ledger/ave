@@ -58,6 +58,24 @@ pub struct Config {
 
     /// Control List configuration.
     pub control_list: control_list::Config,
+
+    /// Ram Limits.
+    pub memory_limit: MemoryLimit
+}
+
+/// Ram Limits.
+#[derive(Debug, Clone, Deserialize)]
+pub enum MemoryLimit {
+    /// Ram in percentage.
+    Percentage(f64),
+    /// Ram in bytes.
+    Bytes(usize)
+}
+
+impl Default for MemoryLimit {
+    fn default() -> Self {
+        Self::Percentage(0.90)
+    }
 }
 
 impl Config {
@@ -67,12 +85,14 @@ impl Config {
         listen_addresses: Vec<String>,
         external_addresses: Vec<String>,
         boot_nodes: Vec<RoutingNode>,
+        memory_limit: MemoryLimit
     ) -> Self {
         Self {
             boot_nodes,
             node_type,
             listen_addresses,
             external_addresses,
+            memory_limit,
             routing: routing::Config::new(),
             control_list: control_list::Config::default(),
         }

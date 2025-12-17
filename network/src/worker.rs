@@ -179,6 +179,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             config.clone(),
             cancel.clone(),
             limits,
+            config.memory_limit
         );
 
         // Create the swarm.
@@ -189,11 +190,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             swarm::Config::with_tokio_executor()
                 .with_idle_connection_timeout(Duration::from_secs(60))
                 .with_max_negotiating_inbound_streams(32)
-                .with_dial_concurrency_factor(NonZeroU8::new(2).expect("2 > 0"))
                 .with_notify_handler_buffer_size(
                     NonZeroUsize::new(16).expect("16 > 0"),
                 )
-                .with_per_connection_event_buffer_size(16),
+                .with_per_connection_event_buffer_size(16)
+                .with_dial_concurrency_factor(NonZeroU8::new(2).expect("2 > 0"))
         );
 
         // Register metrics
@@ -1367,7 +1368,7 @@ mod tests {
             routing: config,
             external_addresses: vec![],
             listen_addresses,
-            control_list: Default::default(),
+            ..Default::default()
         }
     }
 

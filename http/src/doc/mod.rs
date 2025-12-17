@@ -17,11 +17,7 @@ use crate::{
         },
     },
     config_types::{
-        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, ConfigHttp,
-        ControlListConfigHttp, HttpConfigHttp, LockoutConfigHttp, LoggingHttp,
-        LoggingOutputHttp, NetworkConfigHttp, RateLimitConfigHttp,
-        RoutingConfigHttp, RoutingNodeHttp,
-        SessionConfigHttp, SinkConfigHttp, SinkServerHttp,
+        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, ConfigHttp, ControlListConfigHttp, HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, MemoryLimitHttp, NetworkConfigHttp, RateLimitConfigHttp, RoutingConfigHttp, RoutingNodeHttp, SessionConfigHttp, SinkConfigHttp, SinkServerHttp
     },
     server::*,
 };
@@ -267,6 +263,7 @@ use utoipa::OpenApi;
             HttpConfigHttp,
             AveConfigHttp,
             NetworkConfigHttp,
+            MemoryLimitHttp,
             RoutingNodeHttp,
             RoutingConfigHttp,
             ControlListConfigHttp,

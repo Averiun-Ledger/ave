@@ -2,23 +2,22 @@
 //!
 
 use crate::{
-    Config, Error, NodeType,
-    control_list::{self, build_control_lists_updaters},
-    routing::{self},
-    utils::{
-        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL, TELL_PROTOCOL, USER_AGENT
-    },
+    Config, Error, MemoryLimit, NodeType, control_list::{self, build_control_lists_updaters}, routing::{self}, utils::{
+        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
+        TELL_PROTOCOL, USER_AGENT,
+    }
 };
 
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol,
+    Multiaddr, PeerId, StreamProtocol, connection_limits::{self, ConnectionLimits},
     identify::{self, Info as IdentifyInfo, UpgradeError},
     identity::PublicKey,
     kad::PeerInfo,
+    memory_connection_limits,
     request_response::{
         self, Config as ReqResConfig, ProtocolSupport, ResponseChannel,
     },
-    swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError},
+    swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError, behaviour::toggle::Toggle},
 };
 use tell::{
     Event as TellEvent, ProtocolSupport as TellProtocol, binary as TellBinary,
@@ -26,7 +25,7 @@ use tell::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::{iter, time::Duration};
+use std::{convert::Infallible, iter, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 /// The network composed behaviour.
@@ -47,6 +46,10 @@ pub struct Behaviour {
 
     /// The `identify` behaviour.
     identify: identify::Behaviour,
+
+    mem_limits: Toggle<memory_connection_limits::Behaviour>,
+
+    conn_limits: connection_limits::Behaviour,
 }
 
 impl Behaviour {
@@ -56,6 +59,7 @@ impl Behaviour {
         config: Config,
         token: CancellationToken,
         limits: LimitsConfig,
+        memory_limit: MemoryLimit
     ) -> Self {
         let stream_tell = StreamProtocol::new(TELL_PROTOCOL);
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
@@ -102,34 +106,51 @@ impl Behaviour {
         let control_list_receiver =
             build_control_lists_updaters(&config.control_list, token);
 
+        let conn_limmits = ConnectionLimits::default()
+            .with_max_established(limits.conn_limmits_max_established_total)
+            .with_max_established_incoming(limits.conn_limmits_max_established_incoming)
+            .with_max_established_outgoing(limits.conn_limmits_max_established_outgoing)
+            .with_max_pending_incoming(limits.conn_limmits_max_pending_incoming)
+            .with_max_pending_outgoing(limits.conn_limmits_max_pending_outgoing)
+            .with_max_established_per_peer(limits.conn_limmits_max_established_per_peer);
+
+        #[cfg(feature = "test")]
+        let mem_limits = Toggle::from(None);
+        #[cfg(not(feature = "test"))]
+        let mem_limits = match memory_limit {
+            MemoryLimit::Percentage(percentage) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_percentage(percentage))),
+            MemoryLimit::Bytes(bytes) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_bytes(bytes))),
+        };
+
         
-            Self {
-                control_list: control_list::Behaviour::new(
-                    config.control_list,
-                    &boot_nodes,
-                    control_list_receiver,
-                ),
-                routing: routing::Behaviour::new(
-                    PeerId::from_public_key(public_key),
-                    config.routing,
-                    stream_routing,
-                    config.node_type,
-                ),
-                identify: identify::Behaviour::new(
-                    identify::Config::new(
-                        IDENTIFY_PROTOCOL.to_owned(),
-                        public_key.clone(),
-                    )
-                    .with_agent_version(USER_AGENT.to_string())
-                    .with_interval(Duration::from_secs(
-                        limits.identify_interval,
-                    ))
-                    .with_cache_size(limits.identify_cache),
-                ),
-                tell,
-                req_res,
-            }
-            
+
+        Self {
+            control_list: control_list::Behaviour::new(
+                config.control_list,
+                &boot_nodes,
+                control_list_receiver,
+            ),
+            identify: identify::Behaviour::new(
+                identify::Config::new(
+                    IDENTIFY_PROTOCOL.to_owned(),
+                    public_key.clone(),
+                )
+                .with_agent_version(USER_AGENT.to_string())
+                .with_interval(Duration::from_secs(limits.identify_interval))
+                .with_cache_size(limits.identify_cache),
+            ),
+            routing: routing::Behaviour::new(
+                PeerId::from_public_key(public_key),
+                config.routing,
+                stream_routing,
+                config.node_type,
+                limits,
+            ),
+            tell,
+            req_res,
+            mem_limits,
+            conn_limits: connection_limits::Behaviour::new(conn_limmits)
+        }
     }
 
     pub fn clean_peer_to_remove(&mut self, peer_id: &PeerId) {
@@ -246,6 +267,10 @@ pub enum Event {
 
     /// Dummy Event for control_list, ReqRes and Tell
     Dummy,
+}
+
+impl From<Infallible> for Event {
+    fn from(v: Infallible) -> Self { match v {} }
 }
 
 impl From<control_list::Event> for Event {
@@ -675,6 +700,7 @@ mod tests {
             config,
             CancellationToken::new(),
             limits,
+            MemoryLimit::default()
         );
         Swarm::new(
             transport,
@@ -702,7 +728,7 @@ mod tests {
             routing: config,
             external_addresses: vec![],
             listen_addresses: vec![],
-            control_list: Default::default(),
+            ..Default::default()
         }
     }
 }

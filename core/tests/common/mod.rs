@@ -18,7 +18,7 @@ use ave_core::{
         },
     },
 };
-use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
+use network::{Config as NetworkConfig, MemoryLimit, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
     path::PathBuf,
@@ -70,6 +70,7 @@ pub async fn create_node(
         vec![listen_address.to_owned()],
         vec![],
         peers,
+        MemoryLimit::default()
     );
 
     let contract_dir =

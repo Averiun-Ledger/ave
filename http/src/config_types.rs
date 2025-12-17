@@ -3,10 +3,9 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    HttpConfig,
-    auth::{
+    HttpConfig, MemoryLimit, auth::{
         ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
-    },
+    }
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -211,6 +210,9 @@ pub struct NetworkConfigHttp {
     pub routing: RoutingConfigHttp,
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
+
+    pub memory_limit: MemoryLimitHttp
+
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -226,6 +228,24 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .collect(),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
+            memory_limit: MemoryLimitHttp::from(value.memory_limit),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub enum MemoryLimitHttp {
+    /// Ram in percentage.
+    Percentage(f64),
+    /// Ram in bytes.
+    Bytes(usize)
+}
+
+impl From<MemoryLimit> for MemoryLimitHttp {
+    fn from(value: MemoryLimit) -> Self {
+        match value {
+            MemoryLimit::Percentage(percentage) => MemoryLimitHttp::Percentage(percentage),
+            MemoryLimit::Bytes(bytes) => MemoryLimitHttp::Bytes(bytes),
         }
     }
 }

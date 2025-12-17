@@ -109,7 +109,7 @@ pub mod tests {
 
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::Config as NetworkConfig;
+    use network::{Config as NetworkConfig, MemoryLimit};
     use std::time::Duration;
     use tempfile::TempDir;
     use test_log::test;
@@ -153,6 +153,7 @@ pub mod tests {
             vec![],
             vec![],
             vec![],
+            MemoryLimit::default()
         );
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
