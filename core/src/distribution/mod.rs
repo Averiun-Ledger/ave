@@ -61,7 +61,7 @@ impl Distribution {
         ledger: SignedLedger,
         signer: PublicKey,
         last_proof: ValidationProof,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     ) -> Result<(), ActorError> {
         let child = ctx
             .create_child(
@@ -96,7 +96,7 @@ impl Distribution {
                 node_key: signer,
                 our_key,
                 last_proof,
-                prev_event_validation_response,
+                last_vali_res,
             })
             .await
     }
@@ -137,7 +137,7 @@ pub enum DistributionMessage {
         event: Box<Signed<AveEvent>>,
         ledger: Box<SignedLedger>,
         last_proof: Box<ValidationProof>,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     },
     Response {
         sender: PublicKey,
@@ -162,7 +162,7 @@ impl Handler<Distribution> for Distribution {
                 event,
                 ledger,
                 last_proof,
-                prev_event_validation_response,
+                last_vali_res,
             } => {
                 self.request_id = request_id;
                 let subject_id = ledger.content.subject_id.clone();
@@ -224,7 +224,7 @@ impl Handler<Distribution> for Distribution {
                         *ledger.clone(),
                         witness,
                         last_proof.clone(),
-                        prev_event_validation_response.clone(),
+                        last_vali_res.clone(),
                     )
                     .await?
                 }

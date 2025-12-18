@@ -816,8 +816,7 @@ mod tests {
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
         },
         subject::{
-            Subject,
-            event::{LedgerEvent, LedgerEventMessage, LedgerEventResponse},
+            Subject, laststate::{LastState, LastStateMessage, LastStateResponse},
         },
         validation::tests::create_subject_gov,
     };
@@ -830,7 +829,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -931,8 +930,8 @@ mod tests {
 
         assert_eq!(data.state, "RespondedAccepted");
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -947,22 +946,22 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(last_event.content.subject_id, subject_id);
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 1);
-        assert_eq!(last_event.content.gov_version, 0);
+        assert_eq!(event.content.subject_id, subject_id);
+        assert_eq!(event.content.event_request, signed_event_req);
+        assert_eq!(event.content.sn, 1);
+        assert_eq!(event.content.gov_version, 0);
         assert_eq!(
-            last_event.content.value,
+            event.content.value,
             LedgerValue::Patch(ValueWrapper(json!([
                 {"op":"add","path":"/members/AveNode1","value":"EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"}])))
         );
-        assert!(last_event.content.eval_success.unwrap());
-        assert!(last_event.content.appr_required);
-        assert!(last_event.content.appr_success.unwrap());
-        assert!(last_event.content.vali_success);
-        assert!(!last_event.content.evaluators.unwrap().is_empty());
-        assert!(!last_event.content.approvers.unwrap().is_empty());
-        assert!(!last_event.content.validators.is_empty());
+        assert!(event.content.eval_success.unwrap());
+        assert!(event.content.appr_required);
+        assert!(event.content.appr_success.unwrap());
+        assert!(event.content.vali_success);
+        assert!(!event.content.evaluators.unwrap().is_empty());
+        assert!(!event.content.approvers.unwrap().is_empty());
+        assert!(!event.content.validators.is_empty());
 
         assert_eq!(metadata.subject_id, subject_id);
         assert_eq!(metadata.governance_id.to_string(), "");
@@ -991,7 +990,7 @@ mod tests {
             request_actor,
             _query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -1090,8 +1089,8 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(10)).await;
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -1106,23 +1105,23 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(last_event.content.subject_id, subject_id);
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 2);
-        assert_eq!(last_event.content.gov_version, 1);
+        assert_eq!(event.content.subject_id, subject_id);
+        assert_eq!(event.content.event_request, signed_event_req);
+        assert_eq!(event.content.sn, 2);
+        assert_eq!(event.content.gov_version, 1);
         assert_eq!(
-            last_event.content.value,
+            event.content.value,
             LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
                 "[]".to_owned(),
             ),))
         );
-        assert!(last_event.content.eval_success.unwrap());
-        assert!(!last_event.content.appr_required);
-        assert!(last_event.content.appr_success.is_none());
-        assert!(last_event.content.vali_success);
-        assert!(!last_event.content.evaluators.unwrap().is_empty());
-        assert!(last_event.content.approvers.is_none(),);
-        assert!(!last_event.content.validators.is_empty());
+        assert!(event.content.eval_success.unwrap());
+        assert!(!event.content.appr_required);
+        assert!(event.content.appr_success.is_none());
+        assert!(event.content.vali_success);
+        assert!(!event.content.evaluators.unwrap().is_empty());
+        assert!(event.content.approvers.is_none(),);
+        assert!(!event.content.validators.is_empty());
 
         assert_eq!(metadata.subject_id, subject_id);
         assert_eq!(metadata.governance_id.to_string(), "");
@@ -1160,7 +1159,7 @@ mod tests {
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Subject>,
-        ActorRef<LedgerEvent>,
+        ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -1170,7 +1169,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -1324,8 +1323,8 @@ mod tests {
 
         assert_eq!(data.state, "RespondedAccepted");
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -1340,24 +1339,24 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(last_event.content.subject_id, subject_id);
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 1);
-        assert_eq!(last_event.content.gov_version, 0);
+        assert_eq!(event.content.subject_id, subject_id);
+        assert_eq!(event.content.event_request, signed_event_req);
+        assert_eq!(event.content.sn, 1);
+        assert_eq!(event.content.gov_version, 0);
 
         assert_eq!(
-            last_event.content.value,
+            event.content.value,
             LedgerValue::Patch(ValueWrapper(
                 json!([{"op":"add","path":"/policies_schema/Example","value":{"evaluate":"majority","validate":"majority"}},{"op":"add","path":"/roles_all_schemas/evaluator/0","value":{"name":"Owner","namespace":[]}},{"op":"add","path":"/roles_all_schemas/validator/0","value":{"name":"Owner","namespace":[]}},{"op":"add","path":"/roles_all_schemas/witness/0","value":{"name":"Owner","namespace":[]}},{"op":"add","path":"/roles_schema/Example","value":{"creator":[{"name":"Owner","namespace":[],"quantity":2,"witnesses":["Witnesses"]}],"evaluator":[],"issuer":{"any":false,"users":[{"name":"Owner","namespace":[]}]},"validator":[],"witness":[]}},{"op":"add","path":"/schemas/Example","value":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}}}])
             ))
         );
-        assert!(last_event.content.eval_success.unwrap());
-        assert!(last_event.content.appr_required);
-        assert!(last_event.content.appr_success.unwrap());
-        assert!(last_event.content.vali_success);
-        assert!(!last_event.content.evaluators.unwrap().is_empty());
-        assert!(!last_event.content.approvers.unwrap().is_empty());
-        assert!(!last_event.content.validators.is_empty());
+        assert!(event.content.eval_success.unwrap());
+        assert!(event.content.appr_required);
+        assert!(event.content.appr_success.unwrap());
+        assert!(event.content.vali_success);
+        assert!(!event.content.evaluators.unwrap().is_empty());
+        assert!(!event.content.approvers.unwrap().is_empty());
+        assert!(!event.content.validators.is_empty());
 
         assert_eq!(metadata.subject_id, subject_id);
         assert_eq!(metadata.governance_id.to_string(), "");
@@ -1383,7 +1382,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dir,
         )
@@ -1400,7 +1399,7 @@ mod tests {
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Subject>,
-        ActorRef<LedgerEvent>,
+        ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -1410,7 +1409,7 @@ mod tests {
             request_actor,
             query_actor,
             _subject_actor,
-            _ledger_event_actor,
+            _last_state_actor,
             gov_id,
             _dir,
         ) = init_gov_sub().await;
@@ -1462,16 +1461,16 @@ mod tests {
 
         assert_eq!("Finish", state.status);
 
-        let ledger_event_actor: ActorRef<LedgerEvent> = system
+        let last_state_actor: ActorRef<LastState> = system
             .get_actor(&ActorPath::from(format!(
-                "/user/node/{}/ledger_event",
+                "/user/node/{}/last_state",
                 request_id.subject_id
             )))
             .await
             .unwrap();
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -1495,34 +1494,34 @@ mod tests {
         };
 
         assert_eq!(
-            last_event.content.subject_id.to_string(),
+            event.content.subject_id.to_string(),
             request_id.subject_id
         );
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 0);
-        assert_eq!(last_event.content.gov_version, 1);
+        assert_eq!(event.content.event_request, signed_event_req);
+        assert_eq!(event.content.sn, 0);
+        assert_eq!(event.content.gov_version, 1);
         assert_eq!(
-            last_event.content.value,
+            event.content.value,
             LedgerValue::Patch(ValueWrapper(json!({
                 "one": 0, "three": 0, "two": 0
             })))
         );
 
         assert_eq!(
-            last_event.content.state_hash,
+            event.content.state_hash,
             hash_borsh(&Blake3Hasher, &metadata.properties).unwrap()
         );
-        assert!(last_event.content.eval_success.is_none());
-        assert!(!last_event.content.appr_required);
-        assert!(last_event.content.appr_success.is_none());
-        assert!(last_event.content.vali_success);
+        assert!(event.content.eval_success.is_none());
+        assert!(!event.content.appr_required);
+        assert!(event.content.appr_success.is_none());
+        assert!(event.content.vali_success);
         assert_eq!(
-            last_event.content.hash_prev_event,
+            event.content.hash_prev_event,
             DigestIdentifier::default()
         );
-        assert!(last_event.content.evaluators.is_none());
-        assert!(last_event.content.approvers.is_none(),);
-        assert!(!last_event.content.validators.is_empty());
+        assert!(event.content.evaluators.is_none());
+        assert!(event.content.approvers.is_none(),);
+        assert!(!event.content.validators.is_empty());
 
         assert_eq!(metadata.subject_id.to_string(), request_id.subject_id);
         assert_eq!(metadata.governance_id.to_string(), gov_id.to_string());
@@ -1540,7 +1539,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             DigestIdentifier::from_str(&request_id.subject_id).unwrap(),
             _dir,
         )
@@ -1559,7 +1558,7 @@ mod tests {
             request_actor,
             _query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dir,
         ) = create_subject().await;
@@ -1599,8 +1598,8 @@ mod tests {
         };
 
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -1616,23 +1615,23 @@ mod tests {
         };
 
         assert_eq!(
-            last_event.content.subject_id.to_string(),
+            event.content.subject_id.to_string(),
             request_id.subject_id
         );
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 1);
-        assert_eq!(last_event.content.gov_version, 1);
+        assert_eq!(event.content.event_request, signed_event_req);
+        assert_eq!(event.content.sn, 1);
+        assert_eq!(event.content.gov_version, 1);
         assert_eq!(
-            last_event.content.state_hash,
+            event.content.state_hash,
             hash_borsh(&Blake3Hasher, &metadata.properties).unwrap()
         );
-        assert!(last_event.content.eval_success.unwrap());
-        assert!(!last_event.content.appr_required);
-        assert!(last_event.content.appr_success.is_none());
-        assert!(last_event.content.vali_success);
-        assert!(!last_event.content.evaluators.unwrap().is_empty());
-        assert!(last_event.content.approvers.is_none(),);
-        assert!(!last_event.content.validators.is_empty());
+        assert!(event.content.eval_success.unwrap());
+        assert!(!event.content.appr_required);
+        assert!(event.content.appr_success.is_none());
+        assert!(event.content.vali_success);
+        assert!(!event.content.evaluators.unwrap().is_empty());
+        assert!(event.content.approvers.is_none(),);
+        assert!(!event.content.validators.is_empty());
 
         assert_eq!(metadata.subject_id.to_string(), request_id.subject_id);
         assert_eq!(metadata.genesis_gov_version, 1);

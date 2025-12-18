@@ -15,5 +15,5 @@ pub struct ValidationReq {
     // Hay que sacarlo de la base de datos,
     pub previous_proof: Option<ValidationProof>,
     // Hay que sacarlo de la base de datos,
-    pub prev_event_validation_response: Vec<ProtocolsSignatures>,
+    pub last_vali_res: Vec<ProtocolsSignatures>,
 }

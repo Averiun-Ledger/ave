@@ -9,7 +9,7 @@ use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::model::common::{emit_fail, get_last_event, get_metadata};
+use crate::model::common::{emit_fail, get_last_state, get_metadata};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 
@@ -36,8 +36,8 @@ impl Reboot {
         ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         self.sn_event =
-            match get_last_event(ctx, &self.governance_id.to_string()).await {
-                Ok(last_event) => last_event.content.sn,
+            match get_last_state(ctx, &self.governance_id.to_string()).await {
+                Ok((last_event, ..)) => last_event.content.sn,
                 Err(e) => {
                     if let ActorError::Functional(_) = e {
                         0

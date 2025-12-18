@@ -32,16 +32,6 @@ CREATE TABLE IF NOT EXISTS approval (
 );
 
 -- =============================================================================
--- VALIDATIONS TABLE
--- =============================================================================
--- Tracks the set of validators for each subject's validation phase
-CREATE TABLE IF NOT EXISTS validations (
-    subject_id TEXT NOT NULL,
-    validators TEXT NOT NULL,  -- JSON serialized HashSet<PublicKey>
-    PRIMARY KEY (subject_id)
-);
-
--- =============================================================================
 -- EVENTS TABLE
 -- =============================================================================
 -- Stores the complete event history for all subjects in the ledger

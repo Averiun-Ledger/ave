@@ -8,7 +8,7 @@ use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     model::event::ProtocolsSignatures,
-    subject::SignedLedger,
+    subject::{LastStateData, SignedLedger},
     update::TransferResponse,
     validation::{
         proof::ValidationProof, request::ValidationReq, response::ValidationRes,
@@ -44,7 +44,7 @@ pub enum ActorMessage {
         ledger: Box<SignedLedger>,
         event: Box<Signed<AveEvent>>,
         last_proof: ValidationProof,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     },
     DistributionLastEventRes {
         signer: PublicKey,
@@ -56,12 +56,10 @@ pub enum ActorMessage {
     },
     DistributionLedgerRes {
         ledger: Vec<SignedLedger>,
-        last_event: Box<Option<Signed<AveEvent>>>,
-        last_proof: Option<ValidationProof>,
+        last_state: Option<LastStateData>,
         namespace: String,
         schema_id: String,
         governance_id: DigestIdentifier,
-        prev_event_validation_response: Option<Vec<ProtocolsSignatures>>,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,

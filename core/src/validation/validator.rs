@@ -112,7 +112,7 @@ impl Validator {
                 ctx,
                 &validation_req.proof,
                 validation_req.previous_proof,
-                validation_req.prev_event_validation_response,
+                validation_req.last_vali_res,
             )
             .await?
         {

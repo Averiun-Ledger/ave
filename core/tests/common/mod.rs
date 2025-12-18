@@ -18,7 +18,7 @@ use ave_core::{
         },
     },
 };
-use network::{Config as NetworkConfig, MemoryLimit, MonitorNetworkState, RoutingNode};
+use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
     path::PathBuf,

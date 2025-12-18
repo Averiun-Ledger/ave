@@ -4,8 +4,7 @@ use crate::{
     external_db::DBManager,
     request::{RequestHandlerEvent, manager::RequestManagerEvent},
     subject::{
-        SignedLedger, event::LedgerEventEvent, sinkdata::SinkDataEvent,
-        validata::ValiDataEvent,
+        SignedLedger, laststate::{LastStateEvent}, sinkdata::SinkDataEvent
     },
 };
 
@@ -39,11 +38,6 @@ pub trait Querys {
         &self,
         subject_id: &str,
     ) -> Result<ApproveInfo, Error>;
-    // validators (not for user use).
-    async fn get_last_validators(
-        &self,
-        subject_id: &str,
-    ) -> Result<String, Error>;
     // events
     async fn get_events(
         &self,
@@ -115,7 +109,7 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_vali_data(&self) -> impl Subscriber<ValiDataEvent> {
+    pub fn get_last_state(&self) -> impl Subscriber<LastStateEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
@@ -130,13 +124,6 @@ impl ExternalDB {
     }
 
     pub fn get_approver(&self) -> impl Subscriber<ApproverEvent> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
-        }
-    }
-
-    pub fn get_ledger_event(&self) -> impl Subscriber<LedgerEventEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
@@ -262,18 +249,6 @@ impl Querys for ExternalDB {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_approve_req(subject_id).await
-            }
-        }
-    }
-
-    async fn get_last_validators(
-        &self,
-        subject_id: &str,
-    ) -> Result<String, Error> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_last_validators(subject_id).await
             }
         }
     }

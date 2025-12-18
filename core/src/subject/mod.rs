@@ -24,7 +24,7 @@ use crate::{
     model::{
         Namespace,
         common::{
-            delete_relation, emit_fail, get_gov, get_last_event, get_vali_data,
+            delete_relation, emit_fail, get_gov, get_last_state,
             register_relation, try_to_update, verify_protocols_state,
         },
         event::{Event as AveEvent, Ledger, LedgerValue, ProtocolsSignatures},
@@ -38,6 +38,7 @@ use crate::{
         },
         transfer,
     },
+    subject::laststate::LastState,
     system::ConfigHelper,
     update::TransferResponse,
     validation::{
@@ -56,7 +57,6 @@ use ave_common::{
     ValueWrapper,
     identity::{DigestIdentifier, PublicKey, Signed, hash_borsh},
 };
-use event::LedgerEvent;
 
 use std::ops::Deref;
 
@@ -71,13 +71,11 @@ use serde_json::to_value;
 use sinkdata::{SinkData, SinkDataMessage};
 use tracing::{error, warn};
 use transfer::{TransferRegister, TransferRegisterMessage};
-use validata::ValiData;
 
 use std::collections::{BTreeMap, HashMap};
 
-pub mod event;
+pub mod laststate;
 pub mod sinkdata;
-pub mod validata;
 
 const TARGET_SUBJECT: &str = "Ave-Subject";
 
@@ -797,7 +795,10 @@ impl Subject {
                     ctx.create_child(&actor_name, Compiler::default()).await?
                 };
 
-            let Schema { contract, initial_value } = schema;
+            let Schema {
+                contract,
+                initial_value,
+            } = schema;
 
             compiler
                 .tell(CompilerMessage::Compile {
@@ -1029,7 +1030,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_ledger_event(
+    async fn verify_new_last_state(
         &self,
         last_ledger: &Signed<Ledger>,
         new_ledger: &Signed<Ledger>,
@@ -1101,9 +1102,7 @@ impl Subject {
         }
 
         let valid_last_event = verify_protocols_state(
-            EventRequestType::from(
-                &last_ledger.content.event_request.content,
-            ),
+            EventRequestType::from(&last_ledger.content.event_request.content),
             last_ledger.content.eval_success,
             last_ledger.content.appr_success,
             last_ledger.content.appr_required,
@@ -1122,9 +1121,7 @@ impl Subject {
         }
 
         let valid_new_event = verify_protocols_state(
-            EventRequestType::from(
-                &new_ledger.content.event_request.content,
-            ),
+            EventRequestType::from(&new_ledger.content.event_request.content),
             new_ledger.content.eval_success,
             new_ledger.content.appr_success,
             new_ledger.content.appr_required,
@@ -1255,7 +1252,7 @@ impl Subject {
         Ok(valid_new_event)
     }
 
-    async fn verify_first_ledger_event(
+    async fn verify_first_last_state(
         &self,
         event: &SignedLedger,
     ) -> Result<(), Error> {
@@ -1446,7 +1443,7 @@ impl Subject {
         Self::publish_sink(ctx, event_to_sink).await
     }
 
-    async fn verify_new_ledger_events_gov(
+    async fn verify_new_last_states_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1457,10 +1454,10 @@ impl Subject {
         let mut last_ledger = if let Some(last_ledger) = last_ledger {
             last_ledger
         } else {
-            let Some(first) = iter.next() else { return Ok(()); };
-            if let Err(e) =
-                self.verify_first_ledger_event(&first).await
-            {
+            let Some(first) = iter.next() else {
+                return Ok(());
+            };
+            if let Err(e) = self.verify_first_last_state(&first).await {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
@@ -1473,7 +1470,7 @@ impl Subject {
 
         for event in iter {
             let last_event_is_ok = match self
-                .verify_new_ledger_event(&last_ledger, &event)
+                .verify_new_last_state(&last_ledger, &event)
                 .await
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
@@ -1622,7 +1619,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_ledger_events_not_gov(
+    async fn verify_new_last_states_not_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1632,7 +1629,9 @@ impl Subject {
 
         let gov = get_gov(ctx, &self.governance_id.to_string()).await?;
 
-        let Some(first) = iter.next() else { return Ok(()); };
+        let Some(first) = iter.next() else {
+            return Ok(());
+        };
 
         let Some(max_quantity) = gov.max_creations(
             &first.signature.signer,
@@ -1658,9 +1657,7 @@ impl Subject {
             )
             .await?;
 
-            if let Err(e) =
-                self.verify_first_ledger_event(&first).await
-            {
+            if let Err(e) = self.verify_first_last_state(&first).await {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
@@ -1675,7 +1672,7 @@ impl Subject {
 
         for event in pending {
             let last_event_is_ok = match self
-                .verify_new_ledger_event(&last_ledger, &event)
+                .verify_new_last_state(&last_ledger, &event)
                 .await
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
@@ -1793,7 +1790,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_ledger_events(
+    async fn verify_new_last_states(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1808,7 +1805,7 @@ impl Subject {
         if self.governance_id.is_empty() {
             let current_properties = self.properties.clone();
 
-            if let Err(e) = self.verify_new_ledger_events_gov(ctx, events).await
+            if let Err(e) = self.verify_new_last_states_gov(ctx, events).await
             {
                 if let ActorError::Functional(error) = e.clone() {
                     warn!(
@@ -2101,7 +2098,7 @@ impl Subject {
             }
         } else {
             if let Err(e) =
-                self.verify_new_ledger_events_not_gov(ctx, events).await
+                self.verify_new_last_states_not_gov(ctx, events).await
             {
                 if let ActorError::Functional(error) = e.clone() {
                     warn!(
@@ -2265,41 +2262,34 @@ impl Subject {
         let ledger = self.get_ledger(ctx, last_sn).await?;
 
         if ledger.len() < 100 {
-            let last_event = get_last_event(ctx, &self.subject_id.to_string())
-                .await
-                .map_err(|e| {
-                    error!(
-                        TARGET_SUBJECT,
-                        "GetLedger, can not get last event: {}", e
-                    );
-                    e
-                })?;
-
-            let (last_proof, prev_event_validation_response) =
-                get_vali_data(ctx, &self.subject_id.to_string())
-                    .await
-                    .map_err(|e| {
+            match get_last_state(ctx, &self.subject_id.to_string()).await {
+                Ok((event, proof, vali_res)) => Ok(SubjectResponse::Ledger {
+                    ledger,
+                    last_state: Some(LastStateData {
+                        event,
+                        proof,
+                        vali_res,
+                    }),
+                }),
+                Err(e) => {
+                    if let ActorError::Functional(_) = e {
+                        Ok(SubjectResponse::Ledger {
+                            ledger,
+                            last_state: None,
+                        })
+                    } else {
                         error!(
                             TARGET_SUBJECT,
-                            "GetLedger, can not get last vali data: {}", e
+                            "GetLedger, can not get last event: {}", e
                         );
-                        e
-                    })?;
-
-            Ok(SubjectResponse::Ledger {
-                ledger,
-                last_event: Box::new(Some(last_event)),
-                last_proof: Box::new(last_proof),
-                prev_event_validation_response: Some(
-                    prev_event_validation_response,
-                ),
-            })
+                        Err(e)
+                    }
+                }
+            }
         } else {
             Ok(SubjectResponse::Ledger {
                 ledger,
-                last_event: Box::new(None),
-                last_proof: Box::new(None),
-                prev_event_validation_response: None,
+                last_state: None,
             })
         }
     }
@@ -2403,14 +2393,19 @@ pub enum SubjectResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
-        last_event: Box<Option<Signed<AveEvent>>>,
-        last_proof: Box<Option<ValidationProof>>,
-        prev_event_validation_response: Option<Vec<ProtocolsSignatures>>,
+        last_state: Option<LastStateData>,
     },
     Governance(Box<Governance>),
     Owner(PublicKey),
     NewCompilers(Vec<String>),
     Ok,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LastStateData {
+    pub event: Box<Signed<AveEvent>>,
+    pub proof: Box<ValidationProof>,
+    pub vali_res: Vec<ProtocolsSignatures>,
 }
 
 impl Response for SubjectResponse {}
@@ -2458,23 +2453,12 @@ impl Actor for Subject {
             return Err(ActorError::NotHelper("sink".to_owned()));
         };
 
-        let ledger_event_actor = ctx
-            .create_child(
-                "ledger_event",
-                LedgerEvent::initial(self.governance_id.is_empty()),
-            )
+        let last_state_actor = ctx
+            .create_child("last_state", LastState::initial(()))
             .await?;
 
-        let sink = Sink::new(
-            ledger_event_actor.subscribe(),
-            ext_db.get_ledger_event(),
-        );
-        ctx.system().run_sink(sink).await;
-
-        let vali_data_actor =
-            ctx.create_child("vali_data", ValiData::initial(())).await?;
         let sink =
-            Sink::new(vali_data_actor.subscribe(), ext_db.get_vali_data());
+            Sink::new(last_state_actor.subscribe(), ext_db.get_last_state());
         ctx.system().run_sink(sink).await;
 
         if self.active {
@@ -2600,8 +2584,7 @@ impl Handler<Subject> for Subject {
                 Ok(SubjectResponse::Metadata(Box::new(self.get_metadata())))
             }
             SubjectMessage::UpdateLedger { events } => {
-                if let Err(e) =
-                    self.verify_new_ledger_events(ctx, events).await
+                if let Err(e) = self.verify_new_last_states(ctx, events).await
                 {
                     warn!(
                         TARGET_SUBJECT,
@@ -2849,23 +2832,20 @@ impl Storable for Subject {}
 #[cfg(test)]
 mod tests {
 
-    use std::{collections::HashSet, time::Instant};
+    use std::{collections::HashSet, time::Instant, vec};
 
     use super::*;
 
     use crate::{
-        FactRequest,
-        model::{
+        FactRequest, model::{
             event::Event as AveEvent, request::tests::create_start_request_mock,
-        },
-        node::NodeResponse,
-        system::tests::create_system,
+        }, node::NodeResponse, subject::laststate::{LastStateMessage, LastStateResponse}, system::tests::create_system, validation::proof::EventProof
     };
 
-    async fn create_subject_and_ledger_event(
+    async fn create_subject_and_last_state(
         system: SystemRef,
         node_keys: KeyPair,
-    ) -> (ActorRef<Subject>, ActorRef<LedgerEvent>, Signed<Ledger>) {
+    ) -> (ActorRef<Subject>, Signed<Ledger>) {
         let node_actor = system
             .create_root_actor("node", Node::initial(node_keys.clone()))
             .await
@@ -2913,25 +2893,36 @@ mod tests {
             .await
             .unwrap();
 
-        let ledger_event_actor: Option<ActorRef<LedgerEvent>> = system
+        let last_state_actor: ActorRef<LastState> = system
             .get_actor(&ActorPath::from(format!(
-                "user/node/{}/ledger_event",
+                "user/node/{}/last_state",
                 signed_ledger.content.subject_id
             )))
-            .await;
-
-        let ledger_event_actor = if let Some(actor) = ledger_event_actor {
-            actor
-        } else {
-            panic!("Actor must be in system actor");
-        };
-
-        ledger_event_actor
-            .ask(LedgerEventMessage::UpdateLastEvent {
-                event: Box::new(signed_event),
-            })
             .await
             .unwrap();
+
+        let empty_proof = ValidationProof {
+            subject_id: DigestIdentifier::default(),
+            schema_id: String::default(),
+            namespace: Namespace::new(),
+            governance_id: DigestIdentifier::default(),
+            genesis_governance_version: 0,
+            sn: 0,
+            prev_event_hash: DigestIdentifier::default(),
+            event_hash: DigestIdentifier::default(),
+            governance_version: 0,
+            owner: node_keys.public_key(),
+            new_owner: None,
+            active: true,
+            event: EventProof::Create,
+        };
+        let response  = last_state_actor.ask(LastStateMessage::UpdateLastState { proof: Box::new(empty_proof), event: Box::new(signed_event), vali_res: vec![] }).await
+            .unwrap();
+
+        if let LastStateResponse::Ok = response {
+        } else {
+            panic!("Invalid response");
+        }
 
         let response = subject_actor
             .ask(SubjectMessage::UpdateLedger {
@@ -2940,13 +2931,14 @@ mod tests {
             .await
             .unwrap();
 
+
         if let SubjectResponse::UpdateResult(last_sn, _, _) = response {
             assert_eq!(last_sn, 0);
         } else {
             panic!("Invalid response");
         }
 
-        (subject_actor, ledger_event_actor, signed_ledger)
+        (subject_actor, signed_ledger)
     }
 
     fn create_n_fact_events(
@@ -3060,7 +3052,6 @@ mod tests {
     use ave_common::identity::{
         Blake3Hasher, KeyPair, KeyPairAlgorithm, Signature, keys::Ed25519Signer,
     };
-    use event::LedgerEventMessage;
     use serde_json::{Value, json};
     use test_log::test;
 
@@ -3101,19 +3092,19 @@ mod tests {
         let (system, ..) = create_system().await;
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        let (subject_actor, _ledger_event_actor, _signed_ledger) =
-            create_subject_and_ledger_event(system, node_keys.clone()).await;
+        let (subject_actor, _signed_ledger) =
+            create_subject_and_last_state(system, node_keys.clone()).await;
 
         let response = subject_actor
             .ask(SubjectMessage::GetLedger { last_sn: 0 })
             .await
             .unwrap();
         if let SubjectResponse::Ledger {
-            ledger, last_event, ..
+            ledger, last_state
         } = response
         {
             assert!(ledger.len() == 1);
-            last_event.unwrap();
+            last_state.unwrap();
         } else {
             panic!("Invalid response");
         }
@@ -3135,8 +3126,8 @@ mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, ..) = create_system().await;
 
-        let (subject_actor, _ledger_event_actor, signed_ledger) =
-            create_subject_and_ledger_event(system, node_keys.clone()).await;
+        let (subject_actor, signed_ledger) =
+            create_subject_and_last_state(system, node_keys.clone()).await;
 
         let res = subject_actor
             .ask(SubjectMessage::GetMetadata)

@@ -1,11 +1,9 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
-use ave_common::identity::PublicKey;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use tracing::error;
@@ -15,14 +13,13 @@ use crate::approval::request::ApprovalReq;
 use crate::error::Error;
 use crate::external_db::{DBManager, DBManagerMessage, DeleteTypes};
 use crate::helpers::db::common::{ApprovalReqInfo, ApproveInfo, EventDB};
-use crate::model::event::{LedgerValue, ProtocolsSignatures};
+use crate::model::event::{LedgerValue};
 use crate::request::RequestHandlerEvent;
 use crate::request::manager::RequestManagerEvent;
 use crate::request::types::RequestManagerState;
 use crate::subject::SignedLedger;
-use crate::subject::event::LedgerEventEvent;
+use crate::subject::laststate::LastStateEvent;
 use crate::subject::sinkdata::{SinkDataEvent, SinkDataMessage};
-use crate::subject::validata::ValiDataEvent;
 
 use super::common::{
     EventInfo, Paginator, PaginatorEvents, SignaturesDB, SignaturesInfo,
@@ -455,25 +452,6 @@ impl Querys for SqliteLocal {
             request: approval_request_info,
         })
     }
-
-    async fn get_last_validators(
-        &self,
-        subject_id: &str,
-    ) -> Result<String, Error> {
-        let subject_id = subject_id.to_owned();
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql =
-                "SELECT validators FROM validations WHERE subject_id = ?1";
-
-            conn.query_row(sql, params![subject_id], |row| row.get(0))
-                .map_err(|e| Error::ExtDB(e.to_string()))
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
 }
 
 impl SqliteLocal {
@@ -756,78 +734,10 @@ impl Subscriber<ApproverEvent> for SqliteLocal {
     }
 }
 
-#[async_trait]
-impl Subscriber<ValiDataEvent> for SqliteLocal {
-    async fn notify(&self, event: ValiDataEvent) {
-        let subject_id = event.last_proof.subject_id.to_string();
-
-        let validators: HashSet<PublicKey> = event
-            .prev_event_validation_response
-            .iter()
-            .map(|x| match x {
-                ProtocolsSignatures::Signature(signature) => {
-                    signature.signer.clone()
-                }
-                ProtocolsSignatures::TimeOut(time_out_response) => {
-                    time_out_response.who.clone()
-                }
-            })
-            .collect();
-
-        let Ok(validators) = serde_json::to_string(&validators) else {
-            let e = Error::ExtDB(
-                "Can not Serialize validators as String".to_owned(),
-            );
-            error!(
-                TARGET_SQLITE,
-                "Subscriber<LedgerEventEvent> LedgerEventEvent::WithVal: {}", e
-            );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-            return;
-        };
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "INSERT OR REPLACE INTO validations (subject_id, validators) VALUES (?1, ?2)";
-
-            let _ = conn.execute(sql, params![subject_id, validators]).map_err(async |e| {
-                let e = Error::ExtDB(format!("Can not update validations: {}", e));
-                error!(TARGET_SQLITE, "Subscriber<LedgerEventEvent> LedgerEventEvent::WithVal: {}", e);
-                if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-                {
-                    error!(
-                        TARGET_SQLITE,
-                        "Can no send message to DBManager actor: {}", e
-                    );
-                }
-            });
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(
-                TARGET_SQLITE,
-                "Subscriber<LedgerEventEvent> LedgerEventEvent::WithVal: {}", e
-            );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
-    }
-}
 
 #[async_trait]
-impl Subscriber<LedgerEventEvent> for SqliteLocal {
-    async fn notify(&self, event: LedgerEventEvent) {
+impl Subscriber<LastStateEvent> for SqliteLocal {
+    async fn notify(&self, event: LastStateEvent) {
         let sn = event.event.content.sn;
         let subject_id = event.event.content.subject_id.to_string();
 
@@ -933,6 +843,8 @@ impl Subscriber<LedgerEventEvent> for SqliteLocal {
         }
     }
 }
+
+
 
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {

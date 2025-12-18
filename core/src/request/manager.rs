@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
+use crate::model::common::{get_last_state, update_last_state};
 use crate::subject::SignedLedger;
 use crate::system::ConfigHelper;
 use crate::{
@@ -35,10 +36,7 @@ use crate::{
     intermediary::Intermediary,
     model::{
         SignTypesNode,
-        common::{
-            emit_fail, get_gov, get_metadata, get_sign, get_vali_data,
-            update_event, update_vali_data,
-        },
+        common::{emit_fail, get_gov, get_metadata, get_sign},
         event::{
             DataProofEvent, Ledger, LedgerValue, ProofEvent, ProtocolsError,
             ProtocolsSignatures,
@@ -84,7 +82,7 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
         val_info: ValidationInfo,
         last_proof: Option<ValidationProof>,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     ) -> Result<(), ActorError> {
         info!(TARGET_MANAGER, "Init validation {}", self.id);
         let validation_path = ActorPath::from(format!(
@@ -99,7 +97,7 @@ impl RequestManager {
                 .tell(ValidationMessage::Create {
                     request_id: self.id.clone(),
                     last_proof: Box::new(last_proof),
-                    prev_event_validation_response,
+                    last_vali_res,
                     version: self.version,
                     info: Box::new(val_info),
                 })
@@ -204,8 +202,19 @@ impl RequestManager {
             event_proof,
         };
 
-        let (last_proof, prev_event_validation_response) =
-            get_vali_data(ctx, &self.subject_id).await?;
+        let (last_proof, last_vali_res) =
+            match get_last_state(ctx, &self.subject_id).await {
+                Ok((_event, last_proof, last_vali_res)) => {
+                    (Some(*last_proof), last_vali_res)
+                }
+                Err(e) => {
+                    if let ActorError::Functional(_) = e {
+                        (None, vec![])
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
         self.on_event(
             RequestManagerEvent::UpdateState {
@@ -213,21 +222,15 @@ impl RequestManager {
                 state: Box::new(RequestManagerState::Validation {
                     val_info: Box::new(val_info.clone()),
                     last_proof: last_proof.clone(),
-                    prev_event_validation_response:
-                        prev_event_validation_response.clone(),
+                    last_vali_res: last_vali_res.clone(),
                 }),
             },
             ctx,
         )
         .await;
 
-        self.send_validation(
-            ctx,
-            val_info.clone(),
-            last_proof,
-            prev_event_validation_response,
-        )
-        .await
+        self.send_validation(ctx, val_info.clone(), last_proof, last_vali_res)
+            .await
     }
 
     async fn approval(
@@ -269,7 +272,7 @@ impl RequestManager {
         self.send_evaluation(ctx).await
     }
 
-    fn create_ledger_event(
+    fn create_last_state(
         &self,
         val_info: ValidationInfo,
         signatures: Vec<ProtocolsSignatures>,
@@ -358,13 +361,13 @@ impl RequestManager {
         }
     }
 
-    async fn safe_ledger_event(
+    async fn safe_last_state(
         &mut self,
         ctx: &mut ActorContext<RequestManager>,
         event: AveEvent,
         ledger: Ledger,
         last_proof: ValidationProof,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     ) -> Result<(SignedLedger, Signed<AveEvent>), ActorError> {
         let signature_ledger =
             get_sign(ctx, SignTypesNode::Ledger(ledger.clone())).await?;
@@ -392,27 +395,12 @@ impl RequestManager {
             signature: signature_event,
         };
 
-        if let Err(e) = update_event(ctx, signed_event.clone()).await {
-            if let ActorError::Functional(_) = e {
-                self.abort_request_manager(ctx, &e.to_string(), true)
-                    .await?;
-            }
-            return Err(e);
-        };
 
-        if let Err(e) = update_vali_data(
-            ctx,
-            last_proof.clone(),
-            prev_event_validation_response.clone(),
-        )
-        .await
-        {
-            if let ActorError::Functional(_) = e {
-                self.abort_request_manager(ctx, &e.to_string(), true)
-                    .await?;
-            }
-            return Err(e);
-        };
+        let update = update_last_state(ctx, signed_event.clone(), last_proof.clone(), last_vali_res.clone()).await?;
+        if !update {
+            self.abort_request_manager(ctx, "Our sn is biggest than event sn", true)
+                .await?;
+        }
 
         self.on_event(
             RequestManagerEvent::UpdateState {
@@ -421,8 +409,7 @@ impl RequestManager {
                     event: Box::new(signed_event.clone()),
                     ledger: Box::new(signed_ledger.clone()),
                     last_proof: last_proof.clone(),
-                    prev_event_validation_response:
-                        prev_event_validation_response.clone(),
+                    last_vali_res: last_vali_res.clone(),
                 }),
             },
             ctx,
@@ -438,7 +425,7 @@ impl RequestManager {
         event: Signed<AveEvent>,
         ledger: SignedLedger,
         last_proof: ValidationProof,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     ) -> Result<(), ActorError> {
         info!(TARGET_MANAGER, "Init distribution {}", self.id);
         let distribution_path = ActorPath::from(format!(
@@ -455,7 +442,7 @@ impl RequestManager {
                     event: Box::new(event),
                     ledger: Box::new(ledger),
                     last_proof: Box::new(last_proof),
-                    prev_event_validation_response,
+                    last_vali_res,
                 })
                 .await
         } else {
@@ -472,7 +459,7 @@ impl RequestManager {
                     event: Box::new(event),
                     ledger: Box::new(ledger),
                     last_proof: Box::new(last_proof),
-                    prev_event_validation_response,
+                    last_vali_res,
                 })
                 .await
         }
@@ -1173,14 +1160,14 @@ impl Handler<RequestManager> for RequestManager {
                     RequestManagerState::Validation {
                         val_info,
                         last_proof,
-                        prev_event_validation_response,
+                        last_vali_res,
                     } => {
                         if let Err(e) = self
                             .send_validation(
                                 ctx,
                                 *val_info,
                                 last_proof,
-                                prev_event_validation_response,
+                                last_vali_res,
                             )
                             .await
                         {
@@ -1195,7 +1182,7 @@ impl Handler<RequestManager> for RequestManager {
                         event,
                         ledger,
                         last_proof,
-                        prev_event_validation_response,
+                        last_vali_res,
                     } => {
                         if let Err(e) = self
                             .init_distribution(
@@ -1203,7 +1190,7 @@ impl Handler<RequestManager> for RequestManager {
                                 *event,
                                 *ledger,
                                 last_proof,
-                                prev_event_validation_response,
+                                last_vali_res,
                             )
                             .await
                         {
@@ -1412,7 +1399,7 @@ impl Handler<RequestManager> for RequestManager {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
-                let (ledger, event) = match self.create_ledger_event(
+                let (ledger, event) = match self.create_last_state(
                     *val_info,
                     signatures.clone(),
                     result,
@@ -1435,7 +1422,7 @@ impl Handler<RequestManager> for RequestManager {
                 };
 
                 let (signed_ledger, signed_event) = match self
-                    .safe_ledger_event(
+                    .safe_last_state(
                         ctx,
                         event,
                         ledger.clone(),

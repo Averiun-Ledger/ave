@@ -109,7 +109,7 @@ pub mod tests {
 
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::{Config as NetworkConfig, MemoryLimit};
+    use network::{Config as NetworkConfig};
     use std::time::Duration;
     use tempfile::TempDir;
     use test_log::test;

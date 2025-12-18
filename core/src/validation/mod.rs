@@ -112,7 +112,7 @@ impl Validation {
         &self,
         validation_info: ValidationInfo,
         previous_proof: Option<ValidationProof>,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
         derivator: HashAlgorithm,
     ) -> Result<ValidationReq, ActorError> {
         let prev_evet_hash =
@@ -133,7 +133,7 @@ impl Validation {
         Ok(ValidationReq {
             proof: proof.clone(),
             previous_proof: previous_proof.clone(),
-            prev_event_validation_response: prev_event_validation_response
+            last_vali_res: last_vali_res
                 .clone(),
         })
     }
@@ -239,7 +239,7 @@ pub enum ValidationMessage {
         version: u64,
         info: Box<ValidationInfo>,
         last_proof: Box<Option<ValidationProof>>,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     },
     Response {
         validation_res: ValidationRes,
@@ -286,7 +286,7 @@ impl Handler<Validation> for Validation {
                 info,
                 version,
                 last_proof,
-                prev_event_validation_response,
+                last_vali_res,
             } => {
                 let hash = if let Some(config) =
                     ctx.system().get_helper::<ConfigHelper>("config").await {
@@ -300,7 +300,7 @@ impl Handler<Validation> for Validation {
                     .create_validation_req(
                         *info.clone(),
                         *last_proof,
-                        prev_event_validation_response,
+                        last_vali_res,
                         hash,
                     )
                     .await
@@ -591,18 +591,9 @@ pub mod tests {
     };
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Governance, Node, NodeMessage,
-        NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse,
-        helpers::db::ExternalDB,
-        model::{Namespace, SignTypesNode, event::LedgerValue},
-        query::Query,
-        request::{
+        CreateRequest, EOLRequest, EventRequest, Governance, Node, NodeMessage, NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse, helpers::db::ExternalDB, model::{Namespace, SignTypesNode, event::LedgerValue}, query::Query, request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
-        },
-        subject::event::{
-            LedgerEvent, LedgerEventMessage, LedgerEventResponse,
-        },
-        system::tests::create_system,
+        }, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system
     };
 
     pub async fn create_subject_gov() -> (
@@ -611,7 +602,7 @@ pub mod tests {
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Subject>,
-        ActorRef<LedgerEvent>,
+        ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -684,16 +675,16 @@ pub mod tests {
             .await
             .unwrap();
 
-        let ledger_event_actor: ActorRef<LedgerEvent> = system
+        let last_state_actor: ActorRef<LastState> = system
             .get_actor(&ActorPath::from(format!(
-                "/user/node/{}/ledger_event",
+                "/user/node/{}/last_state",
                 owned_subj
             )))
             .await
             .unwrap();
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. }= last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -708,6 +699,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
+        let last_event = *event;
         assert_eq!(last_event.content.subject_id.to_string(), owned_subj);
         assert_eq!(last_event.content.event_request, signed_event_req);
         assert_eq!(last_event.content.sn, 0);
@@ -760,7 +752,7 @@ pub mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             metadata.subject_id,
             _dirs,
         )
@@ -779,7 +771,7 @@ pub mod tests {
             request_actor,
             _query_actor,
             subject_actor,
-            ledger_event_actor,
+            last_state_actor,
             subject_id,
             _dirs,
         ) = create_subject_gov().await;
@@ -815,8 +807,8 @@ pub mod tests {
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let LedgerEventResponse::LastEvent(last_event) = ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+        let LastStateResponse::LastState {  event, .. } = last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
         else {
@@ -831,6 +823,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
+        let last_event = *event;
         assert_eq!(last_event.content.subject_id, subject_id);
         assert_eq!(last_event.content.event_request, signed_event_req);
         assert_eq!(last_event.content.sn, 1);

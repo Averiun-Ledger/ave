@@ -27,13 +27,13 @@ pub enum RequestManagerState {
     Validation {
         val_info: Box<ValidationInfo>,
         last_proof: Option<ValidationProof>,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     },
     Distribution {
         event: Box<Signed<AveEvent>>,
         ledger: Box<SignedLedger>,
         last_proof: ValidationProof,
-        prev_event_validation_response: Vec<ProtocolsSignatures>,
+        last_vali_res: Vec<ProtocolsSignatures>,
     },
 }
 

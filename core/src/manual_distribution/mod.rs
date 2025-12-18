@@ -3,7 +3,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
     Message, NotPersistentActor,
 };
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -11,10 +11,8 @@ use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
     model::{
         common::{emit_fail, subject_owner},
-        event::{Event as AveEvent, ProtocolsSignatures},
     },
-    subject::{SignedLedger, Subject, SubjectMessage, SubjectResponse},
-    validation::proof::ValidationProof,
+    subject::{LastStateData, SignedLedger, Subject, SubjectMessage, SubjectResponse},
 };
 
 const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";
@@ -33,9 +31,7 @@ impl ManualDistribution {
     ) -> Result<
         (
             Vec<SignedLedger>,
-            Box<Option<Signed<AveEvent>>>,
-            Box<Option<ValidationProof>>,
-            Option<Vec<ProtocolsSignatures>>,
+            Option<LastStateData>,
         ),
         ActorError,
     > {
@@ -53,14 +49,10 @@ impl ManualDistribution {
         match response {
             SubjectResponse::Ledger {
                 ledger,
-                last_event,
-                last_proof,
-                prev_event_validation_response,
+                last_state
             } => Ok((
                 ledger,
-                last_event,
-                last_proof,
-                prev_event_validation_response,
+                last_state
             )),
             _ => Err(ActorError::UnexpectedResponse(
                 subject_path,
@@ -127,31 +119,16 @@ impl Handler<ManualDistribution> for ManualDistribution {
 
                 let (
                     ledger,
-                    last_event,
-                    last_proof,
-                    prev_event_validation_response,
+                    last_state,
                 ) = Self::get_last_ledger(ctx, &subject_id.to_string()).await?;
 
-                let Some(last_event) = *last_event else {
-                    let e = "Can not obtain last signed event";
+
+                let Some(last_state) = last_state else {
+                    let e = "Can not obtain last state";
                     error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
                     return Err(ActorError::Functional(e.to_string()));
                 };
 
-                let Some(last_proof) = *last_proof else {
-                    let e = "Can not obtain last proof";
-                    error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_string()));
-                };
-
-                let Some(prev_event_validation_response) =
-                    prev_event_validation_response
-                else {
-                    let e =
-                        "Can not obtain previous event validation responses";
-                    error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_string()));
-                };
 
                 let ledger = if ledger.len() != 1 {
                     let e = "Failed to get the latest event from the ledger";
@@ -169,10 +146,10 @@ impl Handler<ManualDistribution> for ManualDistribution {
                 if let Err(e) = distribution_actor
                     .tell(DistributionMessage::Create {
                         request_id,
-                        event: Box::new(last_event),
+                        event: last_state.event,
                         ledger: Box::new(ledger),
-                        last_proof: Box::new(last_proof),
-                        prev_event_validation_response,
+                        last_proof: last_state.proof,
+                        last_vali_res: last_state.vali_res,
                     })
                     .await
                 {

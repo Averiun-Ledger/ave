@@ -33,9 +33,7 @@ use crate::{
     },
     request::manager::{RequestManager, RequestManagerMessage},
     subject::{
-        Metadata,
-        event::{LedgerEvent, LedgerEventMessage, LedgerEventResponse},
-        validata::{ValiData, ValiDataMessage, ValiDataResponse},
+        Metadata, laststate::{LastState, LastStateMessage, LastStateResponse}
     },
     validation::proof::ValidationProof,
 };
@@ -371,38 +369,38 @@ where
     }
 }
 
-pub async fn update_event<A>(
+pub async fn update_last_state<A>(
     ctx: &mut ActorContext<A>,
     event: Signed<AveEvent>,
-) -> Result<(), ActorError>
+    proof: ValidationProof,
+    vali_res: Vec<ProtocolsSignatures>,
+) -> Result<bool, ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let ledger_event_path = ActorPath::from(format!(
-        "/user/node/{}/ledger_event",
+    let last_state_path = ActorPath::from(format!(
+        "/user/node/{}/last_state",
         event.content.subject_id
     ));
-    let ledger_event_actor: Option<ActorRef<LedgerEvent>> =
-        ctx.system().get_actor(&ledger_event_path).await;
+    let last_state_actor: Option<ActorRef<LastState>> =
+        ctx.system().get_actor(&last_state_path).await;
 
-    let response = if let Some(ledger_event_actor) = ledger_event_actor {
-        ledger_event_actor
-            .ask(LedgerEventMessage::UpdateLastEvent {
-                event: Box::new(event),
-            })
+    let response = if let Some(last_state_actor) = last_state_actor {
+        last_state_actor
+            .ask(LastStateMessage::UpdateLastState { proof: Box::new(proof), event: Box::new(event), vali_res })
             .await?
     } else {
-        return Err(ActorError::NotFound(ledger_event_path));
+        return Err(ActorError::NotFound(last_state_path));
     };
 
-    if let LedgerEventResponse::LastEvent(_) = response {
-        return Err(ActorError::UnexpectedResponse(
-            ledger_event_path,
-            "LedgerEventResponse::Ok".to_owned(),
-        ));
+    match response {
+        LastStateResponse::Ok => Ok(true),
+        LastStateResponse::LessThanOurSn => Ok(false),
+        _ => Err(ActorError::UnexpectedResponse(
+            last_state_path,
+            "LastStateResponse::Ok |  LastStateResponse::LessThanOurSn".to_owned(),
+        ))
     }
-
-    Ok(())
 }
 
 pub async fn get_quantity<A>(
@@ -755,40 +753,6 @@ pub fn generate_linker(
     Ok(linker)
 }
 
-pub async fn update_vali_data<A>(
-    ctx: &mut ActorContext<A>,
-    last_proof: ValidationProof,
-    prev_event_validation_response: Vec<ProtocolsSignatures>,
-) -> Result<(), ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let vali_data_path = ActorPath::from(format!(
-        "/user/node/{}/vali_data",
-        last_proof.subject_id
-    ));
-    let vali_data_actor: Option<ActorRef<ValiData>> =
-        ctx.system().get_actor(&vali_data_path).await;
-
-    let response = if let Some(vali_data_actor) = vali_data_actor {
-        vali_data_actor
-            .ask(ValiDataMessage::UpdateValiData {
-                last_proof: Box::new(last_proof),
-                prev_event_validation_response,
-            })
-            .await?
-    } else {
-        return Err(ActorError::NotFound(vali_data_path));
-    };
-
-    match response {
-        ValiDataResponse::Ok => Ok(()),
-        _ => Err(ActorError::UnexpectedResponse(
-            vali_data_path,
-            "ValiDataResponse::Ok".to_owned(),
-        )),
-    }
-}
 
 pub struct UpdateData {
     pub sn: u64,
@@ -837,63 +801,31 @@ where
         .await
 }
 
-pub async fn get_last_event<A>(
+pub async fn get_last_state<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &str,
-) -> Result<Signed<AveEvent>, ActorError>
+) -> Result<(Box<Signed<AveEvent>>, Box<ValidationProof>, Vec<ProtocolsSignatures>), ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let ledger_event_path =
-        ActorPath::from(format!("/user/node/{}/ledger_event", subject_id));
-    let ledger_event_actor: Option<ActorRef<LedgerEvent>> =
-        ctx.system().get_actor(&ledger_event_path).await;
+    let last_state_path =
+        ActorPath::from(format!("/user/node/{}/last_state", subject_id));
+    let last_state_actor: Option<ActorRef<LastState>> =
+        ctx.system().get_actor(&last_state_path).await;
 
-    let response = if let Some(ledger_event_actor) = ledger_event_actor {
-        ledger_event_actor
-            .ask(LedgerEventMessage::GetLastEvent)
+    let response = if let Some(last_state_actor) = last_state_actor {
+        last_state_actor
+            .ask(LastStateMessage::GetLastState)
             .await?
     } else {
-        return Err(ActorError::NotFound(ledger_event_path));
+        return Err(ActorError::NotFound(last_state_path));
     };
 
     match response {
-        LedgerEventResponse::LastEvent(event) => Ok(*event),
+        LastStateResponse::LastState { proof, event, vali_res } => Ok((event, proof, vali_res)),
         _ => Err(ActorError::UnexpectedResponse(
-            ledger_event_path,
+            last_state_path,
             "LedgerEventResponse::LastEvent".to_owned(),
-        )),
-    }
-}
-
-pub async fn get_vali_data<A>(
-    ctx: &mut ActorContext<A>,
-    subject_id: &str,
-) -> Result<(Option<ValidationProof>, Vec<ProtocolsSignatures>), ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let vali_data_path =
-        ActorPath::from(format!("/user/node/{}/vali_data", subject_id));
-    let vali_data_actor: Option<ActorRef<ValiData>> =
-        ctx.system().get_actor(&vali_data_path).await;
-
-    let response = if let Some(vali_data_actor) = vali_data_actor {
-        vali_data_actor
-            .ask(ValiDataMessage::GetLastValiData)
-            .await?
-    } else {
-        return Err(ActorError::NotFound(vali_data_path));
-    };
-
-    match response {
-        ValiDataResponse::LastValiData {
-            last_proof,
-            prev_event_validation_response,
-        } => Ok((*last_proof, prev_event_validation_response)),
-        _ => Err(ActorError::UnexpectedResponse(
-            vali_data_path,
-            "ValiDataResponse::LastValiData".to_owned(),
         )),
     }
 }

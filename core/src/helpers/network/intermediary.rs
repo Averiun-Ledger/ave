@@ -387,7 +387,7 @@ impl Intermediary {
                         event,
                         ledger,
                         last_proof,
-                        prev_event_validation_response,
+                        last_vali_res,
                     } => {
                         // Distributor path.
                         let distributor_path = ActorPath::from(
@@ -430,7 +430,7 @@ impl Intermediary {
                                 ledger: *ledger,
                                 info: message.info,
                                 last_proof: last_proof.clone(),
-                                prev_event_validation_response,
+                                last_vali_res,
                             })
                             .await
                         {
@@ -570,9 +570,7 @@ impl Intermediary {
                     }
                     ActorMessage::DistributionLedgerRes {
                         ledger,
-                        last_event,
-                        last_proof,
-                        prev_event_validation_response,
+                        last_state,
                         namespace,
                         schema_id,
                         governance_id,
@@ -617,10 +615,8 @@ impl Intermediary {
                         if let Err(e) = distributor_actor
                             .tell(DistributorMessage::LedgerDistribution {
                                 events: ledger,
-                                last_event: *last_event,
                                 info: message.info,
-                                last_proof,
-                                prev_event_validation_response,
+                                last_state,
                                 schema_id,
                                 namespace,
                                 governance_id,
