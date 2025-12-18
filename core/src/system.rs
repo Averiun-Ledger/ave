@@ -153,7 +153,7 @@ pub mod tests {
             vec![],
             vec![],
             vec![],
-            MemoryLimit::default()
+            None
         );
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,

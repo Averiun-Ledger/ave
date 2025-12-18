@@ -60,7 +60,7 @@ pub struct Config {
     pub control_list: control_list::Config,
 
     /// Ram Limits.
-    pub memory_limit: MemoryLimit
+    pub memory_limit: Option<MemoryLimit>
 }
 
 /// Ram Limits.
@@ -72,12 +72,6 @@ pub enum MemoryLimit {
     Bytes(usize)
 }
 
-impl Default for MemoryLimit {
-    fn default() -> Self {
-        Self::Percentage(0.90)
-    }
-}
-
 impl Config {
     /// Create a new configuration.
     pub fn new(
@@ -85,7 +79,7 @@ impl Config {
         listen_addresses: Vec<String>,
         external_addresses: Vec<String>,
         boot_nodes: Vec<RoutingNode>,
-        memory_limit: MemoryLimit
+        memory_limit: Option<MemoryLimit>
     ) -> Self {
         Self {
             boot_nodes,

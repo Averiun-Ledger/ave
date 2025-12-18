@@ -59,7 +59,7 @@ impl Behaviour {
         config: Config,
         token: CancellationToken,
         limits: LimitsConfig,
-        memory_limit: MemoryLimit
+        memory_limit: Option<MemoryLimit>
     ) -> Self {
         let stream_tell = StreamProtocol::new(TELL_PROTOCOL);
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
@@ -114,16 +114,15 @@ impl Behaviour {
             .with_max_pending_outgoing(limits.conn_limmits_max_pending_outgoing)
             .with_max_established_per_peer(limits.conn_limmits_max_established_per_peer);
 
-        #[cfg(feature = "test")]
-        let mem_limits = Toggle::from(None);
-        #[cfg(not(feature = "test"))]
-        let mem_limits = match memory_limit {
-            MemoryLimit::Percentage(percentage) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_percentage(percentage))),
-            MemoryLimit::Bytes(bytes) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_bytes(bytes))),
+        let mem_limits = if let Some(memory_limit) = memory_limit {
+            match memory_limit {
+                MemoryLimit::Percentage(percentage) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_percentage(percentage))),
+                MemoryLimit::Bytes(bytes) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_bytes(bytes))),
+            }
+        } else {
+            Toggle::from(None)
         };
-
         
-
         Self {
             control_list: control_list::Behaviour::new(
                 config.control_list,
@@ -700,7 +699,7 @@ mod tests {
             config,
             CancellationToken::new(),
             limits,
-            MemoryLimit::default()
+            None
         );
         Swarm::new(
             transport,

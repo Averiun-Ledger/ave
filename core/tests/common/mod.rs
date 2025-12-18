@@ -70,7 +70,7 @@ pub async fn create_node(
         vec![listen_address.to_owned()],
         vec![],
         peers,
-        MemoryLimit::default()
+        None
     );
 
     let contract_dir =

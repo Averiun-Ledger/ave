@@ -527,8 +527,8 @@ http:
             Duration::from_secs(42)
         );
         match &node.network.memory_limit {
-            network::MemoryLimit::Bytes(bytes) => assert_eq!(*bytes, 1073741824),
-            _ => panic!("Expected Bytes variant for memory_limit"),
+            Some(network::MemoryLimit::Bytes(bytes)) => assert_eq!(*bytes, 1073741824),
+            _ => panic!("Expected Some(Bytes) variant for memory_limit"),
         }
 
         let logging = &config.logging;
@@ -632,9 +632,6 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
-        match &config.node.network.memory_limit {
-            network::MemoryLimit::Percentage(p) => assert_eq!(*p, 0.90),
-            _ => panic!("Expected Percentage variant for default memory_limit"),
-        }
+        assert!(config.node.network.memory_limit.is_none());
     }
 }

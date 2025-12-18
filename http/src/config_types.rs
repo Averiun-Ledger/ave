@@ -211,7 +211,7 @@ pub struct NetworkConfigHttp {
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
 
-    pub memory_limit: MemoryLimitHttp
+    pub memory_limit: Option<MemoryLimitHttp>
 
 }
 
@@ -228,7 +228,7 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .collect(),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
-            memory_limit: MemoryLimitHttp::from(value.memory_limit),
+            memory_limit: value.memory_limit.map(|x| MemoryLimitHttp::from(x)),
         }
     }
 }
