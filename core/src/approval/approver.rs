@@ -1,19 +1,14 @@
 use std::{collections::VecDeque, fmt::Display, time::Duration};
 
 use crate::{
-    ActorMessage, EventRequest, NetworkMessage,
-    db::Storable,
-    governance::Governance,
-    intermediary::Intermediary,
-    model::{
+    ActorMessage, EventRequest, NetworkMessage, db::Storable, governance::data::GovernanceData, intermediary::Intermediary, model::{
         SignTypesNode,
         common::{
             UpdateData, emit_fail, get_metadata, get_sign,
             update_ledger_network,
         },
         network::{RetryNetwork, TimeOutResponse},
-    },
-    subject::Subject,
+    }, subject::Subject
 };
 use async_trait::async_trait;
 use ave_actors::{
@@ -153,7 +148,7 @@ impl Approver {
     ) -> Result<(), ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match Governance::try_from(metadata.properties.clone())
+        let governance = match GovernanceData::try_from(metadata.properties.clone())
         {
             Ok(gov) => gov,
             Err(e) => {

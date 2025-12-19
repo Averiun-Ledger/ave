@@ -39,7 +39,7 @@ sqlite = ["core/sqlite"]
 ext-sqlite = ["core/ext-sqlite"]
 prometheus = ["axum"]
 openapi = ["ave-common/openapi"]
-test = ["network/test"]
+test = ["network/test", "core/test"]
 
 [lib]
 bench = false

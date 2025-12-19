@@ -950,7 +950,7 @@ impl Subscriber<SinkDataEvent> for SqliteLocal {
         let governance_id = metadata.governance_id.to_string();
         let genesis_gov_version = metadata.genesis_gov_version;
         let namespace = metadata.namespace.to_string();
-        let schema_id = metadata.schema_id;
+        let schema_id = metadata.schema_id.to_string();
         let owner = metadata.owner.to_string();
         let creator = metadata.creator.to_string();
         let active = metadata.active as i32;

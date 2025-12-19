@@ -14,8 +14,7 @@ use ave_common::{
 use core::{
     error::Error,
     model::request::{
-        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
-        RejectRequest, TransferRequest,
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest, SchemaType, TransferRequest
     },
 };
 
@@ -66,7 +65,9 @@ pub fn bridge_to_create_request(
         .map_err(|_| {
             Error::Bridge("Invalid governance identifier".to_string())
         })?,
-        schema_id: request.schema_id,
+        schema_id: SchemaType::from_str(&request.schema_id).map_err(|e| {
+            Error::Bridge(e)
+        })?,
         namespace: Namespace::from(request.namespace.unwrap_or_default()),
     })
 }
@@ -150,7 +151,7 @@ pub fn core_subj_to_common(
 ) -> RegisterDataSubj {
     RegisterDataSubj {
         subject_id: subj.subject_id,
-        schema_id: subj.schema_id,
+        schema_id: subj.schema_id.to_string(),
         active: subj.active,
         name: subj.name,
         description: subj.description,

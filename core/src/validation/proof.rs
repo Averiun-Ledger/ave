@@ -2,7 +2,7 @@ use super::ValidationInfo;
 
 use crate::{
     Error,
-    model::{Namespace, request::EventRequest},
+    model::{Namespace, request::{EventRequest, SchemaType}},
 };
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
@@ -68,7 +68,7 @@ pub struct ValidationProof {
     /// The identifier of the subject being validated.
     pub subject_id: DigestIdentifier,
     /// The identifier of the schema used to validate the subject.
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     /// The namespace of the subject being validated.
     pub namespace: Namespace,
     /// The identifier of the governance contract associated with the subject being validated.
@@ -92,7 +92,7 @@ pub struct ValidationProof {
 impl ValidationProof {
     pub fn error_create(&self) -> bool {
         let first_check = self.subject_id.is_empty()
-            || self.schema_id.is_empty()
+            || !self.schema_id.is_valid()
             || self.sn != 0
             || !self.prev_event_hash.is_empty()
             || self.event_hash.is_empty()
@@ -111,7 +111,7 @@ impl ValidationProof {
     pub fn error_not_create(&self, previous_proof: &Self) -> bool {
         let first_check = self.subject_id.is_empty()
             || previous_proof.subject_id != self.subject_id
-            || self.schema_id.is_empty()
+            || !self.schema_id.is_valid()
             || previous_proof.schema_id != self.schema_id
             || previous_proof.namespace != self.namespace
             || previous_proof.governance_id != self.governance_id
@@ -148,7 +148,7 @@ impl Default for ValidationProof {
             governance_version: 0,
             subject_id: DigestIdentifier::default(),
             sn: 0,
-            schema_id: "subject_id".to_string(),
+            schema_id: SchemaType::Type("subject_id".to_string()),
             namespace: Namespace::default(),
             prev_event_hash: DigestIdentifier::default(),
             event_hash: DigestIdentifier::default(),

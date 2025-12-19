@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::{model::common::emit_fail, subject::Metadata};
+use crate::{model::{common::emit_fail, request::SchemaType}, subject::Metadata};
 const TARGET_SINKDATA: &str = "Ave-Subject-Sinkdata";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,14 +24,14 @@ pub enum SinkDataMessage {
         governance_id: Option<String>,
         subject_id: String,
         owner: String,
-        schema_id: String,
+        schema_id: SchemaType,
         namespace: String,
         sn: u64,
     },
     Fact {
         governance_id: Option<String>,
         subject_id: String,
-        schema_id: String,
+        schema_id: SchemaType,
         issuer: String,
         owner: String,
         payload: Value,
@@ -40,7 +40,7 @@ pub enum SinkDataMessage {
     Transfer {
         governance_id: Option<String>,
         subject_id: String,
-        schema_id: String,
+        schema_id: SchemaType,
         owner: String,
         new_owner: String,
         sn: u64,
@@ -48,19 +48,19 @@ pub enum SinkDataMessage {
     Confirm {
         governance_id: Option<String>,
         subject_id: String,
-        schema_id: String,
+        schema_id: SchemaType,
         sn: u64,
     },
     Reject {
         governance_id: Option<String>,
         subject_id: String,
-        schema_id: String,
+        schema_id: SchemaType,
         sn: u64,
     },
     EOL {
         governance_id: Option<String>,
         subject_id: String,
-        schema_id: String,
+        schema_id: SchemaType,
         sn: u64,
     },
 }
@@ -128,7 +128,7 @@ impl SinkDataMessage {
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
             SinkDataMessage::UpdateState(metadata) => {
-                (metadata.subject_id.to_string(), metadata.schema_id.clone())
+                (metadata.subject_id.to_string(), metadata.schema_id.to_string())
             }
             SinkDataMessage::Create {
                 subject_id,
@@ -159,7 +159,7 @@ impl SinkDataMessage {
                 subject_id,
                 schema_id,
                 ..
-            } => (subject_id.clone(), schema_id.clone()),
+            } => (subject_id.clone(), schema_id.to_string()),
         }
     }
 }

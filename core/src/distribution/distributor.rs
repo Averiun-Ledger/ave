@@ -14,8 +14,7 @@ use crate::{
     NodeMessage, NodeResponse, Subject, SubjectMessage, SubjectResponse,
     auth::WitnessesAuth,
     governance::{
-        Governance,
-        model::{CreatorQuantity, HashThisRole, RoleTypes},
+        data::GovernanceData, model::{CreatorQuantity, HashThisRole, RoleTypes}
     },
     intermediary::Intermediary,
     model::{
@@ -25,7 +24,7 @@ use crate::{
             subject_old_owner, try_to_update, update_last_state,
         },
         event::{Ledger, ProtocolsSignatures},
-        network::RetryNetwork,
+        network::RetryNetwork, request::SchemaType,
     },
     subject::{LastStateData, SignedLedger},
     update::TransferResponse,
@@ -40,7 +39,7 @@ use super::{Distribution, DistributionMessage};
 
 pub struct AuthGovData {
     pub gov_version: Option<u64>,
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub namespace: Namespace,
     pub governance_id: DigestIdentifier,
 }
@@ -57,7 +56,7 @@ impl Distributor {
         subject_id: &str,
         owner: &str,
         new_owner: Option<String>,
-        schema_id: &str,
+        schema_id: SchemaType,
     ) -> Result<(), ActorError> {
         let up = Self::is_up_subject(
             &self.node.to_string(),
@@ -85,7 +84,7 @@ impl Distributor {
         our_key: &str,
         owner: &str,
         new_owner: Option<String>,
-        schema_id: &str,
+        schema_id: SchemaType,
     ) -> bool {
         let i_new_owner = if let Some(new_owner) = new_owner.clone() {
             our_key == new_owner
@@ -93,7 +92,8 @@ impl Distributor {
             false
         };
 
-        our_key == owner || i_new_owner || schema_id == "governance"
+        println!("{}", schema_id);
+        our_key == owner || i_new_owner || schema_id.is_gov()
     }
 
     async fn update_ledger(
@@ -131,13 +131,13 @@ impl Distributor {
     ) -> Result<(), ActorError> {
         if let EventRequest::Create(request) =
             ledger.content.event_request.content.clone()
-            && request.schema_id != "governance"
+            && !request.schema_id.is_gov()
         {
             let gov = get_gov(ctx, &request.governance_id.to_string()).await?;
 
             if let Some(max_quantity) = gov.max_creations(
                 &ledger.signature.signer,
-                &request.schema_id,
+                request.schema_id.clone(),
                 request.namespace.clone(),
             ) {
                 let quantity = get_quantity(
@@ -264,7 +264,7 @@ impl Distributor {
             self.authorized_subj(ctx, &subject_id.to_string()).await?;
 
         // si es gov
-        if auth_data.schema_id == "governance" {
+        if auth_data.schema_id.is_gov() {
             // No está auth
             if !auth {
                 Err(ActorError::Functional(
@@ -377,11 +377,11 @@ impl Distributor {
 
     async fn cmp_govs(
         ctx: &mut ActorContext<Distributor>,
-        gov: Governance,
+        gov: GovernanceData,
         gov_version: u64,
         governance_id: DigestIdentifier,
         info: ComunicateInfo,
-        schema_id: &str,
+        schema_id: &SchemaType,
     ) -> Result<(), ActorError> {
         let governance_id_string = governance_id.to_string();
 
@@ -428,7 +428,7 @@ impl Distributor {
             std::cmp::Ordering::Greater => {
                 // Su version es menor. Traslado la solicitud de actualización
                 // a mi distributor gov.
-                if schema_id != "governance" {
+                if !schema_id.is_gov() {
                     let new_info = ComunicateInfo {
                         receiver: info.receiver,
                         sender: info.sender,
@@ -538,7 +538,7 @@ impl Distributor {
             return Ok(());
         }
 
-        let has_this_role = if schema_id == "governance" {
+        let has_this_role = if schema_id.is_gov() {
             HashThisRole::Gov {
                 who: info.sender.clone(),
                 role: RoleTypes::Witness,
@@ -646,7 +646,7 @@ pub enum DistributorMessage {
         events: Vec<SignedLedger>,
         last_state: Option<LastStateData>,
         namespace: Namespace,
-        schema_id: String,
+        schema_id: SchemaType,
         governance_id: DigestIdentifier,
         info: ComunicateInfo,
     },
@@ -832,7 +832,7 @@ impl Handler<Distributor> for Distributor {
                     subject_data.owner == sender
                 };
 
-                let has_this_role = if subject_data.schema_id == "governance" {
+                let has_this_role = if subject_data.schema_id.is_gov() {
                     HashThisRole::Gov {
                         who: info.sender.clone(),
                         role: RoleTypes::Witness,
@@ -1049,6 +1049,11 @@ impl Handler<Distributor> for Distributor {
 
                 let target = RetryNetwork::default();
 
+                #[cfg(feature = "test")]
+                let strategy = Strategy::FixedInterval(
+                    FixedIntervalStrategy::new(2, Duration::from_secs(2)),
+                );
+                #[cfg(not(feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(2, Duration::from_secs(5)),
                 );
@@ -1242,7 +1247,7 @@ impl Handler<Distributor> for Distributor {
                         &self.node.to_string(),
                         &old_owner,
                         old_new_owner,
-                        &schema_id,
+                        schema_id.clone(),
                     ) && let Err(e) =
                         Self::up_subject(ctx, subject_id, false).await
                     {
@@ -1329,7 +1334,7 @@ impl Handler<Distributor> for Distributor {
                                 if let Err(e) = self
                                     .down_subject(
                                         ctx, subject_id, &owner, new_owner,
-                                        &schema_id,
+                                        schema_id,
                                     )
                                     .await
                                 {
@@ -1443,7 +1448,7 @@ impl Handler<Distributor> for Distributor {
 
                 if let Err(e) = self
                     .down_subject(
-                        ctx, subject_id, &owner, new_owner, &schema_id,
+                        ctx, subject_id, &owner, new_owner, schema_id,
                     )
                     .await
                 {
@@ -1567,7 +1572,7 @@ impl Handler<Distributor> for Distributor {
                         &self.node.to_string(),
                         &old_owner,
                         old_new_owner.clone(),
-                        &schema_id,
+                        schema_id.clone(),
                     ) && let Err(e) =
                         Self::up_subject(ctx, subject_id, false).await
                     {
@@ -1743,7 +1748,7 @@ impl Handler<Distributor> for Distributor {
                 // Bajar al sujeto.
                 if let Err(e) = self
                     .down_subject(
-                        ctx, subject_id, &owner, new_owner, &schema_id,
+                        ctx, subject_id, &owner, new_owner, schema_id,
                     )
                     .await
                 {

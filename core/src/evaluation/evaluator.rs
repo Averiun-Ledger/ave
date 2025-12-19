@@ -1,20 +1,14 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    Error, EventRequest, Subject,
-    evaluation::response::Response as EvalRes,
-    governance::{Governance, Schema},
-    helpers::network::{NetworkMessage, intermediary::Intermediary},
-    model::{
+    Error, EventRequest, Subject, evaluation::response::Response as EvalRes, governance::{data::GovernanceData, model::Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
         SignTypesNode,
         common::{
             UpdateData, emit_fail, get_metadata, get_sign,
             update_ledger_network,
         },
-        network::{RetryNetwork, TimeOutResponse},
-    },
-    subject::{SubjectMessage, SubjectResponse},
-    system::ConfigHelper,
+        network::{RetryNetwork, TimeOutResponse}, request::SchemaType,
+    }, subject::{SubjectMessage, SubjectResponse}, system::ConfigHelper
 };
 
 use crate::helpers::network::ActorMessage;
@@ -146,7 +140,7 @@ impl Evaluator {
     ) -> Result<bool, ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match Governance::try_from(metadata.properties.clone())
+        let governance = match GovernanceData::try_from(metadata.properties.clone())
         {
             Ok(gov) => gov,
             Err(e) => {
@@ -281,7 +275,7 @@ impl Evaluator {
             .await?;
 
         if is_governance && !response.compilations.is_empty() {
-            let governance_data = serde_json::from_value::<Governance>(
+            let governance_data = serde_json::from_value::<GovernanceData>(
                 response.result.final_state.0.clone(),
             )
             .map_err(|e| {
@@ -442,7 +436,7 @@ pub enum EvaluatorMessage {
     },
     NetworkEvaluation {
         evaluation_req: Signed<EvaluationReq>,
-        schema_id: String,
+        schema_id: SchemaType,
         node_key: PublicKey,
         our_key: PublicKey,
     },
@@ -453,7 +447,7 @@ pub enum EvaluatorMessage {
     },
     NetworkRequest {
         evaluation_req: Signed<EvaluationReq>,
-        schema_id: String,
+        schema_id: SchemaType,
         info: ComunicateInfo,
     },
 }
@@ -483,7 +477,7 @@ impl Handler<Evaluator> for Evaluator {
                 our_key,
             } => {
                 let is_governance =
-                    evaluation_req.context.schema_id == "governance";
+                    evaluation_req.context.schema_id.is_gov();
 
                 // Get governance id
                 let governance_id = if is_governance {
@@ -580,7 +574,7 @@ impl Handler<Evaluator> for Evaluator {
                 node_key,
                 our_key,
             } => {
-                let receiver_actor = if schema_id == "governance" {
+                let receiver_actor = if schema_id.is_gov() {
                     format!(
                         "/user/node/{}/evaluator",
                         evaluation_req.content.context.subject_id
@@ -610,6 +604,11 @@ impl Handler<Evaluator> for Evaluator {
                 let target = RetryNetwork::default();
 
                 // TODO, la evaluación, si hay compilación podría tardar más
+                #[cfg(feature = "test")]
+                let strategy = Strategy::FixedInterval(
+                    FixedIntervalStrategy::new(1, Duration::from_secs(10)),
+                );
+                #[cfg(not(feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(3, Duration::from_secs(15)),
                 );
@@ -769,7 +768,7 @@ impl Handler<Evaluator> for Evaluator {
                 };
 
                 let is_governance =
-                    evaluation_req.content.context.schema_id == "governance";
+                    evaluation_req.content.context.schema_id.is_gov();
 
                 let reboot = match self
                     .check_governance(
@@ -892,7 +891,7 @@ impl Handler<Evaluator> for Evaluator {
                     return Err(emit_fail(ctx, e).await);
                 };
 
-                if schema_id != "governance" {
+                if !schema_id.is_gov() {
                     ctx.stop(None).await;
                 }
             }

@@ -2,7 +2,7 @@ use ave_common::{ValueWrapper, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::model::Namespace;
+use crate::model::{Namespace, request::SchemaType};
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
@@ -38,7 +38,7 @@ pub enum EvaluateType {
         new_owner: PublicKey,
         old_owner: PublicKey,
         namespace: Namespace,
-        schema_id: String,
+        schema_id: SchemaType,
     },
     GovConfirm {
         new_owner: PublicKey,

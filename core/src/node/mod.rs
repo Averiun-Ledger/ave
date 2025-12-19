@@ -12,16 +12,7 @@ use tracing::{error, warn};
 use transfer::TransferRegister;
 
 use crate::{
-    Error, EventRequest, Subject, SubjectMessage, SubjectResponse,
-    auth::{Auth, AuthMessage, AuthResponse},
-    db::Storable,
-    distribution::distributor::Distributor,
-    governance::Governance,
-    helpers::db::ExternalDB,
-    manual_distribution::ManualDistribution,
-    model::{Namespace, SignTypesNode, event::LedgerValue},
-    subject::{CreateSubjectData, SignedLedger},
-    system::ConfigHelper,
+    Error, EventRequest, Subject, SubjectMessage, SubjectResponse, auth::{Auth, AuthMessage, AuthResponse}, db::Storable, distribution::distributor::Distributor, governance::data::GovernanceData, helpers::db::ExternalDB, manual_distribution::ManualDistribution, model::{Namespace, SignTypesNode, event::LedgerValue, request::SchemaType}, subject::{CreateSubjectData, SignedLedger}, system::ConfigHelper
 };
 
 use ave_common::identity::{
@@ -69,7 +60,7 @@ pub struct SubjectData {
     pub owner: String,
     pub governance_id: Option<String>,
     pub sn: u64,
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub namespace: Namespace,
 }
 
@@ -667,8 +658,8 @@ impl Handler<Node> for Node {
                 let subject = if let EventRequest::Create(create_event) =
                     ledger.content.event_request.content.clone()
                 {
-                    let properties = if create_event.schema_id == "governance" {
-                        let gov = Governance::new(
+                    let properties = if create_event.schema_id.is_gov() {
+                        let gov = GovernanceData::new(
                             ledger
                                 .content
                                 .event_request

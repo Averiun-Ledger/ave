@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    CreateRequest, Error, EventRequestType, Governance, Node,
+    CreateRequest, Error, EventRequestType, Node,
     approval::{
         Approval,
         approver::{Approver, InitApprover, VotationType},
@@ -16,10 +16,7 @@ use crate::{
         evaluator::Evaluator,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
     },
-    governance::{
-        Schema,
-        model::{CreatorQuantity, HashThisRole, ProtocolTypes, RoleTypes},
-    },
+    governance::{data::GovernanceData, model::{CreatorQuantity, HashThisRole, ProtocolTypes, RoleTypes, Schema}},
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
         Namespace,
@@ -28,7 +25,7 @@ use crate::{
             register_relation, try_to_update, verify_protocols_state,
         },
         event::{Event as AveEvent, Ledger, LedgerValue, ProtocolsSignatures},
-        request::EventRequest,
+        request::{EventRequest, SchemaType},
     },
     node::{
         NodeMessage, TransferSubject,
@@ -123,7 +120,7 @@ pub struct Metadata {
     pub genesis_gov_version: u64,
     pub last_event_hash: DigestIdentifier,
     /// The identifier of the schema_id used to validate the event.
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     /// The namespace of the subject.
     pub namespace: Namespace,
     /// The current sequence number of the subject.
@@ -163,7 +160,7 @@ pub struct Subject {
     /// The namespace of the subject.
     pub namespace: Namespace,
     /// The identifier of the schema_id used to validate the subject.
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     /// The identifier of the public key of the subject owner.
     pub owner: PublicKey,
     /// The identifier of the public key of the new subject owner.
@@ -355,7 +352,7 @@ impl Subject {
         ext_db: ExternalDB,
     ) -> Result<(), ActorError> {
         // If subject is a governance
-        let gov = Governance::try_from(self.properties.clone())
+        let gov = GovernanceData::try_from(self.properties.clone())
             .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
 
         let owner = our_key == self.owner;
@@ -431,7 +428,7 @@ impl Subject {
 
     async fn up_not_owner(
         ctx: &mut ActorContext<Subject>,
-        gov: Governance,
+        gov: GovernanceData,
         our_key: PublicKey,
         ext_db: ExternalDB,
         subject_id: DigestIdentifier,
@@ -488,8 +485,8 @@ impl Subject {
 
     async fn up_down_not_owner(
         ctx: &mut ActorContext<Subject>,
-        new_gov: Governance,
-        old_gov: Governance,
+        new_gov: GovernanceData,
+        old_gov: GovernanceData,
         our_key: PublicKey,
         ext_db: ExternalDB,
         subject_id: DigestIdentifier,
@@ -609,7 +606,7 @@ impl Subject {
 
     async fn down_not_owner(
         ctx: &mut ActorContext<Subject>,
-        gov: Governance,
+        gov: GovernanceData,
         our_key: PublicKey,
     ) -> Result<(), ActorError> {
         if gov.has_this_role(HashThisRole::Gov {
@@ -914,7 +911,7 @@ impl Subject {
     async fn get_governance_from_other_subject(
         &self,
         ctx: &mut ActorContext<Subject>,
-    ) -> Result<Governance, ActorError> {
+    ) -> Result<GovernanceData, ActorError> {
         let governance_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
 
@@ -1030,7 +1027,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_last_state(
+    async fn verify_new_ledger_event(
         &self,
         last_ledger: &Signed<Ledger>,
         new_ledger: &Signed<Ledger>,
@@ -1252,7 +1249,7 @@ impl Subject {
         Ok(valid_new_event)
     }
 
-    async fn verify_first_last_state(
+    async fn verify_first_ledger_event(
         &self,
         event: &SignedLedger,
     ) -> Result<(), Error> {
@@ -1271,7 +1268,7 @@ impl Subject {
                 return Err(Error::Subject("The subject description must be less than 200 characters or not be empty.".to_owned()));
             }
 
-            if event_req.schema_id == "governance"
+            if event_req.schema_id.is_gov()
                 && (!event_req.governance_id.is_empty()
                     || !event_req.namespace.is_empty()
                         && event.content.gov_version != 0)
@@ -1279,7 +1276,7 @@ impl Subject {
                 return Err(Error::Subject("In create event, governance_id must be empty, namespace must be empty and gov version must be 0".to_owned()));
             }
 
-            event_req.schema_id == "governance"
+            event_req.schema_id.is_gov()
         } else {
             return Err(Error::Subject(
                 "First event is not a create event".to_owned(),
@@ -1443,7 +1440,7 @@ impl Subject {
         Self::publish_sink(ctx, event_to_sink).await
     }
 
-    async fn verify_new_last_states_gov(
+    async fn verify_new_ledger_events_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1457,7 +1454,7 @@ impl Subject {
             let Some(first) = iter.next() else {
                 return Ok(());
             };
-            if let Err(e) = self.verify_first_last_state(&first).await {
+            if let Err(e) = self.verify_first_ledger_event(&first).await {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
@@ -1465,12 +1462,19 @@ impl Subject {
             self.on_event(first.clone(), ctx).await;
             self.register(ctx, true).await?;
 
+            self.event_to_sink(
+                    ctx,
+                    &first.content.event_request.content,
+                    &first.content.event_request.signature.signer.to_string(),
+                )
+                .await?;
+
             first
         };
 
         for event in iter {
             let last_event_is_ok = match self
-                .verify_new_last_state(&last_ledger, &event)
+                .verify_new_ledger_event(&last_ledger, &event)
                 .await
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
@@ -1598,7 +1602,7 @@ impl Subject {
         &self,
         ctx: &mut ActorContext<Subject>,
     ) -> Result<(), ActorError> {
-        if self.schema_id != "governance" {
+        if !self.schema_id.is_gov() {
             delete_relation(
                 ctx,
                 self.governance_id.to_string(),
@@ -1619,7 +1623,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_last_states_not_gov(
+    async fn verify_new_ledger_events_not_gov(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1635,7 +1639,7 @@ impl Subject {
 
         let Some(max_quantity) = gov.max_creations(
             &first.signature.signer,
-            &self.schema_id,
+            self.schema_id.clone(),
             self.namespace.clone(),
         ) else {
             return Err(ActorError::Functional(
@@ -1657,13 +1661,20 @@ impl Subject {
             )
             .await?;
 
-            if let Err(e) = self.verify_first_last_state(&first).await {
+            if let Err(e) = self.verify_first_ledger_event(&first).await {
                 self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
 
             self.on_event(first.clone(), ctx).await;
             self.register(ctx, true).await?;
+
+            self.event_to_sink(
+                    ctx,
+                    &first.content.event_request.content,
+                    &first.content.event_request.signature.signer.to_string(),
+                )
+                .await?;
 
             first
         };
@@ -1672,7 +1683,7 @@ impl Subject {
 
         for event in pending {
             let last_event_is_ok = match self
-                .verify_new_last_state(&last_ledger, &event)
+                .verify_new_ledger_event(&last_ledger, &event)
                 .await
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
@@ -1790,7 +1801,7 @@ impl Subject {
         Ok(())
     }
 
-    async fn verify_new_last_states(
+    async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Subject>,
         events: Vec<SignedLedger>,
@@ -1805,7 +1816,7 @@ impl Subject {
         if self.governance_id.is_empty() {
             let current_properties = self.properties.clone();
 
-            if let Err(e) = self.verify_new_last_states_gov(ctx, events).await
+            if let Err(e) = self.verify_new_ledger_events_gov(ctx, events).await
             {
                 if let ActorError::Functional(error) = e.clone() {
                     warn!(
@@ -1825,7 +1836,7 @@ impl Subject {
             };
 
             if current_sn < self.sn {
-                let old_gov = Governance::try_from(current_properties)
+                let old_gov = GovernanceData::try_from(current_properties)
                     .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
                 if !self.active {
                     if current_owner == our_key {
@@ -1856,7 +1867,7 @@ impl Subject {
                     Self::down_schemas(ctx, old_schemas_eval, old_schemas_val)
                         .await?;
                 } else {
-                    let new_gov = Governance::try_from(self.properties.clone())
+                    let new_gov = GovernanceData::try_from(self.properties.clone())
                         .map_err(|e| {
                             ActorError::FunctionalFail(e.to_string())
                         })?;
@@ -2009,7 +2020,7 @@ impl Subject {
                         if let Some(eval_users) = creators.evaluation {
                             let pos = old_schemas_eval
                                 .iter()
-                                .position(|x| *x == creators.schema_id);
+                                .position(|x| *x == creators.schema_id.to_string());
 
                             if let Some(pos) = pos {
                                 old_schemas_eval.remove(pos);
@@ -2052,7 +2063,7 @@ impl Subject {
                         if let Some(val_user) = creators.validation {
                             let pos = old_schemas_val
                                 .iter()
-                                .position(|x| *x == creators.schema_id);
+                                .position(|x| *x == creators.schema_id.to_string());
                             if let Some(pos) = pos {
                                 old_schemas_val.remove(pos);
                                 let actor: Option<ActorRef<ValidationSchema>> =
@@ -2098,7 +2109,7 @@ impl Subject {
             }
         } else {
             if let Err(e) =
-                self.verify_new_last_states_not_gov(ctx, events).await
+                self.verify_new_ledger_events_not_gov(ctx, events).await
             {
                 if let ActorError::Functional(error) = e.clone() {
                     warn!(
@@ -2395,7 +2406,7 @@ pub enum SubjectResponse {
         ledger: Vec<SignedLedger>,
         last_state: Option<LastStateData>,
     },
-    Governance(Box<Governance>),
+    Governance(Box<GovernanceData>),
     Owner(PublicKey),
     NewCompilers(Vec<String>),
     Ok,
@@ -2584,7 +2595,7 @@ impl Handler<Subject> for Subject {
                 Ok(SubjectResponse::Metadata(Box::new(self.get_metadata())))
             }
             SubjectMessage::UpdateLedger { events } => {
-                if let Err(e) = self.verify_new_last_states(ctx, events).await
+                if let Err(e) = self.verify_new_ledger_events(ctx, events).await
                 {
                     warn!(
                         TARGET_SUBJECT,
@@ -2601,7 +2612,7 @@ impl Handler<Subject> for Subject {
             SubjectMessage::GetGovernance => {
                 // If is a governance
                 if self.governance_id.is_empty() {
-                    match Governance::try_from(self.properties.clone()) {
+                    match GovernanceData::try_from(self.properties.clone()) {
                         Ok(gov) => {
                             return Ok(SubjectResponse::Governance(Box::new(
                                 gov,
@@ -2712,8 +2723,8 @@ impl PersistentActor for Subject {
                         ActorError::Functional(error)
                     })?;
 
-                    let properties = if create_event.schema_id == "governance" {
-                        let gov = Governance::new(
+                    let properties = if create_event.schema_id.is_gov() {
+                        let gov = GovernanceData::new(
                             event
                                 .content
                                 .event_request
@@ -2779,7 +2790,7 @@ impl PersistentActor for Subject {
             }
 
             if self.governance_id.is_empty() {
-                let mut gov = match Governance::try_from(
+                let mut gov = match GovernanceData::try_from(
                     self.properties.clone(),
                 ) {
                     Ok(gov) => gov,
@@ -2842,7 +2853,7 @@ mod tests {
         }, node::NodeResponse, subject::laststate::{LastStateMessage, LastStateResponse}, system::tests::create_system, validation::proof::EventProof
     };
 
-    async fn create_subject_and_last_state(
+    async fn create_subject_and_ledger_event(
         system: SystemRef,
         node_keys: KeyPair,
     ) -> (ActorRef<Subject>, Signed<Ledger>) {
@@ -2854,7 +2865,7 @@ mod tests {
         let event = AveEvent::from_create_request(
             &request,
             0,
-            &Governance::new(node_keys.public_key())
+            &GovernanceData::new(node_keys.public_key())
                 .to_value_wrapper()
                 .unwrap(),
         )
@@ -2903,7 +2914,7 @@ mod tests {
 
         let empty_proof = ValidationProof {
             subject_id: DigestIdentifier::default(),
-            schema_id: String::default(),
+            schema_id: SchemaType::default(),
             namespace: Namespace::new(),
             governance_id: DigestIdentifier::default(),
             genesis_governance_version: 0,
@@ -3059,7 +3070,7 @@ mod tests {
     fn test_serialize_deserialize() {
         let node_keys = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 
-        let value = Governance::new(node_keys.public_key())
+        let value = GovernanceData::new(node_keys.public_key())
             .to_value_wrapper()
             .unwrap();
 
@@ -3076,7 +3087,7 @@ mod tests {
 
         let subject_a = Subject::from_event(
             &signed_ledger,
-            Governance::new(signed_ledger.signature.signer.clone())
+            GovernanceData::new(signed_ledger.signature.signer.clone())
                 .to_value_wrapper()
                 .unwrap(),
         )
@@ -3093,7 +3104,7 @@ mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
         let (subject_actor, _signed_ledger) =
-            create_subject_and_last_state(system, node_keys.clone()).await;
+            create_subject_and_ledger_event(system, node_keys.clone()).await;
 
         let response = subject_actor
             .ask(SubjectMessage::GetLedger { last_sn: 0 })
@@ -3127,7 +3138,7 @@ mod tests {
         let (system, ..) = create_system().await;
 
         let (subject_actor, signed_ledger) =
-            create_subject_and_last_state(system, node_keys.clone()).await;
+            create_subject_and_ledger_event(system, node_keys.clone()).await;
 
         let res = subject_actor
             .ask(SubjectMessage::GetMetadata)

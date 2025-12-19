@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
+use crate::governance::data::GovernanceData;
 use crate::model::common::{get_last_state, update_last_state};
 use crate::subject::SignedLedger;
 use crate::system::ConfigHelper;
@@ -32,7 +33,6 @@ use crate::{
         Evaluation, EvaluationMessage, request::EvaluationReq,
         response::EvalLedgerResponse,
     },
-    governance::Governance,
     intermediary::Intermediary,
     model::{
         SignTypesNode,
@@ -667,7 +667,7 @@ impl RequestManager {
         let witnesses = Self::get_witnesses(ctx, governance_id.clone()).await?;
 
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let gov = match Governance::try_from(metadata.properties.clone()) {
+        let gov = match GovernanceData::try_from(metadata.properties.clone()) {
             Ok(gov) => gov,
             Err(e) => {
                 let e = format!(
@@ -753,7 +753,7 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<LedgerValue, ActorError> {
         if let EventRequest::Create(create_req) = self.request.content.clone() {
-            if create_req.schema_id == "governance" {
+            if create_req.schema_id.is_gov() {
                 Ok(LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
                     "[]".to_owned(),
                 ))))

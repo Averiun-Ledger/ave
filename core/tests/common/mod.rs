@@ -13,8 +13,7 @@ use ave_core::{
     model::{
         Namespace,
         request::{
-            ConfirmRequest, CreateRequest, EventRequest, FactRequest,
-            RejectRequest, TransferRequest,
+            ConfirmRequest, CreateRequest, EventRequest, FactRequest, RejectRequest, SchemaType, TransferRequest
         },
     },
 };
@@ -215,7 +214,7 @@ pub async fn create_and_authorize_governance(
         name: Some("Governance Tests".to_owned()),
         description: Some("A description for Governance Tests".to_owned()),
         governance_id: DigestIdentifier::default(),
-        schema_id: "governance".to_owned(),
+        schema_id: SchemaType::Governance,
         namespace: Namespace::from(namespace),
     });
     let data = owner_node.own_request(request).await.unwrap();
@@ -252,7 +251,7 @@ pub async fn create_subject(
         name: Some("A Subject".to_owned()),
         description: Some("A description for Subject".to_owned()),
         governance_id,
-        schema_id: schema_id.to_owned(),
+        schema_id: SchemaType::Type(schema_id.to_owned()),
         namespace: Namespace::from(namespace),
     });
     let response = node.own_request(request).await?;

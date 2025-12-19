@@ -12,7 +12,7 @@ use tracing::{error, warn};
 
 use crate::{
     auth::WitnessesAuth,
-    model::common::{emit_fail, try_to_update},
+    model::{common::{emit_fail, try_to_update}, request::SchemaType},
 };
 
 use super::{
@@ -42,7 +42,7 @@ pub enum EvaluationSchemaMessage {
     NetworkRequest {
         evaluation_req: Box<Signed<EvaluationReq>>,
         info: ComunicateInfo,
-        schema_id: String,
+        schema_id: SchemaType,
     },
     UpdateEvaluators(HashSet<PublicKey>, u64),
 }

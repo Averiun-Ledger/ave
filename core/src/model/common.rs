@@ -11,16 +11,15 @@ use network::ComunicateInfo;
 use wasmtime::{Caller, Config, Engine, Linker};
 
 use crate::{
-    ActorMessage, Error, Event as AveEvent, EventRequestType, Governance,
+    ActorMessage, Error, Event as AveEvent, EventRequestType,
     NetworkMessage, Node, NodeMessage, NodeResponse, Subject, SubjectMessage,
     SubjectResponse,
     auth::{Auth, AuthMessage, WitnessesAuth},
     governance::{
-        Quorum,
-        model::{CreatorQuantity, ProtocolTypes},
+        data::GovernanceData, model::{CreatorQuantity, ProtocolTypes, Quorum}
     },
     intermediary::Intermediary,
-    model::SignTypesNode,
+    model::{SignTypesNode, request::SchemaType},
     node::{
         SubjectData,
         relationship::{
@@ -167,7 +166,7 @@ pub fn take_random_signers(
 pub async fn get_gov<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &str,
-) -> Result<Governance, ActorError>
+) -> Result<GovernanceData, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -406,7 +405,7 @@ where
 pub async fn get_quantity<A>(
     ctx: &mut ActorContext<A>,
     gov: String,
-    schema_id: String,
+    schema_id: SchemaType,
     owner: String,
     namespace: String,
 ) -> Result<usize, ActorError>
@@ -443,7 +442,7 @@ where
 pub async fn register_relation<A>(
     ctx: &mut ActorContext<A>,
     gov: String,
-    schema_id: String,
+    schema_id: SchemaType,
     owner: String,
     subject: String,
     namespace: String,
@@ -485,7 +484,7 @@ where
 pub async fn delete_relation<A>(
     ctx: &mut ActorContext<A>,
     gov: String,
-    schema_id: String,
+    schema_id: SchemaType,
     owner: String,
     subject: String,
     namespace: String,
@@ -612,7 +611,7 @@ pub fn verify_protocols_state(
 pub async fn get_signers_quorum_gov_version<A>(
     ctx: &mut ActorContext<A>,
     governance: &str,
-    schema_id: &str,
+    schema_id: &SchemaType,
     namespace: Namespace,
     role: ProtocolTypes,
 ) -> Result<(HashSet<PublicKey>, Quorum, u64), ActorError>

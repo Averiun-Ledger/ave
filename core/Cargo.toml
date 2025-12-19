@@ -47,9 +47,11 @@ criterion = { version = "0.8.1", features = ["async_tokio"]}
 tokio = { workspace = true, features = ["full"] }
 futures ={ version = "0.3.31"}
 network = { package = "ave-network", path = "../network", features = ["test"]}
+ave-core = { path = ".", features = ["test"], default-features = false}
 
 [features]
 default = ["sqlite", "ext-sqlite"]
 rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["rusqlite"]
+test = []

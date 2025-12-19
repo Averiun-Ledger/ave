@@ -1,4 +1,4 @@
-use crate::model::{Namespace, request::EventRequest};
+use crate::model::{Namespace, request::{EventRequest, SchemaType}};
 use ave_common::{
     ValueWrapper,
     identity::{DigestIdentifier, PublicKey, Signed},
@@ -49,7 +49,7 @@ pub struct EvaluationReq {
 pub struct SubjectContext {
     pub subject_id: DigestIdentifier,
     pub governance_id: DigestIdentifier,
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub is_owner: bool,
     pub namespace: Namespace,
 }

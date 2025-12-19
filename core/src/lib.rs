@@ -27,7 +27,6 @@ use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, Signed};
 use config::Config as AveBaseConfig;
 use error::Error;
-use governance::Governance;
 use helpers::db::ExternalDB;
 use helpers::db::common::{
     ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
@@ -69,6 +68,11 @@ compile_error!("You must enable 'sqlite' or 'rocksdb'.");
 
 #[cfg(not(feature = "ext-sqlite"))]
 compile_error!("You must enable 'ext-sqlite'.");
+
+#[cfg(all(feature = "test", not(test), not(debug_assertions)))]
+compile_error!(
+    "The 'test' feature should only be used during development/testing."
+);
 
 const TARGET_API: &str = "Ave-Api";
 

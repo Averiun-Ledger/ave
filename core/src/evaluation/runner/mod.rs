@@ -18,12 +18,10 @@ use wasmtime::{Engine, Module, Store};
 use crate::{
     Error,
     governance::{
-        Governance, Schema,
-        events::{
+        data::GovernanceData, events::{
             GovernanceEvent, MemberEvent, PoliciesEvent, RolesEvent,
             SchemasEvent,
-        },
-        model::{HashThisRole, RoleTypes},
+        }, model::{HashThisRole, RoleTypes, Schema}
     },
     model::{
         Namespace,
@@ -31,7 +29,7 @@ use crate::{
             MAX_FUEL, MemoryManager,
             generate_linker,
         },
-        patch::apply_patch,
+        patch::apply_patch, request::SchemaType,
     },
 };
 
@@ -98,7 +96,7 @@ impl Runner {
         new_owner: &PublicKey,
         old_owner: &PublicKey,
         namespace: Namespace,
-        schema_id: &str,
+        schema_id: &SchemaType,
     ) -> Result<(RunnerResult, Vec<String>), Error> {
         if new_owner.is_empty() {
             return Err(Error::Runner(
@@ -112,7 +110,7 @@ impl Runner {
             ));
         }
 
-        let governance = serde_json::from_value::<Governance>(state.0)
+        let governance = serde_json::from_value::<GovernanceData>(state.0)
             .map_err(|e| {
                 Error::Runner(format!("Can deserialice governance patch {}", e))
             })?;
@@ -156,7 +154,7 @@ impl Runner {
             ));
         }
 
-        let governance = serde_json::from_value::<Governance>(state.0)
+        let governance = serde_json::from_value::<GovernanceData>(state.0)
             .map_err(|e| {
                 Error::Runner(format!("Can deserialice governance patch {}", e))
             })?;
@@ -201,7 +199,7 @@ impl Runner {
             ));
         }
 
-        let mut governance = serde_json::from_value::<Governance>(
+        let mut governance = serde_json::from_value::<GovernanceData>(
             state.0.clone(),
         )
         .map_err(|e| {
@@ -267,7 +265,7 @@ impl Runner {
 
         let mod_state = to_value(governance).map_err(|e| {
             Error::Runner(format!(
-                "Can not serialice Governance into Value {}",
+                "Can not serialice GovernanceData into Value {}",
                 e
             ))
         })?;
@@ -276,7 +274,7 @@ impl Runner {
         let json_patch = to_value(patch).map_err(|e| {
             Error::Runner(format!("Can not conver patch to JSON patch: {}", e))
         })?;
-        let patched_state: Governance =
+        let patched_state: GovernanceData =
             apply_patch(json_patch.clone(), state.0.clone()).map_err(|e| {
                 Error::Runner(format!("Can not apply patch {}", e))
             })?;
@@ -401,10 +399,10 @@ impl Runner {
         state: &ValueWrapper,
         event: &ValueWrapper,
     ) -> Result<(RunnerResult, Vec<String>), Error> {
-        let mut governance: Governance =
+        let mut governance: GovernanceData =
             serde_json::from_value(state.0.clone()).map_err(|e| {
                 Error::Runner(format!(
-                    "Can not deserialize Value into Governance: {}",
+                    "Can not deserialize Value into GovernanceData: {}",
                     e
                 ))
             })?;
@@ -463,7 +461,7 @@ impl Runner {
 
         let mod_state = to_value(governance).map_err(|e| {
             Error::Runner(format!(
-                "Can not serialice Governance into Value {}",
+                "Can not serialice GovernanceData into Value {}",
                 e
             ))
         })?;
@@ -473,7 +471,7 @@ impl Runner {
             Error::Runner(format!("Can not conver patch to JSON patch: {}", e))
         })?;
 
-        let patched_state: Governance =
+        let patched_state: GovernanceData =
             apply_patch(json_patch.clone(), state.0.clone()).map_err(|e| {
                 Error::Runner(format!("Can not apply patch {}", e))
             })?;
@@ -496,7 +494,7 @@ impl Runner {
 
     fn check_policies(
         policies_event: PoliciesEvent,
-        governance: &mut Governance,
+        governance: &mut GovernanceData,
     ) -> Result<(), Error> {
         if policies_event.is_empty() {
             return Err(Error::Runner(
@@ -614,7 +612,7 @@ impl Runner {
 
     fn check_roles(
         roles_event: RolesEvent,
-        governance: &mut Governance,
+        governance: &mut GovernanceData,
     ) -> Result<(), Error> {
         if roles_event.is_empty() {
             return Err(Error::Runner(
@@ -684,7 +682,7 @@ impl Runner {
 
     fn check_schemas(
         schema_event: &SchemasEvent,
-        governance: &mut Governance,
+        governance: &mut GovernanceData,
     ) -> Result<AddRemoveChangeSchema, Error> {
         if schema_event.is_empty() {
             return Err(Error::Runner(
@@ -845,7 +843,7 @@ impl Runner {
 
     fn check_members(
         member_event: &MemberEvent,
-        governance: &mut Governance,
+        governance: &mut GovernanceData,
     ) -> Result<ChangeRemoveMembers, Error> {
         if member_event.is_empty() {
             return Err(Error::Runner(

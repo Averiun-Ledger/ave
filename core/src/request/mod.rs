@@ -14,6 +14,8 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{error, info};
 use types::ReqManInitMessage;
 
+use crate::governance::data::GovernanceData;
+use crate::model::request::SchemaType;
 use crate::request::manager::InitRequestManager;
 use crate::subject::CreateSubjectData;
 use crate::system::ConfigHelper;
@@ -21,7 +23,7 @@ use crate::{
     CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
     approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
     db::Storable,
-    governance::{Governance, model::CreatorQuantity},
+    governance::{model::CreatorQuantity},
     helpers::db::ExternalDB,
     model::{
         Namespace,
@@ -87,8 +89,8 @@ impl RequestHandler {
         let subject_id = hash_borsh(&*hash.hasher(), &request)
             .map_err(|e| ActorError::Functional(e.to_string()))?;
 
-        let data = if create_req.schema_id == "governance" {
-            let gov = Governance::new(request.signature.signer.clone());
+        let data = if create_req.schema_id.is_gov() {
+            let gov = GovernanceData::new(request.signature.signer.clone());
             let value = gov
                 .to_value_wrapper()
                 .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
@@ -185,18 +187,18 @@ impl RequestHandler {
         message: &str,
         ctx: &mut ActorContext<RequestHandler>,
         governance_id: &str,
-        schema_id: &str,
+        schema_id: SchemaType,
         namespace: Namespace,
-        gov: Governance,
+        gov: GovernanceData,
     ) -> Result<(), ActorError> {
         if let Some(max_quantity) =
-            gov.max_creations(&self.node_key, schema_id, namespace.clone())
+            gov.max_creations(&self.node_key, schema_id.clone(), namespace.clone())
         {
             if let CreatorQuantity::Quantity(max_quantity) = max_quantity {
                 let quantity = match get_quantity(
                     ctx,
                     governance_id.to_string(),
-                    schema_id.to_owned(),
+                    schema_id.clone(),
                     self.node_key.to_string(),
                     namespace.to_string(),
                 )
@@ -535,7 +537,7 @@ impl Handler<RequestHandler> for RequestHandler {
                             return Err(ActorError::Functional(e.to_owned()));
                         }
 
-                        if create_request.schema_id == "governance" {
+                        if create_request.schema_id.is_gov() {
                             if !create_request.namespace.is_empty() {
                                 let e = "The creation event is for a governance, the namespace must be empty.";
                                 error!(TARGET_REQUEST, "NewRequest, {}", e);
@@ -586,7 +588,7 @@ impl Handler<RequestHandler> for RequestHandler {
                                 "NewRequest",
                                 ctx,
                                 &create_request.governance_id.to_string(),
-                                &create_request.schema_id,
+                                create_request.schema_id.clone(),
                                 create_request.namespace.clone(),
                                 gov,
                             )
@@ -739,7 +741,7 @@ impl Handler<RequestHandler> for RequestHandler {
                                 "NewRequest",
                                 ctx,
                                 &metadata.governance_id.to_string(),
-                                &metadata.schema_id,
+                                metadata.schema_id.clone(),
                                 metadata.namespace.clone(),
                                 gov,
                             )
@@ -936,13 +938,13 @@ impl Handler<RequestHandler> for RequestHandler {
 
                 let (message, command) = match event.content.clone() {
                     EventRequest::Create(create_request) => {
-                        if create_request.schema_id != "governance"
+                        if !create_request.schema_id.is_gov()
                             && let Err(e) = self
                                 .check_creations(
                                     "PopQueue",
                                     ctx,
                                     &metadata.governance_id.to_string(),
-                                    &metadata.schema_id,
+                                    metadata.schema_id,
                                     metadata.namespace.clone(),
                                     gov,
                                 )
@@ -990,7 +992,7 @@ impl Handler<RequestHandler> for RequestHandler {
                                     "PopQueue",
                                     ctx,
                                     &metadata.governance_id.to_string(),
-                                    &metadata.schema_id,
+                                    metadata.schema_id,
                                     metadata.namespace.clone(),
                                     gov,
                                 )

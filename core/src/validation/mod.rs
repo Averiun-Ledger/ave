@@ -9,7 +9,7 @@ pub mod validator;
 
 use crate::{
     auth::WitnessesAuth,
-    governance::{Quorum, model::ProtocolTypes},
+    governance::model::{ProtocolTypes, Quorum},
     model::{
         SignTypesNode,
         common::{
@@ -17,9 +17,11 @@ use crate::{
             send_reboot_to_req, take_random_signers, try_to_update,
         },
         event::{ProofEvent, ProtocolsSignatures},
+        request::SchemaType,
     },
     request::manager::{RequestManager, RequestManagerMessage},
-    subject::Metadata, system::ConfigHelper,
+    subject::Metadata,
+    system::ConfigHelper,
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
@@ -133,8 +135,7 @@ impl Validation {
         Ok(ValidationReq {
             proof: proof.clone(),
             previous_proof: previous_proof.clone(),
-            last_vali_res: last_vali_res
-                .clone(),
+            last_vali_res: last_vali_res.clone(),
         })
     }
 
@@ -142,7 +143,7 @@ impl Validation {
         &self,
         ctx: &mut ActorContext<Validation>,
         validation_req: Signed<ValidationReq>,
-        schema_id: &str,
+        schema_id: &SchemaType,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         // Create Validator child
@@ -289,10 +290,10 @@ impl Handler<Validation> for Validation {
                 last_vali_res,
             } => {
                 let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.hash_algorithm
+                } else {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
@@ -591,7 +592,9 @@ pub mod tests {
     };
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Governance, Node, NodeMessage, NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse, helpers::db::ExternalDB, model::{Namespace, SignTypesNode, event::LedgerValue}, query::Query, request::{
+        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse, governance::data::GovernanceData, helpers::db::ExternalDB, model::{
+            Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
+        }, query::Query, request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
         }, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system
     };
@@ -637,7 +640,7 @@ pub mod tests {
             name: Some("Name".to_string()),
             description: Some("Description".to_string()),
             governance_id: DigestIdentifier::default(),
-            schema_id: "governance".to_owned(),
+            schema_id: SchemaType::Governance,
             namespace: Namespace::new(),
         });
 
@@ -683,7 +686,7 @@ pub mod tests {
             .await
             .unwrap();
 
-        let LastStateResponse::LastState {  event, .. }= last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -732,13 +735,13 @@ pub mod tests {
         assert_eq!(metadata.description.unwrap(), "Description");
         assert_eq!(metadata.governance_id.to_string(), "");
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id, "governance");
+        assert_eq!(metadata.schema_id.to_string(), "governance");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 0);
         assert_eq!(metadata.owner, node_keys.public_key());
         assert!(metadata.active);
 
-        let gov = Governance::try_from(metadata.properties).unwrap();
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 0);
         // TODO MEJORAR
         assert!(!gov.members.is_empty());
@@ -807,7 +810,7 @@ pub mod tests {
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -847,12 +850,12 @@ pub mod tests {
         assert_eq!(metadata.name.unwrap(), "Name");
         assert_eq!(metadata.description.unwrap(), "Description");
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id, "governance");
+        assert_eq!(metadata.schema_id.to_string(), "governance");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 1);
         assert!(!metadata.active);
 
-        let gov = Governance::try_from(metadata.properties).unwrap();
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
         // TODO MEJORAR
         assert!(!gov.members.is_empty());

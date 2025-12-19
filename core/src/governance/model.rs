@@ -11,7 +11,7 @@ use std::{
     hash::Hash,
 };
 
-use crate::model::Namespace;
+use crate::model::{Namespace, request::SchemaType};
 pub type MemberName = String;
 
 /// Governance schema.
@@ -33,12 +33,12 @@ impl NameCreators {
 }
 
 pub struct SchemaKeyCreators {
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub validation: Option<HashSet<PublicKey>>,
     pub evaluation: Option<HashSet<PublicKey>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct RolesGov {
     pub approver: BTreeSet<MemberName>,
     pub evaluator: BTreeSet<MemberName>,
@@ -799,23 +799,23 @@ pub enum WitnessesData {
     Gov,
     Schema {
         creator: PublicKey,
-        schema_id: String,
+        schema_id: SchemaType,
         namespace: Namespace,
     },
 }
 
 impl WitnessesData {
     pub fn build(
-        schema_id: &str,
+        schema_id: SchemaType,
         namespace: Namespace,
         creator: PublicKey,
     ) -> Self {
-        if schema_id == "governance" {
+        if schema_id.is_gov() {
             WitnessesData::Gov
         } else {
             WitnessesData::Schema {
                 creator,
-                schema_id: schema_id.to_owned(),
+                schema_id,
                 namespace,
             }
         }
@@ -830,13 +830,13 @@ pub enum HashThisRole {
     Schema {
         who: PublicKey,
         role: RoleTypes,
-        schema_id: String,
+        schema_id: SchemaType,
         namespace: Namespace,
     },
     SchemaWitness {
         who: PublicKey,
         creator: PublicKey,
-        schema_id: String,
+        schema_id: SchemaType,
         namespace: Namespace,
     },
 }
@@ -912,7 +912,7 @@ impl RoleCreator {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct RoleGovIssuer {
     pub users: BTreeSet<MemberName>,
     pub any: bool,
@@ -1062,7 +1062,7 @@ impl Quorum {
 }
 
 /// Governance policy.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PolicyGov {
     /// Approve quorum
     pub approve: Quorum,

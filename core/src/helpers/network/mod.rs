@@ -7,7 +7,7 @@ use crate::{
     Event as AveEvent,
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
-    model::event::ProtocolsSignatures,
+    model::{event::ProtocolsSignatures, request::SchemaType},
     subject::{LastStateData, SignedLedger},
     update::TransferResponse,
     validation::{
@@ -22,14 +22,14 @@ pub mod service;
 pub enum ActorMessage {
     ValidationReq {
         req: Box<Signed<ValidationReq>>,
-        schema_id: String,
+        schema_id: SchemaType,
     },
     ValidationRes {
         res: Signed<ValidationRes>,
     },
     EvaluationReq {
         req: Signed<EvaluationReq>,
-        schema_id: String,
+        schema_id: SchemaType,
     },
     EvaluationRes {
         res: Signed<EvaluationRes>,
@@ -58,7 +58,7 @@ pub enum ActorMessage {
         ledger: Vec<SignedLedger>,
         last_state: Option<LastStateData>,
         namespace: String,
-        schema_id: String,
+        schema_id: SchemaType,
         governance_id: DigestIdentifier,
     },
     DistributionGetLastSn {

@@ -18,10 +18,10 @@ use super::ActorMessage;
 use super::{NetworkMessage, service::HelperService};
 use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
+use bytes::Bytes;
 use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
-use bytes::Bytes;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::io::Cursor;
@@ -245,7 +245,7 @@ impl Intermediary {
                             message.info.receiver_actor.clone(),
                         );
                         // Validator actor.
-                        if schema_id == "governance" {
+                        if schema_id.is_gov() {
                             let validator_actor: Option<ActorRef<Validator>> =
                                 self.system.get_actor(&validator_path).await;
 
@@ -301,7 +301,7 @@ impl Intermediary {
                             message.info.receiver_actor.clone(),
                         );
 
-                        if schema_id == "governance" {
+                        if schema_id.is_gov() {
                             // Evaluator actor.
                             let evaluator_actor: Option<ActorRef<Evaluator>> =
                                 self.system.get_actor(&evaluator_path).await;

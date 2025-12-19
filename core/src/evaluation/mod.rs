@@ -10,14 +10,14 @@ mod runner;
 pub mod schema;
 
 use crate::{
-    auth::WitnessesAuth, governance::{Governance, Quorum, model::ProtocolTypes}, model::{
+    auth::WitnessesAuth, governance::{data::GovernanceData, model::{ProtocolTypes, Quorum}}, model::{
         SignTypesNode,
         common::{
             emit_fail, get_metadata, get_sign, get_signers_quorum_gov_version,
             send_reboot_to_req, take_random_signers, try_to_update,
         },
         event::{LedgerValue, ProtocolsError, ProtocolsSignatures},
-        request::EventRequest,
+        request::{EventRequest, SchemaType},
     }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata, system::ConfigHelper
 };
 use ave_actors::{
@@ -123,7 +123,7 @@ impl Evaluation {
         &self,
         ctx: &mut ActorContext<Evaluation>,
         evaluation_req: Signed<EvaluationReq>,
-        schema_id: &str,
+        schema_id: &SchemaType,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         // Create Evaluator child
@@ -409,7 +409,7 @@ impl Handler<Evaluation> for Evaluation {
                                 }
                             };
 
-                            let governance = match Governance::try_from(
+                            let governance = match GovernanceData::try_from(
                                 metadata_gov.properties.clone(),
                             ) {
                                 Ok(gov) => gov,
@@ -803,22 +803,14 @@ mod tests {
     use test_log::test;
 
     use crate::{
-        EventRequest, FactRequest, Governance, NodeMessage, NodeResponse,
-        SubjectMessage, SubjectResponse,
-        approval::approver::ApprovalStateRes,
-        model::{
+        EventRequest, FactRequest, NodeMessage, NodeResponse, SubjectMessage, SubjectResponse, approval::approver::ApprovalStateRes, governance::data::GovernanceData, model::{
             Namespace, SignTypesNode, event::LedgerValue,
-            request::TransferRequest,
-        },
-        node::Node,
-        query::{Query, QueryMessage, QueryResponse},
-        request::{
+            request::{SchemaType, TransferRequest},
+        }, node::Node, query::{Query, QueryMessage, QueryResponse}, request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
-        },
-        subject::{
+        }, subject::{
             Subject, laststate::{LastState, LastStateMessage, LastStateResponse},
-        },
-        validation::tests::create_subject_gov,
+        }, validation::tests::create_subject_gov
     };
 
     #[test(tokio::test)]
@@ -968,12 +960,12 @@ mod tests {
         assert_eq!(metadata.name.unwrap(), "Name");
         assert_eq!(metadata.description.unwrap(), "Description");
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id, "governance");
+        assert_eq!(metadata.schema_id.to_string(), "governance");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 1);
         assert!(metadata.active);
 
-        let gov = Governance::try_from(metadata.properties).unwrap();
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
         // TODO MEJORAR
         assert!(!gov.members.is_empty());
@@ -1128,13 +1120,13 @@ mod tests {
         assert_eq!(metadata.genesis_gov_version, 0);
         assert_eq!(metadata.name.unwrap(), "Name");
         assert_eq!(metadata.description.unwrap(), "Description");
-        assert_eq!(metadata.schema_id, "governance");
+        assert_eq!(metadata.schema_id.to_string(), "governance");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 2);
         assert_eq!(metadata.new_owner.unwrap(), new_owner.public_key());
         assert!(metadata.active);
 
-        let gov = Governance::try_from(metadata.properties).unwrap();
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 2);
         // TODO MEJORAR
         assert!(!gov.members.is_empty());
@@ -1363,12 +1355,12 @@ mod tests {
         assert_eq!(metadata.genesis_gov_version, 0);
         assert_eq!(metadata.name.unwrap(), "Name");
         assert_eq!(metadata.description.unwrap(), "Description");
-        assert_eq!(metadata.schema_id, "governance");
+        assert_eq!(metadata.schema_id.to_string(), "governance");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 1);
         assert!(metadata.active);
 
-        let gov = Governance::try_from(metadata.properties).unwrap();
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
         // TODO MEJORAR
         assert!(!gov.members.is_empty());
@@ -1418,7 +1410,7 @@ mod tests {
             name: Some("Subject Name".to_owned()),
             description: Some("Subject Description".to_owned()),
             governance_id: gov_id.clone(),
-            schema_id: "Example".to_owned(),
+            schema_id: SchemaType::Type("Example".to_owned()),
             namespace: Namespace::new(),
         });
 
@@ -1528,7 +1520,7 @@ mod tests {
         assert_eq!(metadata.name.unwrap(), "Subject Name");
         assert_eq!(metadata.description.unwrap(), "Subject Description");
         assert_eq!(metadata.genesis_gov_version, 1);
-        assert_eq!(metadata.schema_id, "Example");
+        assert_eq!(metadata.schema_id.to_string(), "Example");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 0);
         assert!(metadata.active);
@@ -1637,7 +1629,7 @@ mod tests {
         assert_eq!(metadata.genesis_gov_version, 1);
         assert_eq!(metadata.name.unwrap(), "Subject Name");
         assert_eq!(metadata.description.unwrap(), "Subject Description");
-        assert_eq!(metadata.schema_id, "Example");
+        assert_eq!(metadata.schema_id.to_string(), "Example");
         assert_eq!(metadata.namespace, Namespace::new());
         assert_eq!(metadata.sn, 1);
         assert!(metadata.active);

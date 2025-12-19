@@ -339,6 +339,14 @@ print_summary() {
   local duration=$((end_time - START_TIME))
 
   echo
+  print_header "CHECKING TOOLS"
+  echo "${GREEN}✔${RESET} cargo: $(cargo --version)"
+  echo "${GREEN}✔${RESET} cargo-hack: $(cargo hack --version)"
+  echo "${BLUE}ℹ${RESET} sccache: DISABLED (better performance without cache)"
+  echo "${GREEN}✔${RESET} Log directory: ${LOG_DIR}"
+  echo "${BLUE}⚡${RESET} Parallel jobs: ${PARALLEL_JOBS}"
+
+  echo
   print_header "FINAL SUMMARY"
 
   # Statistics

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::{collections::HashSet, hash::Hash};
 use tracing::{error, warn};
 
+use crate::model::request::SchemaType;
 use crate::{db::Storable, model::common::emit_fail};
 
 const TARGET_REGISTER: &str = "Ave-Node-Register";
@@ -19,7 +20,7 @@ const TARGET_REGISTER: &str = "Ave-Node-Register";
 )]
 pub struct RegisterDataSubj {
     pub subject_id: String,
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub active: bool,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -205,7 +206,7 @@ impl Handler<Register> for Register {
                         };
 
                         if let Some(schema_id) = schema_id.clone()
-                            && subject.schema_id != schema_id
+                            && subject.schema_id.to_string() != schema_id
                         {
                             continue;
                         }

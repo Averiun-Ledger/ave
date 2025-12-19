@@ -10,6 +10,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
+use crate::model::request::SchemaType;
 use crate::{
     db::Storable, governance::model::CreatorQuantity, model::common::emit_fail,
 };
@@ -32,7 +33,7 @@ const TARGET_RELATIONSHIP: &str = "Ave-Node-RelationShip";
 pub struct OwnerSchema {
     pub owner: String,
     pub gov: String,
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     pub namespace: String,
 }
 

@@ -1,13 +1,13 @@
 //! # Request data model.
 //!
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Display};
 
 use super::Namespace;
 
 use crate::{
     Error,
-    governance::{Governance, model::SignersType},
+    governance::{data::GovernanceData, model::SignersType},
     subject::Metadata,
 };
 
@@ -17,7 +17,98 @@ use ave_common::{
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub enum SchemaType {
+    #[default]
+    Governance,
+    Type(String),
+}
+
+impl std::str::FromStr for SchemaType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Special case: empty string deserializes to default (empty) digest
+        if s.is_empty() {
+            return Err("Schema_id can not be empty".to_string());
+        }
+
+        match s {
+            "governance" => Ok(SchemaType::Governance),
+            _ => Ok(SchemaType::Type(s.to_string()))
+        }
+
+    }
+}
+
+impl SchemaType {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            SchemaType::Governance => true,
+            SchemaType::Type(schema_id) => {
+                !schema_id.is_empty() && schema_id != "governance"
+            },
+        }
+    }
+}
+
+impl Display for SchemaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SchemaType::Governance => write!(f, "governance"),
+            SchemaType::Type(schema_id) => write!(f, "{}", schema_id),
+        }
+    }
+}
+
+impl SchemaType {
+    pub fn is_gov(&self) -> bool {
+        matches!(self, SchemaType::Governance)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        if s.is_empty() {
+            println!("ERRRORORORORORROR");
+            return Err(serde::de::Error::custom("Schema can not be empty".to_string()))
+        }
+
+        Ok(match s.as_str() {
+            "governance" => SchemaType::Governance,
+            _ => SchemaType::Type(s),
+        })
+    }
+}
+
+impl Serialize for SchemaType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            SchemaType::Governance => serializer.serialize_str("governance"),
+            SchemaType::Type(schema) => serializer.serialize_str(schema),
+        }
+    }
+}
 
 pub enum EventRequestType {
     Create,
@@ -129,7 +220,7 @@ impl EventRequest {
         &self,
         signer: &PublicKey,
         metadata: &Metadata,
-        gov: &Governance,
+        gov: &GovernanceData,
     ) -> bool {
         match self {
             EventRequest::Create(_)
@@ -198,7 +289,7 @@ pub struct CreateRequest {
     /// The identifier of the governance contract.
     pub governance_id: DigestIdentifier,
     /// The identifier of the schema used to validate the event.
-    pub schema_id: String,
+    pub schema_id: SchemaType,
     /// The namespace of the subject.
     pub namespace: Namespace,
 }
@@ -321,7 +412,7 @@ pub mod tests {
             name: None,
             description: None,
             governance_id: DigestIdentifier::default(),
-            schema_id: "governance".to_string(),
+            schema_id: SchemaType::Governance,
             namespace: Namespace::from("namespace"),
         };
         let content = EventRequest::Create(req);

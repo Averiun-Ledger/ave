@@ -2,7 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use crate::{
     Signed,
-    governance::{Governance, model::SignersType},
+    governance::{data::GovernanceData, model::SignersType},
     helpers::network::{NetworkMessage, intermediary::Intermediary},
     model::{
         SignTypesNode,
@@ -11,7 +11,7 @@ use crate::{
             update_ledger_network,
         },
         event::ProtocolsSignatures,
-        network::{RetryNetwork, TimeOutResponse},
+        network::{RetryNetwork, TimeOutResponse}, request::SchemaType,
     },
 };
 
@@ -63,7 +63,7 @@ impl Validator {
     ) -> Result<bool, ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match Governance::try_from(metadata.properties.clone())
+        let governance = match GovernanceData::try_from(metadata.properties.clone())
         {
             Ok(gov) => gov,
             Err(e) => {
@@ -141,7 +141,7 @@ impl Validator {
                 return Err(ActorError::Functional("There are fields that do not match in the comparison of the previous validation proof and the new proof.".to_owned()));
             }
             // Get validation signers
-            let governance_id = if new_proof.schema_id == "governance" {
+            let governance_id = if new_proof.schema_id.is_gov() {
                 new_proof.subject_id.clone()
             } else {
                 new_proof.governance_id.clone()
@@ -205,7 +205,7 @@ pub enum ValidatorMessage {
     },
     NetworkValidation {
         validation_req: Signed<ValidationReq>,
-        schema_id: String,
+        schema_id: SchemaType,
         node_key: PublicKey,
         our_key: PublicKey,
     },
@@ -217,7 +217,7 @@ pub enum ValidatorMessage {
     NetworkRequest {
         validation_req: Box<Signed<ValidationReq>>,
         info: ComunicateInfo,
-        schema_id: String,
+        schema_id: SchemaType,
     },
 }
 
@@ -305,7 +305,7 @@ impl Handler<Validator> for Validator {
                 node_key,
                 our_key,
             } => {
-                let receiver_actor = if schema_id == "governance" {
+                let receiver_actor = if schema_id.is_gov() {
                     format!(
                         "/user/node/{}/validator",
                         validation_req.content.proof.subject_id
@@ -334,6 +334,11 @@ impl Handler<Validator> for Validator {
 
                 let target = RetryNetwork::default();
 
+                #[cfg(feature = "test")]
+                let strategy = Strategy::FixedInterval(
+                    FixedIntervalStrategy::new(1, Duration::from_secs(5)),
+                );
+                #[cfg(not(feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(3, Duration::from_secs(10)),
                 );
@@ -598,7 +603,7 @@ impl Handler<Validator> for Validator {
                     return Err(emit_fail(ctx, e).await);
                 };
 
-                if schema_id != "governance" {
+                if !schema_id.is_gov() {
                     ctx.stop(None).await;
                 }
             }

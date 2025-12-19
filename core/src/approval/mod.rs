@@ -16,7 +16,7 @@ use tracing::{error, warn};
 
 use crate::approval::approver::InitApprover;
 use crate::evaluation::response::EvalLedgerResponse;
-use crate::governance::model::ProtocolTypes;
+use crate::governance::model::{ProtocolTypes, Quorum};
 use crate::model::SignTypesNode;
 use crate::model::common::{
     emit_fail, get_sign, get_signers_quorum_gov_version,
@@ -26,7 +26,6 @@ use crate::request::manager::{RequestManager, RequestManagerMessage};
 use crate::{EventRequest, SubjectMessage, SubjectResponse};
 use crate::{
     Subject, db::Storable, evaluation::request::EvaluationReq,
-    governance::Quorum,
 };
 
 pub mod approver;

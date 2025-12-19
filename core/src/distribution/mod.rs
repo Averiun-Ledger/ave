@@ -180,7 +180,7 @@ impl Handler<Distribution> for Distribution {
 
                 let mut witnesses = match governance.get_witnesses(
                     WitnessesData::build(
-                        &last_proof.schema_id,
+                        last_proof.schema_id.clone(),
                         last_proof.namespace.clone(),
                         self.node_key.clone(),
                     ),
