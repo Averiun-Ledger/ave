@@ -48,7 +48,7 @@ use ave_bridge::{
     PaginatorEvents,
     ProtocolsError,
     ProtocolsSignaturesInfo,
-    RegisterDataSubj,
+    SubjsData,
     RejectRequestInfo,
     RequestData,
     RequestInfo,
@@ -230,7 +230,7 @@ use utoipa::OpenApi;
 
             // Subject and Governance schemas
             SubjectInfo,
-            RegisterDataSubj,
+            SubjsData,
             GovsData,
             Namespace,
 

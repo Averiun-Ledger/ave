@@ -251,7 +251,7 @@ pub struct RequestData {
     Clone, Debug, Serialize, Deserialize, Ord, PartialEq, PartialOrd, Eq,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct RegisterDataSubj {
+pub struct SubjsData {
     pub subject_id: String,
     pub schema_id: String,
     pub active: bool,

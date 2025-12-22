@@ -28,7 +28,7 @@ pub use ave_common::{
     PaginatorEvents,
     ProtocolsError,
     ProtocolsSignaturesInfo,
-    RegisterDataSubj,
+    SubjsData,
     RejectRequestInfo,
     RequestData,
     RequestInfo,
@@ -362,7 +362,7 @@ impl Bridge {
         gov_id: String,
         active: Option<bool>,
         schema: Option<String>,
-    ) -> Result<Vec<RegisterDataSubj>, Error> {
+    ) -> Result<Vec<SubjsData>, Error> {
         let gov_id = DigestIdentifier::from_str(&gov_id).map_err(|e| {
             Error::Bridge(format!("Invalid governance id: {}", e))
         })?;

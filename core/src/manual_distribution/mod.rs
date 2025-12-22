@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
     Message, NotPersistentActor,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
@@ -9,10 +9,10 @@ use tracing::{error, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    model::{
-        common::{emit_fail, subject_owner},
-    },
-    subject::{LastStateData, SignedLedger, Subject, SubjectMessage, SubjectResponse},
+    governance::{Governance, GovernanceMessage, GovernanceResponse},
+    model::common::{emit_fail, node::subject_owner},
+    subject::{LastStateData, SignedLedger},
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";
@@ -28,36 +28,40 @@ impl ManualDistribution {
     async fn get_last_ledger(
         ctx: &mut ActorContext<ManualDistribution>,
         subject_id: &str,
-    ) -> Result<
-        (
-            Vec<SignedLedger>,
-            Option<LastStateData>,
-        ),
-        ActorError,
-    > {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
+    ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError> {
+        let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        let response = if let Some(subject_actor) = subject_actor {
-            subject_actor.ask(SubjectMessage::GetLastLedger).await?
+        if let Some(tracker_actor) =
+            ctx.system().get_actor::<Tracker>(&path).await
+        {
+            let response =
+                tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
+            match response {
+                TrackerResponse::Ledger { ledger, last_state } => {
+                    Ok((ledger, last_state))
+                }
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "TrackerResponse::Ledger".to_owned(),
+                )),
+            }
+        } else if let Some(governance_actor) =
+            ctx.system().get_actor::<Governance>(&path).await
+        {
+            let response = governance_actor
+                .ask(GovernanceMessage::GetLastLedger)
+                .await?;
+            match response {
+                GovernanceResponse::Ledger { ledger, last_state } => {
+                    Ok((ledger, last_state))
+                }
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "GovernanceResponse::Ledger".to_owned(),
+                )),
+            }
         } else {
-            return Err(ActorError::NotFound(subject_path));
-        };
-
-        match response {
-            SubjectResponse::Ledger {
-                ledger,
-                last_state
-            } => Ok((
-                ledger,
-                last_state
-            )),
-            _ => Err(ActorError::UnexpectedResponse(
-                subject_path,
-                "SubjectResponse::Ledger".to_owned(),
-            )),
+            Err(ActorError::NotFound(path))
         }
     }
 }
@@ -117,18 +121,14 @@ impl Handler<ManualDistribution> for ManualDistribution {
                 );
                 let request_id = format!("M_{}", subject_id);
 
-                let (
-                    ledger,
-                    last_state,
-                ) = Self::get_last_ledger(ctx, &subject_id.to_string()).await?;
-
+                let (ledger, last_state) =
+                    Self::get_last_ledger(ctx, &subject_id.to_string()).await?;
 
                 let Some(last_state) = last_state else {
                     let e = "Can not obtain last state";
                     error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
                     return Err(ActorError::Functional(e.to_string()));
                 };
-
 
                 let ledger = if ledger.len() != 1 {
                     let e = "Failed to get the latest event from the ledger";

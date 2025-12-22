@@ -32,7 +32,6 @@ const TARGET_RELATIONSHIP: &str = "Ave-Node-RelationShip";
 )]
 pub struct OwnerSchema {
     pub owner: String,
-    pub gov: String,
     pub schema_id: SchemaType,
     pub namespace: String,
 }
@@ -64,12 +63,12 @@ pub enum RelationShipMessage {
     GetSubjectsCount(OwnerSchema),
     RegisterNewSubject {
         data: OwnerSchema,
-        subject: String,
+        subject_id: String,
         max_quantity: CreatorQuantity,
     },
     DeleteSubject {
         data: OwnerSchema,
-        subject: String,
+        subject_id: String,
     },
 }
 
@@ -87,8 +86,8 @@ impl Response for RelationShipResponse {}
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RelationShipEvent {
-    NewRegister { data: OwnerSchema, subject: String },
-    DeleteSubject { data: OwnerSchema, subject: String },
+    NewRegister { data: OwnerSchema, subject_id: String },
+    DeleteSubject { data: OwnerSchema, subject_id: String },
 }
 
 impl Event for RelationShipEvent {}
@@ -103,7 +102,8 @@ impl Actor for RelationShip {
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("relation_ship", None, false, ctx).await
+        let prefix = ctx.path().parent().key();
+        self.init_store("relation_ship", Some(prefix), false, ctx).await
     }
 
     async fn pre_stop(
@@ -132,7 +132,7 @@ impl Handler<RelationShip> for RelationShip {
             }
             RelationShipMessage::RegisterNewSubject {
                 data,
-                subject,
+                subject_id,
                 max_quantity,
             } => {
                 let quantity = if let Some(vec) = self.owner_subjects.get(&data)
@@ -151,15 +151,15 @@ impl Handler<RelationShip> for RelationShip {
                 }
 
                 self.on_event(
-                    RelationShipEvent::NewRegister { data, subject },
+                    RelationShipEvent::NewRegister { data, subject_id },
                     ctx,
                 )
                 .await;
                 Ok(RelationShipResponse::None)
             }
-            RelationShipMessage::DeleteSubject { data, subject } => {
+            RelationShipMessage::DeleteSubject { data, subject_id } => {
                 self.on_event(
-                    RelationShipEvent::DeleteSubject { data, subject },
+                    RelationShipEvent::DeleteSubject { data, subject_id },
                     ctx,
                 )
                 .await;
@@ -195,16 +195,16 @@ impl PersistentActor for RelationShip {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RelationShipEvent::NewRegister { data, subject } => {
+            RelationShipEvent::NewRegister { data, subject_id } => {
                 self.owner_subjects
                     .entry(data.clone())
                     .or_default()
-                    .push(subject.clone());
+                    .push(subject_id.clone());
             }
-            RelationShipEvent::DeleteSubject { data, subject } => {
+            RelationShipEvent::DeleteSubject { data, subject_id } => {
                 self.owner_subjects.entry(data.clone()).and_modify(|vec| {
                     if let Some(pos) =
-                        vec.iter().position(|x| x.clone() == subject.clone())
+                        vec.iter().position(|x| x.clone() == subject_id.clone())
                     {
                         vec.remove(pos);
                     } else {

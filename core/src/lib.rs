@@ -19,6 +19,7 @@ pub mod subject;
 pub(crate) mod system;
 pub mod update;
 pub mod validation;
+pub mod tracker;
 
 use approval::approver::ApprovalStateRes;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
@@ -42,7 +43,7 @@ use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 pub use network::MonitorNetworkState;
 
 use node::register::{
-    GovsData, Register, RegisterDataSubj, RegisterMessage, RegisterResponse,
+    GovsData, Register, SubjsData, RegisterMessage, RegisterResponse,
 };
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
@@ -50,7 +51,6 @@ use query::{Query, QueryMessage, QueryResponse};
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
 };
-use subject::{Subject, SubjectMessage, SubjectResponse};
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -623,7 +623,7 @@ impl Api {
         gov_id: DigestIdentifier,
         active: Option<bool>,
         schema_id: Option<String>,
-    ) -> Result<Vec<RegisterDataSubj>, Error> {
+    ) -> Result<Vec<SubjsData>, Error> {
         let response = self
             .register
             .ask(RegisterMessage::GetSubj {

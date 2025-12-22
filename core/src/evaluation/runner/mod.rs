@@ -24,12 +24,7 @@ use crate::{
         }, model::{HashThisRole, RoleTypes, Schema}
     },
     model::{
-        Namespace,
-        common::{
-            MAX_FUEL, MemoryManager,
-            generate_linker,
-        },
-        patch::apply_patch, request::SchemaType,
+        Namespace, common::contract::{MAX_FUEL, MemoryManager, generate_linker}, patch::apply_patch, request::SchemaType
     },
 };
 
@@ -745,7 +740,7 @@ impl Runner {
                     .insert(
                         new_schema.id.clone(),
                         Schema {
-                            initial_value: new_schema.initial_value,
+                            initial_value: ValueWrapper(new_schema.initial_value),
                             contract: new_schema.contract,
                         },
                     )
@@ -830,7 +825,7 @@ impl Runner {
                 }
 
                 if let Some(init_value) = change_schema.new_initial_value {
-                    schema_data.initial_value = init_value;
+                    schema_data.initial_value = ValueWrapper(init_value);
                 }
 
                 change_schemas.insert(change_schema.actual_id);

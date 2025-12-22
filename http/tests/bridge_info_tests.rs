@@ -4,7 +4,7 @@ use ave_common::{
     ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
     BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
     BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
-    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RegisterDataSubj,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, SubjsData,
     RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
     identity::{KeyPair, keys::Ed25519Signer},
 };
@@ -789,7 +789,7 @@ async fn test_update_and_transfer_deserialization() {
 // --- Gov Sub Endpoints ---
 #[tokio::test]
 async fn test_gov_sub_deserialization() {
-    // GET /register-subjects/{governance_id}?active={bool}&schema={string} -> Vec<RegisterDataSubj>
+    // GET /register-subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
     // GET /register-governances?active={bool} -> Vec<GovsData>
 
     let (server, _dirs) = TestServer::build(false, true, None).await;
@@ -956,32 +956,32 @@ async fn test_gov_sub_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let res: Vec<RegisterDataSubj> = serde_json::from_value(body).unwrap();
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
     assert_eq!(
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_1_1.clone(),
                 schema_id: "Example1".to_string(),
                 active: true,
                 name: Some("Subject1_1".to_string()),
                 description: Some("A subject".to_string())
             },
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_2_1.clone(),
                 schema_id: "Example1".to_string(),
                 active: false,
                 name: Some("Subject2_1".to_string()),
                 description: Some("A subject".to_string())
             },
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_1_2.clone(),
                 schema_id: "Example2".to_string(),
                 active: true,
                 name: Some("Subject1_2".to_string()),
                 description: Some("A subject".to_string())
             },
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_2_2.clone(),
                 schema_id: "Example2".to_string(),
                 active: false,
@@ -1001,18 +1001,18 @@ async fn test_gov_sub_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let res: Vec<RegisterDataSubj> = serde_json::from_value(body).unwrap();
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
     assert_eq!(
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_2_1.clone(),
                 schema_id: "Example1".to_string(),
                 active: false,
                 name: Some("Subject2_1".to_string()),
                 description: Some("A subject".to_string())
             },
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_2_2.clone(),
                 schema_id: "Example2".to_string(),
                 active: false,
@@ -1033,18 +1033,18 @@ async fn test_gov_sub_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let res: Vec<RegisterDataSubj> = serde_json::from_value(body).unwrap();
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
     assert_eq!(
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_1_1.clone(),
                 schema_id: "Example1".to_string(),
                 active: true,
                 name: Some("Subject1_1".to_string()),
                 description: Some("A subject".to_string())
             },
-            &RegisterDataSubj {
+            &SubjsData {
                 subject_id: subject_id_2_1.clone(),
                 schema_id: "Example1".to_string(),
                 active: false,
@@ -1065,10 +1065,10 @@ async fn test_gov_sub_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let res: Vec<RegisterDataSubj> = serde_json::from_value(body).unwrap();
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
     assert_eq!(
         BTreeSet::from_iter(res.iter()),
-        BTreeSet::from([&RegisterDataSubj {
+        BTreeSet::from([&SubjsData {
             subject_id: subject_id_2_2.clone(),
             schema_id: "Example2".to_string(),
             active: false,

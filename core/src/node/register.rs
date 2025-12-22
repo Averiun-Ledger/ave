@@ -7,7 +7,6 @@ use ave_actors::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::{collections::HashSet, hash::Hash};
 use tracing::{error, warn};
 
 use crate::model::request::SchemaType;
@@ -19,38 +18,11 @@ const TARGET_REGISTER: &str = "Ave-Node-Register";
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub struct RegisterDataSubj {
-    pub subject_id: String,
     pub schema_id: SchemaType,
     pub active: bool,
     pub name: Option<String>,
     pub description: Option<String>,
 }
-
-impl Hash for RegisterDataSubj {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.subject_id.hash(state)
-    }
-}
-
-impl PartialOrd for RegisterDataSubj {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RegisterDataSubj {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.subject_id.clone()).cmp(&(other.subject_id.clone()))
-    }
-}
-
-impl PartialEq for RegisterDataSubj {
-    fn eq(&self, other: &Self) -> bool {
-        self.subject_id == other.subject_id
-    }
-}
-
-impl Eq for RegisterDataSubj {}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -69,6 +41,15 @@ pub struct GovsData {
     pub description: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubjsData {
+    pub subject_id: String,
+    pub schema_id: SchemaType,
+    pub active: bool,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(
     Clone,
     Debug,
@@ -80,7 +61,7 @@ pub struct GovsData {
 )]
 pub struct Register {
     register_gov: HashMap<String, RegisterDataGov>,
-    register_subj: HashMap<String, HashSet<RegisterDataSubj>>,
+    register_subj: HashMap<String, HashMap<String, RegisterDataSubj>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,11 +76,22 @@ pub enum RegisterMessage {
     },
     RegisterGov {
         gov_id: String,
-        data: RegisterDataGov,
+        name: Option<String>,
+        description: Option<String>,
+    },
+    EOLGov {
+        gov_id: String,
     },
     RegisterSubj {
         gov_id: String,
-        data: RegisterDataSubj,
+        subject_id: String,
+        schema_id: SchemaType,
+        name: Option<String>,
+        description: Option<String>,
+    },
+    EOLSubj {
+        gov_id: String,
+        subj_id: String,
     },
 }
 
@@ -108,7 +100,7 @@ impl Message for RegisterMessage {}
 #[derive(Debug, Clone)]
 pub enum RegisterResponse {
     Govs { governances: Vec<GovsData> },
-    Subjs { subjects: Vec<RegisterDataSubj> },
+    Subjs { subjects: Vec<SubjsData> },
     None,
 }
 
@@ -122,9 +114,17 @@ pub enum RegisterEvent {
         gov_id: String,
         data: RegisterDataGov,
     },
+    EOLGov {
+        gov_id: String,
+    },
     RegisterSubj {
         gov_id: String,
+        subject_id: String,
         data: RegisterDataSubj,
+    },
+    EOLSubj {
+        gov_id: String,
+        subj_id: String,
     },
 }
 
@@ -198,20 +198,26 @@ impl Handler<Register> for Register {
                 let subjects = self.register_subj.get(&gov_id.to_string());
                 if let Some(subjects) = subjects {
                     let mut subj = vec![];
-                    for subject in subjects {
+                    for (subject_id, data) in subjects {
                         if let Some(active) = active
-                            && subject.active != active
+                            && data.active != active
                         {
                             continue;
                         };
 
                         if let Some(schema_id) = schema_id.clone()
-                            && subject.schema_id.to_string() != schema_id
+                            && data.schema_id.to_string() != schema_id
                         {
                             continue;
                         }
 
-                        subj.push(subject.clone());
+                        subj.push(SubjsData {
+                            schema_id: data.schema_id.clone(),
+                            subject_id: subject_id.clone(),
+                            active: data.active,
+                            name: data.name.clone(),
+                            description: data.description.clone(),
+                        });
                     }
 
                     return Ok(RegisterResponse::Subjs { subjects: subj });
@@ -221,12 +227,51 @@ impl Handler<Register> for Register {
                     return Err(ActorError::Functional(e.to_owned()));
                 }
             }
-            RegisterMessage::RegisterGov { gov_id, data } => {
-                self.on_event(RegisterEvent::RegisterGov { gov_id, data }, ctx)
-                    .await
+            RegisterMessage::RegisterGov {
+                gov_id,
+                description,
+                name,
+            } => {
+                self.on_event(
+                    RegisterEvent::RegisterGov {
+                        gov_id,
+                        data: RegisterDataGov {
+                            active: true,
+                            name,
+                            description,
+                        },
+                    },
+                    ctx,
+                )
+                .await
             }
-            RegisterMessage::RegisterSubj { gov_id, data } => {
-                self.on_event(RegisterEvent::RegisterSubj { gov_id, data }, ctx)
+            RegisterMessage::EOLGov { gov_id } => {
+                self.on_event(RegisterEvent::EOLGov { gov_id }, ctx).await
+            }
+            RegisterMessage::RegisterSubj {
+                gov_id,
+                subject_id,
+                schema_id,
+                name,
+                description,
+            } => {
+                self.on_event(
+                    RegisterEvent::RegisterSubj {
+                        gov_id,
+                        subject_id,
+                        data: RegisterDataSubj {
+                            schema_id,
+                            active: true,
+                            name,
+                            description,
+                        },
+                    },
+                    ctx,
+                )
+                .await
+            }
+            RegisterMessage::EOLSubj { gov_id, subj_id } => {
+                self.on_event(RegisterEvent::EOLSubj { gov_id, subj_id }, ctx)
                     .await
             }
         }
@@ -260,15 +305,27 @@ impl PersistentActor for Register {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
+            RegisterEvent::EOLGov { gov_id } => {
+                self.register_gov.get_mut(gov_id).map(|x| x.active = false);
+            }
+            RegisterEvent::EOLSubj { gov_id, subj_id } => {
+                self.register_subj
+                    .get_mut(gov_id)
+                    .map(|x| x.get_mut(subj_id).map(|x| x.active = false));
+            }
             RegisterEvent::RegisterGov { gov_id, data } => {
                 self.register_gov.insert(gov_id.clone(), data.clone());
-                self.register_subj.insert(gov_id.clone(), HashSet::new());
+                self.register_subj.insert(gov_id.clone(), HashMap::new());
             }
-            RegisterEvent::RegisterSubj { gov_id, data } => {
+            RegisterEvent::RegisterSubj {
+                gov_id,
+                subject_id,
+                data,
+            } => {
                 self.register_subj
                     .entry(gov_id.clone())
                     .or_default()
-                    .replace(data.clone());
+                    .insert(subject_id.clone(), data.clone());
             }
         };
 

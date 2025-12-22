@@ -1,14 +1,9 @@
 use std::{collections::VecDeque, fmt::Display, time::Duration};
 
 use crate::{
-    ActorMessage, EventRequest, NetworkMessage, db::Storable, governance::data::GovernanceData, intermediary::Intermediary, model::{
-        SignTypesNode,
-        common::{
-            UpdateData, emit_fail, get_metadata, get_sign,
-            update_ledger_network,
-        },
-        network::{RetryNetwork, TimeOutResponse},
-    }, subject::Subject
+    ActorMessage, EventRequest, NetworkMessage, db::Storable, governance::{Governance, data::GovernanceData}, intermediary::Intermediary, model::{
+        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::get_metadata}, network::{RetryNetwork, TimeOutResponse}
+    }
 };
 use async_trait::async_trait;
 use ave_actors::{
@@ -331,7 +326,7 @@ impl Actor for Approver {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if ctx.parent::<Subject>().await.is_some() {
+        if ctx.parent::<Governance>().await.is_some() {
             let prefix = ctx.path().parent().key();
             self.init_store("approver", Some(prefix), false, ctx).await
         } else {
@@ -343,7 +338,7 @@ impl Actor for Approver {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if ctx.parent::<Subject>().await.is_some() {
+        if ctx.parent::<Governance>().await.is_some() {
             self.stop_store(ctx).await
         } else {
             Ok(())

@@ -9,7 +9,7 @@ use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::model::common::{emit_fail, get_last_state, get_metadata};
+use crate::model::common::{emit_fail, subject::{get_last_state, get_metadata}};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 

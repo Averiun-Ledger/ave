@@ -11,12 +11,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
 use tracing::{error, warn};
 
+use crate::model::common::node::{get_node_subject_data, subject_old};
+use crate::model::common::subject::get_gov;
 use crate::{
     ActorMessage, NetworkMessage,
     db::Storable,
     governance::model::WitnessesData,
     intermediary::Intermediary,
-    model::common::{emit_fail, get_gov, get_node_subject_data, subject_old},
+    model::common::{emit_fail},
     update::{Update, UpdateMessage, UpdateNew, UpdateRes},
 };
 

@@ -5,13 +5,7 @@ use crate::{
     governance::{data::GovernanceData, model::SignersType},
     helpers::network::{NetworkMessage, intermediary::Intermediary},
     model::{
-        SignTypesNode,
-        common::{
-            UpdateData, emit_fail, get_gov, get_metadata, get_sign,
-            update_ledger_network,
-        },
-        event::ProtocolsSignatures,
-        network::{RetryNetwork, TimeOutResponse}, request::SchemaType,
+        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::{get_gov, get_metadata}}, event::ProtocolsSignatures, network::{RetryNetwork, TimeOutResponse}, request::SchemaType
     },
 };
 

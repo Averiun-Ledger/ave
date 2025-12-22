@@ -13,8 +13,7 @@ use crate::{
     model::{
         SignTypesNode,
         common::{
-            emit_fail, get_sign, get_signers_quorum_gov_version,
-            send_reboot_to_req, take_random_signers, try_to_update,
+            emit_fail, node::{get_sign, try_to_update}, send_reboot_to_req, subject::get_signers_quorum_gov_version, take_random_signers
         },
         event::{ProofEvent, ProtocolsSignatures},
         request::SchemaType,
@@ -592,7 +591,7 @@ pub mod tests {
     };
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, Subject, SubjectMessage, SubjectResponse, governance::data::GovernanceData, helpers::db::ExternalDB, model::{
+        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, helpers::db::ExternalDB, model::{
             Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
         }, query::Query, request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
@@ -604,7 +603,7 @@ pub mod tests {
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         ActorRef<Query>,
-        ActorRef<Subject>,
+        ActorRef<Governance>,
         ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
@@ -673,7 +672,7 @@ pub mod tests {
 
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        let subject_actor: ActorRef<Subject> = system
+        let subject_actor: ActorRef<Governance> = system
             .get_actor(&ActorPath::from(format!("/user/node/{}", owned_subj)))
             .await
             .unwrap();
@@ -694,8 +693,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
             .await
             .unwrap()
         else {
@@ -818,8 +817,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
             .await
             .unwrap()
         else {

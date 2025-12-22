@@ -23,10 +23,7 @@ use tracing::error;
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    Error, model::common::{
-        MAX_FUEL_COMPILATION, MemoryManager,
-        generate_linker,
-    }, system::ConfigHelper
+    Error, model::common::contract::{MAX_FUEL_COMPILATION, MemoryManager, generate_linker}, system::ConfigHelper
 };
 
 const TARGET_COMPILER: &str = "Ave-Evaluation-Compiler";
