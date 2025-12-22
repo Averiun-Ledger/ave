@@ -13,7 +13,7 @@ use tracing::{error, warn};
 use crate::{
     Signed,
     auth::WitnessesAuth,
-    model::{common::{emit_fail, try_to_update}, request::SchemaType},
+    model::{common::{emit_fail, node::try_to_update}, request::SchemaType},
 };
 
 use super::{

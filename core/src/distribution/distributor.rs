@@ -11,22 +11,30 @@ use network::ComunicateInfo;
 
 use crate::{
     ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Node,
-    NodeMessage, NodeResponse, Subject, SubjectMessage, SubjectResponse,
+    NodeMessage, NodeResponse,
     auth::WitnessesAuth,
     governance::{
-        data::GovernanceData, model::{CreatorQuantity, HashThisRole, RoleTypes}
+        Governance, GovernanceMessage, GovernanceResponse,
+        data::GovernanceData,
+        model::{CreatorQuantity, HashThisRole, RoleTypes},
     },
     intermediary::Intermediary,
     model::{
         Namespace,
         common::{
-            emit_fail, get_gov, get_node_subject_data, get_quantity,
-            subject_old_owner, try_to_update, update_last_state,
+            emit_fail,
+            node::{
+                get_node_subject_data, get_quantity, subject_old_owner,
+                try_to_update,
+            },
+            subject::{get_gov, update_last_state, update_ledger},
         },
         event::{Ledger, ProtocolsSignatures},
-        network::RetryNetwork, request::SchemaType,
+        network::RetryNetwork,
+        request::SchemaType,
     },
     subject::{LastStateData, SignedLedger},
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
     update::TransferResponse,
     validation::proof::ValidationProof,
 };
@@ -50,7 +58,7 @@ pub struct Distributor {
 
 // TODO QUITAR TODOS LOS &self.
 impl Distributor {
-    async fn down_subject(
+    async fn down_tracker(
         &self,
         ctx: &mut ActorContext<Distributor>,
         subject_id: &str,
@@ -69,7 +77,7 @@ impl Distributor {
             let subject_path =
                 ActorPath::from(format!("/user/node/{}", subject_id));
             let Some(subject_actor) =
-                ctx.system().get_actor::<Subject>(&subject_path).await
+                ctx.system().get_actor::<Tracker>(&subject_path).await
             else {
                 return Err(ActorError::NotFound(subject_path));
             };
@@ -94,34 +102,6 @@ impl Distributor {
 
         println!("{}", schema_id);
         our_key == owner || i_new_owner || schema_id.is_gov()
-    }
-
-    async fn update_ledger(
-        ctx: &mut ActorContext<Distributor>,
-        subject_id: &str,
-        events: Vec<SignedLedger>,
-    ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
-        let response = if let Some(subject_actor) =
-            ctx.system().get_actor::<Subject>(&subject_path).await
-        {
-            subject_actor
-                .ask(SubjectMessage::UpdateLedger { events })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(subject_path));
-        };
-
-        match response {
-            SubjectResponse::UpdateResult(last_sn, owner, new_owner) => {
-                Ok((last_sn, owner, new_owner))
-            }
-            _ => Err(ActorError::UnexpectedResponse(
-                subject_path,
-                "SubjectResponse::UpdateResult".to_owned(),
-            )),
-        }
     }
 
     async fn create_subject(
@@ -184,41 +164,64 @@ impl Distributor {
         ctx: &mut ActorContext<Distributor>,
         subject_id: &str,
         last_sn: u64,
+        is_gov: bool,
     ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
+        let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        let response = if let Some(subject_actor) = subject_actor {
-            subject_actor
-                .ask(SubjectMessage::GetLedger { last_sn })
-                .await?
-        } else {
-            Self::up_subject(ctx, subject_id, true).await?;
-            let subject_actor: Option<ActorRef<Subject>> =
-                ctx.system().get_actor(&subject_path).await;
-            let Some(subject_actor) = subject_actor else {
-                return Err(ActorError::NotFound(subject_path));
+        if is_gov {
+            let Some(governance_actor) =
+                ctx.system().get_actor::<Governance>(&path).await
+            else {
+                return Err(ActorError::NotFound(path));
             };
 
-            let response = subject_actor
-                .ask(SubjectMessage::GetLedger { last_sn })
+            let response = governance_actor
+                .ask(GovernanceMessage::GetLedger { last_sn })
                 .await?;
 
-            subject_actor.ask_stop().await?;
-
-            response
-        };
-
-        match response {
-            SubjectResponse::Ledger { ledger, last_state } => {
-                Ok((ledger, last_state))
+            match response {
+                GovernanceResponse::Ledger { ledger, last_state } => {
+                    Ok((ledger, last_state))
+                }
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "GovernanceResponse::Ledger".to_owned(),
+                )),
             }
-            _ => Err(ActorError::UnexpectedResponse(
-                subject_path,
-                "SubjectResponse::Ledger".to_owned(),
-            )),
+        } else {
+            let response = if let Some(tracker_actor) =
+                ctx.system().get_actor::<Tracker>(&path).await
+            {
+                tracker_actor
+                    .ask(TrackerMessage::GetLedger { last_sn })
+                    .await?
+            } else {
+                Self::up_subject(ctx, subject_id, true).await?;
+
+                let Some(tracker_actor) =
+                    ctx.system().get_actor::<Tracker>(&path).await
+                else {
+                    return Err(ActorError::NotFound(path));
+                };
+
+                let response = tracker_actor
+                    .ask(TrackerMessage::GetLedger { last_sn })
+                    .await?;
+
+                tracker_actor.ask_stop().await?;
+
+                response
+            };
+
+            match response {
+                TrackerResponse::Ledger { ledger, last_state } => {
+                    Ok((ledger, last_state))
+                }
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "TrackerResponse::Ledger".to_owned(),
+                )),
+            }
         }
     }
 
@@ -477,7 +480,7 @@ impl Distributor {
         subject_id: &str,
         gov_version: Option<u64>,
         info: &ComunicateInfo,
-    ) -> Result<(), ActorError> {
+    ) -> Result<bool, ActorError> {
         let data = get_node_subject_data(ctx, subject_id).await?;
         let (namespace, governance_id, owner, schema_id, new_owner) =
             if let Some((subject_data, new_owner)) = data {
@@ -495,6 +498,8 @@ impl Distributor {
                     "Can not check governance version, can not get node subject data".to_owned(),
                 ));
             };
+
+        let is_gov = schema_id.is_gov();
 
         let gov = match get_gov(ctx, &governance_id).await {
             Ok(gov) => gov,
@@ -532,13 +537,13 @@ impl Distributor {
         let sender = info.sender.to_string();
         if let Some(new_owner) = new_owner {
             if owner == sender || new_owner == sender {
-                return Ok(());
+                return Ok(is_gov);
             }
         } else if owner == sender {
-            return Ok(());
+            return Ok(is_gov);
         }
 
-        let has_this_role = if schema_id.is_gov() {
+        let has_this_role = if is_gov {
             HashThisRole::Gov {
                 who: info.sender.clone(),
                 role: RoleTypes::Witness,
@@ -560,7 +565,7 @@ impl Distributor {
             ));
         };
 
-        Ok(())
+        Ok(is_gov)
     }
 
     pub async fn up_subject(
@@ -900,23 +905,26 @@ impl Handler<Distributor> for Distributor {
                 gov_version,
                 subject_id,
             } => {
-                if let Err(e) = self
+                let is_gov = match self
                     .check_gov_version(ctx, &subject_id, gov_version, &info)
                     .await
                 {
-                    error!(TARGET_DISTRIBUTOR, "SendDistribution, {}", e);
-                    if let ActorError::Functional(_) = e {
-                        return Err(e);
-                    } else {
-                        return Err(emit_fail(ctx, e).await);
-                    };
-                }
+                    Ok(is_gov) => is_gov,
+                    Err(e) => {
+                        error!(TARGET_DISTRIBUTOR, "SendDistribution, {}", e);
+                        if let ActorError::Functional(_) = e {
+                            return Err(e);
+                        } else {
+                            return Err(emit_fail(ctx, e).await);
+                        };
+                    }
+                };
 
                 let sn = actual_sn.unwrap_or_default();
 
                 // Sacar eventos.
                 let (ledger, last_state) =
-                    match self.get_ledger(ctx, &subject_id, sn).await {
+                    match self.get_ledger(ctx, &subject_id, sn, is_gov).await {
                         Ok(res) => res,
                         Err(e) => {
                             error!(
@@ -1263,10 +1271,11 @@ impl Handler<Distributor> for Distributor {
                         .await);
                     }
 
-                    match Self::update_ledger(
+                    match update_ledger(
                         ctx,
                         subject_id,
                         vec![ledger.clone()],
+                        schema_id.is_gov(),
                     )
                     .await
                     {
@@ -1332,7 +1341,7 @@ impl Handler<Distributor> for Distributor {
                             };
 
                                 if let Err(e) = self
-                                    .down_subject(
+                                    .down_tracker(
                                         ctx, subject_id, &owner, new_owner,
                                         schema_id,
                                     )
@@ -1447,9 +1456,7 @@ impl Handler<Distributor> for Distributor {
                 }
 
                 if let Err(e) = self
-                    .down_subject(
-                        ctx, subject_id, &owner, new_owner, schema_id,
-                    )
+                    .down_tracker(ctx, subject_id, &owner, new_owner, schema_id)
                     .await
                 {
                     error!(
@@ -1595,7 +1602,13 @@ impl Handler<Distributor> for Distributor {
                     let last_ledger_sn =
                         events.last().map(|x| x.content.sn).unwrap_or_default();
                     if last_ledger_sn > old_sn {
-                        match Self::update_ledger(ctx, subject_id, events).await
+                        match update_ledger(
+                            ctx,
+                            subject_id,
+                            events,
+                            schema_id.is_gov(),
+                        )
+                        .await
                         {
                             Ok((last_sn, owner, new_owner)) => (
                                 last_sn,
@@ -1747,9 +1760,7 @@ impl Handler<Distributor> for Distributor {
 
                 // Bajar al sujeto.
                 if let Err(e) = self
-                    .down_subject(
-                        ctx, subject_id, &owner, new_owner, schema_id,
-                    )
+                    .down_tracker(ctx, subject_id, &owner, new_owner, schema_id)
                     .await
                 {
                     error!(

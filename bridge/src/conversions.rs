@@ -6,10 +6,7 @@
 use std::str::FromStr;
 
 use ave_common::{
-    BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
-    BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
-    BridgeTransferRequest, Namespace, ValueWrapper,
-    identity::{DigestIdentifier, PublicKey},
+    BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeTransferRequest, Namespace, ValueWrapper, identity::{DigestIdentifier, PublicKey}
 };
 use core::{
     error::Error,
@@ -117,7 +114,7 @@ pub fn bridge_to_confirm_request(
 }
 
 // Convert from Core types to Common types for API responses
-use ave_common::{GovsData, RegisterDataSubj, RequestData, TransferSubject};
+use ave_common::{GovsData, SubjsData, RequestData, TransferSubject};
 
 pub fn core_request_to_common(data: core::request::RequestData) -> RequestData {
     RequestData {
@@ -147,9 +144,9 @@ pub fn core_gov_to_common(gov: core::node::register::GovsData) -> GovsData {
 }
 
 pub fn core_subj_to_common(
-    subj: core::node::register::RegisterDataSubj,
-) -> RegisterDataSubj {
-    RegisterDataSubj {
+    subj: core::node::register::SubjsData,
+) -> SubjsData {
+    SubjsData {
         subject_id: subj.subject_id,
         schema_id: subj.schema_id.to_string(),
         active: subj.active,

@@ -13,7 +13,7 @@ use crate::{
     Event as AveEvent,
     governance::model::WitnessesData,
     model::{
-        common::{emit_fail, get_gov},
+        common::{emit_fail, subject::get_gov},
         event::ProtocolsSignatures,
     },
     request::manager::{RequestManager, RequestManagerMessage},

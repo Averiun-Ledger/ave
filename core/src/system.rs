@@ -11,7 +11,7 @@ use crate::{
     Error,config::{Config, SinkAuth},
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink}, model::common::create_secure_wasmtime_config,
+    helpers::{db::ExternalDB, sink::AveSink}, model::common::contract::create_secure_wasmtime_config,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

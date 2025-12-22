@@ -14,10 +14,11 @@ use updater::{Updater, UpdaterMessage};
 
 use crate::{
     ActorMessage, NetworkMessage,
+    governance::{Governance, GovernanceMessage},
     intermediary::Intermediary,
     model::common::emit_fail,
     request::manager::{RequestManager, RequestManagerMessage},
-    subject::{Subject, SubjectMessage},
+    tracker::{Tracker, TrackerMessage},
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,20 +70,22 @@ impl Update {
         subject_id: &str,
         res: TransferResponse,
     ) -> Result<(), ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
+        let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        // Subject actor.
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
-
-        // We obtain the actor governance
-        if let Some(subject_actor) = subject_actor {
-            subject_actor
-                .tell(SubjectMessage::UpdateTransfer(res))
+        if let Some(governance_actor) =
+            ctx.system().get_actor::<Governance>(&path).await
+        {
+            governance_actor
+                .tell(GovernanceMessage::UpdateTransfer(res))
+                .await
+        } else if let Some(tracker_actor) =
+            ctx.system().get_actor::<Tracker>(&path).await
+        {
+            tracker_actor
+                .tell(TrackerMessage::UpdateTransfer(res))
                 .await
         } else {
-            Err(ActorError::NotFound(subject_path))
+            Err(ActorError::NotFound(path))
         }
     }
 

@@ -6,13 +6,24 @@ use std::{collections::HashMap, path::Path};
 use borsh::{BorshDeserialize, BorshSerialize};
 use nodekey::NodeKey;
 use register::Register;
-use relationship::RelationShip;
 use tokio::fs;
 use tracing::{error, warn};
 use transfer::TransferRegister;
 
 use crate::{
-    Error, EventRequest, Subject, SubjectMessage, SubjectResponse, auth::{Auth, AuthMessage, AuthResponse}, db::Storable, distribution::distributor::Distributor, governance::data::GovernanceData, helpers::db::ExternalDB, manual_distribution::ManualDistribution, model::{Namespace, SignTypesNode, event::LedgerValue, request::SchemaType}, subject::{CreateSubjectData, SignedLedger}, system::ConfigHelper
+    Error, EventRequest,
+    auth::{Auth, AuthMessage, AuthResponse},
+    db::Storable,
+    distribution::distributor::Distributor,
+    governance::{Governance, GovernanceMessage},
+    helpers::db::ExternalDB,
+    manual_distribution::ManualDistribution,
+    model::{
+        Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
+    },
+    subject::{CreateSubjectData, SignedLedger},
+    system::ConfigHelper,
+    tracker::{Tracker, TrackerMessage},
 };
 
 use ave_common::identity::{
@@ -244,20 +255,43 @@ impl Node {
         let our_key = self.owner.public_key();
         let our_key_string = our_key.to_string();
 
-        for (subject, _) in self.owned_subjects.clone() {
-            let subject_actor =
-                ctx.create_child(&subject, Subject::initial(None)).await?;
-            let sink =
-                Sink::new(subject_actor.subscribe(), ext_db.get_subject());
-            ctx.system().run_sink(sink).await;
+        for (subject, data) in self.owned_subjects.clone() {
+            if data.schema_id.is_gov() {
+                let tracker_actor =
+                    ctx.create_child(&subject, Tracker::initial(None)).await?;
 
-            ctx.create_child(
-                &format!("distributor_{}", subject),
-                Distributor {
-                    node: our_key.clone(),
-                },
-            )
-            .await?;
+                let sink =
+                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
+
+                ctx.system().run_sink(sink).await;
+
+                ctx.create_child(
+                    &format!("distributor_{}", subject),
+                    Distributor {
+                        node: our_key.clone(),
+                    },
+                )
+                .await?;
+            } else {
+                let governance_actor = ctx
+                    .create_child(&subject, Governance::initial(None))
+                    .await?;
+
+                let sink = Sink::new(
+                    governance_actor.subscribe(),
+                    ext_db.get_subject(),
+                );
+
+                ctx.system().run_sink(sink).await;
+
+                ctx.create_child(
+                    &format!("distributor_{}", subject),
+                    Distributor {
+                        node: our_key.clone(),
+                    },
+                )
+                .await?;
+            }
         }
 
         for (subject, data) in self.known_subjects.clone() {
@@ -268,21 +302,42 @@ impl Node {
                     false
                 };
 
-            if data.governance_id.is_none() || i_new_owner {
-                let subject_actor =
-                    ctx.create_child(&subject, Subject::initial(None)).await?;
-                let sink =
-                    Sink::new(subject_actor.subscribe(), ext_db.get_subject());
-                ctx.system().run_sink(sink).await;
-            }
+            if data.schema_id.is_gov() {
+                let governance_actor = ctx
+                    .create_child(&subject, Governance::initial(None))
+                    .await?;
 
-            ctx.create_child(
-                &format!("distributor_{}", subject),
-                Distributor {
-                    node: our_key.clone(),
-                },
-            )
-            .await?;
+                let sink = Sink::new(
+                    governance_actor.subscribe(),
+                    ext_db.get_subject(),
+                );
+
+                ctx.system().run_sink(sink).await;
+
+                ctx.create_child(
+                    &format!("distributor_{}", subject),
+                    Distributor {
+                        node: our_key.clone(),
+                    },
+                )
+                .await?;
+            } else if i_new_owner {
+                let tracker_actor =
+                    ctx.create_child(&subject, Tracker::initial(None)).await?;
+
+                let sink =
+                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
+
+                ctx.system().run_sink(sink).await;
+
+                ctx.create_child(
+                    &format!("distributor_{}", subject),
+                    Distributor {
+                        node: our_key.clone(),
+                    },
+                )
+                .await?;
+            }
         }
 
         Ok(())
@@ -415,8 +470,6 @@ impl Actor for Node {
             },
         )
         .await?;
-        ctx.create_child("relation_ship", RelationShip::initial(()))
-            .await?;
 
         ctx.create_child("transfer_register", TransferRegister::initial(()))
             .await?;
@@ -533,12 +586,12 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
-                let subject_actor = ctx
-                    .create_child(&subject_id, Subject::initial(None))
+                let tracker_actor = ctx
+                    .create_child(&subject_id, Tracker::initial(None))
                     .await?;
                 if !light {
                     let sink = Sink::new(
-                        subject_actor.subscribe(),
+                        tracker_actor.subscribe(),
                         ext_db.get_subject(),
                     );
                     ctx.system().run_sink(sink).await;
@@ -655,89 +708,134 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
-                let subject = if let EventRequest::Create(create_event) =
+                if let EventRequest::Create(create_event) =
                     ledger.content.event_request.content.clone()
                 {
-                    let properties = if create_event.schema_id.is_gov() {
-                        let gov = GovernanceData::new(
-                            ledger
-                                .content
-                                .event_request
-                                .signature
-                                .signer
-                                .clone(),
-                        );
-                        gov.to_value_wrapper().map_err(|e| {
-                            error!(
-                                TARGET_NODE,
-                                "CreateNewSubjectLedger, {}", e
-                            );
-                            ActorError::FunctionalFail(e.to_string())
-                        })?
-                    } else if let LedgerValue::Patch(init_state) =
-                        ledger.content.value.clone()
-                    {
-                        init_state
-                    } else {
-                        let e = "Can not create subject, ledgerValue is not a patch";
-                        warn!(TARGET_NODE, "CreateNewSubjectLedger, {}", e);
-                        return Err(ActorError::Functional(e.to_string()));
-                    };
-
-                    Subject::from_event(&ledger, properties)
-                        .map_err(|e| {
-                            warn!(TARGET_NODE, "CreateNewSubjectLedger, Can not create subject from event {}", e);
+                    if create_event.schema_id.is_gov() {
+                        let governance = Governance::from_create_event(&ledger).map_err(|e| {
+                            warn!(TARGET_NODE, "CreateNewSubjectLedger, Can not create Governance from event {}", e);
                             ActorError::Functional(e.to_string())
-                        })?
+                        })?;
+
+                        self.on_event(
+                            NodeEvent::TemporalSubject {
+                                subject_id: governance
+                                    .subject_metadata
+                                    .subject_id
+                                    .to_string(),
+                                data: SubjectData {
+                                    owner: governance
+                                        .subject_metadata
+                                        .creator
+                                        .to_string(),
+                                    governance_id: None,
+                                    sn: 0,
+                                    schema_id: governance
+                                        .subject_metadata
+                                        .schema_id
+                                        .clone(),
+                                    namespace: Namespace::new(),
+                                },
+                            },
+                            ctx,
+                        )
+                        .await;
+
+                        let governance_actor = ctx
+                            .create_child(
+                                &format!("{}", ledger.content.subject_id),
+                                Governance::initial(Some(governance.clone())),
+                            )
+                            .await
+                            .map_err(|e| {
+                                ActorError::Functional(e.to_string())
+                            })?;
+
+                        let sink = Sink::new(
+                            governance_actor.subscribe(),
+                            ext_db.get_subject(),
+                        );
+                        ctx.system().run_sink(sink).await;
+
+                        governance_actor
+                            .ask(GovernanceMessage::UpdateLedger {
+                                events: vec![ledger.clone()],
+                            })
+                            .await?;
+                    } else {
+                        let properties = if let LedgerValue::Patch(init_state) =
+                            ledger.content.value.clone()
+                        {
+                            init_state
+                        } else {
+                            let e = "Can not create subject, ledgerValue is not a patch";
+                            warn!(TARGET_NODE, "CreateNewSubjectLedger, {}", e);
+                            return Err(ActorError::Functional(e.to_string()));
+                        };
+
+                        let tracker = Tracker::from_create_event(&ledger, properties).map_err(|e| {
+                            warn!(TARGET_NODE, "CreateNewSubjectLedger, Can not create Tracker from event {}", e);
+                            ActorError::Functional(e.to_string())
+                        })?;
+
+                        self.on_event(
+                            NodeEvent::TemporalSubject {
+                                subject_id: tracker
+                                    .subject_metadata
+                                    .subject_id
+                                    .to_string(),
+                                data: SubjectData {
+                                    owner: tracker
+                                        .subject_metadata
+                                        .creator
+                                        .to_string(),
+                                    governance_id: Some(
+                                        tracker.governance_id.to_string(),
+                                    ),
+                                    sn: 0,
+                                    schema_id: tracker
+                                        .subject_metadata
+                                        .schema_id
+                                        .clone(),
+                                    namespace: tracker.namespace.clone(),
+                                },
+                            },
+                            ctx,
+                        )
+                        .await;
+
+                        let tracker_actor = ctx
+                            .create_child(
+                                &format!("{}", ledger.content.subject_id),
+                                Tracker::initial(Some(tracker.clone())),
+                            )
+                            .await
+                            .map_err(|e| {
+                                ActorError::Functional(e.to_string())
+                            })?;
+
+                        let sink = Sink::new(
+                            tracker_actor.subscribe(),
+                            ext_db.get_subject(),
+                        );
+                        ctx.system().run_sink(sink).await;
+
+                        tracker_actor
+                            .ask(TrackerMessage::UpdateLedger {
+                                events: vec![ledger.clone()],
+                            })
+                            .await?;
+                    }
                 } else {
                     let e = "trying to create a subject without create event";
                     warn!(TARGET_NODE, "CreateNewSubjectLedger, {}", e);
                     return Err(ActorError::Functional(e.to_owned()));
                 };
 
-                let governance_id = if subject.governance_id.is_empty() {
-                    None
-                } else {
-                    Some(subject.governance_id.to_string())
-                };
-
-                self.on_event(
-                    NodeEvent::TemporalSubject {
-                        subject_id: subject.subject_id.to_string(),
-                        data: SubjectData {
-                            owner: subject.creator.to_string(),
-                            governance_id,
-                            sn: 0,
-                            schema_id: subject.schema_id.clone(),
-                            namespace: subject.namespace.clone(),
-                        },
-                    },
-                    ctx,
-                )
-                .await;
-
-                let subject_actor = ctx
-                    .create_child(
-                        &format!("{}", ledger.content.subject_id),
-                        Subject::initial(Some(subject.clone())),
-                    )
-                    .await
-                    .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-                let sink =
-                    Sink::new(subject_actor.subscribe(), ext_db.get_subject());
-                ctx.system().run_sink(sink).await;
-
-                let response = subject_actor
-                    .ask(SubjectMessage::UpdateLedger {
-                        events: vec![ledger.clone()],
-                    })
-                    .await?;
-
                 self.on_event(
                     NodeEvent::RegisterSubject {
-                        iam_owner: self.owner.public_key() == subject.owner,
-                        subject_id: subject.subject_id.to_string(),
+                        iam_owner: self.owner.public_key() == ledger.content.event_request.signature.signer,
+                        subject_id: ledger.content.subject_id.to_string(),
                     },
                     ctx,
                 )
@@ -750,19 +848,7 @@ impl Handler<Node> for Node {
                 .await
                 .map_err(|e| ActorError::Functional(e.to_string()))?;
 
-                match response {
-                    SubjectResponse::UpdateResult(_, _, _) => {
-                        Ok(NodeResponse::SonWasCreated)
-                    }
-                    _ => {
-                        ctx.system().stop_system();
-                        let e = ActorError::UnexpectedResponse(
-                            subject_actor.path(),
-                            "SubjectResponse::UpdateResult".to_owned(),
-                        );
-                        return Err(e);
-                    }
-                }
+                Ok(NodeResponse::SonWasCreated)
             }
             NodeMessage::CreateNewSubjectReq(data) => {
                 let Some(ext_db): Option<ExternalDB> =
@@ -776,22 +862,31 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
-                let subject = Subject::from(data.clone());
-
-                let child = ctx
+                let governance_id = if data.create_req.schema_id.is_gov() {
+                    let governance = Governance::from(data.clone());
+                    let child = ctx
                     .create_child(
                         &format!("{}", data.subject_id),
-                        Subject::initial(Some(subject)),
+                        Governance::initial(Some(governance)),
                     )
                     .await?;
 
-                let sink = Sink::new(child.subscribe(), ext_db.get_subject());
-                ctx.system().run_sink(sink).await;
+                    let sink = Sink::new(child.subscribe(), ext_db.get_subject());
+                    ctx.system().run_sink(sink).await;
 
-                let governance_id = if data.create_req.governance_id.is_empty()
-                {
                     None
                 } else {
+                    let tracker = Tracker::from(data.clone());
+                    let child = ctx
+                    .create_child(
+                        &format!("{}", data.subject_id),
+                        Tracker::initial(Some(tracker)),
+                    )
+                    .await?;
+
+                    let sink = Sink::new(child.subscribe(), ext_db.get_subject());
+                    ctx.system().run_sink(sink).await;
+
                     Some(data.create_req.governance_id.to_string())
                 };
 

@@ -1,13 +1,21 @@
 //! # GovernanceData module.
 //!
 use crate::{
-    Error, governance::model::{CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas, RolesGov, RolesSchema, Schema, SchemaKeyCreators, SignersType, WitnessesData}, model::{Namespace, request::SchemaType}
+    Error,
+    governance::model::{
+        CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes,
+        Quorum, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas,
+        RolesGov, RolesSchema, Schema, SchemaKeyCreators, SignersType,
+        WitnessesData,
+    },
+    model::{Namespace, request::SchemaType},
 };
 
 use ave_actors::ActorError;
 
 use ave_common::{ValueWrapper, identity::PublicKey};
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -15,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 pub type MemberName = String;
 pub type SchemaId = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
 pub struct GovernanceData {
     pub version: u64,
     pub members: BTreeMap<MemberName, PublicKey>,
@@ -65,13 +73,8 @@ impl GovernanceData {
         }
     }
 
-    pub fn to_value_wrapper(&self) -> Result<ValueWrapper, Error> {
-        Ok(ValueWrapper(serde_json::to_value(self).map_err(|e| {
-            Error::Governance(format!(
-                "Can not convert GovernanceData into Value: {}",
-                e
-            ))
-        })?))
+    pub fn to_value_wrapper(&self) -> ValueWrapper {
+        ValueWrapper(serde_json::to_value(self).expect("It cannot fail; it does not contain a map with keys other than strings."))
     }
 
     pub fn check_basic_gov(&self) -> bool {
@@ -136,7 +139,7 @@ impl GovernanceData {
             return Err(Error::Governance("Schema not found.".to_owned()));
         };
 
-        Ok(ValueWrapper(schema.initial_value.clone()))
+        Ok(schema.initial_value.clone())
     }
 
     /// Get the members as a set of key identifiers.
@@ -189,7 +192,8 @@ impl GovernanceData {
                     return true;
                 }
 
-                let Some(roles) = self.roles_schema.get(&schema_id.to_string()) else {
+                let Some(roles) = self.roles_schema.get(&schema_id.to_string())
+                else {
                     return false;
                 };
 
@@ -211,7 +215,8 @@ impl GovernanceData {
                     return false;
                 };
 
-                let Some(roles_schema) = self.roles_schema.get(&schema_id.to_string())
+                let Some(roles_schema) =
+                    self.roles_schema.get(&schema_id.to_string())
                 else {
                     return false;
                 };
@@ -293,12 +298,13 @@ impl GovernanceData {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_all_schemas
                 .get_signers(role.clone(), namespace.clone());
-            let (mut schema_signers, schema_any) =
-                if let Some(roles) = self.roles_schema.get(&schema_id.to_string()) {
-                    roles.get_signers(role, namespace)
-                } else {
-                    (vec![], false)
-                };
+            let (mut schema_signers, schema_any) = if let Some(roles) =
+                self.roles_schema.get(&schema_id.to_string())
+            {
+                roles.get_signers(role, namespace)
+            } else {
+                (vec![], false)
+            };
 
             not_gov_signers.append(&mut schema_signers);
 
@@ -340,7 +346,8 @@ impl GovernanceData {
                     ));
                 };
 
-                let Some(roles_schema) = self.roles_schema.get(&schema_id.to_string())
+                let Some(roles_schema) =
+                    self.roles_schema.get(&schema_id.to_string())
                 else {
                     return Err(ActorError::Functional("They are trying to obtain witnesses for a scheme that does not exist.".to_owned()));
                 };

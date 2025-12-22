@@ -17,13 +17,17 @@ use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::governance::data::GovernanceData;
-use crate::model::common::{get_last_state, update_last_state};
+use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
+use crate::model::common::node::get_sign;
+use crate::model::common::subject::{
+    get_gov, get_last_state, get_metadata, update_last_state, update_ledger,
+};
 use crate::subject::SignedLedger;
 use crate::system::ConfigHelper;
+use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use crate::{
-    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Subject,
-    SubjectMessage, SubjectResponse, Validation, ValidationInfo,
-    ValidationMessage,
+    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Validation,
+    ValidationInfo, ValidationMessage,
     approval::{Approval, ApprovalMessage},
     auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
     db::Storable,
@@ -36,7 +40,7 @@ use crate::{
     intermediary::Intermediary,
     model::{
         SignTypesNode,
-        common::{emit_fail, get_gov, get_metadata, get_sign},
+        common::emit_fail,
         event::{
             DataProofEvent, Ledger, LedgerValue, ProofEvent, ProtocolsError,
             ProtocolsSignatures,
@@ -340,24 +344,46 @@ impl RequestManager {
     pub async fn delete_subject(
         ctx: &mut ActorContext<RequestManager>,
         subject_id: &str,
+        is_gov: bool,
     ) -> Result<(), ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
+        let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        let response = if let Some(subject_actor) = subject_actor {
-            subject_actor.ask(SubjectMessage::DeleteSubject).await?
+        if is_gov {
+            let governance_actor: Option<ActorRef<Governance>> =
+                ctx.system().get_actor(&path).await;
+
+            let response = if let Some(governance_actor) = governance_actor {
+                governance_actor
+                    .ask(GovernanceMessage::DeleteGovernance)
+                    .await?
+            } else {
+                return Err(ActorError::NotFound(path));
+            };
+
+            match response {
+                GovernanceResponse::Ok => Ok(()),
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "GovernanceResponse::Ok".to_owned(),
+                )),
+            }
         } else {
-            return Err(ActorError::NotFound(subject_path));
-        };
+            let tracker_actor: Option<ActorRef<Tracker>> =
+                ctx.system().get_actor(&path).await;
 
-        match response {
-            SubjectResponse::Ok => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse(
-                subject_path,
-                "SubjectResponse::Ok".to_owned(),
-            )),
+            let response = if let Some(tracker_actor) = tracker_actor {
+                tracker_actor.ask(TrackerMessage::DeleteTracker).await?
+            } else {
+                return Err(ActorError::NotFound(path));
+            };
+
+            match response {
+                TrackerResponse::Ok => Ok(()),
+                _ => Err(ActorError::UnexpectedResponse(
+                    path,
+                    "TrackerResponse::Ok".to_owned(),
+                )),
+            }
         }
     }
 
@@ -377,14 +403,31 @@ impl RequestManager {
             signature: signature_ledger,
         });
 
-        if let Err(e) =
-            RequestManager::update_ledger(ctx, signed_ledger.clone()).await
+        let subject_id = event.subject_id.to_string();
+
+        match update_ledger(
+            ctx,
+            &subject_id,
+            vec![signed_ledger.clone()],
+            last_proof.schema_id.is_gov(),
+        )
+        .await
         {
-            if let ActorError::Functional(_) = e {
-                self.abort_request_manager(ctx, &e.to_string(), false)
-                    .await?;
+            Ok((_, owner, _)) => {
+                Self::change_node_subject_state(
+                    ctx,
+                    &owner.to_string(),
+                    &subject_id,
+                )
+                .await?;
             }
-            return Err(e);
+            Err(e) => {
+                if let ActorError::Functional(_) = e {
+                    self.abort_request_manager(ctx, &e.to_string(), false)
+                        .await?;
+                }
+                return Err(e);
+            }
         };
 
         let signature_event =
@@ -395,11 +438,20 @@ impl RequestManager {
             signature: signature_event,
         };
 
-
-        let update = update_last_state(ctx, signed_event.clone(), last_proof.clone(), last_vali_res.clone()).await?;
+        let update = update_last_state(
+            ctx,
+            signed_event.clone(),
+            last_proof.clone(),
+            last_vali_res.clone(),
+        )
+        .await?;
         if !update {
-            self.abort_request_manager(ctx, "Our sn is biggest than event sn", true)
-                .await?;
+            self.abort_request_manager(
+                ctx,
+                "Our sn is biggest than event sn",
+                true,
+            )
+            .await?;
         }
 
         self.on_event(
@@ -487,46 +539,6 @@ impl RequestManager {
             .await?;
 
         Ok(())
-    }
-
-    async fn update_ledger(
-        ctx: &mut ActorContext<RequestManager>,
-        ledger: SignedLedger,
-    ) -> Result<(), ActorError> {
-        let subject_id = ledger.content.subject_id.to_string();
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
-
-        let response = if let Some(subject_actor) = subject_actor {
-            subject_actor
-                .ask(SubjectMessage::UpdateLedger {
-                    events: vec![ledger.clone()],
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(subject_path));
-        };
-
-        match response {
-            SubjectResponse::UpdateResult(_, owner, _) => {
-                if ledger.content.event_request.content.is_create_event() {
-                    Self::change_node_subject_state(
-                        ctx,
-                        &owner.to_string(),
-                        &subject_id,
-                    )
-                    .await?;
-                }
-
-                Ok(())
-            }
-            _ => Err(ActorError::UnexpectedResponse(
-                subject_path,
-                "SubjectResponse::UpdateResult".to_owned(),
-            )),
-        }
     }
 
     async fn end_request(
@@ -782,10 +794,15 @@ impl RequestManager {
     ) -> Result<(), ActorError> {
         error!(TARGET_MANAGER, "Aborting request {}", self.id);
 
-        if self.request.content.is_create_event() {
+        if let EventRequest::Create(create_request) = &self.request.content {
             error!(TARGET_MANAGER, "Deleting Subject {}", self.subject_id);
             if delete_subj {
-                Self::delete_subject(ctx, &self.subject_id).await?;
+                Self::delete_subject(
+                    ctx,
+                    &self.subject_id,
+                    create_request.schema_id.is_gov(),
+                )
+                .await?;
             }
         }
 

@@ -1,14 +1,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    Error, EventRequest, Subject, evaluation::response::Response as EvalRes, governance::{data::GovernanceData, model::Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
-        SignTypesNode,
-        common::{
-            UpdateData, emit_fail, get_metadata, get_sign,
-            update_ledger_network,
-        },
-        network::{RetryNetwork, TimeOutResponse}, request::SchemaType,
-    }, subject::{SubjectMessage, SubjectResponse}, system::ConfigHelper
+    Error, EventRequest, evaluation::response::Response as EvalRes, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData, model::Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
+        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::get_metadata}, network::{RetryNetwork, TimeOutResponse}, request::SchemaType
+    }, system::ConfigHelper
 };
 
 use crate::helpers::network::ActorMessage;
@@ -118,7 +113,7 @@ impl Evaluator {
                     .ask(CompilerMessage::Compile {
                         contract_name: format!("{}_{}", governance_id, id),
                         contract: schema.contract.clone(),
-                        initial_value: schema.initial_value.clone(),
+                        initial_value: schema.initial_value.0.clone(),
                         contract_path: contracts_path
                             .join("contracts")
                             .join(format!("{}_{}", governance_id, id)),
@@ -315,22 +310,22 @@ impl Evaluator {
         gov: &str,
     ) -> Result<Vec<String>, ActorError> {
         let subject_path = ActorPath::from(format!("/user/node/{}", gov));
-        let subject: Option<ActorRef<Subject>> =
+        let subject: Option<ActorRef<Governance>> =
             ctx.system().get_actor(&subject_path).await;
 
         let response = if let Some(subject) = subject {
             subject
-                .ask(SubjectMessage::CreateCompilers(ids.to_vec()))
+                .ask(GovernanceMessage::CreateCompilers(ids.to_vec()))
                 .await?
         } else {
             return Err(ActorError::NotFound(subject_path));
         };
 
         match response {
-            SubjectResponse::NewCompilers(new_compilers) => Ok(new_compilers),
+            GovernanceResponse::NewCompilers(new_compilers) => Ok(new_compilers),
             _ => Err(ActorError::UnexpectedResponse(
                 subject_path,
-                "SubjectResponse::NewCompilers".to_owned(),
+                "GovernanceResponse::NewCompilers".to_owned(),
             )),
         }
     }

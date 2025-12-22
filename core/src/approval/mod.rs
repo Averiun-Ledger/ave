@@ -18,14 +18,16 @@ use crate::approval::approver::InitApprover;
 use crate::evaluation::response::EvalLedgerResponse;
 use crate::governance::model::{ProtocolTypes, Quorum};
 use crate::model::SignTypesNode;
+use crate::model::common::node::get_sign;
+use crate::model::common::subject::{get_metadata, get_signers_quorum_gov_version};
 use crate::model::common::{
-    emit_fail, get_sign, get_signers_quorum_gov_version,
+    emit_fail, 
 };
 use crate::model::event::{LedgerValue, ProtocolsSignatures};
 use crate::request::manager::{RequestManager, RequestManagerMessage};
-use crate::{EventRequest, SubjectMessage, SubjectResponse};
+use crate::{EventRequest};
 use crate::{
-    Subject, db::Storable, evaluation::request::EvaluationReq,
+    db::Storable, evaluation::request::EvaluationReq,
 };
 
 pub mod approver;
@@ -82,26 +84,7 @@ impl Approval {
             return Err(ActorError::FunctionalFail("An attempt is being made to approvation an event that is not fact.".to_owned()));
         };
 
-        // Obtain the last event of subject actor
-        let subject_path = ctx.path().parent();
-        let subject_actor: Option<ActorRef<Subject>> =
-            ctx.system().get_actor(&subject_path).await;
-
-        let response = if let Some(subject_actor) = subject_actor {
-            subject_actor.ask(SubjectMessage::GetMetadata).await?
-        } else {
-            return Err(ActorError::NotFound(subject_path));
-        };
-
-        let prev_hash = match response {
-            SubjectResponse::Metadata(metadata) => metadata.last_event_hash,
-            _ => {
-                return Err(ActorError::UnexpectedResponse(
-                    subject_path,
-                    "SubjectResponse::Metadata".to_owned(),
-                ));
-            }
-        };
+        let prev_hash = get_metadata(ctx, &subject_id.to_string()).await?.last_event_hash;
 
         let LedgerValue::Patch(patch) = eval_res.value else {
             return Err(ActorError::FunctionalFail(

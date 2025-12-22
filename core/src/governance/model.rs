@@ -1,7 +1,7 @@
 //! # Governance model.
 //!
 
-use ave_common::identity::PublicKey;
+use ave_common::{ValueWrapper, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -15,9 +15,9 @@ use crate::model::{Namespace, request::SchemaType};
 pub type MemberName = String;
 
 /// Governance schema.
-#[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
 pub struct Schema {
-    pub initial_value: serde_json::Value,
+    pub initial_value: ValueWrapper,
     pub contract: String,
 }
 
@@ -38,7 +38,7 @@ pub struct SchemaKeyCreators {
     pub evaluation: Option<HashSet<PublicKey>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
 pub struct RolesGov {
     pub approver: BTreeSet<MemberName>,
     pub evaluator: BTreeSet<MemberName>,
@@ -127,7 +127,7 @@ impl RolesGov {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
 pub struct RolesAllSchemas {
     pub evaluator: BTreeSet<Role>,
     pub validator: BTreeSet<Role>,
@@ -391,7 +391,7 @@ impl RolesAllSchemas {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
 pub struct RolesSchema {
     pub evaluator: BTreeSet<Role>,
     pub validator: BTreeSet<Role>,
@@ -853,14 +853,14 @@ impl HashThisRole {
 
 /// Governance role.
 #[derive(
-    Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq, PartialOrd, Ord,
+    Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq, PartialOrd, Ord, BorshDeserialize, BorshSerialize
 )]
 pub struct Role {
     pub name: String,
     pub namespace: Namespace,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
 pub struct RoleCreator {
     pub name: String,
     pub namespace: Namespace,
@@ -912,19 +912,19 @@ impl RoleCreator {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
 pub struct RoleGovIssuer {
     pub users: BTreeSet<MemberName>,
     pub any: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
 pub struct RoleSchemaIssuer {
     pub users: BTreeSet<Role>,
     pub any: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, BorshDeserialize, BorshSerialize)]
 pub enum CreatorQuantity {
     Quantity(u32),
     Infinity,
@@ -1062,7 +1062,7 @@ impl Quorum {
 }
 
 /// Governance policy.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, BorshDeserialize, BorshSerialize)]
 pub struct PolicyGov {
     /// Approve quorum
     pub approve: Quorum,
@@ -1083,7 +1083,7 @@ impl PolicyGov {
 }
 
 #[derive(
-    Debug, Serialize, Deserialize, Clone, Hash, PartialEq, Eq, Default,
+    Debug, Serialize, Deserialize, Clone, Hash, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize
 )]
 pub struct PolicySchema {
     /// Evaluate quorum

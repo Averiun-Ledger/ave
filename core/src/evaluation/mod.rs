@@ -11,13 +11,7 @@ pub mod schema;
 
 use crate::{
     auth::WitnessesAuth, governance::{data::GovernanceData, model::{ProtocolTypes, Quorum}}, model::{
-        SignTypesNode,
-        common::{
-            emit_fail, get_metadata, get_sign, get_signers_quorum_gov_version,
-            send_reboot_to_req, take_random_signers, try_to_update,
-        },
-        event::{LedgerValue, ProtocolsError, ProtocolsSignatures},
-        request::{EventRequest, SchemaType},
+        SignTypesNode, common::{emit_fail, node::{get_sign, try_to_update}, send_reboot_to_req, subject::{get_metadata, get_signers_quorum_gov_version}, take_random_signers}, event::{LedgerValue, ProtocolsError, ProtocolsSignatures}, request::{EventRequest, SchemaType}
     }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata, system::ConfigHelper
 };
 use ave_actors::{
@@ -803,14 +797,14 @@ mod tests {
     use test_log::test;
 
     use crate::{
-        EventRequest, FactRequest, NodeMessage, NodeResponse, SubjectMessage, SubjectResponse, approval::approver::ApprovalStateRes, governance::data::GovernanceData, model::{
+        EventRequest, FactRequest, NodeMessage, NodeResponse, approval::approver::ApprovalStateRes, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, model::{
             Namespace, SignTypesNode, event::LedgerValue,
             request::{SchemaType, TransferRequest},
         }, node::Node, query::{Query, QueryMessage, QueryResponse}, request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
         }, subject::{
             Subject, laststate::{LastState, LastStateMessage, LastStateResponse},
-        }, validation::tests::create_subject_gov
+        }, tracker::{Tracker, TrackerMessage, TrackerResponse}, validation::tests::create_subject_gov
     };
 
     #[test(tokio::test)]
@@ -930,8 +924,8 @@ mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
             .await
             .unwrap()
         else {
@@ -1089,8 +1083,8 @@ mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
             .await
             .unwrap()
         else {
@@ -1150,7 +1144,7 @@ mod tests {
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         ActorRef<Query>,
-        ActorRef<Subject>,
+        ActorRef<Governance>,
         ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
@@ -1323,8 +1317,8 @@ mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
             .await
             .unwrap()
         else {
@@ -1390,7 +1384,7 @@ mod tests {
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         ActorRef<Query>,
-        ActorRef<Subject>,
+        ActorRef<Tracker>,
         ActorRef<LastState>,
         DigestIdentifier,
         Vec<TempDir>,
@@ -1469,7 +1463,7 @@ mod tests {
             panic!("Invalid response")
         };
 
-        let subject_actor: ActorRef<Subject> = system
+        let subject_actor: ActorRef<Tracker> = system
             .get_actor(&ActorPath::from(format!(
                 "/user/node/{}",
                 request_id.subject_id
@@ -1477,8 +1471,8 @@ mod tests {
             .await
             .unwrap();
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let TrackerResponse::Metadata(metadata) = subject_actor
+            .ask(TrackerMessage::GetMetadata)
             .await
             .unwrap()
         else {
@@ -1598,8 +1592,8 @@ mod tests {
             panic!("Invalid response")
         };
 
-        let SubjectResponse::Metadata(metadata) = subject_actor
-            .ask(SubjectMessage::GetMetadata)
+        let TrackerResponse::Metadata(metadata) = subject_actor
+            .ask(TrackerMessage::GetMetadata)
             .await
             .unwrap()
         else {

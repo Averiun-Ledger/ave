@@ -15,6 +15,8 @@ use tracing::{error, info};
 use types::ReqManInitMessage;
 
 use crate::governance::data::GovernanceData;
+use crate::model::common::node::{get_quantity, subject_owner};
+use crate::model::common::subject::{get_gov, get_metadata};
 use crate::model::request::SchemaType;
 use crate::request::manager::InitRequestManager;
 use crate::subject::CreateSubjectData;
@@ -26,8 +28,7 @@ use crate::{
     governance::{model::CreatorQuantity},
     helpers::db::ExternalDB,
     model::{
-        Namespace,
-        common::{get_gov, get_metadata, get_quantity, subject_owner},
+        Namespace
     },
 };
 
@@ -92,8 +93,7 @@ impl RequestHandler {
         let data = if create_req.schema_id.is_gov() {
             let gov = GovernanceData::new(request.signature.signer.clone());
             let value = gov
-                .to_value_wrapper()
-                .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
+                .to_value_wrapper();
 
             CreateSubjectData {
                 create_req,

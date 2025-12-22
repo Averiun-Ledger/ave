@@ -10,7 +10,7 @@ use crate::{
     error::Error,
 };
 use ave_bridge::{
-    ApproveInfo, EventInfo, GovsData, PaginatorEvents, RegisterDataSubj,
+    ApproveInfo, EventInfo, GovsData, PaginatorEvents, SubjsData,
     RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
 };
 use ave_bridge::{Bridge, BridgeSignedEventRequest};
@@ -582,7 +582,7 @@ async fn get_all_govs(
         ("parameters" = SubjectQuery, Query, description = "The query parameters for the request"),
     ),
     responses(
-        (status = 200, description = "Subjects Data successfully retrieved", body = [RegisterDataSubj],
+        (status = 200, description = "Subjects Data successfully retrieved", body = [SubjsData],
         example = json!(
             [
                 {
@@ -600,7 +600,7 @@ async fn get_all_subjects(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(governance_id): Path<String>,
     Query(parameters): Query<SubjectQuery>,
-) -> Result<Json<Vec<RegisterDataSubj>>, Error> {
+) -> Result<Json<Vec<SubjsData>>, Error> {
     Ok(Json(
         bridge
             .get_all_subjs(governance_id, parameters.active, parameters.schema)
