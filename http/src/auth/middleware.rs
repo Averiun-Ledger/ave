@@ -87,11 +87,11 @@ where
 
         // Update API key last used
         let _ =
-            db.update_api_key_usage(auth_ctx.api_key_id, ip_address.as_deref());
+            db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
 
         // Check rate limit
         db.check_rate_limit(
-            Some(auth_ctx.api_key_id),
+            Some(&auth_ctx.api_key_id),
             ip_address.as_deref(),
             parts.uri.path().into(),
         )

@@ -494,7 +494,7 @@ mod tests {
     fn test_revoke_nonexistent_api_key() {
         let (db, _dirs) = common::create_test_db();
 
-        let result = db.revoke_api_key(99999, None, None);
+        let result = db.revoke_api_key("99999999-9999-9999-9999-999999999999", None, None);
 
         // revoke_api_key doesn't check if key exists, it just succeeds silently
         assert!(result.is_ok());
@@ -593,7 +593,7 @@ mod tests {
             .unwrap();
 
         // Revoke key
-        db.revoke_api_key(key_info.id, None, Some("Security breach"))
+        db.revoke_api_key(&key_info.id, None, Some("Security breach"))
             .unwrap();
 
         // Should not verify
@@ -613,10 +613,10 @@ mod tests {
             .unwrap();
 
         // Revoke key
-        db.revoke_api_key(key_info.id, None, None).unwrap();
+        db.revoke_api_key(&key_info.id, None, None).unwrap();
 
         // Revoke again (should still work or fail gracefully)
-        let result = db.revoke_api_key(key_info.id, None, None);
+        let result = db.revoke_api_key(&key_info.id, None, None);
         // Either succeeds or fails with NotFound
         assert!(
             result.is_ok()
@@ -728,7 +728,7 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            public_ids.push(key_info.public_id.clone());
+            public_ids.push(key_info.id.clone());
         }
 
         // Verify all public_ids are UUIDs (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
@@ -799,9 +799,9 @@ mod tests {
             .create_api_key(user.id, Some("test"), None, None, false)
             .unwrap();
 
-        // public_id should be populated and non-empty
-        assert!(!key_info.public_id.is_empty(), "public_id should not be empty");
-        assert_ne!(key_info.public_id, "0", "public_id should not be default value");
+        // id should be populated and non-empty UUID
+        assert!(!key_info.id.is_empty(), "id should not be empty");
+        assert_ne!(key_info.id, "0", "id should not be default value");
     }
 
     /// Test concurrent API key creation respects max_keys limit

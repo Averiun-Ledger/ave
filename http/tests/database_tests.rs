@@ -472,7 +472,7 @@ mod tests {
             .unwrap();
 
         // Revoke the key
-        db.revoke_api_key(key_info.id, None, None).unwrap();
+        db.revoke_api_key(&key_info.id, None, None).unwrap();
 
         // Should no longer verify
         let result = db.verify_api_key(&api_key);
@@ -532,14 +532,14 @@ mod tests {
             .unwrap();
 
         // Verify no expiration was set
-        let info = db.get_api_key_info(key_info.id).unwrap();
+        let info = db.get_api_key_info(&key_info.id).unwrap();
         assert!(info.expires_at.is_none());
 
         // Enable TTL and run cleanup to backfill
         db.set_default_api_key_ttl(100);
 
         let _ = db.cleanup_expired_api_keys().unwrap();
-        let info = db.get_api_key_info(key_info.id).unwrap();
+        let info = db.get_api_key_info(&key_info.id).unwrap();
 
         assert_eq!(info.expires_at, Some(info.created_at + 100));
     }
@@ -660,7 +660,7 @@ mod tests {
         // Make 10 requests (well under limit of 100)
         for _ in 0..10 {
             let result = db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("127.0.0.1"),
                 Some("/api/test"),
             );
@@ -682,7 +682,7 @@ mod tests {
         // Hit rate limit (100 requests)
         for _ in 0..100 {
             let _ = db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("127.0.0.1"),
                 Some("/api/test"),
             );
@@ -690,7 +690,7 @@ mod tests {
 
         // 101st request should fail
         let result = db.check_rate_limit(
-            Some(key_info.id),
+            Some(&key_info.id),
             Some("127.0.0.1"),
             Some("/api/test"),
         );
@@ -723,7 +723,7 @@ mod tests {
         // Two requests from same IP should pass
         assert!(
             db.check_rate_limit(
-                Some(key1.id),
+                Some(&key1.id),
                 Some("127.0.0.1"),
                 Some("/api/test")
             )
@@ -731,7 +731,7 @@ mod tests {
         );
         assert!(
             db.check_rate_limit(
-                Some(key1.id),
+                Some(&key1.id),
                 Some("127.0.0.1"),
                 Some("/api/test")
             )
@@ -740,7 +740,7 @@ mod tests {
 
         // Third request from same IP but different key should exceed (IP-only limit)
         let result = db.check_rate_limit(
-            Some(key2.id),
+            Some(&key2.id),
             Some("127.0.0.1"),
             Some("/api/test"),
         );
@@ -770,7 +770,7 @@ mod tests {
         // First request from any IP should pass
         assert!(
             db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("10.0.0.1"),
                 Some("/api/test")
             )
@@ -779,7 +779,7 @@ mod tests {
 
         // Second request with the same key but different IP should still be limited
         let result = db.check_rate_limit(
-            Some(key_info.id),
+            Some(&key_info.id),
             Some("10.0.0.2"),
             Some("/api/test"),
         );

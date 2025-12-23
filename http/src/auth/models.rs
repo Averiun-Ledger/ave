@@ -261,7 +261,7 @@ pub struct AuditLog {
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub timestamp: i64,
     pub user_id: Option<i64>,
-    pub api_key_id: Option<i64>,
+    pub api_key_id: Option<String>,
     pub action_type: String,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
@@ -276,7 +276,7 @@ pub struct AuditLog {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditLogQuery {
     pub user_id: Option<i64>,
-    pub api_key_id: Option<i64>,
+    pub api_key_id: Option<String>,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
     pub ip_address: Option<String>,
@@ -316,7 +316,7 @@ pub struct AuthContext {
     pub is_superadmin: bool,
     pub roles: Vec<String>,
     pub permissions: Vec<Permission>,
-    pub api_key_id: i64,
+    pub api_key_id: String,  // UUID
     pub is_management_key: bool,
     pub ip_address: Option<String>,
 }

@@ -98,7 +98,7 @@ pub async fn create_user(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_created",
         endpoint: Some("/admin/users"),
         http_method: Some("POST"),
@@ -259,7 +259,7 @@ pub async fn update_user(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_updated",
         endpoint: Some(&format!("/admin/users/{}", user_id)),
         http_method: Some("PUT"),
@@ -310,7 +310,7 @@ pub async fn reset_user_password(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_password_reset",
         endpoint: Some(&format!("/admin/users/{}/password", user_id)),
         http_method: Some("POST"),
@@ -364,7 +364,7 @@ pub async fn delete_user(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_deleted",
         endpoint: Some(&format!("/admin/users/{}", user_id)),
         http_method: Some("DELETE"),
@@ -410,7 +410,7 @@ pub async fn assign_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_assigned",
         endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         http_method: Some("POST"),
@@ -456,7 +456,7 @@ pub async fn remove_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_removed",
         endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         http_method: Some("DELETE"),
@@ -505,7 +505,7 @@ pub async fn create_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_created",
         endpoint: Some("/admin/roles"),
         http_method: Some("POST"),
@@ -607,7 +607,7 @@ pub async fn update_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_updated",
         endpoint: Some(&format!("/admin/roles/{}", role_id)),
         http_method: Some("PUT"),
@@ -651,7 +651,7 @@ pub async fn delete_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_deleted",
         endpoint: Some(&format!("/admin/roles/{}", role_id)),
         http_method: Some("DELETE"),
@@ -730,7 +730,7 @@ pub async fn set_role_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_set",
         endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
         http_method: Some("POST"),
@@ -818,7 +818,7 @@ pub async fn set_user_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_set",
         endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
         http_method: Some("POST"),
@@ -868,7 +868,7 @@ pub async fn remove_user_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_removed",
         endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
         http_method: Some("DELETE"),
@@ -916,7 +916,7 @@ pub async fn remove_role_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_removed",
         endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
         http_method: Some("DELETE"),

@@ -1580,7 +1580,7 @@ mod tests {
             is_superadmin: false,
             roles: vec![role_name],
             permissions: perms,
-            api_key_id: 1,
+            api_key_id: "00000000-0000-0000-0000-000000000001".to_string(),
             is_management_key: true,
             ip_address: None,
         })

@@ -82,7 +82,7 @@ pub async fn create_api_key_for_user(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
         endpoint: Some(&format!("/admin/api-keys/user/{}", user_id)),
         http_method: Some("POST"),
@@ -168,11 +168,11 @@ pub async fn list_user_api_keys_admin(
 /// Get API key info (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{public_id}",
+    path = "/admin/api-keys/{id}",
     operation_id = "getApiKey",
     tag = "API Key Management",
     params(
-        ("public_id" = String, Path, description = "API Key Public ID (UUID)")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
     responses(
         (status = 200, description = "API key information", body = ApiKeyInfo),
@@ -184,12 +184,12 @@ pub async fn list_user_api_keys_admin(
 pub async fn get_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(public_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let key_info = db.get_api_key_info_by_public_id(&public_id).map_err(db_error_to_response)?;
+    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
 
     Ok(Json(key_info))
 }
@@ -197,11 +197,11 @@ pub async fn get_api_key(
 /// Revoke API key (admin)
 #[utoipa::path(
     delete,
-    path = "/admin/api-keys/{public_id}",
+    path = "/admin/api-keys/{id}",
     operation_id = "revokeApiKey",
     tag = "API Key Management",
     params(
-        ("public_id" = String, Path, description = "API Key Public ID (UUID)")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body = RevokeApiKeyRequest,
     responses(
@@ -214,21 +214,21 @@ pub async fn get_api_key(
 pub async fn revoke_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(public_id): Path<String>,
+    Path(id): Path<String>,
     Json(req): Json<RevokeApiKeyRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
 
-    db.revoke_api_key_by_public_id(&public_id, Some(auth_ctx.user_id), req.reason.as_deref())
+    db.revoke_api_key(&id, Some(auth_ctx.user_id), req.reason.as_deref())
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
-        endpoint: Some(&format!("/admin/api-keys/{}", public_id)),
+        endpoint: Some(&format!("/admin/api-keys/{}", id)),
         http_method: Some("DELETE"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
@@ -244,11 +244,11 @@ pub async fn revoke_api_key(
 /// Rotate an existing API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{public_id}/rotate",
+    path = "/admin/api-keys/{id}/rotate",
     operation_id = "rotateApiKey",
     tag = "API Key Management",
     params(
-        ("public_id" = String, Path, description = "API Key Public ID (UUID)")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body = RotateApiKeyRequest,
     responses(
@@ -261,7 +261,7 @@ pub async fn revoke_api_key(
 pub async fn rotate_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(public_id): Path<String>,
+    Path(id): Path<String>,
     Json(req): Json<RotateApiKeyRequest>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
@@ -271,10 +271,10 @@ pub async fn rotate_api_key(
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
     // Fetch existing key for user and defaults
-    let existing = db.get_api_key_info_by_public_id(&public_id).map_err(db_error_to_response)?;
+    let existing = db.get_api_key_info(&id).map_err(db_error_to_response)?;
 
     // Revoke old key first
-    db.revoke_api_key(existing.id, Some(auth_ctx.user_id), req.reason.as_deref())
+    db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.reason.as_deref())
         .map_err(db_error_to_response)?;
 
     // Create replacement key
@@ -295,9 +295,9 @@ pub async fn rotate_api_key(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_rotated",
-        endpoint: Some(&format!("/admin/api-keys/{}/rotate", public_id)),
+        endpoint: Some(&format!("/admin/api-keys/{}/rotate", id)),
         http_method: Some("POST"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
@@ -370,7 +370,7 @@ pub async fn create_my_api_key(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
         endpoint: Some("/me/api-keys"),
         http_method: Some("POST"),
@@ -479,7 +479,7 @@ pub async fn revoke_my_api_key(
         .map_err(db_error_to_response)?;
 
     // Cannot revoke the current key
-    if key_info.id == auth_ctx.api_key_id {
+    if &key_info.id == &auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -500,13 +500,13 @@ pub async fn revoke_my_api_key(
 
     let reason = req.as_ref().and_then(|r| r.reason.as_deref());
 
-    db.revoke_api_key(key_info.id, Some(auth_ctx.user_id), reason)
+    db.revoke_api_key(&key_info.id, Some(auth_ctx.user_id), reason)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
         endpoint: Some(&format!("/me/api-keys/{}", name)),
         http_method: Some("DELETE"),

@@ -140,7 +140,7 @@ pub async fn login(
     // Log successful login
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(user.id),
-        api_key_id: Some(key_info.id),
+        api_key_id: Some(&key_info.id),
         action_type: "login_success",
         endpoint: Some("/login"),
         http_method: Some("POST"),

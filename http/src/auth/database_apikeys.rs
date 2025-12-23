@@ -15,10 +15,10 @@ impl AuthDatabase {
     /// Internal: Get API key info by ID without acquiring lock
     fn get_api_key_info_internal(
         conn: &rusqlite::Connection,
-        key_id: i64,
+        key_id: &str,
     ) -> Result<ApiKeyInfo, DatabaseError> {
         conn.query_row(
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -28,20 +28,19 @@ impl AuthDatabase {
             |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    public_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    username: row.get(3)?,
-                    key_prefix: row.get(4)?,
-                    name: row.get(5)?,
-                    description: row.get(6)?,
-                    is_management: row.get(7)?,
-                    created_at: row.get(8)?,
-                    expires_at: row.get(9)?,
-                    revoked: row.get(10)?,
-                    revoked_at: row.get(11)?,
-                    revoked_reason: row.get(12)?,
-                    last_used_at: row.get(13)?,
-                    last_used_ip: row.get(14)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    key_prefix: row.get(3)?,
+                    name: row.get(4)?,
+                    description: row.get(5)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             },
         )
@@ -53,50 +52,10 @@ impl AuthDatabase {
     /// Get API key info by ID
     pub fn get_api_key_info(
         &self,
-        key_id: i64,
+        key_id: &str,
     ) -> Result<ApiKeyInfo, DatabaseError> {
         let conn = self.lock_conn()?;
         Self::get_api_key_info_internal(&conn, key_id)
-    }
-
-    /// Get API key info by public_id (UUID)
-    pub fn get_api_key_info_by_public_id(
-        &self,
-        public_id: &str,
-    ) -> Result<ApiKeyInfo, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        conn.query_row(
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
-                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
-             FROM api_keys k
-             INNER JOIN users u ON k.user_id = u.id
-             WHERE k.public_id = ?1",
-            params![public_id],
-            |row| {
-                Ok(ApiKeyInfo {
-                    id: row.get(0)?,
-                    public_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    username: row.get(3)?,
-                    key_prefix: row.get(4)?,
-                    name: row.get(5)?,
-                    description: row.get(6)?,
-                    is_management: row.get(7)?,
-                    created_at: row.get(8)?,
-                    expires_at: row.get(9)?,
-                    revoked: row.get(10)?,
-                    revoked_at: row.get(11)?,
-                    revoked_reason: row.get(12)?,
-                    last_used_at: row.get(13)?,
-                    last_used_ip: row.get(14)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-        .ok_or_else(|| DatabaseError::NotFoundError(format!("API key with public_id {} not found", public_id)))
     }
 
     /// Create a new API key for a user
@@ -165,7 +124,7 @@ impl AuthDatabase {
         }
 
         if !is_management {
-            let exists: Option<i64> = conn
+            let exists: Option<String> = conn
                 .query_row(
                     "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
                     params![user_id, name.unwrap_or_default()],
@@ -212,29 +171,27 @@ impl AuthDatabase {
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
-        // SECURITY FIX: Generate UUID for public identifier
-        let public_id = AuthDatabase::generate_uuid();
+        // Generate UUID for id
+        let key_id = AuthDatabase::generate_uuid();
 
         // Insert API key
         conn.execute(
-            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at, is_management, public_id)
+            "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, description, expires_at, is_management)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
+                key_id,
                 user_id,
                 key_hash,
                 key_prefix,
                 name.unwrap_or_default(),
                 description,
                 expires_at,
-                is_management,
-                public_id
+                is_management
             ],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
-        let key_id = conn.last_insert_rowid();
-
         // Get key info
-        let key_info = Self::get_api_key_info_internal(&conn, key_id)?;
+        let key_info = Self::get_api_key_info_internal(&conn, &key_id)?;
 
         Ok((api_key, key_info))
     }
@@ -248,7 +205,7 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let query = if include_revoked {
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -256,7 +213,7 @@ impl AuthDatabase {
              WHERE k.user_id = ?1
              ORDER BY k.created_at DESC"
         } else {
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -273,20 +230,19 @@ impl AuthDatabase {
             .query_map(params![user_id], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    public_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    username: row.get(3)?,
-                    key_prefix: row.get(4)?,
-                    name: row.get(5)?,
-                    description: row.get(6)?,
-                    is_management: row.get(7)?,
-                    created_at: row.get(8)?,
-                    expires_at: row.get(9)?,
-                    revoked: row.get(10)?,
-                    revoked_at: row.get(11)?,
-                    revoked_reason: row.get(12)?,
-                    last_used_at: row.get(13)?,
-                    last_used_ip: row.get(14)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    key_prefix: row.get(3)?,
+                    name: row.get(4)?,
+                    description: row.get(5)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -304,7 +260,7 @@ impl AuthDatabase {
     ) -> Result<ApiKeyInfo, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let key_id: i64 = conn
+        let key_id: String = conn
             .query_row(
                 "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
                 params![user_id, name],
@@ -318,7 +274,7 @@ impl AuthDatabase {
                 )
             })?;
 
-        Self::get_api_key_info_internal(&conn, key_id)
+        Self::get_api_key_info_internal(&conn, &key_id)
     }
 
     /// List all API keys (admin)
@@ -329,14 +285,14 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let query = if include_revoked {
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              ORDER BY k.created_at DESC"
         } else {
-            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -353,20 +309,19 @@ impl AuthDatabase {
             .query_map([], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    public_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    username: row.get(3)?,
-                    key_prefix: row.get(4)?,
-                    name: row.get(5)?,
-                    description: row.get(6)?,
-                    is_management: row.get(7)?,
-                    created_at: row.get(8)?,
-                    expires_at: row.get(9)?,
-                    revoked: row.get(10)?,
-                    revoked_at: row.get(11)?,
-                    revoked_reason: row.get(12)?,
-                    last_used_at: row.get(13)?,
-                    last_used_ip: row.get(14)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    key_prefix: row.get(3)?,
+                    name: row.get(4)?,
+                    description: row.get(5)?,
+                    is_management: row.get(6)?,
+                    created_at: row.get(7)?,
+                    expires_at: row.get(8)?,
+                    revoked: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    revoked_reason: row.get(11)?,
+                    last_used_at: row.get(12)?,
+                    last_used_ip: row.get(13)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -379,7 +334,7 @@ impl AuthDatabase {
     /// Revoke an API key
     pub fn revoke_api_key(
         &self,
-        key_id: i64,
+        key_id: &str,
         revoked_by: Option<i64>,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
@@ -392,27 +347,6 @@ impl AuthDatabase {
              SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
              WHERE id = ?4",
             params![now, revoked_by, reason, key_id],
-        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// Revoke API key by public_id (UUID)
-    pub fn revoke_api_key_by_public_id(
-        &self,
-        public_id: &str,
-        revoked_by: Option<i64>,
-        reason: Option<&str>,
-    ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        let now = Self::now();
-
-        conn.execute(
-            "UPDATE api_keys
-             SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
-             WHERE public_id = ?4",
-            params![now, revoked_by, reason, public_id],
         ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
         Ok(())
@@ -449,7 +383,7 @@ impl AuthDatabase {
 
         // Get API key from database
         let (key_id, user_id, revoked, expires_at, is_management): (
-            i64,
+            String,
             i64,
             bool,
             Option<i64>,
@@ -519,7 +453,7 @@ impl AuthDatabase {
         let now = Self::now();
         conn.execute(
             "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
-            params![now, key_id],
+            params![now, &key_id],
         )
         .ok(); // Ignore errors on usage tracking
 
@@ -555,7 +489,7 @@ impl AuthDatabase {
     /// Update API key last used timestamp and IP
     pub fn update_api_key_usage(
         &self,
-        key_id: i64,
+        key_id: &str,
         ip_address: Option<&str>,
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;

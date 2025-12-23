@@ -14,7 +14,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 /// Parameters for creating an audit log entry
 pub struct AuditLogParams<'a> {
     pub user_id: Option<i64>,
-    pub api_key_id: Option<i64>,
+    pub api_key_id: Option<&'a str>,  // UUID
     pub action_type: &'a str,
     pub endpoint: Option<&'a str>,
     pub http_method: Option<&'a str>,
@@ -87,7 +87,7 @@ impl AuthDatabase {
 
         self.create_audit_log(AuditLogParams {
             user_id: Some(ctx.user_id),
-            api_key_id: Some(ctx.api_key_id),
+            api_key_id: Some(&ctx.api_key_id),
             action_type: "api_request",
             endpoint: Some(req_params.path),
             http_method: Some(req_params.method),
@@ -122,9 +122,9 @@ impl AuthDatabase {
             params_vec.push(Box::new(uid));
         }
 
-        if let Some(api_key_id) = query.api_key_id {
+        if let Some(ref api_key_id) = query.api_key_id {
             sql.push_str(" AND api_key_id = ?");
-            params_vec.push(Box::new(api_key_id));
+            params_vec.push(Box::new(api_key_id.as_str()));
         }
 
         if let Some(ref endpoint) = query.endpoint {
@@ -354,7 +354,7 @@ impl AuthDatabase {
     /// Check rate limit and record request
     pub fn check_rate_limit(
         &self,
-        api_key_id: Option<i64>,
+        api_key_id: Option<&str>,  // UUID
         ip_address: Option<&str>,
         endpoint: Option<&str>,
     ) -> Result<bool, DatabaseError> {
@@ -442,7 +442,7 @@ impl AuthDatabase {
     /// Get rate limit stats for a user
     pub fn get_rate_limit_stats(
         &self,
-        api_key_id: Option<i64>,
+        api_key_id: Option<&str>,  // UUID
         hours: u32,
     ) -> Result<serde_json::Value, DatabaseError> {
         let conn = self.lock_conn()?;
