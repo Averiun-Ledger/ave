@@ -102,34 +102,44 @@ async fn main() {
         if cors_config.allow_any_origin {
             // SECURITY WARNING: This allows ANY website to make requests (CVSS 6.5)
             // Only use in development or if API is not accessed from browsers
+            tracing::warn!(
+                "CORS configured with allow_any_origin=true. This is a security risk in production!"
+            );
             cors_layer.allow_origin(Any)
         } else if !cors_config.allowed_origins.is_empty() {
             // Parse allowed origins from configuration
             let origins: Vec<HeaderValue> = cors_config
                 .allowed_origins
                 .iter()
-                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+                .filter_map(|origin| {
+                    origin.parse::<HeaderValue>().inspect_err(|e| {
+                        tracing::error!("Invalid CORS origin '{}': {}", origin, e);
+                    }).ok()
+                })
                 .collect();
 
-            if !origins.is_empty() {
-                cors_layer.allow_origin(origins)
-            } else {
-                // Fallback: if all origins failed to parse, allow localhost for development
-                tracing::warn!("No valid CORS origins configured, falling back to localhost:3000");
-                cors_layer.allow_origin(
-                    HeaderValue::from_static("http://localhost:3000")
-                )
+            if origins.is_empty() {
+                // All origins failed to parse - this is a configuration error
+                panic!(
+                    "CORS enabled with allowed_origins but all origins are invalid. \
+                    Please check your CORS configuration in config.json. \
+                    Provided origins: {:?}",
+                    cors_config.allowed_origins
+                );
             }
+
+            cors_layer.allow_origin(origins)
         } else {
-            // No origins configured and allow_any_origin is false
-            // Fallback to localhost for development
-            tracing::warn!("CORS enabled but no origins configured, falling back to localhost:3000");
-            cors_layer.allow_origin(
-                HeaderValue::from_static("http://localhost:3000")
-            )
+            // CORS enabled but no origins configured and allow_any_origin is false
+            // This is a misconfiguration - fail fast
+            panic!(
+                "CORS is enabled but no valid configuration provided. \
+                Either set 'allow_any_origin: true' (development only) or \
+                provide 'allowed_origins' list in config.json"
+            );
         }
     } else {
-        // CORS disabled, use permissive layer (will be skipped)
+        // CORS disabled, use permissive layer
         CorsLayer::permissive()
     };
 
