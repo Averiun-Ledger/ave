@@ -8,6 +8,20 @@ use rusqlite::{OptionalExtension, Result as SqliteResult, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/// Sanitize log field to prevent log injection attacks
+/// Removes control characters (except space) and limits length
+fn sanitize_log_field(input: &str, max_length: usize) -> String {
+    input
+        .chars()
+        .filter(|c| !c.is_control() || *c == ' ')
+        .take(max_length)
+        .collect()
+}
+
+// =============================================================================
 // AUDIT LOG OPERATIONS
 // =============================================================================
 
@@ -50,6 +64,13 @@ impl AuthDatabase {
 
         let conn = self.lock_conn()?;
 
+        // SECURITY FIX: Sanitize user-controlled fields to prevent log injection
+        let sanitized_user_agent = params.user_agent.map(|ua| sanitize_log_field(ua, 500));
+        let sanitized_ip = params.ip_address.map(|ip| sanitize_log_field(ip, 100));
+        let sanitized_endpoint = params.endpoint.map(|ep| sanitize_log_field(ep, 500));
+        let sanitized_details = params.details.map(|d| sanitize_log_field(d, 2000));
+        let sanitized_error = params.error_message.map(|e| sanitize_log_field(e, 1000));
+
         conn.execute(
             "INSERT INTO audit_logs (
                 user_id, api_key_id, action_type,
@@ -60,14 +81,14 @@ impl AuthDatabase {
                 params.user_id,
                 params.api_key_id,
                 params.action_type,
-                params.endpoint,
+                sanitized_endpoint.as_deref(),
                 params.http_method,
-                params.ip_address,
-                params.user_agent,
+                sanitized_ip.as_deref(),
+                sanitized_user_agent.as_deref(),
                 params.request_id,
-                params.details,
+                sanitized_details.as_deref(),
                 params.success,
-                params.error_message
+                sanitized_error.as_deref()
             ],
         )
         .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
@@ -379,12 +400,32 @@ impl AuthDatabase {
         let now = Self::now();
         let window_start = now - self.config.rate_limit.window_seconds;
 
+        // SECURITY FIX: Build WHERE clause dynamically to avoid SQL NULL comparison issues
+        // Using IS for parameters can cause incorrect behavior with NULL values
+        let (select_where, update_where) = match (api_key_id, ip_address) {
+            (Some(_), Some(_)) => (
+                "WHERE api_key_id = ?1 AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4",
+                "WHERE api_key_id = ?2 AND ip_address = ?3 AND endpoint = ?4 AND window_start >= ?5",
+            ),
+            (Some(_), None) => (
+                "WHERE api_key_id = ?1 AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4",
+                "WHERE api_key_id = ?2 AND ip_address IS NULL AND endpoint = ?4 AND window_start >= ?5",
+            ),
+            (None, Some(_)) => (
+                "WHERE api_key_id IS NULL AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4",
+                "WHERE api_key_id IS NULL AND ip_address = ?3 AND endpoint = ?4 AND window_start >= ?5",
+            ),
+            (None, None) => (
+                "WHERE api_key_id IS NULL AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4",
+                "WHERE api_key_id IS NULL AND ip_address IS NULL AND endpoint = ?4 AND window_start >= ?5",
+            ),
+        };
+
         // Try to get existing rate limit entry
+        let select_query = format!("SELECT request_count FROM rate_limits {}", select_where);
         let current_count: Option<i64> = conn
             .query_row(
-                "SELECT request_count FROM rate_limits
-                 WHERE api_key_id IS ?1 AND ip_address IS ?2 AND endpoint IS ?3
-                   AND window_start >= ?4",
+                &select_query,
                 params![api_key_id, ip_address, endpoint, window_start],
                 |row| row.get(0),
             )
@@ -402,11 +443,12 @@ impl AuthDatabase {
             }
 
             // Increment counter
+            let update_query = format!(
+                "UPDATE rate_limits SET request_count = request_count + 1, last_request_at = ?1 {}",
+                update_where
+            );
             conn.execute(
-                "UPDATE rate_limits
-                 SET request_count = request_count + 1, last_request_at = ?1
-                 WHERE api_key_id IS ?2 AND ip_address IS ?3 AND endpoint IS ?4
-                   AND window_start >= ?5",
+                &update_query,
                 params![now, api_key_id, ip_address, endpoint, window_start],
             )
             .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
@@ -449,24 +491,42 @@ impl AuthDatabase {
 
         let cutoff = Self::now() - (hours as i64 * 3600);
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT window_start, SUM(request_count) as total_requests
+        // SECURITY FIX: Build WHERE clause dynamically for proper NULL handling
+        let query: String = if api_key_id.is_some() {
+            "SELECT window_start, SUM(request_count) as total_requests
              FROM rate_limits
-             WHERE (api_key_id IS ?1 OR ?1 IS NULL) AND window_start >= ?2
+             WHERE api_key_id = ?1 AND window_start >= ?2
              GROUP BY window_start
              ORDER BY window_start DESC
-             LIMIT 100",
-            )
+             LIMIT 100".to_string()
+        } else {
+            "SELECT window_start, SUM(request_count) as total_requests
+             FROM rate_limits
+             WHERE api_key_id IS NULL AND window_start >= ?1
+             GROUP BY window_start
+             ORDER BY window_start DESC
+             LIMIT 100".to_string()
+        };
+
+        let mut stmt = conn
+            .prepare(&query)
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
-        let data: Vec<(i64, i64)> = stmt
-            .query_map(params![api_key_id, cutoff], |row| {
+        let data: Vec<(i64, i64)> = if api_key_id.is_some() {
+            stmt.query_map(params![api_key_id, cutoff], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        } else {
+            stmt.query_map(params![cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        };
 
         let total_requests: i64 = data.iter().map(|(_, count)| count).sum();
         let requests_per_window: Vec<(String, i64)> = data

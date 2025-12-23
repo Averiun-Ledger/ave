@@ -1961,7 +1961,7 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.auth.lockout.duration_seconds, 60);
     assert!(config.auth.rate_limit.enable);
     assert_eq!(config.auth.rate_limit.window_seconds, 60);
-    assert_eq!(config.auth.rate_limit.max_requests, 20);
+    assert_eq!(config.auth.rate_limit.max_requests, 10000);
     assert!(config.auth.rate_limit.limit_by_key);
     assert!(config.auth.rate_limit.limit_by_ip);
     assert_eq!(config.auth.rate_limit.cleanup_interval_seconds, 1800);

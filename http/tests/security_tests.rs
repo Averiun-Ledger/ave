@@ -752,7 +752,41 @@ mod tests {
     /// Security Fix: Prevents brute force attacks on login endpoint
     #[test]
     fn test_pre_auth_rate_limiting_on_login() {
-        let (db, _dirs) = common::create_test_db();
+        use ave_bridge::auth::{RateLimitConfig, ApiKeyConfig, LockoutConfig, SessionConfig, AuthConfig};
+        use ave_http::auth::database::AuthDatabase;
+
+        // Create test DB with specific rate limit config (100 requests/minute)
+        let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+        let path = dir.path().to_path_buf();
+
+        let config = AuthConfig {
+            enable: true,
+            database_path: path,
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig {
+                default_ttl_seconds: 0,
+                max_keys_per_user: 10,
+            },
+            lockout: LockoutConfig {
+                max_attempts: 5,
+                duration_seconds: 900,
+            },
+            rate_limit: RateLimitConfig {
+                enable: true,
+                window_seconds: 60,
+                max_requests: 100,  // Set to 100 for this test
+                limit_by_key: true,
+                limit_by_ip: true,
+                cleanup_interval_seconds: 3600,
+            },
+            session: SessionConfig {
+                audit_enable: true,
+                audit_retention_days: 90,
+                log_all_requests: false,
+            },
+        };
+
+        let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         // Create a test user
         db.create_user("testuser", "Password123!", false, None, None, None)
@@ -761,7 +795,7 @@ mod tests {
         // Simulate multiple failed login attempts from same IP
         let fake_ip = Some("192.168.1.100");
 
-        // Make requests up to rate limit (test config uses 100 per 60 seconds)
+        // Make requests up to rate limit (100 per 60 seconds)
         let mut successful_checks = 0;
         let mut rate_limited = false;
 

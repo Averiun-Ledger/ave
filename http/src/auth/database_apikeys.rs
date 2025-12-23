@@ -152,6 +152,16 @@ impl AuthDatabase {
         // Calculate expiration
         let now = Self::now();
         let config_ttl = self.config.api_key.default_ttl_seconds;
+        // SECURITY FIX: Validate TTL is not negative
+        if let Some(ttl) = expires_in_seconds {
+            if ttl < 0 {
+                return Err(DatabaseError::ValidationError(format!(
+                    "Invalid TTL: {} (must be positive or 0)",
+                    ttl
+                )));
+            }
+        }
+
         let effective_ttl = match expires_in_seconds {
             Some(ttl) if ttl > 0 => {
                 if config_ttl > 0 {
@@ -167,7 +177,7 @@ impl AuthDatabase {
                     None
                 }
             }
-            _ => None,
+            _ => unreachable!("Negative TTL already validated above"),
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 

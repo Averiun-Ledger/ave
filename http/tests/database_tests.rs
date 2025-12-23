@@ -670,7 +670,16 @@ mod tests {
 
     #[test]
     fn test_rate_limit_exceeded() {
-        let (db, _dirs) = create_test_db();
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 100,
+            limit_by_key: true,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
             .create_user("testuser", "TestPass123!", false, None, None, None)

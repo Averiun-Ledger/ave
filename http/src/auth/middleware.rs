@@ -40,9 +40,9 @@ where
         let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
 
         // If no auth database, auth is disabled - allow request
-        if auth_db.is_none() {
+        let Some(db) = auth_db else {
             return Ok(ApiKeyAuthNew);
-        }
+        };
 
         // Auth is enabled - validate API key
         let api_key = parts
@@ -58,15 +58,25 @@ where
                 )
             })?;
 
-        // Verify API key and get auth context
-        let Some(db) = auth_db else {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Authentication database unavailable".to_string(),
-                }),
-            ));
-        };
+        // SECURITY FIX: Extract IP from socket address, not client headers
+        // X-Forwarded-For and X-Real-IP can be spoofed to bypass rate limiting
+        let ip_address = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|conn| conn.0.ip().to_string());
+
+        // SECURITY FIX: Pre-authentication rate limiting by IP
+        // Check rate limit BEFORE verifying credentials to prevent brute force attacks
+        db.check_rate_limit(None, ip_address.as_deref(), Some("/auth/*"))
+            .map_err(|e| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        error: format!("Rate limit exceeded: {}", e),
+                    }),
+                )
+            })?;
+
         let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
             (
                 StatusCode::UNAUTHORIZED,
@@ -76,20 +86,13 @@ where
             )
         })?;
 
-        // SECURITY FIX: Extract IP from socket address, not client headers
-        // X-Forwarded-For and X-Real-IP can be spoofed to bypass rate limiting
-        let ip_address = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|conn| conn.0.ip().to_string());
-
         auth_ctx.ip_address = ip_address.clone();
 
         // Update API key last used
         let _ =
             db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
 
-        // Check rate limit
+        // Post-authentication rate limit (per API key)
         db.check_rate_limit(
             Some(&auth_ctx.api_key_id),
             ip_address.as_deref(),
