@@ -59,6 +59,46 @@ impl AuthDatabase {
         Self::get_api_key_info_internal(&conn, key_id)
     }
 
+    /// Get API key info by public_id (UUID)
+    pub fn get_api_key_info_by_public_id(
+        &self,
+        public_id: &str,
+    ) -> Result<ApiKeyInfo, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        conn.query_row(
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+                    k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
+                    k.last_used_at, k.last_used_ip
+             FROM api_keys k
+             INNER JOIN users u ON k.user_id = u.id
+             WHERE k.public_id = ?1",
+            params![public_id],
+            |row| {
+                Ok(ApiKeyInfo {
+                    id: row.get(0)?,
+                    public_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    key_prefix: row.get(4)?,
+                    name: row.get(5)?,
+                    description: row.get(6)?,
+                    is_management: row.get(7)?,
+                    created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    revoked: row.get(10)?,
+                    revoked_at: row.get(11)?,
+                    revoked_reason: row.get(12)?,
+                    last_used_at: row.get(13)?,
+                    last_used_ip: row.get(14)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        .ok_or_else(|| DatabaseError::NotFoundError(format!("API key with public_id {} not found", public_id)))
+    }
+
     /// Create a new API key for a user
     pub fn create_api_key(
         &self,
@@ -352,6 +392,27 @@ impl AuthDatabase {
              SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
              WHERE id = ?4",
             params![now, revoked_by, reason, key_id],
+        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Revoke API key by public_id (UUID)
+    pub fn revoke_api_key_by_public_id(
+        &self,
+        public_id: &str,
+        revoked_by: Option<i64>,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let now = Self::now();
+
+        conn.execute(
+            "UPDATE api_keys
+             SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
+             WHERE public_id = ?4",
+            params![now, revoked_by, reason, public_id],
         ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
         Ok(())

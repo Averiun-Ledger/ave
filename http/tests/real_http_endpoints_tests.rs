@@ -674,12 +674,12 @@ async fn test_get_api_key_info() {
         Some(json!({"name": "infokey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let public_id = key_body["key_info"]["public_id"].as_str().unwrap();
 
     // Get key info
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}", key_id)),
+        &server.url(&format!("/admin/api-keys/{}", public_id)),
         "GET",
         Some(&api_key),
         None,
@@ -719,12 +719,12 @@ async fn test_revoke_api_key() {
         Some(json!({"name": "revokekey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let public_id = key_body["key_info"]["public_id"].as_str().unwrap();
 
     // Revoke key
     let (status, _) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}", key_id)),
+        &server.url(&format!("/admin/api-keys/{}", public_id)),
         "DELETE",
         Some(&api_key),
         Some(json!({"reason": "Test revocation"})),
@@ -763,13 +763,13 @@ async fn test_rotate_api_key() {
         Some(json!({"name": "rotatekey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let public_id = key_body["key_info"]["public_id"].as_str().unwrap();
     let old_key = key_body["api_key"].as_str().unwrap();
 
     // Rotate key
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}/rotate", key_id)),
+        &server.url(&format!("/admin/api-keys/{}/rotate", public_id)),
         "POST",
         Some(&api_key),
         Some(json!({"reason": "Test rotation"})),
