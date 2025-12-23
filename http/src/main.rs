@@ -15,7 +15,7 @@ use axum::{
     BoxError,
     handler::HandlerWithoutStateExt,
     http::{
-        HeaderName, Method, StatusCode, Uri, header,
+        HeaderName, HeaderValue, Method, StatusCode, Uri, header,
         uri::{Authority, Scheme},
     },
     response::Redirect,
@@ -27,7 +27,11 @@ use middleware::tower_trace;
 use server::build_routes;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower::ServiceBuilder;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    set_header::SetResponseHeaderLayer,
+};
 use tracing::{error, info};
 
 use crate::auth::build_auth;
@@ -77,19 +81,74 @@ async fn main() {
             .await
             .expect("Can not build TCP listener with http address");
 
-    let cors = CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            HeaderName::from_static("x-api-key"),
-        ])
-        .allow_origin(Any);
+    // Build CORS layer based on configuration
+    let cors_config = &config.http.cors;
+    let cors = if cors_config.enabled {
+        let cors_layer = CorsLayer::new()
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                HeaderName::from_static("x-api-key"),
+            ])
+            .allow_credentials(cors_config.allow_credentials);
+
+        // Configure origins based on configuration
+        if cors_config.allow_any_origin {
+            // SECURITY WARNING: This allows ANY website to make requests (CVSS 6.5)
+            // Only use in development or if API is not accessed from browsers
+            cors_layer.allow_origin(Any)
+        } else if !cors_config.allowed_origins.is_empty() {
+            // Parse allowed origins from configuration
+            let origins: Vec<HeaderValue> = cors_config
+                .allowed_origins
+                .iter()
+                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+                .collect();
+
+            if !origins.is_empty() {
+                cors_layer.allow_origin(origins)
+            } else {
+                // Fallback: if all origins failed to parse, allow localhost for development
+                tracing::warn!("No valid CORS origins configured, falling back to localhost:3000");
+                cors_layer.allow_origin(
+                    HeaderValue::from_static("http://localhost:3000")
+                )
+            }
+        } else {
+            // No origins configured and allow_any_origin is false
+            // Fallback to localhost for development
+            tracing::warn!("CORS enabled but no origins configured, falling back to localhost:3000");
+            cors_layer.allow_origin(
+                HeaderValue::from_static("http://localhost:3000")
+            )
+        }
+    } else {
+        // CORS disabled, use permissive layer (will be skipped)
+        CorsLayer::permissive()
+    };
+
+    // SECURITY FIX: Add security headers to prevent API key leakage
+    // Referrer-Policy: no-referrer prevents API keys from leaking via Referer header
+    // This is critical when API keys are in headers, as browser may leak them
+    let security_headers = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ));
 
     let _log_handle = logging::init_logging(&config.logging).await;
 
@@ -162,6 +221,7 @@ async fn main() {
                     bridge,
                     auth_db,
                 ))
+                .layer(security_headers.clone())
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -171,6 +231,7 @@ async fn main() {
         axum::serve(
             listener_http,
             tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
+                .layer(security_headers)
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )

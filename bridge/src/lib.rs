@@ -68,7 +68,7 @@ use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
 pub mod config;
-pub use http::HttpConfig;
+pub use http::{HttpConfig, CorsConfig};
 pub mod conversions;
 pub mod http;
 pub mod settings;

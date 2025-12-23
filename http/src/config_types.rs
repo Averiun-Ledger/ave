@@ -143,6 +143,7 @@ pub struct HttpConfigHttp {
     pub https_cert_path: Option<String>,
     pub https_private_key_path: Option<String>,
     pub enable_doc: bool,
+    pub cors: CorsConfigHttp,
 }
 
 impl From<HttpConfig> for HttpConfigHttp {
@@ -157,6 +158,26 @@ impl From<HttpConfig> for HttpConfigHttp {
                 .https_private_key_path
                 .map(|x| x.to_string_lossy().to_string()),
             enable_doc: value.enable_doc,
+            cors: CorsConfigHttp::from(value.cors),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct CorsConfigHttp {
+    pub enabled: bool,
+    pub allow_any_origin: bool,
+    pub allowed_origins: Vec<String>,
+    pub allow_credentials: bool,
+}
+
+impl From<ave_bridge::CorsConfig> for CorsConfigHttp {
+    fn from(value: ave_bridge::CorsConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            allow_any_origin: value.allow_any_origin,
+            allowed_origins: value.allowed_origins,
+            allow_credentials: value.allow_credentials,
         }
     }
 }

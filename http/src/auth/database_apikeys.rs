@@ -18,7 +18,7 @@ impl AuthDatabase {
         key_id: i64,
     ) -> Result<ApiKeyInfo, DatabaseError> {
         conn.query_row(
-            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -28,19 +28,20 @@ impl AuthDatabase {
             |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    username: row.get(2)?,
-                    key_prefix: row.get(3)?,
-                    name: row.get(4)?,
-                    description: row.get(5)?,
-                    is_management: row.get(6)?,
-                    created_at: row.get(7)?,
-                    expires_at: row.get(8)?,
-                    revoked: row.get(9)?,
-                    revoked_at: row.get(10)?,
-                    revoked_reason: row.get(11)?,
-                    last_used_at: row.get(12)?,
-                    last_used_ip: row.get(13)?,
+                    public_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    key_prefix: row.get(4)?,
+                    name: row.get(5)?,
+                    description: row.get(6)?,
+                    is_management: row.get(7)?,
+                    created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    revoked: row.get(10)?,
+                    revoked_at: row.get(11)?,
+                    revoked_reason: row.get(12)?,
+                    last_used_at: row.get(13)?,
+                    last_used_ip: row.get(14)?,
                 })
             },
         )
@@ -68,6 +69,9 @@ impl AuthDatabase {
         is_management: bool,
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
         let conn = self.lock_conn()?;
+
+        // SECURITY FIX: Validate description for CRLF injection
+        AuthDatabase::validate_description(description)?;
 
         // Check if user exists and is active
         let user = AuthDatabase::get_user_by_id_internal(&conn, user_id)?;
@@ -111,6 +115,13 @@ impl AuthDatabase {
             return Err(DatabaseError::ValidationError(
                 "API key name is required".to_string(),
             ));
+        }
+
+        // SECURITY FIX: Validate API key name for dangerous characters
+        // Prevent XSS, SQL injection, command injection, and path traversal
+        if !is_management {
+            let key_name = name.unwrap_or_default();
+            Self::validate_api_key_name(key_name)?;
         }
 
         if !is_management {
@@ -161,10 +172,13 @@ impl AuthDatabase {
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
+        // SECURITY FIX: Generate UUID for public identifier
+        let public_id = AuthDatabase::generate_uuid();
+
         // Insert API key
         conn.execute(
-            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at, is_management)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at, is_management, public_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 user_id,
                 key_hash,
@@ -172,7 +186,8 @@ impl AuthDatabase {
                 name.unwrap_or_default(),
                 description,
                 expires_at,
-                is_management
+                is_management,
+                public_id
             ],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
@@ -193,7 +208,7 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let query = if include_revoked {
-            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -201,7 +216,7 @@ impl AuthDatabase {
              WHERE k.user_id = ?1
              ORDER BY k.created_at DESC"
         } else {
-            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -218,19 +233,20 @@ impl AuthDatabase {
             .query_map(params![user_id], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    username: row.get(2)?,
-                    key_prefix: row.get(3)?,
-                    name: row.get(4)?,
-                    description: row.get(5)?,
-                    is_management: row.get(6)?,
-                    created_at: row.get(7)?,
-                    expires_at: row.get(8)?,
-                    revoked: row.get(9)?,
-                    revoked_at: row.get(10)?,
-                    revoked_reason: row.get(11)?,
-                    last_used_at: row.get(12)?,
-                    last_used_ip: row.get(13)?,
+                    public_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    key_prefix: row.get(4)?,
+                    name: row.get(5)?,
+                    description: row.get(6)?,
+                    is_management: row.get(7)?,
+                    created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    revoked: row.get(10)?,
+                    revoked_at: row.get(11)?,
+                    revoked_reason: row.get(12)?,
+                    last_used_at: row.get(13)?,
+                    last_used_ip: row.get(14)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -273,14 +289,14 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let query = if include_revoked {
-            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
              ORDER BY k.created_at DESC"
         } else {
-            "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
+            "SELECT k.id, k.public_id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
                     k.last_used_at, k.last_used_ip
              FROM api_keys k
@@ -297,19 +313,20 @@ impl AuthDatabase {
             .query_map([], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    username: row.get(2)?,
-                    key_prefix: row.get(3)?,
-                    name: row.get(4)?,
-                    description: row.get(5)?,
-                    is_management: row.get(6)?,
-                    created_at: row.get(7)?,
-                    expires_at: row.get(8)?,
-                    revoked: row.get(9)?,
-                    revoked_at: row.get(10)?,
-                    revoked_reason: row.get(11)?,
-                    last_used_at: row.get(12)?,
-                    last_used_ip: row.get(13)?,
+                    public_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    key_prefix: row.get(4)?,
+                    name: row.get(5)?,
+                    description: row.get(6)?,
+                    is_management: row.get(7)?,
+                    created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    revoked: row.get(10)?,
+                    revoked_at: row.get(11)?,
+                    revoked_reason: row.get(12)?,
+                    last_used_at: row.get(13)?,
+                    last_used_ip: row.get(14)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -518,5 +535,52 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
 
         Ok(deleted)
+    }
+
+    /// Validate API key name for dangerous characters
+    ///
+    /// SECURITY FIX: Prevents XSS, SQL injection, command injection, and path traversal
+    /// by rejecting names containing dangerous characters.
+    ///
+    /// Allowed characters: alphanumeric, underscore, hyphen, space, period
+    /// Max length: 100 characters
+    fn validate_api_key_name(name: &str) -> Result<(), DatabaseError> {
+        // Check length
+        if name.len() > 100 {
+            return Err(DatabaseError::ValidationError(
+                "API key name must be 100 characters or less".to_string(),
+            ));
+        }
+
+        // Check for null bytes (command injection, path traversal)
+        if name.contains('\0') {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid characters".to_string(),
+            ));
+        }
+
+        // Check for control characters (including newlines, tabs, etc)
+        if name.chars().any(|c| c.is_control()) {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid control characters".to_string(),
+            ));
+        }
+
+        // Check for dangerous characters that could be used for attacks
+        let dangerous_chars = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '(', ')', '{', '}', '[', ']', '\\', '/', ':', '*', '?', '%'];
+        if name.chars().any(|c| dangerous_chars.contains(&c)) {
+            return Err(DatabaseError::ValidationError(
+                format!("API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed")
+            ));
+        }
+
+        // Check for path traversal patterns
+        if name.contains("..") || name.contains("./") || name.contains(".\\") {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid patterns".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }

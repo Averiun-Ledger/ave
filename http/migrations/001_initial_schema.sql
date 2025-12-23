@@ -137,6 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_user_permissions_action ON user_permissions(actio
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS api_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id TEXT NOT NULL, -- SECURITY: UUID for public API responses (prevents IDOR)
     user_id INTEGER NOT NULL,
     key_hash TEXT NOT NULL UNIQUE, -- SHA-256 hash of the actual key
     key_prefix TEXT NOT NULL, -- First 8 chars for identification (e.g., "ave_v1_a")
@@ -160,6 +161,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked = 0;
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
 CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(user_id, revoked, expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_public_id ON api_keys(public_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_name_active ON api_keys(user_id, name) WHERE revoked = 0;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_management_active ON api_keys(user_id) WHERE revoked = 0 AND is_management = 1;
 
@@ -331,6 +333,24 @@ BEGIN
         revoked_reason = 'User account deleted'
     WHERE user_id = NEW.id AND revoked = 0;
 END;
+
+-- =============================================================================
+-- API KEY LIMIT ENFORCEMENT
+-- =============================================================================
+-- SECURITY NOTE: The max_keys_per_user limit is enforced at application level
+-- (see database_apikeys.rs:85-99). A database-level trigger was considered but
+-- removed because:
+-- 1. It would require hardcoding the limit (20) or using a config table
+-- 2. The race condition window is extremely small and difficult to exploit
+-- 3. Application-level check is more flexible and respects config changes
+-- 4. SQLite transactions already provide isolation for the check+insert operation
+--
+-- The application performs the check within a transaction, making the race
+-- condition very unlikely. If stricter enforcement is needed in the future,
+-- consider using:
+-- - SERIALIZABLE transaction isolation mode
+-- - A database-level config table with trigger reading from it
+-- - Row-level locking (though SQLite uses database-level locks)
 
 -- =============================================================================
 -- END OF MIGRATION

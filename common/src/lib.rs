@@ -10,21 +10,28 @@
 //!
 //! ```rust
 //! use ave_common::{
-//!     identity::{KeyPair, Signature},
+//!     identity::{KeyPair, KeyPairAlgorithm, signature::Signature},
 //!     ValueWrapper,
 //!     BridgeEventRequest,
 //!     BridgeFactRequest,
 //! };
+//! use borsh::{BorshSerialize, BorshDeserialize};
 //!
-//! // Create a new keypair
-//! let keypair = KeyPair::default();
+//! // Define a type that can be signed (must implement BorshSerialize)
+//! #[derive(BorshSerialize, BorshDeserialize)]
+//! struct MyData {
+//!     message: String,
+//! }
+//!
+//! // Generate a new keypair (not default, which has no secret key)
+//! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 //!
 //! // Sign some data
-//! let data = b"Hello, Ave!";
-//! let signature = Signature::new(data, &keypair).unwrap();
+//! let data = MyData { message: "Hello, Ave!".to_string() };
+//! let signature = Signature::new(&data, &keypair).unwrap();
 //!
 //! // Verify signature
-//! assert!(signature.verify(data).is_ok());
+//! assert!(signature.verify(&data).is_ok());
 //!
 //! // Use ValueWrapper
 //! let value = ValueWrapper::default();

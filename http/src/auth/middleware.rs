@@ -76,15 +76,12 @@ where
             )
         })?;
 
-        // Extract IP address
+        // SECURITY FIX: Extract IP from socket address, not client headers
+        // X-Forwarded-For and X-Real-IP can be spoofed to bypass rate limiting
         let ip_address = parts
-            .headers
-            .get("X-Forwarded-For")
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| {
-                parts.headers.get("X-Real-IP").and_then(|v| v.to_str().ok())
-            })
-            .map(|s| s.to_string());
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|conn| conn.0.ip().to_string());
 
         auth_ctx.ip_address = ip_address.clone();
 
@@ -188,21 +185,12 @@ pub async fn audit_log_middleware(
     let path = req.uri().path().to_string();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // Get IP address from headers
-    let header_ip = req
-        .headers()
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            req.headers().get("X-Real-IP").and_then(|v| v.to_str().ok())
-        })
-        .map(|s| s.to_string());
-    // Fallback to socket address if available (ConnectInfo from axum)
-    let socket_ip = req
+    // SECURITY FIX: Get IP from socket address only, ignore client headers
+    // X-Forwarded-For and X-Real-IP can be spoofed
+    let ip_address = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip().to_string());
-    let ip_address = header_ip.or(socket_ip);
 
     // Get user agent
     let user_agent = req

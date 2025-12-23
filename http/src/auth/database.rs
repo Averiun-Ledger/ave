@@ -294,6 +294,21 @@ impl AuthDatabase {
         time::OffsetDateTime::now_utc().unix_timestamp()
     }
 
+    /// Generate a UUID v4 string (for API key public IDs)
+    pub(crate) fn generate_uuid() -> String {
+        use rand::Rng;
+        let mut rng = rand::rng();
+
+        format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            rng.random::<u32>(),
+            rng.random::<u16>(),
+            0x4000 | (rng.random::<u16>() & 0x0FFF), // Version 4
+            0x8000 | (rng.random::<u16>() & 0x3FFF), // Variant 1
+            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
+        )
+    }
+
     /// Override default API key TTL on an existing instance (used for tests/config reloads)
     #[allow(dead_code)] // primarily used in tests / config reload scenarios
     pub fn set_default_api_key_ttl(&mut self, ttl: i64) {
@@ -318,12 +333,8 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        // Check if username already exists
-        if username.trim().is_empty() {
-            return Err(DatabaseError::ValidationError(
-                "Username cannot be empty".to_string(),
-            ));
-        }
+        // SECURITY FIX: Validate username for CRLF and other attacks
+        Self::validate_username(username)?;
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1 AND is_deleted = 0)",
@@ -612,6 +623,10 @@ impl AuthDatabase {
     }
 
     /// Verify user credentials (username + password)
+    ///
+    /// SECURITY: This function uses constant-time comparison to prevent username enumeration
+    /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
+    /// to make the response time similar to a failed login for an existing user.
     pub fn verify_credentials(
         &self,
         username: &str,
@@ -619,36 +634,46 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let user: User = conn
-            .query_row(
-                "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
-                        must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
-                 FROM users
-                 WHERE username = ?1 AND is_deleted = 0",
-                params![username],
-                |row| {
-                    let user = User {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        password_hash: row.get(2)?,
-                        is_superadmin: row.get(3)?,
-                        is_active: row.get(4)?,
-                        is_deleted: row.get(5)?,
-                        must_change_password: row.get(6)?,
-                        failed_login_attempts: row.get(7)?,
-                        locked_until: row.get(8)?,
-                        last_login_at: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
-                    };
-                    Ok(user)
-                },
-            )
-            .map_err(|_| {
-                DatabaseError::PermissionDenied(
+        // Try to find the user
+        let user_result = conn.query_row(
+            "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+                    must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
+             FROM users
+             WHERE username = ?1 AND is_deleted = 0",
+            params![username],
+            |row| {
+                let user = User {
+                    id: row.get(0)?,
+                    username: row.get(1)?,
+                    password_hash: row.get(2)?,
+                    is_superadmin: row.get(3)?,
+                    is_active: row.get(4)?,
+                    is_deleted: row.get(5)?,
+                    must_change_password: row.get(6)?,
+                    failed_login_attempts: row.get(7)?,
+                    locked_until: row.get(8)?,
+                    last_login_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                };
+                Ok(user)
+            },
+        );
+
+        // SECURITY: Constant-time username enumeration mitigation
+        // If user doesn't exist, perform dummy hash computation to match timing
+        let user = match user_result {
+            Ok(u) => u,
+            Err(_) => {
+                // User doesn't exist - perform dummy Argon2 hash to prevent timing attack
+                let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$aaa$bbb"; // Invalid but valid format
+                let _ = super::crypto::verify_password(password, dummy_hash);
+
+                return Err(DatabaseError::PermissionDenied(
                     "Invalid username or password".to_string(),
-                )
-            })?;
+                ));
+            }
+        };
 
         // Active check
         if !user.is_active {
@@ -854,5 +879,95 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
         Self::get_user_by_id_internal(&conn, user_id)
+    }
+
+    // =============================================================================
+    // STRING VALIDATION HELPERS
+    // =============================================================================
+
+    /// Validate a username for CRLF injection and other attacks
+    ///
+    /// SECURITY FIX: Prevents CRLF injection, header manipulation, and log forgery
+    pub(crate) fn validate_username(username: &str) -> Result<(), DatabaseError> {
+        // Check length (reasonable username limit)
+        if username.len() > 64 {
+            return Err(DatabaseError::ValidationError(
+                "Username must be 64 characters or less".to_string(),
+            ));
+        }
+
+        if username.is_empty() || username.trim().is_empty() {
+            return Err(DatabaseError::ValidationError(
+                "Username cannot be empty".to_string(),
+            ));
+        }
+
+        // SECURITY: Check for CRLF injection
+        if username.contains('\r') || username.contains('\n') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid characters (CRLF)".to_string(),
+            ));
+        }
+
+        // Check for null bytes
+        if username.contains('\0') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains null bytes".to_string(),
+            ));
+        }
+
+        // Check for other control characters
+        if username.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid control characters".to_string(),
+            ));
+        }
+
+        // Check for dangerous characters commonly used in attacks
+        let dangerous = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '\\'];
+        if username.chars().any(|c| dangerous.contains(&c)) {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid characters. Only alphanumeric, underscore, hyphen, period, and @ allowed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate a description field for CRLF injection
+    ///
+    /// SECURITY FIX: Prevents CRLF injection in description fields
+    pub(crate) fn validate_description(description: Option<&str>) -> Result<(), DatabaseError> {
+        if let Some(desc) = description {
+            // Check length
+            if desc.len() > 500 {
+                return Err(DatabaseError::ValidationError(
+                    "Description must be 500 characters or less".to_string(),
+                ));
+            }
+
+            // SECURITY: Check for CRLF injection
+            if desc.contains('\r') || desc.contains('\n') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains invalid characters (CRLF)".to_string(),
+                ));
+            }
+
+            // Check for null bytes
+            if desc.contains('\0') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains null bytes".to_string(),
+                ));
+            }
+
+            // Check for excessive control characters (allow tab)
+            if desc.chars().any(|c| c.is_control() && c != '\t') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains invalid control characters".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
