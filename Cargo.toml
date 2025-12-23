@@ -27,7 +27,6 @@ rust-version = "1.91.0"
 async-trait = "0.1.88"
 bs58 = "0.5"
 base64 = "0.22"
-blake2 = "0.10"
 blake3 = "1.8.2"
 borsh = { version = "1.6.0", features = ["std", "derive"] }
 ed25519-dalek = { version = "2", features = ["alloc", "pkcs8"] }

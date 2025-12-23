@@ -24,10 +24,10 @@ use crate::{
         common::{
             emit_fail,
             node::{
-                get_node_subject_data, get_quantity, subject_old_owner,
+                get_node_subject_data, subject_old_owner,
                 try_to_update,
             },
-            subject::{get_gov, update_last_state, update_ledger},
+            subject::{get_gov, get_quantity, update_last_state, update_ledger},
         },
         event::{Ledger, ProtocolsSignatures},
         network::RetryNetwork,
@@ -100,7 +100,6 @@ impl Distributor {
             false
         };
 
-        println!("{}", schema_id);
         our_key == owner || i_new_owner || schema_id.is_gov()
     }
 

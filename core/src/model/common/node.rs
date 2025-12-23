@@ -6,20 +6,12 @@ use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
 use network::ComunicateInfo;
 
 use crate::{
-    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
-    auth::{Auth, AuthMessage, WitnessesAuth},
-    intermediary::Intermediary,
-    model::{SignTypesNode, request::SchemaType},
-    node::{
+    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse, auth::{Auth, AuthMessage, WitnessesAuth}, intermediary::Intermediary, model::SignTypesNode, node::{
         SubjectData,
-        relationship::{
-            OwnerSchema, RelationShip, RelationShipMessage,
-            RelationShipResponse,
-        },
         transfer::{
             TransferRegister, TransferRegisterMessage, TransferRegisterResponse,
         },
-    },
+    }
 };
 
 pub async fn subject_owner<A>(
@@ -137,42 +129,6 @@ where
     }
 }
 
-pub async fn get_quantity<A>(
-    ctx: &mut ActorContext<A>,
-    gov: String,
-    schema_id: SchemaType,
-    owner: String,
-    namespace: String,
-) -> Result<usize, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let relation_path =
-        ActorPath::from(&format!("/user/node/{}/relation_ship", gov));
-    let relation_actor: Option<ActorRef<RelationShip>> =
-        ctx.system().get_actor(&relation_path).await;
-
-    let response = if let Some(relation_actor) = relation_actor {
-        relation_actor
-            .ask(RelationShipMessage::GetSubjectsCount(OwnerSchema {
-                owner,
-                schema_id,
-                namespace,
-            }))
-            .await?
-    } else {
-        return Err(ActorError::NotFound(relation_path));
-    };
-
-    if let RelationShipResponse::Count(quantity) = response {
-        Ok(quantity)
-    } else {
-        Err(ActorError::UnexpectedResponse(
-            relation_path,
-            "RelationShipResponse::Count".to_owned(),
-        ))
-    }
-}
 
 pub async fn try_to_update<A>(
     ctx: &mut ActorContext<A>,

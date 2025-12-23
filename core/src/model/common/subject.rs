@@ -10,11 +10,19 @@ use ave_common::{
 };
 
 use crate::{
-    Event as AveEvent, governance::{
-        Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData, model::{ProtocolTypes, Quorum}
-    }, model::{event::ProtocolsSignatures, request::SchemaType}, subject::{
-        Metadata, SignedLedger, laststate::{LastState, LastStateMessage, LastStateResponse}
-    }, tracker::{Tracker, TrackerMessage, TrackerResponse}, validation::proof::ValidationProof
+    Event as AveEvent,
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse,
+        data::GovernanceData,
+        model::{ProtocolTypes, Quorum}, relationship::{OwnerSchema, RelationShip, RelationShipMessage, RelationShipResponse},
+    },
+    model::{event::ProtocolsSignatures, request::SchemaType},
+    subject::{
+        Metadata, SignedLedger,
+        laststate::{LastState, LastStateMessage, LastStateResponse},
+    },
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
+    validation::proof::ValidationProof,
 };
 
 pub async fn get_gov<A>(
@@ -30,9 +38,7 @@ where
     {
         let response = tracker_actor.ask(TrackerMessage::GetGovernance).await?;
         match response {
-            TrackerResponse::Governance(gov_data) => {
-                Ok(*gov_data)
-            }
+            TrackerResponse::Governance(gov_data) => Ok(*gov_data),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "TrackerResponse::Governance".to_owned(),
@@ -45,9 +51,7 @@ where
             .ask(GovernanceMessage::GetGovernance)
             .await?;
         match response {
-            GovernanceResponse::Governance(gov_data) => {
-                Ok(*gov_data)
-            }
+            GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "GovernanceResponse::Governance".to_owned(),
@@ -71,9 +75,7 @@ where
     {
         let response = tracker_actor.ask(TrackerMessage::GetMetadata).await?;
         match response {
-            TrackerResponse::Metadata(metadata) => {
-                Ok(*metadata)
-            }
+            TrackerResponse::Metadata(metadata) => Ok(*metadata),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "TrackerResponse::Metadata".to_owned(),
@@ -82,13 +84,10 @@ where
     } else if let Some(governance_actor) =
         ctx.system().get_actor::<Governance>(&path).await
     {
-        let response = governance_actor
-            .ask(GovernanceMessage::GetMetadata)
-            .await?;
+        let response =
+            governance_actor.ask(GovernanceMessage::GetMetadata).await?;
         match response {
-            GovernanceResponse::Metadata(metadata) => {
-                Ok(*metadata)
-            }
+            GovernanceResponse::Metadata(metadata) => Ok(*metadata),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "GovernanceResponse::Metadata".to_owned(),
@@ -193,55 +192,92 @@ where
 }
 
 pub async fn update_ledger<A>(
-        ctx: &mut ActorContext<A>,
-        subject_id: &str,
-        events: Vec<SignedLedger>,
-        is_gov: bool,
-    ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
-    where
-    A: Actor + Handler<A>
-    {
-        let path = ActorPath::from(format!("/user/node/{}", subject_id));
+    ctx: &mut ActorContext<A>,
+    subject_id: &str,
+    events: Vec<SignedLedger>,
+    is_gov: bool,
+) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        if is_gov {
-            let response = if let Some(governance_actor) =
-                ctx.system().get_actor::<Governance>(&path).await
-            {
-                governance_actor
-                    .ask(GovernanceMessage::UpdateLedger { events })
-                    .await?
-            } else {
-                return Err(ActorError::NotFound(path));
-            };
-
-            match response {
-                GovernanceResponse::UpdateResult(last_sn, owner, new_owner) => {
-                    Ok((last_sn, owner, new_owner))
-                }
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "GovernanceResponse::UpdateResult".to_owned(),
-                )),
-            }
+    if is_gov {
+        let response = if let Some(governance_actor) =
+            ctx.system().get_actor::<Governance>(&path).await
+        {
+            governance_actor
+                .ask(GovernanceMessage::UpdateLedger { events })
+                .await?
         } else {
-            let response = if let Some(tracker_actor) =
-                ctx.system().get_actor::<Tracker>(&path).await
-            {
-                tracker_actor
-                    .ask(TrackerMessage::UpdateLedger { events })
-                    .await?
-            } else {
-                return Err(ActorError::NotFound(path));
-            };
+            return Err(ActorError::NotFound(path));
+        };
 
-            match response {
-                TrackerResponse::UpdateResult(last_sn, owner, new_owner) => {
-                    Ok((last_sn, owner, new_owner))
-                }
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "TrackerResponse::UpdateResult".to_owned(),
-                )),
+        match response {
+            GovernanceResponse::UpdateResult(last_sn, owner, new_owner) => {
+                Ok((last_sn, owner, new_owner))
             }
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "GovernanceResponse::UpdateResult".to_owned(),
+            )),
+        }
+    } else {
+        let response = if let Some(tracker_actor) =
+            ctx.system().get_actor::<Tracker>(&path).await
+        {
+            tracker_actor
+                .ask(TrackerMessage::UpdateLedger { events })
+                .await?
+        } else {
+            return Err(ActorError::NotFound(path));
+        };
+
+        match response {
+            TrackerResponse::UpdateResult(last_sn, owner, new_owner) => {
+                Ok((last_sn, owner, new_owner))
+            }
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "TrackerResponse::UpdateResult".to_owned(),
+            )),
         }
     }
+}
+
+pub async fn get_quantity<A>(
+    ctx: &mut ActorContext<A>,
+    gov: String,
+    schema_id: SchemaType,
+    owner: String,
+    namespace: String,
+) -> Result<usize, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let relation_path =
+        ActorPath::from(&format!("/user/node/{}/relation_ship", gov));
+    let relation_actor: Option<ActorRef<RelationShip>> =
+        ctx.system().get_actor(&relation_path).await;
+
+    let response = if let Some(relation_actor) = relation_actor {
+        relation_actor
+            .ask(RelationShipMessage::GetSubjectsCount(OwnerSchema {
+                owner,
+                schema_id,
+                namespace,
+            }))
+            .await?
+    } else {
+        return Err(ActorError::NotFound(relation_path));
+    };
+
+    if let RelationShipResponse::Count(quantity) = response {
+        Ok(quantity)
+    } else {
+        Err(ActorError::UnexpectedResponse(
+            relation_path,
+            "RelationShipResponse::Count".to_owned(),
+        ))
+    }
+}

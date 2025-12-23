@@ -227,7 +227,7 @@ async fn test_limits_in_subjects() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -261,7 +261,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -303,7 +303,7 @@ async fn test_limits_in_subjects() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "change": {
                             "creator": [
                                 {
@@ -313,7 +313,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -335,7 +335,7 @@ async fn test_limits_in_subjects() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "change": {
                             "creator": [
                                 {
@@ -345,7 +345,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -519,7 +519,7 @@ async fn test_namespace_in_role_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -547,7 +547,7 @@ async fn test_namespace_in_role_1() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -588,7 +588,7 @@ async fn test_namespace_in_role_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "policies": {
+
                         "change": {
                             "evaluate": {
                                 "fixed": 10
@@ -597,7 +597,7 @@ async fn test_namespace_in_role_1() {
                                 "fixed": 10
                             }
                         }
-                    }
+                    
                 }
             ]
         }
@@ -783,7 +783,7 @@ async fn test_namespace_in_role_2() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -811,7 +811,7 @@ async fn test_namespace_in_role_2() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -852,7 +852,7 @@ async fn test_namespace_in_role_2() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "policies": {
+
                         "change": {
                             "evaluate": {
                                 "fixed": 10
@@ -861,7 +861,7 @@ async fn test_namespace_in_role_2() {
                                 "fixed": 10
                             }
                         }
-                    }
+                    
                 }
             ]
         }
@@ -1050,7 +1050,7 @@ async fn test_subject_transfer_event_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -1083,7 +1083,7 @@ async fn test_subject_transfer_event_1() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -1319,7 +1319,7 @@ async fn test_subject_transfer_event_2() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -1334,7 +1334,7 @@ async fn test_subject_transfer_event_2() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -1637,7 +1637,7 @@ async fn test_subject_transfer_event_3() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -1652,7 +1652,7 @@ async fn test_subject_transfer_event_3() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -1945,7 +1945,7 @@ async fn test_dynamic_witnesses_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -1955,7 +1955,7 @@ async fn test_dynamic_witnesses_1() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -2001,7 +2001,7 @@ async fn test_dynamic_witnesses_1() {
         "schema": [
             {
                 "schema_id": "Example",
-                "roles": {
+
                     "add": {
                         "witness": [
                             {
@@ -2010,7 +2010,7 @@ async fn test_dynamic_witnesses_1() {
                             }
                         ]
                     }
-                }
+                
             }
         ]
     }});
@@ -2188,7 +2188,7 @@ async fn test_dynamic_witnesses_2() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -2198,7 +2198,7 @@ async fn test_dynamic_witnesses_2() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -2245,7 +2245,7 @@ async fn test_dynamic_witnesses_2() {
         "schema": [
             {
                 "schema_id": "Example",
-                "roles": {
+
                     "add": {
                         "witness": [
                             {
@@ -2254,7 +2254,7 @@ async fn test_dynamic_witnesses_2() {
                             }
                         ]
                     }
-                }
+                
             }
         ]
     }});
@@ -2463,7 +2463,7 @@ async fn test_dynamic_witnesses_explicit_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -2474,7 +2474,7 @@ async fn test_dynamic_witnesses_explicit_1() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -2635,7 +2635,7 @@ async fn test_dynamic_witnesses_explicit_2() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -2651,7 +2651,7 @@ async fn test_dynamic_witnesses_explicit_2() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -2865,7 +2865,7 @@ async fn test_dynamic_witnesses_explicit_3() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -2876,7 +2876,7 @@ async fn test_dynamic_witnesses_explicit_3() {
                                 },
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -2996,7 +2996,7 @@ async fn test_no_subject_validator() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "creator": [
                                 {
@@ -3006,7 +3006,7 @@ async fn test_no_subject_validator() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -3069,7 +3069,7 @@ async fn test_no_subject_evaluator() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "validator": [
                                 {
@@ -3091,7 +3091,7 @@ async fn test_no_subject_evaluator() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -3175,7 +3175,6 @@ async fn test_no_subject_issuer() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "roles": {
                         "add": {
                             "validator": [
                                 {
@@ -3191,7 +3190,7 @@ async fn test_no_subject_issuer() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -3276,7 +3275,6 @@ async fn test_1000_events() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
                         "add": {
                             "evaluator": [
                                 {
@@ -3310,7 +3308,7 @@ async fn test_1000_events() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -3412,7 +3410,7 @@ async fn test_subj_no_all_validators() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -3450,7 +3448,7 @@ async fn test_subj_no_all_validators() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -3458,7 +3456,7 @@ async fn test_subj_no_all_validators() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "policies": {
+
                         "change": {
                            "evaluate": {
                                 "fixed": 1
@@ -3467,7 +3465,7 @@ async fn test_subj_no_all_validators() {
                                 "fixed": 1
                            }
                         }
-                    }
+                    
                 }
             ]
         }
@@ -3568,7 +3566,6 @@ async fn test_subj_no_all_evaluators() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
                         "add": {
                             "evaluator": [
                                 {
@@ -3606,7 +3603,7 @@ async fn test_subj_no_all_evaluators() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         },
@@ -3614,7 +3611,7 @@ async fn test_subj_no_all_evaluators() {
             "schema": [
                 {
                     "schema_id": "Example",
-                    "policies": {
+
                         "change": {
                            "evaluate": {
                                 "fixed": 1
@@ -3623,7 +3620,7 @@ async fn test_subj_no_all_evaluators() {
                                 "fixed": 1
                            }
                         }
-                    }
+                    
                 }
             ]
         }

@@ -1,7 +1,10 @@
 //! # Request data model.
 //!
 
-use std::{collections::HashSet, fmt::Display};
+use std::{
+    collections::HashSet,
+    fmt::{Display, write},
+};
 
 use super::Namespace;
 
@@ -35,6 +38,7 @@ pub enum SchemaType {
     #[default]
     Governance,
     Type(String),
+    AllSchemas,
 }
 
 impl std::str::FromStr for SchemaType {
@@ -48,19 +52,31 @@ impl std::str::FromStr for SchemaType {
 
         match s {
             "governance" => Ok(SchemaType::Governance),
-            _ => Ok(SchemaType::Type(s.to_string()))
+            "all_schemas" => Ok(SchemaType::AllSchemas),
+            _ => Ok(SchemaType::Type(s.to_string())),
         }
-
     }
 }
 
 impl SchemaType {
+    pub fn len(&self) -> usize {
+        match self {
+            SchemaType::Governance => "governance".len(),
+            SchemaType::Type(schema_id) => schema_id.len(),
+            SchemaType::AllSchemas => "all_schemas".len(),
+        }
+    }
+
     pub fn is_valid(&self) -> bool {
         match self {
             SchemaType::Governance => true,
+            SchemaType::AllSchemas => true,
             SchemaType::Type(schema_id) => {
-                !schema_id.is_empty() && schema_id != "governance"
-            },
+                !schema_id.is_empty()
+                    && schema_id != "governance"
+                    && schema_id != "all_schemas"
+                    && schema_id.trim().len() == schema_id.len()
+            }
         }
     }
 }
@@ -68,6 +84,7 @@ impl SchemaType {
 impl Display for SchemaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SchemaType::AllSchemas => write!(f, "all_schemas"),
             SchemaType::Governance => write!(f, "governance"),
             SchemaType::Type(schema_id) => write!(f, "{}", schema_id),
         }
@@ -87,12 +104,14 @@ impl<'de> Deserialize<'de> for SchemaType {
     {
         let s = <String as serde::Deserialize>::deserialize(deserializer)?;
         if s.is_empty() {
-            println!("ERRRORORORORORROR");
-            return Err(serde::de::Error::custom("Schema can not be empty".to_string()))
+            return Err(serde::de::Error::custom(
+                "Schema can not be empty".to_string(),
+            ));
         }
 
         Ok(match s.as_str() {
             "governance" => SchemaType::Governance,
+            "all_schemas" => SchemaType::AllSchemas,
             _ => SchemaType::Type(s),
         })
     }
@@ -104,6 +123,7 @@ impl Serialize for SchemaType {
         S: Serializer,
     {
         match self {
+            SchemaType::AllSchemas => serializer.serialize_str("all_schemas"),
             SchemaType::Governance => serializer.serialize_str("governance"),
             SchemaType::Type(schema) => serializer.serialize_str(schema),
         }

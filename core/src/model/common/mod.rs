@@ -1,7 +1,9 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std:: fmt::Debug;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
@@ -14,10 +16,76 @@ use crate::{
     node::nodekey::{NodeKey, NodeKeyMessage, NodeKeyResponse},
     request::manager::{RequestManager, RequestManagerMessage},
 };
+use std::ops::Bound::{Included, Unbounded};
 
 pub mod contract;
 pub mod node;
 pub mod subject;
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize,)]
+pub struct CeilingMap<T> 
+{
+    inner: BTreeMap<u64, T>,
+}
+
+impl<T> CeilingMap<T> 
+where T: Debug + Clone + Serialize + Default
+{
+    pub fn new() -> Self {
+        CeilingMap { inner: BTreeMap::new() }
+    }
+
+    pub fn insert(&mut self, key: u64, value: T) {
+        self.inner.insert(key, value);
+    }
+
+    pub fn range_with_predecessor(
+        &self,
+        lower: u64,
+        upper: u64,
+    ) -> Vec<(u64, T)> {
+        let mut out: Vec<(u64, T)> = Vec::new();
+
+        if let Some((key, value)) = self.inner.range(..lower).next_back() {
+            out.push((key.clone(), value.clone()));
+        }
+
+        for (key, value) in self.inner.range((Included(&lower), Included(&upper))) {
+            out.push((key.clone(), value.clone()));
+        }
+
+        out
+    }
+
+    pub fn get_prev_or_equal(&self, key: u64) -> Option<T> {
+        self.inner
+            .range((Unbounded, Included(&key)))
+            .next_back().map(|x| x.1.clone())
+    }
+}
+
+impl CeilingMap<HashSet<PublicKey>> {
+    pub fn contains_from(&self, key: u64, target: &PublicKey) -> Option<u64> {
+        for (k, v) in self.inner.range((Included(&key), Unbounded)) {
+            if v.contains(&target) {
+                return Some(k.clone());
+            }
+        }
+        None
+    }
+}
+
+impl CeilingMap<HashMap<PublicKey, BTreeSet<String>>> {
+    pub fn contains_from(&self, key: u64, target: &PublicKey) -> Option<(u64, BTreeSet<String>)> {
+        for (k, v) in self.inner.range((Included(&key), Unbounded)) {
+            if let Some(povs) = v.get(&target) {
+                return Some((k.clone(), povs.clone()));
+            }
+        }
+        None
+    }
+}
 
 pub async fn emit_fail<A>(
     ctx: &mut ActorContext<A>,

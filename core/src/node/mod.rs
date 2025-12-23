@@ -40,7 +40,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod nodekey;
 pub mod register;
-pub mod relationship;
 pub mod transfer;
 
 const TARGET_NODE: &str = "Ave-Node";

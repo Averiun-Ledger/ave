@@ -9,15 +9,15 @@ use crate::{
     governance::{
         data::GovernanceData,
         model::{Quorum, Role},
+        roles_register::RolesRegisterUpdate,
     },
-    model::Namespace,
+    model::{Namespace, request::SchemaType},
 };
 
 use super::model::{
     CreatorQuantity, RoleCreator, RolesAllSchemas, RolesGov, RolesSchema,
 };
 pub type MemberName = String;
-pub type SchemaId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceEvent {
@@ -28,6 +28,155 @@ pub struct GovernanceEvent {
 }
 
 impl GovernanceEvent {
+    pub fn roles_update(&self) -> Option<RolesRegisterUpdate> {
+        let mut appr_quorum: bool = false;
+        let mut approvers: bool = false;
+        let mut eval_quorum: HashSet<SchemaType> = HashSet::new();
+        let mut evaluators: HashSet<SchemaType> = HashSet::new();
+        let mut vali_quorum: HashSet<SchemaType> = HashSet::new();
+        let mut validators: HashSet<SchemaType> = HashSet::new();
+
+        if let Some(roles) = &self.roles {
+            //Gov
+            if let Some(governance) = &roles.governance {
+                if let Some(add) = &governance.add {
+                    approvers = add.approver.is_some();
+                    if add.evaluator.is_some() {
+                        evaluators.insert(SchemaType::Governance);
+                    }
+                    if add.validator.is_some() {
+                        validators.insert(SchemaType::Governance);
+                    }
+                }
+                if let Some(remove) = &governance.remove {
+                    approvers = remove.approver.is_some();
+                    if remove.evaluator.is_some() {
+                        evaluators.insert(SchemaType::Governance);
+                    }
+                    if remove.validator.is_some() {
+                        validators.insert(SchemaType::Governance);
+                    }
+                }
+            }
+            // all schemas
+            if let Some(all_schemas) = &roles.all_schemas {
+                if let Some(add) = &all_schemas.add {
+                    if add.evaluator.is_some() {
+                        evaluators.insert(SchemaType::AllSchemas);
+                    }
+                    if add.validator.is_some() {
+                        validators.insert(SchemaType::AllSchemas);
+                    }
+                }
+                if let Some(remove) = &all_schemas.remove {
+                    if remove.evaluator.is_some() {
+                        evaluators.insert(SchemaType::AllSchemas);
+                    }
+                    if remove.validator.is_some() {
+                        validators.insert(SchemaType::AllSchemas);
+                    }
+                }
+                if let Some(change) = &all_schemas.change {
+                    if change.evaluator.is_some() {
+                        evaluators.insert(SchemaType::AllSchemas);
+                    }
+                    if change.validator.is_some() {
+                        validators.insert(SchemaType::AllSchemas);
+                    }
+                }
+            }
+
+            // schema
+            if let Some(schemas) = &roles.schema {
+                for schema in schemas {
+                    if let Some(add) = &schema.add {
+                        if add.evaluator.is_some() {
+                            evaluators.insert(schema.schema_id.clone());
+                        }
+                        if add.validator.is_some() {
+                            validators.insert(schema.schema_id.clone());
+                        }
+                    }
+                    if let Some(remove) = &schema.remove {
+                        if remove.evaluator.is_some() {
+                            evaluators.insert(schema.schema_id.clone());
+                        }
+                        if remove.validator.is_some() {
+                            validators.insert(schema.schema_id.clone());
+                        }
+                    }
+                    if let Some(change) = &schema.change {
+                        if change.evaluator.is_some() {
+                            evaluators.insert(schema.schema_id.clone());
+                        }
+                        if change.validator.is_some() {
+                            validators.insert(schema.schema_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(policies) = &self.policies {
+            // gov
+            if let Some(governance) = &policies.governance {
+                if governance.change.approve.is_some() {
+                    appr_quorum = true;
+                }
+                if governance.change.evaluate.is_some() {
+                    eval_quorum.insert(SchemaType::Governance);
+                }
+                if governance.change.validate.is_some() {
+                    vali_quorum.insert(SchemaType::Governance);
+                }
+            }
+
+            // schemas
+            if let Some(schemas) = &policies.schema {
+                for schema in schemas {
+                    if schema.change.evaluate.is_some() {
+                        eval_quorum.insert(schema.schema_id.clone());
+                    }
+                    if schema.change.validate.is_some() {
+                        vali_quorum.insert(schema.schema_id.clone());
+                    }
+                }
+            }
+        }
+
+        let eval_quorum = (!eval_quorum.is_empty())
+            .then(|| eval_quorum.into_iter().collect());
+
+        let vali_quorum = (!vali_quorum.is_empty())
+            .then(|| vali_quorum.into_iter().collect());
+
+        let evaluators =
+            (!evaluators.is_empty()).then(|| evaluators.into_iter().collect());
+
+        let validators =
+            (!validators.is_empty()).then(|| validators.into_iter().collect());
+
+        // (!set.is_empty()).then(|| set.into_iter().collect())
+        if appr_quorum
+            || approvers
+            || !eval_quorum.is_none()
+            || !vali_quorum.is_none()
+            || !evaluators.is_none()
+            || !validators.is_none()
+        {
+            Some(RolesRegisterUpdate {
+                appr_quorum,
+                approvers,
+                eval_quorum,
+                evaluators,
+                vali_quorum,
+                validators,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.members.is_none()
             && self.roles.is_none()
@@ -380,17 +529,10 @@ impl GovRoleEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SchemaIdRole {
-    pub schema_id: SchemaId,
-    pub roles: SchemaRoleEvent,
-}
-
-impl SchemaIdRole {
-    pub fn is_empty(&self) -> bool {
-        self.schema_id.is_empty()
-            || self.roles.add.is_none()
-                && self.roles.change.is_none()
-                && self.roles.remove.is_none()
-    }
+    pub schema_id: SchemaType,
+    pub add: Option<SchemaRolesAddEvent>,
+    pub remove: Option<SchemaRolesRemoveEvent>,
+    pub change: Option<SchemaRolesChangeEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -400,21 +542,14 @@ pub struct AllSchemasRoleEvent {
     pub change: Option<AllSchemasRolesChangeEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
-pub struct SchemaRoleEvent {
-    pub add: Option<SchemaRolesAddEvent>,
-    pub remove: Option<SchemaRolesRemoveEvent>,
-    pub change: Option<SchemaRolesChangeEvent>,
-}
-
 impl AllSchemasRoleEvent {
     pub fn check_data(
         &self,
         governance: &GovernanceData,
         roles_not_gov: RolesAllSchemas,
-        schema_id: &str,
+        schema_id: &SchemaType,
     ) -> Result<RolesAllSchemas, Error> {
-        let schema_role = SchemaRoleEvent::from(self.clone());
+        let schema_role = SchemaIdRole::from(self.clone());
 
         let mut roles_schema = RolesSchema::from(roles_not_gov);
         schema_role.check_data(governance, &mut roles_schema, schema_id)?;
@@ -423,9 +558,10 @@ impl AllSchemasRoleEvent {
     }
 }
 
-impl From<AllSchemasRoleEvent> for SchemaRoleEvent {
+impl From<AllSchemasRoleEvent> for SchemaIdRole {
     fn from(value: AllSchemasRoleEvent) -> Self {
         Self {
+            schema_id: SchemaType::AllSchemas,
             add: value.add.map(SchemaRolesAddEvent::from),
             remove: value.remove.map(SchemaRolesRemoveEvent::from),
             change: value.change.map(SchemaRolesChangeEvent::from),
@@ -433,12 +569,19 @@ impl From<AllSchemasRoleEvent> for SchemaRoleEvent {
     }
 }
 
-impl SchemaRoleEvent {
+impl SchemaIdRole {
+    pub fn is_empty(&self) -> bool {
+        !self.schema_id.is_valid()
+            || self.add.is_none()
+                && self.change.is_none()
+                && self.remove.is_none()
+    }
+
     pub fn check_data(
         &self,
         governance: &GovernanceData,
         roles_schema: &mut RolesSchema,
-        schema_id: &str,
+        schema_id: &SchemaType,
     ) -> Result<(), Error> {
         let members: HashSet<String> =
             governance.members.keys().cloned().collect();
@@ -1310,7 +1453,7 @@ pub struct RoleChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemasEvent {
     pub add: Option<HashSet<SchemaAdd>>,
-    pub remove: Option<HashSet<SchemaId>>,
+    pub remove: Option<HashSet<SchemaType>>,
     pub change: Option<HashSet<SchemaChange>>,
 }
 
@@ -1322,21 +1465,21 @@ impl SchemasEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct SchemaAdd {
-    pub id: SchemaId,
+    pub id: SchemaType,
     pub contract: String,
     pub initial_value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct SchemaChange {
-    pub actual_id: SchemaId,
+    pub actual_id: SchemaType,
     pub new_contract: Option<String>,
     pub new_initial_value: Option<Value>,
 }
 
 impl SchemaChange {
     pub fn is_empty(&self) -> bool {
-        self.actual_id.is_empty()
+        !self.actual_id.is_valid()
             || self.new_contract.is_none() && self.new_initial_value.is_none()
     }
 }
@@ -1356,19 +1499,14 @@ impl PoliciesEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct SchemaIdPolicie {
-    pub schema_id: SchemaId,
-    pub policies: SchemaPolicieEvent,
+    pub schema_id: SchemaType,
+    pub change: SchemaPolicieChange,
 }
 
 impl SchemaIdPolicie {
     pub fn is_empty(&self) -> bool {
-        self.schema_id.is_empty() || self.policies.change.is_none()
+        !self.schema_id.is_valid() || self.change.is_empty()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
-pub struct SchemaPolicieEvent {
-    pub change: Option<SchemaPolicieChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,7 +7,7 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
-        model::CreatorQuantity,
+        model::CreatorQuantity, relationship::{OwnerSchema, RelationShip, RelationShipMessage, RelationShipResponse},
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
@@ -18,13 +18,7 @@ use crate::{
         event::{Ledger, LedgerValue},
         request::EventRequest,
     },
-    node::{
-        register::RegisterMessage,
-        relationship::{
-            OwnerSchema, RelationShip, RelationShipMessage,
-            RelationShipResponse,
-        }
-    },
+    node::register::RegisterMessage,
     subject::{
         CreateSubjectData, DataForSink, LastStateData,
         Metadata, SignedLedger, Subject, SubjectMetadata, VerifyData,

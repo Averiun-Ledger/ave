@@ -10,9 +10,26 @@ mod runner;
 pub mod schema;
 
 use crate::{
-    auth::WitnessesAuth, governance::{data::GovernanceData, model::{ProtocolTypes, Quorum}}, model::{
-        SignTypesNode, common::{emit_fail, node::{get_sign, try_to_update}, send_reboot_to_req, subject::{get_metadata, get_signers_quorum_gov_version}, take_random_signers}, event::{LedgerValue, ProtocolsError, ProtocolsSignatures}, request::{EventRequest, SchemaType}
-    }, request::manager::{RequestManager, RequestManagerMessage}, subject::Metadata, system::ConfigHelper
+    auth::WitnessesAuth,
+    governance::{
+        data::GovernanceData,
+        model::{ProtocolTypes, Quorum},
+    },
+    model::{
+        SignTypesNode,
+        common::{
+            emit_fail,
+            node::{get_sign, try_to_update},
+            send_reboot_to_req,
+            subject::{get_metadata, get_signers_quorum_gov_version},
+            take_random_signers,
+        },
+        event::{LedgerValue, ProtocolsError, ProtocolsSignatures},
+        request::{EventRequest, SchemaType},
+    },
+    request::manager::{RequestManager, RequestManagerMessage},
+    subject::Metadata,
+    system::ConfigHelper,
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
@@ -173,13 +190,13 @@ impl Evaluation {
         &self,
         ctx: &mut ActorContext<Evaluation>,
     ) -> Result<EvalLedgerResponse, ActorError> {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
+        };
 
         let (state, gov_id) = if let Some(req) = self.signed_eval_req.clone() {
             let gov_id = if req.content.context.governance_id.is_empty() {
@@ -797,14 +814,25 @@ mod tests {
     use test_log::test;
 
     use crate::{
-        EventRequest, FactRequest, NodeMessage, NodeResponse, approval::approver::ApprovalStateRes, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, model::{
-            Namespace, SignTypesNode, event::LedgerValue,
+        EventRequest, FactRequest, NodeMessage, NodeResponse,
+        approval::approver::ApprovalStateRes,
+        governance::{
+            Governance, GovernanceMessage, GovernanceResponse,
+            data::GovernanceData,
+        },
+        model::{
+            Namespace, SignTypesNode,
+            event::LedgerValue,
             request::{SchemaType, TransferRequest},
-        }, node::Node, query::{Query, QueryMessage, QueryResponse}, request::{
+        },
+        node::Node,
+        query::{Query, QueryMessage, QueryResponse},
+        request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
-        }, subject::{
-            Subject, laststate::{LastState, LastStateMessage, LastStateResponse},
-        }, tracker::{Tracker, TrackerMessage, TrackerResponse}, validation::tests::create_subject_gov
+        },
+        subject::laststate::{LastState, LastStateMessage, LastStateResponse},
+        tracker::{Tracker, TrackerMessage, TrackerResponse},
+        validation::tests::create_subject_gov,
     };
 
     #[test(tokio::test)]
@@ -916,7 +944,7 @@ mod tests {
 
         assert_eq!(data.state, "RespondedAccepted");
 
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -1075,7 +1103,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(10)).await;
 
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -1203,7 +1231,6 @@ mod tests {
                         [
                         {
                             "schema_id": "Example",
-                            "roles": {
                                 "add": {
                                     "creator": [
                                         {
@@ -1219,7 +1246,6 @@ mod tests {
                                         }
                                     ]
                                 }
-                            }
                         }
                     ]
                 }
@@ -1309,7 +1335,7 @@ mod tests {
 
         assert_eq!(data.state, "RespondedAccepted");
 
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -1455,7 +1481,7 @@ mod tests {
             .await
             .unwrap();
 
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -1479,10 +1505,7 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(
-            event.content.subject_id.to_string(),
-            request_id.subject_id
-        );
+        assert_eq!(event.content.subject_id.to_string(), request_id.subject_id);
         assert_eq!(event.content.event_request, signed_event_req);
         assert_eq!(event.content.sn, 0);
         assert_eq!(event.content.gov_version, 1);
@@ -1501,10 +1524,7 @@ mod tests {
         assert!(!event.content.appr_required);
         assert!(event.content.appr_success.is_none());
         assert!(event.content.vali_success);
-        assert_eq!(
-            event.content.hash_prev_event,
-            DigestIdentifier::default()
-        );
+        assert_eq!(event.content.hash_prev_event, DigestIdentifier::default());
         assert!(event.content.evaluators.is_none());
         assert!(event.content.approvers.is_none(),);
         assert!(!event.content.validators.is_empty());
@@ -1584,7 +1604,7 @@ mod tests {
         };
 
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let LastStateResponse::LastState {  event, .. } = last_state_actor
+        let LastStateResponse::LastState { event, .. } = last_state_actor
             .ask(LastStateMessage::GetLastState)
             .await
             .unwrap()
@@ -1600,10 +1620,7 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(
-            event.content.subject_id.to_string(),
-            request_id.subject_id
-        );
+        assert_eq!(event.content.subject_id.to_string(), request_id.subject_id);
         assert_eq!(event.content.event_request, signed_event_req);
         assert_eq!(event.content.sn, 1);
         assert_eq!(event.content.gov_version, 1);

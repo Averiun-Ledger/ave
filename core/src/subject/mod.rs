@@ -141,7 +141,6 @@ impl From<Tracker> for Metadata {
     }
 }
 
-
 pub struct DataForSink {
     pub gov_id: Option<String>,
     pub subject_id: String,
@@ -211,7 +210,7 @@ impl SubjectMetadata {
         subject_id: DigestIdentifier,
         request: &CreateRequest,
         owner: PublicKey,
-        last_event_hash: DigestIdentifier
+        last_event_hash: DigestIdentifier,
     ) -> Self {
         Self {
             name: request.name.clone(),
@@ -839,7 +838,6 @@ where
         Ok(())
     }
 
-
     async fn publish_sink(
         ctx: &mut ActorContext<Self>,
         message: SinkDataMessage,
@@ -939,9 +937,17 @@ mod tests {
     use super::*;
 
     use crate::{
-        FactRequest, governance::{GovernanceMessage, GovernanceResponse, data::GovernanceData}, model::{
+        FactRequest,
+        governance::{
+            GovernanceMessage, GovernanceResponse, data::GovernanceData,
+        },
+        model::{
             event::Event as AveEvent, request::tests::create_start_request_mock,
-        }, node::NodeResponse, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system, validation::proof::EventProof
+        },
+        node::NodeResponse,
+        subject::laststate::{LastState, LastStateMessage, LastStateResponse},
+        system::tests::create_system,
+        validation::proof::EventProof,
     };
 
     async fn create_subject_and_ledger_event(
@@ -956,8 +962,7 @@ mod tests {
         let event = AveEvent::from_create_request(
             &request,
             0,
-            &GovernanceData::new(node_keys.public_key())
-                .to_value_wrapper(),
+            &GovernanceData::new(node_keys.public_key()).to_value_wrapper(),
         )
         .unwrap();
         let ledger = Ledger::from(event.clone());
@@ -1060,18 +1065,22 @@ mod tests {
             let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
                 .public_key()
                 .to_string();
-            let patch_event_req = json!(
-                    [{"op":"add","path": format!("/members/AveNode{}", i),"value": key},
-                    {
-                        "op": "add",
-                        "path": "/version",
-                        "value": i
-                    }]
-            );
+
+            let name = format!("AveNode{}", i);
+            let event_req_payload = json!({
+                "members": {
+                    "add": [
+                        {
+                            "name": name,
+                            "key": key
+                        }
+                    ]
+                }
+            });
 
             let event_req = EventRequest::Fact(FactRequest {
                 subject_id: subject_id.clone(),
-                payload: ValueWrapper(patch_event_req.clone()),
+                payload: ValueWrapper(event_req_payload.clone()),
             });
 
             let signature_event_req =
@@ -1081,6 +1090,15 @@ mod tests {
                 content: event_req,
                 signature: signature_event_req,
             };
+
+            let patch_event_req = json!(
+                    [{"op":"add","path": format!("/members/AveNode{}", i),"value": key},
+                    {
+                        "op": "add",
+                        "path": "/version",
+                        "value": i
+                    }]
+            );
 
             let patch_json =
                 serde_json::from_value::<Patch>(patch_event_req.clone())
@@ -1165,8 +1183,8 @@ mod tests {
     fn test_serialize_deserialize() {
         let node_keys = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 
-        let value = GovernanceData::new(node_keys.public_key())
-            .to_value_wrapper();
+        let value =
+            GovernanceData::new(node_keys.public_key()).to_value_wrapper();
 
         let request = create_start_request_mock("issuer", node_keys.clone());
         let event = AveEvent::from_create_request(&request, 0, &value).unwrap();
@@ -1179,14 +1197,14 @@ mod tests {
             signature,
         };
 
-        let subject_a = Governance::from_create_event(
-            &signed_ledger,
-        )
-        .unwrap();
+        let subject_a = Governance::from_create_event(&signed_ledger).unwrap();
 
         let bytes = borsh::to_vec(&subject_a).unwrap();
         let subject_b: Governance = borsh::from_slice(&bytes).unwrap();
-        assert_eq!(subject_a.subject_metadata.subject_id, subject_b.subject_metadata.subject_id);
+        assert_eq!(
+            subject_a.subject_metadata.subject_id,
+            subject_b.subject_metadata.subject_id
+        );
     }
 
     #[test(tokio::test)]

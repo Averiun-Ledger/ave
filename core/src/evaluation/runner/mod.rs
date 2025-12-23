@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -18,20 +21,28 @@ use wasmtime::{Engine, Module, Store};
 use crate::{
     Error,
     governance::{
-        data::GovernanceData, events::{
+        data::GovernanceData,
+        events::{
             GovernanceEvent, MemberEvent, PoliciesEvent, RolesEvent,
             SchemasEvent,
-        }, model::{HashThisRole, RoleTypes, Schema}
+        },
+        model::{HashThisRole, RoleTypes, Schema},
     },
     model::{
-        Namespace, common::contract::{MAX_FUEL, MemoryManager, generate_linker}, patch::apply_patch, request::SchemaType
+        Namespace,
+        common::contract::{MAX_FUEL, MemoryManager, generate_linker},
+        patch::apply_patch,
+        request::SchemaType,
     },
 };
 
 const TARGET_RUNNER: &str = "Ave-Evaluation-Runner";
 type ChangeRemoveMembers = (Vec<(String, String)>, Vec<String>);
-type AddRemoveChangeSchema =
-    (HashSet<String>, HashSet<String>, HashSet<String>);
+type AddRemoveChangeSchema = (
+    HashSet<SchemaType>,
+    HashSet<SchemaType>,
+    HashSet<SchemaType>,
+);
 
 pub mod types;
 
@@ -44,7 +55,7 @@ impl Runner {
         state: ValueWrapper,
         evaluate_type: EvaluateType,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
         match evaluate_type {
             EvaluateType::AllSchemasFact {
                 contract,
@@ -73,11 +84,7 @@ impl Runner {
                 namespace,
                 schema_id,
             } => Self::execute_transfer_not_gov(
-                state,
-                &new_owner,
-                &old_owner,
-                namespace,
-                &schema_id,
+                state, &new_owner, &old_owner, namespace, &schema_id,
             ),
             EvaluateType::GovConfirm {
                 old_owner_name,
@@ -92,7 +99,7 @@ impl Runner {
         old_owner: &PublicKey,
         namespace: Namespace,
         schema_id: &SchemaType,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
         if new_owner.is_empty() {
             return Err(Error::Runner(
                 "New owner PublicKey can not be empty".to_owned(),
@@ -142,7 +149,7 @@ impl Runner {
     fn execute_transfer_gov(
         state: ValueWrapper,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
         if new_owner.is_empty() {
             return Err(Error::Runner(
                 "New owner PublicKey can not be empty".to_owned(),
@@ -187,7 +194,7 @@ impl Runner {
         state: &ValueWrapper,
         old_owner_name: Option<String>,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
         if new_owner.is_empty() {
             return Err(Error::Runner(
                 "New owner PublicKey can not be empty".to_owned(),
@@ -296,25 +303,36 @@ impl Runner {
         payload: &ValueWrapper,
         contract_name: &str,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
-        let Some(engine) = ctx.system().get_helper::<Arc<Engine>>("engine").await
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
+        let Some(engine) =
+            ctx.system().get_helper::<Arc<Engine>>("engine").await
         else {
-            return Err(Error::Runner("Can not get engine from helper".to_owned()));
+            return Err(Error::Runner(
+                "Can not get engine from helper".to_owned(),
+            ));
         };
 
-        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts").await
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts")
+            .await
         else {
-            return Err(Error::Runner("Can not get engine from helper".to_owned()));
+            return Err(Error::Runner(
+                "Can not get engine from helper".to_owned(),
+            ));
         };
 
         let contract = {
             let contracts = contracts.read().await;
             let Some(contract) = contracts.get(contract_name) else {
-                return Err(Error::Runner(format!("Can not get contract {} from contracts", contract_name)));
+                return Err(Error::Runner(format!(
+                    "Can not get contract {} from contracts",
+                    contract_name
+                )));
             };
             contract.to_vec()
         };
-        
+
         // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
@@ -393,7 +411,7 @@ impl Runner {
     async fn execute_fact_gov(
         state: &ValueWrapper,
         event: &ValueWrapper,
-    ) -> Result<(RunnerResult, Vec<String>), Error> {
+    ) -> Result<(RunnerResult, Vec<SchemaType>), Error> {
         let mut governance: GovernanceData =
             serde_json::from_value(state.0.clone()).map_err(|e| {
                 Error::Runner(format!(
@@ -434,7 +452,7 @@ impl Runner {
             add_schemas
                 .union(&change_schemas)
                 .cloned()
-                .collect::<Vec<String>>()
+                .collect::<Vec<SchemaType>>()
         } else {
             vec![]
         };
@@ -567,35 +585,32 @@ impl Runner {
                     )));
                 };
 
-                if let Some(change) = schema.policies.change {
-                    if change.is_empty() {
-                        return Err(Error::Runner(
-                            "Change in SchemaIdPolicie can not be empty"
-                                .to_owned(),
-                        ));
+                if schema.change.is_empty() {
+                    return Err(Error::Runner(
+                        "Change in SchemaIdPolicie can not be empty".to_owned(),
+                    ));
+                }
+
+                if let Some(evaluate) = schema.change.evaluate {
+                    if let Err(e) = evaluate.check_values() {
+                        return Err(Error::Runner(format!(
+                            "Schema {} change policies, evaluate quorum error: {}",
+                            schema.schema_id, e
+                        )));
                     }
 
-                    if let Some(evaluate) = change.evaluate {
-                        if let Err(e) = evaluate.check_values() {
-                            return Err(Error::Runner(format!(
-                                "Schema {} change policies, evaluate quorum error: {}",
-                                schema.schema_id, e
-                            )));
-                        }
+                    policies_schema.evaluate = evaluate;
+                }
 
-                        policies_schema.evaluate = evaluate;
+                if let Some(validate) = schema.change.validate {
+                    if let Err(e) = validate.check_values() {
+                        return Err(Error::Runner(format!(
+                            "Schema {} change policies, validate quorum error: {}",
+                            schema.schema_id, e
+                        )));
                     }
 
-                    if let Some(validate) = change.validate {
-                        if let Err(e) = validate.check_values() {
-                            return Err(Error::Runner(format!(
-                                "Schema {} change policies, validate quorum error: {}",
-                                schema.schema_id, e
-                            )));
-                        }
-
-                        policies_schema.validate = validate;
-                    }
+                    policies_schema.validate = validate;
                 }
             }
 
@@ -653,7 +668,7 @@ impl Runner {
                     )));
                 };
 
-                schema.roles.check_data(
+                schema.check_data(
                     governance,
                     roles_schema,
                     &schema.schema_id,
@@ -666,8 +681,11 @@ impl Runner {
         if let Some(all_schemas) = roles_event.all_schemas {
             let new_roles = governance.roles_all_schemas.clone();
 
-            let new_roles =
-                all_schemas.check_data(governance, new_roles, "all_schemas")?;
+            let new_roles = all_schemas.check_data(
+                governance,
+                new_roles,
+                &SchemaType::AllSchemas,
+            )?;
 
             governance.roles_all_schemas = new_roles;
         }
@@ -698,10 +716,8 @@ impl Runner {
                 ));
             }
 
-            for mut new_schema in add {
-                new_schema.id = new_schema.id.trim().to_owned();
-
-                if new_schema.id.is_empty() {
+            for new_schema in add {
+                if !new_schema.id.is_valid() {
                     return Err(Error::Runner(
                         "Id of schema to add can not be empty".to_owned(),
                     ));
@@ -714,11 +730,11 @@ impl Runner {
                     )));
                 }
 
-                if new_schema.id == "all_schemas" {
+                if new_schema.id == SchemaType::AllSchemas {
                     return Err(Error::Runner("There can not be a schema whose id is all_schemas, it is a reserved word".to_owned()));
                 }
 
-                if new_schema.id == "governance" {
+                if new_schema.id == SchemaType::Governance {
                     return Err(Error::Runner("There can not be a schema whose id is governance, it is a reserved word".to_owned()));
                 }
 
@@ -740,7 +756,9 @@ impl Runner {
                     .insert(
                         new_schema.id.clone(),
                         Schema {
-                            initial_value: ValueWrapper(new_schema.initial_value),
+                            initial_value: ValueWrapper(
+                                new_schema.initial_value,
+                            ),
                             contract: new_schema.contract,
                         },
                     )
@@ -764,7 +782,7 @@ impl Runner {
             }
 
             for remove_schema in remove.clone() {
-                if remove_schema.is_empty() {
+                if !remove_schema.is_valid() {
                     return Err(Error::Runner(
                         "Id of schema to remove can not be empty".to_owned(),
                     ));
@@ -1124,7 +1142,7 @@ impl Message for RunnerMessage {}
 #[derive(Debug, Clone)]
 pub struct RunnerResponse {
     pub result: RunnerResult,
-    pub compilations: Vec<String>,
+    pub compilations: Vec<SchemaType>,
 }
 
 impl Response for RunnerResponse {}
@@ -1146,13 +1164,17 @@ impl Handler<Runner> for Runner {
         msg: RunnerMessage,
         ctx: &mut ActorContext<Runner>,
     ) -> Result<RunnerResponse, ActorError> {
-        let (result, compilations) =
-            Self::execute_contract(ctx, msg.state, msg.evaluate_type, msg.is_owner)
-                .await
-                .map_err(|e| {
-                    error!(TARGET_RUNNER, "A problem running contract: {}", e);
-                    ActorError::Functional(e.to_string())
-                })?;
+        let (result, compilations) = Self::execute_contract(
+            ctx,
+            msg.state,
+            msg.evaluate_type,
+            msg.is_owner,
+        )
+        .await
+        .map_err(|e| {
+            error!(TARGET_RUNNER, "A problem running contract: {}", e);
+            ActorError::Functional(e.to_string())
+        })?;
 
         Ok(RunnerResponse {
             result,

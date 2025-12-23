@@ -84,8 +84,8 @@ impl Evaluator {
     async fn compile_contracts(
         &self,
         ctx: &mut ActorContext<Evaluator>,
-        ids: &[String],
-        schemas: BTreeMap<String, Schema>,
+        ids: &[SchemaType],
+        schemas: BTreeMap<SchemaType, Schema>,
         governance_id: &str,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
@@ -306,9 +306,9 @@ impl Evaluator {
 
     async fn create_compilers(
         ctx: &mut ActorContext<Evaluator>,
-        ids: &[String],
+        ids: &[SchemaType],
         gov: &str,
-    ) -> Result<Vec<String>, ActorError> {
+    ) -> Result<Vec<SchemaType>, ActorError> {
         let subject_path = ActorPath::from(format!("/user/node/{}", gov));
         let subject: Option<ActorRef<Governance>> =
             ctx.system().get_actor(&subject_path).await;

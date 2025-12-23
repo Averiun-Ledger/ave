@@ -67,7 +67,6 @@ async fn test_governance_and_subject_copy_with_approve() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
                         "add": {
                             "evaluator": [
                                 {
@@ -101,7 +100,7 @@ async fn test_governance_and_subject_copy_with_approve() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -1400,7 +1399,7 @@ async fn test_delete_schema() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -1434,7 +1433,7 @@ async fn test_delete_schema() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }
@@ -1547,7 +1546,7 @@ async fn test_change_schema() {
                 [
                 {
                     "schema_id": "Example",
-                    "roles": {
+
                         "add": {
                             "evaluator": [
                                 {
@@ -1581,7 +1580,7 @@ async fn test_change_schema() {
                                 }
                             ]
                         }
-                    }
+                    
                 }
             ]
         }

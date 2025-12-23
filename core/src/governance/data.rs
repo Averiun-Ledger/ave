@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub type MemberName = String;
-pub type SchemaId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
 pub struct GovernanceData {
@@ -29,21 +28,21 @@ pub struct GovernanceData {
     pub members: BTreeMap<MemberName, PublicKey>,
     pub roles_gov: RolesGov,
     pub policies_gov: PolicyGov,
-    pub schemas: BTreeMap<SchemaId, Schema>,
-    pub roles_schema: BTreeMap<SchemaId, RolesSchema>,
+    pub schemas: BTreeMap<SchemaType, Schema>,
+    pub roles_schema: BTreeMap<SchemaType, RolesSchema>,
     pub roles_all_schemas: RolesAllSchemas,
-    pub policies_schema: BTreeMap<SchemaId, PolicySchema>,
+    pub policies_schema: BTreeMap<SchemaType, PolicySchema>,
 }
 
 impl GovernanceData {
-    pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaId>) {
+    pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaType>) {
         for schema_id in remove_schemas {
             self.roles_schema.remove(&schema_id);
             self.policies_schema.remove(&schema_id);
         }
     }
 
-    pub fn add_schema(&mut self, add_schema: HashSet<SchemaId>) {
+    pub fn add_schema(&mut self, add_schema: HashSet<SchemaType>) {
         for schema_id in add_schema {
             self.roles_schema
                 .insert(schema_id.clone(), RolesSchema::default());
@@ -135,7 +134,7 @@ impl GovernanceData {
         &self,
         schema_id: &SchemaType,
     ) -> Result<ValueWrapper, Error> {
-        let Some(schema) = self.schemas.get(&schema_id.to_string()) else {
+        let Some(schema) = self.schemas.get(&schema_id) else {
             return Err(Error::Governance("Schema not found.".to_owned()));
         };
 
@@ -192,7 +191,7 @@ impl GovernanceData {
                     return true;
                 }
 
-                let Some(roles) = self.roles_schema.get(&schema_id.to_string())
+                let Some(roles) = self.roles_schema.get(&schema_id)
                 else {
                     return false;
                 };
@@ -216,7 +215,7 @@ impl GovernanceData {
                 };
 
                 let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id.to_string())
+                    self.roles_schema.get(&schema_id)
                 else {
                     return false;
                 };
@@ -272,7 +271,7 @@ impl GovernanceData {
             .map(|x| x.0)
             .cloned()?;
 
-        let roles = self.roles_schema.get(&schema_id.to_string())?;
+        let roles = self.roles_schema.get(&schema_id)?;
 
         roles.max_creations(namespace, &name)
     }
@@ -299,7 +298,7 @@ impl GovernanceData {
                 .roles_all_schemas
                 .get_signers(role.clone(), namespace.clone());
             let (mut schema_signers, schema_any) = if let Some(roles) =
-                self.roles_schema.get(&schema_id.to_string())
+                self.roles_schema.get(&schema_id)
             {
                 roles.get_signers(role, namespace)
             } else {
@@ -347,7 +346,7 @@ impl GovernanceData {
                 };
 
                 let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id.to_string())
+                    self.roles_schema.get(&schema_id)
                 else {
                     return Err(ActorError::Functional("They are trying to obtain witnesses for a scheme that does not exist.".to_owned()));
                 };
@@ -400,7 +399,7 @@ impl GovernanceData {
         if schema_id.is_gov() {
             self.policies_gov.get_quorum(role)
         } else {
-            let policie = self.policies_schema.get(&schema_id.to_string())?;
+            let policie = self.policies_schema.get(&schema_id)?;
 
             policie.get_quorum(role)
         }
@@ -439,7 +438,7 @@ impl GovernanceData {
         &self,
         role: ProtocolTypes,
         key: &PublicKey,
-    ) -> BTreeMap<SchemaId, Schema> {
+    ) -> BTreeMap<SchemaType, Schema> {
         let Some(name) = self
             .members
             .iter()
@@ -457,7 +456,7 @@ impl GovernanceData {
             return self.schemas.clone();
         }
 
-        let mut not_schemas: Vec<String> = vec![];
+        let mut not_schemas: Vec<SchemaType> = vec![];
 
         for (schema_id, roles) in self.roles_schema.iter() {
             if !roles.hash_this_rol_not_namespace(role.clone(), &name) {
@@ -501,7 +500,7 @@ impl GovernanceData {
 
             if !schema_creators.is_empty() {
                 let mut schema_key = SchemaKeyCreators {
-                    schema_id: SchemaType::Type(schema_id.clone()),
+                    schema_id: schema_id.clone(),
                     validation: None,
                     evaluation: None,
                 };

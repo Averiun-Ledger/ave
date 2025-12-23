@@ -4,8 +4,8 @@ use ave_common::{
     ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
     BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
     BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
-    EventRequestInfo, GovsData, Namespace, PaginatorEvents, SubjsData,
-    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData,
+    RequestInfo, SignaturesInfo, SubjectInfo, SubjsData, TransferSubject,
     identity::{KeyPair, keys::Ed25519Signer},
 };
 use ave_http::config_types::ConfigHttp;
@@ -174,7 +174,6 @@ async fn fact_req_schema(
                         [
                         {
                             "schema_id": "Example1",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -212,12 +211,11 @@ async fn fact_req_schema(
                                             "namespace": []
                                         }
                                     ]
-                                }
+
                             }
                         },
                             {
                             "schema_id": "Example2",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -256,7 +254,7 @@ async fn fact_req_schema(
                                         }
                                     ]
                                 }
-                            }
+
                         }
                     ]
                 },
@@ -264,7 +262,7 @@ async fn fact_req_schema(
                     "schema": [
                         {
                             "schema_id": "Example1",
-                            "policies": {
+
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -273,11 +271,10 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+                            
                         },
                         {
                             "schema_id": "Example2",
-                            "policies": {
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -286,7 +283,7 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+                            
                         }
                     ]
                 }

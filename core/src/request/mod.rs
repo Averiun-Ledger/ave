@@ -15,8 +15,8 @@ use tracing::{error, info};
 use types::ReqManInitMessage;
 
 use crate::governance::data::GovernanceData;
-use crate::model::common::node::{get_quantity, subject_owner};
-use crate::model::common::subject::{get_gov, get_metadata};
+use crate::model::common::node::{subject_owner};
+use crate::model::common::subject::{get_gov, get_metadata, get_quantity};
 use crate::model::request::SchemaType;
 use crate::request::manager::InitRequestManager;
 use crate::subject::CreateSubjectData;
