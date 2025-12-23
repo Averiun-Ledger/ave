@@ -202,11 +202,8 @@ pub struct SetPermissionRequest {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiKeyInfo {
-    /// Public UUID identifier (use this in API requests)
-    pub public_id: String,
-    /// Internal database ID (not exposed in API)
-    #[serde(skip_serializing)]
-    pub id: i64,
+    /// UUID identifier - serves as both public ID and primary key
+    pub id: String,
     #[serde(skip_serializing)]
     pub user_id: i64,
     pub username: String,

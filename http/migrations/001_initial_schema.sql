@@ -135,9 +135,9 @@ CREATE INDEX IF NOT EXISTS idx_user_permissions_action ON user_permissions(actio
 -- =============================================================================
 -- API_KEYS TABLE
 -- =============================================================================
+-- SECURITY: Using UUID as PRIMARY KEY prevents IDOR and enumeration attacks
 CREATE TABLE IF NOT EXISTS api_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    public_id TEXT NOT NULL, -- SECURITY: UUID for public API responses (prevents IDOR)
+    id TEXT PRIMARY KEY, -- UUID v4 as primary key (e.g., "550e8400-e29b-41d4-a716-446655440000")
     user_id INTEGER NOT NULL,
     key_hash TEXT NOT NULL UNIQUE, -- SHA-256 hash of the actual key
     key_prefix TEXT NOT NULL, -- First 8 chars for identification (e.g., "ave_v1_a")
@@ -161,7 +161,6 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked = 0;
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
 CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(user_id, revoked, expires_at);
-CREATE INDEX IF NOT EXISTS idx_api_keys_public_id ON api_keys(public_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_name_active ON api_keys(user_id, name) WHERE revoked = 0;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_management_active ON api_keys(user_id) WHERE revoked = 0 AND is_management = 1;
 
@@ -172,7 +171,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     user_id INTEGER, -- NULL for anonymous/failed auth attempts
-    api_key_id INTEGER,
+    api_key_id TEXT, -- UUID reference to api_keys
     action_type TEXT NOT NULL, -- e.g., "login_success", "login_failed", "api_key_created"
     endpoint TEXT, -- HTTP endpoint called
     http_method TEXT, -- GET, POST, PUT, DELETE, etc.
@@ -197,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type)
 -- Track rate limiting per API key and IP
 CREATE TABLE IF NOT EXISTS rate_limits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    api_key_id INTEGER,
+    api_key_id TEXT, -- UUID reference to api_keys
     ip_address TEXT,
     endpoint TEXT, -- NULL = global limit
     window_start INTEGER NOT NULL, -- Unix timestamp of current window
