@@ -797,7 +797,7 @@ impl AuthDatabase {
         // SECURITY: Constant-time username enumeration mitigation
         // Always perform password hash verification with equal timing
         // Use a real Argon2id hash to ensure identical parameters and computation cost
-        let (mut user, password_valid) = match user_result {
+        let (user, password_valid) = match user_result {
             Ok(Some(u)) => {
                 // User exists - verify with real hash
                 let valid = super::crypto::verify_password(current_password, &u.password_hash)

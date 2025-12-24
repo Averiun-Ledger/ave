@@ -163,16 +163,21 @@ mod tests {
     fn test_verify_credentials_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        let user = db.create_user("testuser", "TestPass123!", false, None, None, None)
             .unwrap();
+
+        // Force password change requirement
+        db.admin_reset_password(user.id, "NewPass456!").unwrap();
+
+        // Change password with different value
         db.change_password_with_credentials(
             "testuser",
-            "TestPass123!",
-            "TestPass123!",
+            "NewPass456!",
+            "FinalPass789!",
         )
         .unwrap();
 
-        let user = db.verify_credentials("testuser", "TestPass123!").unwrap();
+        let user = db.verify_credentials("testuser", "FinalPass789!").unwrap();
         assert_eq!(user.username, "testuser");
     }
 
@@ -208,14 +213,8 @@ mod tests {
     fn test_failed_attempts_reset_on_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        db.create_user("testuser", "TestPass123!", false, None, None, Some(false))
             .unwrap();
-        db.change_password_with_credentials(
-            "testuser",
-            "TestPass123!",
-            "TestPass123!",
-        )
-        .unwrap();
 
         // 2 failed attempts
         let _ = db.verify_credentials("testuser", "Wrong1");
