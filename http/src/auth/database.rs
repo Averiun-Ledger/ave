@@ -687,10 +687,11 @@ impl AuthDatabase {
             DatabaseError::PermissionDenied("Invalid username or password".to_string())
         })?;
 
+        // SECURITY FIX: Use generic error messages to prevent user enumeration
         // Active check
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
-                "Account is disabled".to_string(),
+                "Invalid username or password".to_string(),
             ));
         }
 
@@ -698,10 +699,9 @@ impl AuthDatabase {
         if let Some(locked_until) = user.locked_until
             && locked_until > Self::now()
         {
-            return Err(DatabaseError::AccountLocked(format!(
-                "Account is locked until timestamp {}",
-                locked_until
-            )));
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
         }
 
         // Password was already verified above for timing attack mitigation
