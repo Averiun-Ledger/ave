@@ -754,6 +754,10 @@ impl AuthDatabase {
     }
 
     /// Change password providing current credentials (for forced reset flow)
+    ///
+    /// SECURITY: This function uses constant-time comparison to prevent username enumeration
+    /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
+    /// to make the response time similar to a failed password change for an existing user.
     pub fn change_password_with_credentials(
         &self,
         username: &str,
@@ -762,7 +766,7 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let mut user = conn
+        let user_result = conn
             .query_row(
                 "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
                         must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
@@ -787,11 +791,37 @@ impl AuthDatabase {
                     Ok(user)
                 },
             )
-            .map_err(|_| {
-                DatabaseError::PermissionDenied(
-                    "Invalid username or password".to_string(),
-                )
-            })?;
+            .optional()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()));
+
+        // SECURITY: Constant-time username enumeration mitigation
+        // Always perform password hash verification with equal timing
+        // Use a real Argon2id hash to ensure identical parameters and computation cost
+        let (mut user, password_valid) = match user_result {
+            Ok(Some(u)) => {
+                // User exists - verify with real hash
+                let valid = super::crypto::verify_password(current_password, &u.password_hash)
+                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                (Some(u), valid)
+            },
+            Ok(None) | Err(_) => {
+                // User doesn't exist - verify with dummy hash to match timing
+                let _ = super::crypto::verify_password(current_password, DUMMY_PASSWORD_HASH);
+                (None, false)
+            }
+        };
+
+        // If user doesn't exist, return error now (after hash verification for timing)
+        let mut user = user.ok_or_else(|| {
+            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+        })?;
+
+        // Password was already verified above for timing attack mitigation
+        if !password_valid {
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
+        }
 
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
@@ -803,23 +833,6 @@ impl AuthDatabase {
         {
             return Err(DatabaseError::AccountLocked(
                 "Account is temporarily locked".to_string(),
-            ));
-        }
-
-        let password_valid = super::crypto::verify_password(
-            current_password,
-            &user.password_hash,
-        )
-        .map_err(|e| {
-            DatabaseError::CryptoError(format!(
-                "Password verification failed: {}",
-                e
-            ))
-        })?;
-
-        if !password_valid {
-            return Err(DatabaseError::PermissionDenied(
-                "Invalid username or password".to_string(),
             ));
         }
 

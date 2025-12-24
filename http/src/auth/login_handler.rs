@@ -202,8 +202,28 @@ fn extract_request_meta(
 )]
 pub async fn change_password(
     Extension(db): Extension<Arc<AuthDatabase>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let (ip_address, _user_agent) = extract_request_meta(&headers, addr);
+
+    // SECURITY FIX: Check rate limit BEFORE credential verification
+    // This prevents brute force attacks on password change endpoint
+    db.check_rate_limit(
+        None, // No API key for pre-auth requests
+        ip_address.as_deref(),
+        "/change-password".into(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: format!("Rate limit exceeded: {}", e),
+            }),
+        )
+    })?;
+
     db.change_password_with_credentials(
         &req.username,
         &req.current_password,
