@@ -392,13 +392,7 @@ impl AuthDatabase {
         let key_hash = hash_api_key(api_key);
 
         // Get API key from database
-        let (key_id, user_id, revoked, expires_at, is_management): (
-            String,
-            i64,
-            bool,
-            Option<i64>,
-            bool,
-        ) = conn
+        let key_result = conn
             .query_row(
                 "SELECT id, user_id, revoked, expires_at, is_management
                  FROM api_keys
@@ -406,19 +400,32 @@ impl AuthDatabase {
                 params![key_hash],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, bool>(4)?,
                     ))
                 },
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-            .ok_or_else(|| {
-                DatabaseError::PermissionDenied("Invalid API key".to_string())
-            })?;
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // SECURITY: Constant-time API key enumeration mitigation
+        // If key doesn't exist, perform dummy user query to match timing
+        let (key_id, user_id, revoked, expires_at, is_management) = match key_result {
+            Some(k) => k,
+            None => {
+                // API key doesn't exist - perform dummy query to prevent timing attack
+                let _ = conn.query_row(
+                    "SELECT id FROM users WHERE id = ?1",
+                    params![999999], // Non-existent user
+                    |row| row.get::<_, i64>(0),
+                ).optional();
+
+                return Err(DatabaseError::PermissionDenied("Invalid API key".to_string()));
+            }
+        };
 
         // Check if revoked
         if revoked {

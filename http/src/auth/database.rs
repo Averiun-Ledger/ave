@@ -72,6 +72,11 @@ pub enum DatabaseError {
 // DATABASE SERVICE
 // =============================================================================
 
+// Dummy password hash for timing attack mitigation
+// This is a real Argon2id hash generated with the same parameters as user passwords
+// to ensure identical verification cost whether user exists or not
+const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$6bLVReaW/buHRwX6rLPCJA$KNXZtbxs0tqTOOuCkWFPldX2ri4wFgAVVFJqixUK/Kw";
+
 /// Thread-safe database service for auth operations
 #[derive(Clone)]
 pub struct AuthDatabase {
@@ -661,19 +666,26 @@ impl AuthDatabase {
         );
 
         // SECURITY: Constant-time username enumeration mitigation
-        // If user doesn't exist, perform dummy hash computation to match timing
-        let user = match user_result {
-            Ok(u) => u,
+        // Always perform password hash verification with equal timing
+        // Use a real Argon2id hash to ensure identical parameters and computation cost
+        let (user, password_valid) = match user_result {
+            Ok(u) => {
+                // User exists - verify with real hash
+                let valid = super::crypto::verify_password(password, &u.password_hash)
+                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                (Some(u), valid)
+            },
             Err(_) => {
-                // User doesn't exist - perform dummy Argon2 hash to prevent timing attack
-                let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$aaa$bbb"; // Invalid but valid format
-                let _ = super::crypto::verify_password(password, dummy_hash);
-
-                return Err(DatabaseError::PermissionDenied(
-                    "Invalid username or password".to_string(),
-                ));
+                // User doesn't exist - verify with dummy hash to match timing
+                let _ = super::crypto::verify_password(password, DUMMY_PASSWORD_HASH);
+                (None, false)
             }
         };
+
+        // If user doesn't exist, return error now (after hash verification for timing)
+        let user = user.ok_or_else(|| {
+            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+        })?;
 
         // Active check
         if !user.is_active {
@@ -692,16 +704,7 @@ impl AuthDatabase {
             )));
         }
 
-        // Verify password
-        let password_valid =
-            super::crypto::verify_password(password, &user.password_hash)
-                .map_err(|e| {
-                    DatabaseError::CryptoError(format!(
-                        "Password verification failed: {}",
-                        e
-                    ))
-                })?;
-
+        // Password was already verified above for timing attack mitigation
         if !password_valid {
             // Increment failed login attempts
             let new_attempts = user.failed_login_attempts + 1;
