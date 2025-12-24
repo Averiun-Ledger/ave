@@ -34,19 +34,10 @@ pub struct Config {
     /// Approval mode.
     pub always_accept: bool,
     /// Garbage collector acts
-    #[serde(deserialize_with = "deserialize_duration_secs")]
-    pub garbage_collector: Duration,
+    pub tracking_size: usize,
 }
 
-fn deserialize_duration_secs<'de, D>(
-    deserializer: D,
-) -> Result<Duration, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let u: u64 = u64::deserialize(deserializer)?;
-    Ok(Duration::from_secs(u))
-}
+
 
 impl Default for Config {
     fn default() -> Self {
@@ -58,7 +49,7 @@ impl Default for Config {
             network: Default::default(),
             contracts_path: PathBuf::new(),
             always_accept: Default::default(),
-            garbage_collector: Duration::from_secs(120),
+            tracking_size: 100,
         }
     }
 }

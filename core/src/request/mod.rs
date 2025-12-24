@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
-    Handler, Message, Response, Sink,
+    Handler, Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::identity::{
-    DigestIdentifier, PublicKey, Signed, hash_borsh,
-};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
+use ave_common::{RequestInfo, RequestState};
 use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
@@ -15,25 +14,25 @@ use tracing::{error, info};
 use types::ReqManInitMessage;
 
 use crate::governance::data::GovernanceData;
-use crate::model::common::node::{subject_owner};
+use crate::model::common::node::subject_owner;
+use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{get_gov, get_metadata, get_quantity};
 use crate::model::request::SchemaType;
 use crate::request::manager::InitRequestManager;
+use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use crate::subject::CreateSubjectData;
 use crate::system::ConfigHelper;
 use crate::{
     CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
     approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
     db::Storable,
-    governance::{model::CreatorQuantity},
-    helpers::db::ExternalDB,
-    model::{
-        Namespace
-    },
+    governance::model::CreatorQuantity,
+    model::Namespace,
 };
 
 pub mod manager;
 pub mod reboot;
+pub mod tracking;
 pub mod types;
 
 const TARGET_REQUEST: &str = "Ave-Request";
@@ -44,13 +43,43 @@ pub struct RequestData {
     pub subject_id: String,
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
+    #[serde(skip)]
     node_key: PublicKey,
-    handling: HashMap<String, (String, Signed<EventRequest>)>,
+    handling: HashMap<String, String>,
     in_queue: HashMap<String, VecDeque<Signed<EventRequest>>>,
+}
+
+impl BorshSerialize for RequestHandler {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.handling, writer)?;
+        BorshSerialize::serialize(&self.in_queue, writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for RequestHandler {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let handling = HashMap::<String, String>::deserialize_reader(reader)?;
+        let in_queue =
+             HashMap::<String, VecDeque<Signed<EventRequest>>>::deserialize_reader(reader)?;
+
+        let node_key = PublicKey::default();
+
+        Ok(Self {
+            node_key,
+            handling,
+            in_queue,
+        })
+    }
 }
 
 impl RequestHandler {
@@ -79,21 +108,20 @@ impl RequestHandler {
         create_req: CreateRequest,
         request: Signed<EventRequest>,
     ) -> Result<DigestIdentifier, ActorError> {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
+        };
 
         let subject_id = hash_borsh(&*hash.hasher(), &request)
             .map_err(|e| ActorError::Functional(e.to_string()))?;
 
         let data = if create_req.schema_id.is_gov() {
             let gov = GovernanceData::new(request.signature.signer.clone());
-            let value = gov
-                .to_value_wrapper();
+            let value = gov.to_value_wrapper();
 
             CreateSubjectData {
                 create_req,
@@ -142,15 +170,11 @@ impl RequestHandler {
     async fn error_queue_handling(
         &mut self,
         ctx: &mut ActorContext<RequestHandler>,
-        id: &str,
         subject_id: &str,
-        error: &str,
     ) -> Result<(), ActorError> {
         self.on_event(
             RequestHandlerEvent::Invalid {
-                id: id.to_owned(),
                 subject_id: subject_id.to_owned(),
-                error: error.to_owned(),
             },
             ctx,
         )
@@ -167,13 +191,28 @@ impl RequestHandler {
         request_id: &str,
     ) -> Result<RequestHandlerResponse, ActorError> {
         error!(TARGET_REQUEST, "PopQueue, {} for {}", e, subject_id);
-        if let Err(e) = self
-            .error_queue_handling(ctx, request_id, subject_id, e)
-            .await
-        {
+        if let Err(e) = self.error_queue_handling(ctx, subject_id).await {
             error!(
                 TARGET_REQUEST,
                 "PopQueue, Can not enqueue next event: {}", e
+            );
+            ctx.system().stop_system();
+            return Err(e);
+        }
+
+        if let Err(e) = send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: request_id.to_string(),
+                state: RequestState::Invalid,
+                error: Some(e.to_string()),
+            },
+        )
+        .await
+        {
+            error!(
+                TARGET_REQUEST,
+                "PopQueue, can not update tracking: {}", e
             );
             ctx.system().stop_system();
             return Err(e);
@@ -191,9 +230,11 @@ impl RequestHandler {
         namespace: Namespace,
         gov: GovernanceData,
     ) -> Result<(), ActorError> {
-        if let Some(max_quantity) =
-            gov.max_creations(&self.node_key, schema_id.clone(), namespace.clone())
-        {
+        if let Some(max_quantity) = gov.max_creations(
+            &self.node_key,
+            schema_id.clone(),
+            namespace.clone(),
+        ) {
             if let CreatorQuantity::Quantity(max_quantity) = max_quantity {
                 let quantity = match get_quantity(
                     ctx,
@@ -287,28 +328,21 @@ impl Response for RequestHandlerResponse {}
 )]
 pub enum RequestHandlerEvent {
     EventToQueue {
-        id: String,
         subject_id: String,
         event: Signed<EventRequest>,
     },
     Invalid {
-        id: String,
         subject_id: String,
-        error: String,
     },
     Abort {
-        id: String,
         subject_id: String,
-        error: String,
     },
     FinishHandling {
-        id: String,
         subject_id: String,
     },
     EventToHandling {
         subject_id: String,
         request_id: String,
-        event: Signed<EventRequest>,
     },
 }
 
@@ -326,32 +360,30 @@ impl Actor for RequestHandler {
     ) -> Result<(), ActorError> {
         self.init_store("request", None, false, ctx).await?;
 
-        let Some(ext_db): Option<ExternalDB> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            return Err(ActorError::NotHelper("ext_db".to_owned()));
+        let tracking_size = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.tracking_size
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
         };
 
-        for (subject_id, (request_id, request)) in self.handling.clone() {
-            let request_manager_init = InitRequestManager {
+        ctx.create_child("tracking", RequestTracking::new(tracking_size))
+            .await?;
+
+        for (subject_id, request_id) in self.handling.clone() {
+            let request_manager_init = InitRequestManager::Continue {
                 our_key: self.node_key.clone(),
                 id: request_id.clone(),
                 subject_id,
-                request,
-                command: ReqManInitMessage::Validate,
             };
+
             let request_manager_actor = ctx
                 .create_child(
                     &request_id,
                     RequestManager::initial(request_manager_init),
                 )
                 .await?;
-
-            let sink = Sink::new(
-                request_manager_actor.subscribe(),
-                ext_db.get_request_manager(),
-            );
-            ctx.system().run_sink(sink).await;
 
             request_manager_actor
                 .tell(RequestManagerMessage::Run)
@@ -393,14 +425,41 @@ impl Handler<RequestHandler> for RequestHandler {
 
                 self.on_event(
                     RequestHandlerEvent::Abort {
-                        id: id.to_owned(),
                         subject_id: subject_id.to_owned(),
-                        error: error.to_owned(),
                     },
                     ctx,
                 )
                 .await;
 
+                if let Err(e) = send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: id.clone(),
+                        state: RequestState::Abort,
+                        error: Some(error),
+                    },
+                )
+                .await
+                {
+                    error!(
+                        TARGET_REQUEST,
+                        "AbortRequest, can not update tracking: {}", e
+                    );
+                    ctx.system().stop_system();
+                    return Err(e);
+                }
+
+                if let Err(e) =
+                    RequestHandler::queued_event(ctx, &subject_id.to_string())
+                        .await
+                {
+                    error!(
+                        TARGET_REQUEST,
+                        "AbortRequest, Can not enqueue new event: {}", e
+                    );
+                    ctx.system().stop_system();
+                    return Err(e);
+                };
                 Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::ChangeApprovalState {
@@ -475,10 +534,10 @@ impl Handler<RequestHandler> for RequestHandler {
                 };
 
                 let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.hash_algorithm
+                } else {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
@@ -627,13 +686,30 @@ impl Handler<RequestHandler> for RequestHandler {
 
                         self.on_event(
                             RequestHandlerEvent::EventToQueue {
-                                id: request_id.clone(),
                                 subject_id: subject_id.to_string(),
                                 event: request,
                             },
                             ctx,
                         )
                         .await;
+
+                        if let Err(e) = send_to_tracking(
+                            ctx,
+                            RequestTrackingMessage::UpdateState {
+                                request_id: request_id.clone(),
+                                state: RequestState::InQueue,
+                                error: None,
+                            },
+                        )
+                        .await
+                        {
+                            error!(
+                                TARGET_REQUEST,
+                                "NewRequest, can not update tracking: {}", e
+                            );
+                            ctx.system().stop_system();
+                            return Err(e);
+                        }
 
                         if let Err(e) = RequestHandler::queued_event(
                             ctx,
@@ -821,13 +897,30 @@ impl Handler<RequestHandler> for RequestHandler {
 
                 self.on_event(
                     RequestHandlerEvent::EventToQueue {
-                        id: request_id.clone(),
                         subject_id: metadata.subject_id.to_string(),
                         event: request,
                     },
                     ctx,
                 )
                 .await;
+
+                if let Err(e) = send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: request_id.clone(),
+                        state: RequestState::InQueue,
+                        error: None,
+                    },
+                )
+                .await
+                {
+                    error!(
+                        TARGET_REQUEST,
+                        "NewRequest, can not update tracking: {}", e
+                    );
+                    ctx.system().stop_system();
+                    return Err(e);
+                }
 
                 if !self.handling.contains_key(&metadata.subject_id.to_string())
                     && let Err(e) = RequestHandler::queued_event(
@@ -856,10 +949,10 @@ impl Handler<RequestHandler> for RequestHandler {
                 }
 
                 let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
+                    ctx.system().get_helper::<ConfigHelper>("config").await
+                {
+                    config.hash_algorithm
+                } else {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
@@ -936,7 +1029,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     return self.error(ctx, e, &subject_id, &request_id).await;
                 }
 
-                let (message, command) = match event.content.clone() {
+                let command = match event.content.clone() {
                     EventRequest::Create(create_request) => {
                         if !create_request.schema_id.is_gov()
                             && let Err(e) = self
@@ -959,10 +1052,8 @@ impl Handler<RequestHandler> for RequestHandler {
                                 )
                                 .await;
                         }
-                        (
-                            RequestManagerMessage::Validate,
-                            ReqManInitMessage::Validate,
-                        )
+
+                        ReqManInitMessage::Validate
                     }
 
                     EventRequest::Confirm(confirm_req) => {
@@ -975,10 +1066,8 @@ impl Handler<RequestHandler> for RequestHandler {
                                     .error(ctx, e, &subject_id, &request_id)
                                     .await;
                             }
-                            (
-                                RequestManagerMessage::Evaluate,
-                                ReqManInitMessage::Evaluate,
-                            )
+
+                            ReqManInitMessage::Evaluate
                         } else {
                             if confirm_req.name_old_owner.is_some() {
                                 let e = "Name of old owner must be None";
@@ -1007,28 +1096,23 @@ impl Handler<RequestHandler> for RequestHandler {
                                     )
                                     .await;
                             };
-                            (
-                                RequestManagerMessage::Validate,
-                                ReqManInitMessage::Validate,
-                            )
+
+                            ReqManInitMessage::Validate
                         }
                     }
-                    EventRequest::Fact(_) | EventRequest::Transfer(_) => (
-                        RequestManagerMessage::Evaluate,
-                        ReqManInitMessage::Evaluate,
-                    ),
-                    _ => (
-                        RequestManagerMessage::Validate,
-                        ReqManInitMessage::Validate,
-                    ),
+                    EventRequest::Fact(_) | EventRequest::Transfer(_) => {
+                        ReqManInitMessage::Evaluate
+                    }
+
+                    _ => ReqManInitMessage::Validate,
                 };
 
-                let request_manager_init = InitRequestManager {
+                let request_manager_init = InitRequestManager::Init {
                     our_key: self.node_key.clone(),
                     id: request_id.clone(),
                     subject_id: subject_id.clone(),
-                    request: event.clone(),
                     command,
+                    request: event.clone(),
                 };
 
                 let request_actor = match ctx
@@ -1050,25 +1134,10 @@ impl Handler<RequestHandler> for RequestHandler {
                     }
                 };
 
-                let Some(ext_db): Option<ExternalDB> =
-                    ctx.system().get_helper("ext_db").await
-                else {
-                    error!(
-                        TARGET_REQUEST,
-                        "PopQueue, Can not obtaint ext_db helper"
-                    );
-                    ctx.system().stop_system();
-                    return Err(ActorError::NotHelper("ext_db".to_owned()));
-                };
-
-                let sink = Sink::new(
-                    request_actor.subscribe(),
-                    ext_db.get_request_manager(),
-                );
-                ctx.system().run_sink(sink).await;
-
                 info!(TARGET_REQUEST, "New Request {}!!!", request_id);
-                if let Err(e) = request_actor.tell(message).await {
+                if let Err(e) =
+                    request_actor.tell(RequestManagerMessage::FirstRun).await
+                {
                     error!(
                         TARGET_REQUEST,
                         "PopQueue, Can not send message to request manager actor: {}",
@@ -1082,7 +1151,6 @@ impl Handler<RequestHandler> for RequestHandler {
                     RequestHandlerEvent::EventToHandling {
                         subject_id: subject_id.clone(),
                         request_id,
-                        event,
                     },
                     ctx,
                 )
@@ -1093,12 +1161,30 @@ impl Handler<RequestHandler> for RequestHandler {
             RequestHandlerMessage::EndHandling { subject_id, id } => {
                 self.on_event(
                     RequestHandlerEvent::FinishHandling {
-                        id,
                         subject_id: subject_id.clone(),
                     },
                     ctx,
                 )
                 .await;
+
+                if let Err(e) = send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: id.clone(),
+                        state: RequestState::Finish,
+                        error: None,
+                    },
+                )
+                .await
+                {
+                    error!(
+                        TARGET_REQUEST,
+                        "EndHandling, Can not send event update to RequestTracking: {}",
+                        e
+                    );
+                    ctx.system().stop_system();
+                    return Err(e);
+                }
 
                 if let Err(e) =
                     RequestHandler::queued_event(ctx, &subject_id).await
@@ -1138,14 +1224,6 @@ impl Handler<RequestHandler> for RequestHandler {
             );
             ctx.system().stop_system();
         };
-
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(
-                TARGET_REQUEST,
-                "PublishEvent, can not publish event: {}", e
-            );
-            ctx.system().stop_system();
-        }
     }
 }
 
@@ -1156,6 +1234,11 @@ impl Storable for RequestHandler {}
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
     type InitParams = PublicKey;
+
+    fn update(&mut self, state: Self) {
+        self.in_queue = state.in_queue;
+        self.handling = state.handling;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         RequestHandler {
@@ -1168,12 +1251,10 @@ impl PersistentActor for RequestHandler {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RequestHandlerEvent::Abort { subject_id, .. } => {
+            RequestHandlerEvent::Abort { subject_id } => {
                 self.handling.remove(subject_id);
             }
-            RequestHandlerEvent::EventToQueue {
-                subject_id, event, ..
-            } => {
+            RequestHandlerEvent::EventToQueue { subject_id, event } => {
                 if let Some(vec) = self.in_queue.get_mut(subject_id) {
                     vec.push_back(event.clone());
                 } else {
@@ -1182,7 +1263,7 @@ impl PersistentActor for RequestHandler {
                     self.in_queue.insert(subject_id.clone(), vec);
                 };
             }
-            RequestHandlerEvent::Invalid { subject_id, .. } => {
+            RequestHandlerEvent::Invalid { subject_id } => {
                 if let Some(vec) = self.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                 }
@@ -1190,18 +1271,13 @@ impl PersistentActor for RequestHandler {
             RequestHandlerEvent::EventToHandling {
                 subject_id,
                 request_id,
-                event,
-                ..
             } => {
-                self.handling.insert(
-                    subject_id.clone(),
-                    (request_id.clone(), event.clone()),
-                );
+                self.handling.insert(subject_id.clone(), request_id.clone());
                 if let Some(vec) = self.in_queue.get_mut(subject_id) {
                     vec.pop_front();
                 }
             }
-            RequestHandlerEvent::FinishHandling { subject_id, .. } => {
+            RequestHandlerEvent::FinishHandling { subject_id } => {
                 self.handling.remove(subject_id);
             }
         };

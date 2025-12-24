@@ -14,21 +14,19 @@ use response::ApprovalRes;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
+use crate::EventRequest;
 use crate::approval::approver::InitApprover;
 use crate::evaluation::response::EvalLedgerResponse;
 use crate::governance::model::{ProtocolTypes, Quorum};
 use crate::model::SignTypesNode;
+use crate::model::common::emit_fail;
 use crate::model::common::node::get_sign;
-use crate::model::common::subject::{get_metadata, get_signers_quorum_gov_version};
-use crate::model::common::{
-    emit_fail, 
+use crate::model::common::subject::{
+    get_metadata, get_signers_quorum_gov_version,
 };
 use crate::model::event::{LedgerValue, ProtocolsSignatures};
 use crate::request::manager::{RequestManager, RequestManagerMessage};
-use crate::{EventRequest};
-use crate::{
-    db::Storable, evaluation::request::EvaluationReq,
-};
+use crate::{db::Storable, evaluation::request::EvaluationReq};
 
 pub mod approver;
 pub mod request;
@@ -41,34 +39,66 @@ const TARGET_APPROVAL: &str = "Ave-Approval";
     Debug,
     Serialize,
     Deserialize,
-    Default,
-    BorshDeserialize,
-    BorshSerialize,
+    Default
 )]
 pub struct Approval {
-    node_key: PublicKey,
-    // Quorum
+    #[serde(skip)]
+    our_key: PublicKey,
     quorum: Quorum,
-
     request_id: String,
     version: u64,
     request: Option<Signed<ApprovalReq>>,
-    // approvers
     approvers: HashSet<PublicKey>,
-    // Actual responses
     approvers_response: Vec<ProtocolsSignatures>,
-    // approvers quantity
     approvers_quantity: u32,
 }
 
-impl Approval {
-    pub fn new(node_key: PublicKey) -> Self {
-        Approval {
-            node_key,
-            ..Default::default()
-        }
+impl BorshSerialize for Approval {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.quorum, writer)?;
+        BorshSerialize::serialize(&self.request_id, writer)?;
+        BorshSerialize::serialize(&self.version, writer)?;
+        BorshSerialize::serialize(&self.request, writer)?;
+        BorshSerialize::serialize(&self.approvers, writer)?;
+        BorshSerialize::serialize(&self.approvers_response, writer)?;
+        BorshSerialize::serialize(&self.approvers_quantity, writer)?;
+        Ok(())
     }
+}
 
+impl BorshDeserialize for Approval {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let quorum = Quorum::deserialize_reader(reader)?;
+        let request_id = String::deserialize_reader(reader)?;
+        let version = u64::deserialize_reader(reader)?;
+        let request = Option::<Signed<ApprovalReq>>::deserialize_reader(reader)?;
+        let approvers = HashSet::<PublicKey>::deserialize_reader(reader)?;
+        let approvers_response = Vec::<ProtocolsSignatures>::deserialize_reader(reader)?;
+        let approvers_quantity = u32::deserialize_reader(reader)?;
+
+        let our_key = PublicKey::default();
+
+        Ok(Self {
+            our_key,
+            quorum,
+            request_id,
+            version,
+            request,
+            approvers,
+            approvers_response,
+            approvers_quantity,
+        })
+    }
+}
+
+impl Approval {
     // generate the approval request
     async fn create_approval_req(
         &mut self,
@@ -84,7 +114,9 @@ impl Approval {
             return Err(ActorError::FunctionalFail("An attempt is being made to approvation an event that is not fact.".to_owned()));
         };
 
-        let prev_hash = get_metadata(ctx, &subject_id.to_string()).await?.last_event_hash;
+        let prev_hash = get_metadata(ctx, &subject_id.to_string())
+            .await?
+            .last_event_hash;
 
         let LedgerValue::Patch(patch) = eval_res.value else {
             return Err(ActorError::FunctionalFail(
@@ -111,7 +143,7 @@ impl Approval {
         approval_req: Signed<ApprovalReq>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
-        let our_key = self.node_key.clone();
+        let our_key = self.our_key.clone();
 
         if signer == our_key {
             let approver_path = ActorPath::from(format!(
@@ -136,7 +168,7 @@ impl Approval {
             let init_approver = InitApprover {
                 request_id: request_id.to_owned(),
                 version,
-                node: signer.clone(),
+                node_key: signer.clone(),
                 subject_id: approval_req.content.subject_id.to_string(),
                 pass_votation: VotationType::Manual,
             };
@@ -488,9 +520,20 @@ impl PersistentActor for Approval {
     type Persistence = LightPersistence;
     type InitParams = PublicKey;
 
+    fn update(&mut self, state: Self) {
+        self.quorum = state.quorum; 
+        self.request_id = state.request_id; 
+        self.version = state.version; 
+        self.request = state.request; 
+        self.approvers = state.approvers; 
+        self.approvers_response = state.approvers_response; 
+        self.approvers_quantity = state.approvers_quantity; 
+
+    }
+
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            node_key: params,
+            our_key: params,
             ..Default::default()
         }
     }

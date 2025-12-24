@@ -594,7 +594,7 @@ pub mod tests {
         CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, helpers::db::ExternalDB, model::{
             Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
         }, query::Query, request::{
-            RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
+            RequestHandler, RequestHandlerMessage, RequestHandlerResponse, tracking::RequestTracking,
         }, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system
     };
 
@@ -605,6 +605,7 @@ pub mod tests {
         ActorRef<Query>,
         ActorRef<Governance>,
         ActorRef<LastState>,
+        ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -628,12 +629,6 @@ pub mod tests {
             .create_root_actor("query", Query::new(node_keys.public_key()))
             .await
             .unwrap();
-
-        let ext_db: ExternalDB = system.get_helper("ext_db").await.unwrap();
-
-        let sink =
-            Sink::new(request_actor.subscribe(), ext_db.get_request_handler());
-        system.run_sink(sink).await;
 
         let create_req = EventRequest::Create(CreateRequest {
             name: Some("Name".to_string()),
@@ -748,6 +743,13 @@ pub mod tests {
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
+        let tracking = system
+            .get_actor::<RequestTracking>(&ActorPath::from(
+                "/user/request/tracking",
+            ))
+            .await
+            .unwrap();
+
         (
             system,
             node_actor,
@@ -755,6 +757,7 @@ pub mod tests {
             query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             metadata.subject_id,
             _dirs,
         )
@@ -774,6 +777,7 @@ pub mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dirs,
         ) = create_subject_gov().await;

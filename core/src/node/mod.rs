@@ -4,7 +4,6 @@
 use std::{collections::HashMap, path::Path};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use nodekey::NodeKey;
 use register::Register;
 use tokio::fs;
 use tracing::{error, warn};
@@ -38,7 +37,6 @@ use ave_actors::{
 use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 
-pub mod nodekey;
 pub mod register;
 pub mod transfer;
 
@@ -257,7 +255,7 @@ impl Node {
         for (subject, data) in self.owned_subjects.clone() {
             if data.schema_id.is_gov() {
                 let tracker_actor =
-                    ctx.create_child(&subject, Tracker::initial(None)).await?;
+                    ctx.create_child(&subject, Tracker::initial((None, our_key.clone()))).await?;
 
                 let sink =
                     Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
@@ -273,7 +271,7 @@ impl Node {
                 .await?;
             } else {
                 let governance_actor = ctx
-                    .create_child(&subject, Governance::initial(None))
+                    .create_child(&subject, Governance::initial((None, our_key.clone())))
                     .await?;
 
                 let sink = Sink::new(
@@ -303,7 +301,7 @@ impl Node {
 
             if data.schema_id.is_gov() {
                 let governance_actor = ctx
-                    .create_child(&subject, Governance::initial(None))
+                    .create_child(&subject, Governance::initial((None, our_key.clone())))
                     .await?;
 
                 let sink = Sink::new(
@@ -322,7 +320,7 @@ impl Node {
                 .await?;
             } else if i_new_owner {
                 let tracker_actor =
-                    ctx.create_child(&subject, Tracker::initial(None)).await?;
+                    ctx.create_child(&subject, Tracker::initial((None, our_key.clone()))).await?;
 
                 let sink =
                     Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
@@ -448,8 +446,6 @@ impl Actor for Node {
         self.init_store("node", None, true, ctx).await?;
 
         ctx.create_child("register", Register::initial(())).await?;
-
-        ctx.create_child("key", NodeKey::new(self.owner())).await?;
 
         ctx.create_child(
             "manual_distribution",
@@ -586,7 +582,7 @@ impl Handler<Node> for Node {
                 };
 
                 let tracker_actor = ctx
-                    .create_child(&subject_id, Tracker::initial(None))
+                    .create_child(&subject_id, Tracker::initial((None, self.owner.public_key())))
                     .await?;
                 if !light {
                     let sink = Sink::new(
@@ -718,19 +714,16 @@ impl Handler<Node> for Node {
 
                         self.on_event(
                             NodeEvent::TemporalSubject {
-                                subject_id: governance
-                                    .subject_metadata
+                                subject_id: governance.0
                                     .subject_id
                                     .to_string(),
                                 data: SubjectData {
-                                    owner: governance
-                                        .subject_metadata
+                                    owner: governance.0
                                         .creator
                                         .to_string(),
                                     governance_id: None,
                                     sn: 0,
-                                    schema_id: governance
-                                        .subject_metadata
+                                    schema_id: governance.0
                                         .schema_id
                                         .clone(),
                                     namespace: Namespace::new(),
@@ -743,7 +736,7 @@ impl Handler<Node> for Node {
                         let governance_actor = ctx
                             .create_child(
                                 &format!("{}", ledger.content.subject_id),
-                                Governance::initial(Some(governance.clone())),
+                                Governance::initial((Some(governance.clone()), self.owner.public_key())),
                             )
                             .await
                             .map_err(|e| {
@@ -806,7 +799,7 @@ impl Handler<Node> for Node {
                         let tracker_actor = ctx
                             .create_child(
                                 &format!("{}", ledger.content.subject_id),
-                                Tracker::initial(Some(tracker.clone())),
+                                Tracker::initial((Some(tracker), self.owner.public_key())),
                             )
                             .await
                             .map_err(|e| {
@@ -862,11 +855,11 @@ impl Handler<Node> for Node {
                 };
 
                 let governance_id = if data.create_req.schema_id.is_gov() {
-                    let governance = Governance::from(data.clone());
+                    let governance = Governance::from_create_subject_data(data.clone());
                     let child = ctx
                     .create_child(
                         &format!("{}", data.subject_id),
-                        Governance::initial(Some(governance)),
+                        Governance::initial((Some(governance), self.owner.public_key())),
                     )
                     .await?;
 
@@ -875,11 +868,11 @@ impl Handler<Node> for Node {
 
                     None
                 } else {
-                    let tracker = Tracker::from(data.clone());
+                    let tracker = Tracker::from_create_subject_data(data.clone());
                     let child = ctx
                     .create_child(
                         &format!("{}", data.subject_id),
-                        Tracker::initial(Some(tracker)),
+                        Tracker::initial((Some(tracker), self.owner.public_key())),
                     )
                     .await?;
 

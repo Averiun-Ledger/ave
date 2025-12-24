@@ -27,12 +27,6 @@ pub mod common;
 
 #[async_trait]
 pub trait Querys {
-    // request
-    async fn get_request_id_status(
-        &self,
-        request_id: &str,
-    ) -> Result<RequestInfo, Error>;
-    async fn del_request(&self, request_id: &str) -> Result<(), Error>;
     // approver
     async fn get_approve_req(
         &self,
@@ -102,21 +96,7 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_request_manager(&self) -> impl Subscriber<RequestManagerEvent> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
-        }
-    }
-
     pub fn get_last_state(&self) -> impl Subscriber<LastStateEvent> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
-        }
-    }
-
-    pub fn get_request_handler(&self) -> impl Subscriber<RequestHandlerEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
@@ -216,27 +196,6 @@ impl Querys for ExternalDB {
                         subject_id, quantity, reverse, sucess,
                     )
                     .await
-            }
-        }
-    }
-
-    async fn get_request_id_status(
-        &self,
-        request_id: &str,
-    ) -> Result<RequestInfo, Error> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_request_id_status(request_id).await
-            }
-        }
-    }
-
-    async fn del_request(&self, request_id: &str) -> Result<(), Error> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.del_request(request_id).await
             }
         }
     }

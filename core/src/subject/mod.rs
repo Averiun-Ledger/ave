@@ -958,6 +958,7 @@ mod tests {
             .create_root_actor("node", Node::initial(node_keys.clone()))
             .await
             .unwrap();
+
         let request = create_start_request_mock("issuer", node_keys.clone());
         let event = AveEvent::from_create_request(
             &request,
@@ -1202,14 +1203,14 @@ mod tests {
         let bytes = borsh::to_vec(&subject_a).unwrap();
         let subject_b: Governance = borsh::from_slice(&bytes).unwrap();
         assert_eq!(
-            subject_a.subject_metadata.subject_id,
+            subject_a.0.subject_id,
             subject_b.subject_metadata.subject_id
         );
     }
 
     #[test(tokio::test)]
     async fn test_get_events() {
-        let (system, ..) = create_system().await;
+        let (system, .., _dir) = create_system().await;
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
         let (subject_actor, _signed_ledger) =
@@ -1241,7 +1242,7 @@ mod tests {
     #[test(tokio::test)]
     async fn test_1000_events() {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-        let (system, ..) = create_system().await;
+        let (system, .., _dirs) = create_system().await;
 
         let (subject_actor, signed_ledger) =
             create_subject_and_ledger_event(system, node_keys.clone()).await;

@@ -23,7 +23,7 @@ pub mod tracker;
 
 use approval::approver::ApprovalStateRes;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
-use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
+use ave_actors::{ActorPath, ActorRef, PersistentActor};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, Signed};
 use config::Config as AveBaseConfig;
@@ -59,6 +59,7 @@ use validation::{Validation, ValidationInfo, ValidationMessage};
 
 
 use crate::config::SinkAuth;
+use crate::request::tracking::{RequestTracking, RequestTrackingMessage, RequestTrackingResponse};
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
@@ -88,6 +89,7 @@ pub struct Api {
     register: ActorRef<Register>,
     monitor: ActorRef<Monitor>,
     manual_dis: ActorRef<ManualDistribution>,
+    tracking: ActorRef<RequestTracking>,
 }
 
 impl Api {
@@ -193,17 +195,16 @@ impl Api {
                 error!(TARGET_API, "Init system, {}", e);
                 Error::System(e.to_owned())
             })?;
-        let Some(ext_db): Option<ExternalDB> =
-            system.get_helper("ext_db").await
-        else {
-            let e = "Can not get ext_db helper";
+
+        let tracking: Option<ActorRef<RequestTracking>> = system
+            .get_actor(&ActorPath::from("/user/request/tracking"))
+            .await;
+
+        let Some(tracking_actor) = tracking else {
+            let e = "Can not get tracking actor";
             error!(TARGET_API, "Init system, {}", e);
             return Err(Error::System(e.to_owned()));
         };
-
-        let sink =
-            Sink::new(request_actor.subscribe(), ext_db.get_request_handler());
-        system.run_sink(sink).await;
 
         let query = Query::new(keys.public_key());
         let query_actor = system
@@ -228,6 +229,7 @@ impl Api {
                 register: register_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
+                tracking: tracking_actor
             },
             tasks,
         ))
@@ -369,10 +371,8 @@ impl Api {
         request_id: DigestIdentifier,
     ) -> Result<RequestInfo, Error> {
         let response = self
-            .query
-            .ask(QueryMessage::GetRequestState {
-                request_id: request_id.to_string(),
-            })
+            .tracking
+            .ask(RequestTrackingMessage::SearchRequest(request_id.to_string()))
             .await
             .map_err(|e| {
                 let e = format!("Can not get request state {}", e);
@@ -381,7 +381,8 @@ impl Api {
             })?;
 
         match response {
-            QueryResponse::RequestState(state) => Ok(state),
+            RequestTrackingResponse::Info(state) => Ok(state),
+            RequestTrackingResponse::NotFound => Err(Error::RequestTracking("The request could not be found".to_string())),
             _ => {
                 let e = "A response was received that was not the expected one";
                 warn!(TARGET_API, e);

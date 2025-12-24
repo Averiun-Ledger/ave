@@ -3,7 +3,7 @@
 use crate::namespace::Namespace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::{Display, write}};
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
@@ -180,9 +180,39 @@ pub struct Paginator {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct RequestInfo {
-    pub status: String,
+    pub state: RequestState,
     pub version: u64,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum RequestState {
+    Abort,
+    InQueue,
+    Invalid,
+    Finish,
+    Reboot,
+    Evaluation,
+    Approval,
+    Validation,
+    Distribution
+}
+
+impl Display for RequestState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestState::Abort => write!(f, "Abort"),
+            RequestState::InQueue => write!(f, "In Queue"),
+            RequestState::Invalid => write!(f, "Invalid"),
+            RequestState::Finish => write!(f, "Finish"),
+            RequestState::Reboot => write!(f, "Reboot"),
+            RequestState::Evaluation => write!(f, "Evaluation"),
+            RequestState::Approval => write!(f, "Approval"),
+            RequestState::Validation => write!(f, "Validation"),
+            RequestState::Distribution => write!(f, "Distribution"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

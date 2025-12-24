@@ -1,9 +1,10 @@
+use ave_common::{RequestInfo, RequestState};
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std:: fmt::Debug;
+use std::fmt::Debug;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
@@ -12,28 +13,35 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
-use crate::{
-    node::nodekey::{NodeKey, NodeKeyMessage, NodeKeyResponse},
-    request::manager::{RequestManager, RequestManagerMessage},
-};
+use crate::request::manager::{RequestManager, RequestManagerMessage};
+use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
 
 pub mod contract;
 pub mod node;
 pub mod subject;
 
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize,)]
-pub struct CeilingMap<T> 
-{
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct CeilingMap<T> {
     inner: BTreeMap<u64, T>,
 }
 
-impl<T> CeilingMap<T> 
-where T: Debug + Clone + Serialize + Default
+impl<T> CeilingMap<T>
+where
+    T: Debug + Clone + Serialize + Default,
 {
     pub fn new() -> Self {
-        CeilingMap { inner: BTreeMap::new() }
+        CeilingMap {
+            inner: BTreeMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: u64, value: T) {
@@ -51,7 +59,9 @@ where T: Debug + Clone + Serialize + Default
             out.push((key.clone(), value.clone()));
         }
 
-        for (key, value) in self.inner.range((Included(&lower), Included(&upper))) {
+        for (key, value) in
+            self.inner.range((Included(&lower), Included(&upper)))
+        {
             out.push((key.clone(), value.clone()));
         }
 
@@ -61,7 +71,8 @@ where T: Debug + Clone + Serialize + Default
     pub fn get_prev_or_equal(&self, key: u64) -> Option<T> {
         self.inner
             .range((Unbounded, Included(&key)))
-            .next_back().map(|x| x.1.clone())
+            .next_back()
+            .map(|x| x.1.clone())
     }
 }
 
@@ -77,13 +88,37 @@ impl CeilingMap<HashSet<PublicKey>> {
 }
 
 impl CeilingMap<HashMap<PublicKey, BTreeSet<String>>> {
-    pub fn contains_from(&self, key: u64, target: &PublicKey) -> Option<(u64, BTreeSet<String>)> {
+    pub fn contains_from(
+        &self,
+        key: u64,
+        target: &PublicKey,
+    ) -> Option<(u64, BTreeSet<String>)> {
         for (k, v) in self.inner.range((Included(&key), Unbounded)) {
             if let Some(povs) = v.get(&target) {
                 return Some((k.clone(), povs.clone()));
             }
         }
         None
+    }
+}
+
+pub async fn send_to_tracking<A>(
+    ctx: &mut ActorContext<A>,
+    message: RequestTrackingMessage
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let tracking_path = ActorPath::from("/user/request/tracking");
+    let tracking_actor: Option<ActorRef<RequestTracking>> =
+        ctx.system().get_actor(&tracking_path).await;
+
+    if let Some(tracking_actor) = tracking_actor {
+        tracking_actor
+            .tell(message)
+            .await
+    } else {
+        Err(ActorError::NotFound(tracking_path))
     }
 }
 
@@ -200,7 +235,7 @@ where
 }
 
 pub async fn get_n_events<A>(
-    ctx: &mut ActorContext<A>,    
+    ctx: &mut ActorContext<A>,
     last_sn: u64,
     n: u64,
 ) -> Result<Vec<A::Event>, ActorError>
@@ -229,30 +264,5 @@ where
             ActorPath::from(format!("{}/store", ctx.path())),
             "StoreResponse::Events".to_owned(),
         )),
-    }
-}
-
-pub async fn get_node_key<A>(
-    ctx: &mut ActorContext<A>,
-) -> Result<PublicKey, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    // Node path.
-    let node_key_path = ActorPath::from("/user/node/key");
-    // Node actor.
-    let node_key_actor: Option<ActorRef<NodeKey>> =
-        ctx.system().get_actor(&node_key_path).await;
-
-    // We obtain the actor node
-    let response = if let Some(node_key_actor) = node_key_actor {
-        node_key_actor.ask(NodeKeyMessage::GetPublicKey).await?
-    } else {
-        return Err(ActorError::NotFound(node_key_path));
-    };
-
-    // We handle the possible responses of node
-    match response {
-        NodeKeyResponse::PublicKey(key) => Ok(key),
     }
 }

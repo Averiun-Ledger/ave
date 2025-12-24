@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashSet,
-    fmt::{Display, write},
+    fmt::Display,
 };
 
 use super::Namespace;
@@ -16,7 +16,10 @@ use crate::{
 
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, PublicKey},
+    identity::{
+        DSAlgorithm, DigestIdentifier, PublicKey, Signature,
+        SignatureIdentifier, Signed, TimeStamp,
+    },
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -154,6 +157,24 @@ impl From<&EventRequest> for EventRequestType {
             EventRequest::EOL(_eolrequest) => Self::EOL,
             EventRequest::Reject(_reject_request) => Self::Reject,
         }
+    }
+}
+
+pub fn empty_request() -> Signed<EventRequest> {
+    Signed {
+        content: EventRequest::EOL(EOLRequest {
+            subject_id: DigestIdentifier::default(),
+        }),
+        signature: Signature {
+            signer: PublicKey::default(),
+            timestamp: TimeStamp::from_nanos(0),
+            content_hash: DigestIdentifier::default(),
+            value: SignatureIdentifier::new(
+                DSAlgorithm::Ed25519,
+                vec![0u8; 32],
+            )
+            .expect("64 bytes, can not fail"),
+        },
     }
 }
 
@@ -397,22 +418,6 @@ pub struct RejectRequest {
     pub subject_id: DigestIdentifier,
 }
 
-/// Indicates the current status of an event request.
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    Eq,
-    PartialEq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
-pub enum RequestState {
-    Finished,
-    Error,
-    Processing,
-}
 
 #[cfg(test)]
 pub mod tests {

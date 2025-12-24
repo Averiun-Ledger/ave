@@ -6,10 +6,10 @@ use ave_actors::{
 use ave_actors::{
     LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
 };
-use ave_common::ValueWrapper;
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
+use ave_common::{RequestState, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,12 @@ use tracing::{error, info, warn};
 use crate::governance::data::GovernanceData;
 use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
 use crate::model::common::node::get_sign;
+use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
     get_gov, get_last_state, get_metadata, update_last_state, update_ledger,
 };
+use crate::model::request::empty_request;
+use crate::request::tracking::RequestTrackingMessage;
 use crate::subject::SignedLedger;
 use crate::system::ConfigHelper;
 use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
@@ -59,25 +62,73 @@ use super::{
     types::{ProtocolsResult, ReqManInitMessage, RequestManagerState},
 };
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestManager {
+    #[serde(skip)]
     our_key: PublicKey,
+    #[serde(skip)]
     id: String,
-    state: RequestManagerState,
+    #[serde(skip)]
     subject_id: String,
-    request: Signed<EventRequest>,
-    version: u64,
     command: ReqManInitMessage,
+    request: Signed<EventRequest>,
+    state: RequestManagerState,
+    version: u64,
 }
 
-pub struct InitRequestManager {
-    pub our_key: PublicKey,
-    pub id: String,
-    pub subject_id: String,
-    pub request: Signed<EventRequest>,
-    pub command: ReqManInitMessage,
+pub enum InitRequestManager {
+    Init {
+        our_key: PublicKey,
+        id: String,
+        subject_id: String,
+        command: ReqManInitMessage,
+        request: Signed<EventRequest>,
+    },
+    Continue {
+        our_key: PublicKey,
+        id: String,
+        subject_id: String,
+    },
+}
+
+impl BorshSerialize for RequestManager {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        BorshSerialize::serialize(&self.command, writer)?;
+        BorshSerialize::serialize(&self.state, writer)?;
+        BorshSerialize::serialize(&self.version, writer)?;
+        BorshSerialize::serialize(&self.request, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for RequestManager {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let command = ReqManInitMessage::deserialize_reader(reader)?;
+        let state = RequestManagerState::deserialize_reader(reader)?;
+        let version = u64::deserialize_reader(reader)?;
+        let request = Signed::<EventRequest>::deserialize_reader(reader)?;
+
+        let our_key = PublicKey::default();
+        let subject_id = String::default();
+        let id = String::default();
+
+        Ok(Self {
+            our_key,
+            id,
+            subject_id,
+            command,
+            request,
+            state,
+            version,
+        })
+    }
 }
 
 impl RequestManager {
@@ -222,7 +273,6 @@ impl RequestManager {
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                id: self.id.clone(),
                 state: Box::new(RequestManagerState::Validation {
                     val_info: Box::new(val_info.clone()),
                     last_proof: last_proof.clone(),
@@ -232,6 +282,23 @@ impl RequestManager {
             ctx,
         )
         .await;
+
+            if let Err(e) = send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Validation,
+                error: None,
+            },
+        )
+        .await
+        {
+            error!(
+                TARGET_MANAGER,
+                "Validation, can not update tracking: {}", e
+            );
+            return Err(emit_fail(ctx, e).await);
+        }
 
         self.send_validation(ctx, val_info.clone(), last_proof, last_vali_res)
             .await
@@ -246,7 +313,6 @@ impl RequestManager {
     ) -> Result<(), ActorError> {
         self.on_event(
             RequestManagerEvent::UpdateState {
-                id: self.id.clone(),
                 state: Box::new(RequestManagerState::Approval {
                     eval_req: Box::new(eval_req.clone()),
                     eval_res: eval_res.clone(),
@@ -257,6 +323,23 @@ impl RequestManager {
         )
         .await;
 
+            if let Err(e) = send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Approval,
+                error: None,
+            },
+        )
+        .await
+        {
+            error!(
+                TARGET_MANAGER,
+                "Approval, can not update tracking: {}", e
+            );
+            return Err(emit_fail(ctx, e).await);
+        }
+
         self.send_approval(ctx, eval_req, eval_res).await
     }
 
@@ -266,12 +349,28 @@ impl RequestManager {
     ) -> Result<(), ActorError> {
         self.on_event(
             RequestManagerEvent::UpdateState {
-                id: self.id.clone(),
                 state: Box::new(RequestManagerState::Evaluation),
             },
             ctx,
         )
         .await;
+
+            if let Err(e) = send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Evaluation,
+                error: None,
+            },
+        )
+        .await
+        {
+            error!(
+                TARGET_MANAGER,
+                "Evaluation, can not update tracking: {}", e
+            );
+            return Err(emit_fail(ctx, e).await);
+        }
 
         self.send_evaluation(ctx).await
     }
@@ -456,7 +555,6 @@ impl RequestManager {
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                id: self.id.clone(),
                 state: Box::new(RequestManagerState::Distribution {
                     event: Box::new(signed_event.clone()),
                     ledger: Box::new(signed_ledger.clone()),
@@ -467,6 +565,23 @@ impl RequestManager {
             ctx,
         )
         .await;
+
+        if let Err(e) = send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Distribution,
+                error: None,
+            },
+        )
+        .await
+        {
+            error!(
+                TARGET_MANAGER,
+                "Distribution, can not update tracking: {}", e
+            );
+            return Err(emit_fail(ctx, e).await);
+        }
 
         Ok((signed_ledger, signed_event))
     }
@@ -842,6 +957,7 @@ impl RequestManager {
 #[derive(Debug, Clone)]
 pub enum RequestManagerMessage {
     Run,
+    FirstRun,
     Reboot {
         governance_id: DigestIdentifier,
     },
@@ -873,11 +989,15 @@ impl Message for RequestManagerMessage {}
 )]
 pub enum RequestManagerEvent {
     UpdateState {
-        id: String,
         state: Box<RequestManagerState>,
     },
     UpdateVersion {
-        id: String,
+        version: u64,
+    },
+    SafeState {
+        command: ReqManInitMessage,
+        request: Signed<EventRequest>,
+        state: RequestManagerState,
         version: u64,
     },
 }
@@ -943,12 +1063,29 @@ impl Handler<RequestManager> for RequestManager {
                 } else {
                     self.on_event(
                         RequestManagerEvent::UpdateState {
-                            id: self.id.clone(),
                             state: Box::new(RequestManagerState::Reboot),
                         },
                         ctx,
                     )
                     .await;
+
+                    if let Err(e) = send_to_tracking(
+                        ctx,
+                        RequestTrackingMessage::UpdateState {
+                            request_id: self.id.clone(),
+                            state: RequestState::Reboot,
+                            error: None,
+                        },
+                    )
+                    .await
+                    {
+                        error!(
+                            TARGET_MANAGER,
+                            "Reboot, can not update tracking: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+
                     if let Err(e) = self.init_reboot(ctx, governance_id).await {
                         if let ActorError::Functional(_) = e {
                             warn!(
@@ -990,12 +1127,27 @@ impl Handler<RequestManager> for RequestManager {
                 info!(TARGET_MANAGER, "Finish reboot {}", self.id);
                 self.on_event(
                     RequestManagerEvent::UpdateVersion {
-                        id: self.id.clone(),
                         version: self.version + 1,
                     },
                     ctx,
                 )
                 .await;
+
+                if let Err(e) = send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateVersion {
+                        request_id: self.id.clone(),
+                        version: self.version,
+                    },
+                )
+                .await
+                {
+                    error!(
+                        TARGET_MANAGER,
+                        "FinishReboot, can not update tracking: {}", e
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                }
 
                 match self.command {
                     ReqManInitMessage::Evaluate => {
@@ -1068,7 +1220,20 @@ impl Handler<RequestManager> for RequestManager {
                     }
                 };
             }
-            RequestManagerMessage::Run => {
+            RequestManagerMessage::Run | RequestManagerMessage::FirstRun => {
+                if let RequestManagerMessage::FirstRun = msg {
+                    self.on_event(
+                        RequestManagerEvent::SafeState {
+                            command: self.command.clone(),
+                            request: self.request.clone(),
+                            state: self.state.clone(),
+                            version: self.version,
+                        },
+                        ctx,
+                    )
+                    .await;
+                }
+
                 info!(TARGET_MANAGER, "Running {}", self.id);
                 match self.state.clone() {
                     RequestManagerState::Starting
@@ -1578,14 +1743,6 @@ impl Handler<RequestManager> for RequestManager {
             );
             emit_fail(ctx, e).await;
         };
-
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(
-                TARGET_MANAGER,
-                "PublishEvent, can not publish event: {}", e
-            );
-            emit_fail(ctx, e).await;
-        }
     }
 
     async fn on_child_fault(
@@ -1604,34 +1761,65 @@ impl PersistentActor for RequestManager {
     type Persistence = LightPersistence;
     type InitParams = InitRequestManager;
 
-    fn create_initial(params: Self::InitParams) -> Self {
-        let Self::InitParams {
-            our_key,
-            id,
-            subject_id,
-            request,
-            command,
-        } = params;
+    fn update(&mut self, state: Self) {
+        self.command = state.command;
+        self.request = state.request;
+        self.state = state.state;
+        self.version = state.version;
+    }
 
-        RequestManager {
-            our_key,
-            id,
-            state: RequestManagerState::Starting,
-            subject_id,
-            request,
-            version: 0,
-            command,
+    fn create_initial(params: Self::InitParams) -> Self {
+        match params {
+            InitRequestManager::Init {
+                our_key,
+                id,
+                subject_id,
+                command,
+                request,
+            } => Self {
+                our_key,
+                id,
+                subject_id,
+                command,
+                request,
+                state: RequestManagerState::Starting,
+                version: 0,
+            },
+            InitRequestManager::Continue {
+                our_key,
+                id,
+                subject_id,
+            } => Self {
+                our_key,
+                id,
+                subject_id,
+                command: ReqManInitMessage::Evaluate,
+                request: empty_request(),
+                state: RequestManagerState::Starting,
+                version: 0,
+            },
         }
     }
 
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RequestManagerEvent::UpdateState { state, .. } => {
+            RequestManagerEvent::UpdateState { state } => {
                 self.state = *state.clone()
             }
-            RequestManagerEvent::UpdateVersion { version, .. } => {
+            RequestManagerEvent::UpdateVersion { version } => {
                 self.version = *version
+            }
+            RequestManagerEvent::SafeState {
+                command,
+                request,
+                state,
+                version,
+            } => {
+                self.version = *version;
+                self.state = state.clone();
+                self.request = request.clone();
+                self.command = command.clone();
             }
         };
 

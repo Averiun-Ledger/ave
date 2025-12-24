@@ -38,6 +38,7 @@ reqwest = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 bytes = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true } 

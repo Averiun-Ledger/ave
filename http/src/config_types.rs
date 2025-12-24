@@ -178,7 +178,7 @@ pub struct AveConfigHttp {
     /// Whether to automatically accept all events (development mode)
     pub always_accept: bool,
     /// Garbage collector interval in seconds
-    pub garbage_collector: u64,
+    pub tracking_size: usize,
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -191,7 +191,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             network: NetworkConfigHttp::from(value.network),
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
-            garbage_collector: value.garbage_collector.as_secs(),
+            tracking_size: value.tracking_size,
         }
     }
 }

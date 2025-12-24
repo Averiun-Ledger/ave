@@ -11,7 +11,7 @@ use tracing::error;
 use crate::approval::approver::ApproverEvent;
 use crate::approval::request::ApprovalReq;
 use crate::error::Error;
-use crate::external_db::{DBManager, DBManagerMessage, DeleteTypes};
+use crate::external_db::{DBManager, DBManagerMessage};
 use crate::helpers::db::common::{ApprovalReqInfo, ApproveInfo, EventDB};
 use crate::model::event::{LedgerValue};
 use crate::request::RequestHandlerEvent;
@@ -369,46 +369,6 @@ impl Querys for SqliteLocal {
         }
     }
 
-    async fn get_request_id_status(
-        &self,
-        request_id: &str,
-    ) -> Result<RequestInfo, Error> {
-        let request_id = request_id.to_owned();
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "SELECT state, version, error FROM request WHERE id = ?1";
-
-            conn.query_row(sql, params![request_id], |row| {
-                Ok(RequestInfo {
-                    status: row.get(0)?,
-                    version: row.get(1)?,
-                    error: row.get(2)?,
-                })
-            })
-            .map_err(|e| Error::ExtDB(e.to_string()))
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
-
-    async fn del_request(&self, request_id: &str) -> Result<(), Error> {
-        let request_id = request_id.to_owned();
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "DELETE FROM request WHERE id = ?1";
-
-            conn.execute(sql, params![request_id])
-                .map_err(|e| Error::ExtDB(e.to_string()))?;
-            Ok(())
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
-
     async fn get_approve_req(
         &self,
         subject_id: &str,
@@ -475,158 +435,6 @@ impl SqliteLocal {
             conn: Arc::new(Mutex::new(conn)),
             manager,
         })
-    }
-}
-
-#[async_trait]
-impl Subscriber<RequestManagerEvent> for SqliteLocal {
-    async fn notify(&self, event: RequestManagerEvent) {
-        let sql = match event {
-            RequestManagerEvent::UpdateState { id, state } => {
-                let state = match *state {
-                    RequestManagerState::Starting => return,
-                    RequestManagerState::Reboot => "In Reboot".to_owned(),
-                    RequestManagerState::Evaluation => {
-                        "In Evaluation".to_owned()
-                    }
-                    RequestManagerState::Approval { .. } => {
-                        "In Approval".to_owned()
-                    }
-                    RequestManagerState::Validation { .. } => {
-                        "In Validation".to_owned()
-                    }
-                    RequestManagerState::Distribution { .. } => {
-                        "In Distribution".to_owned()
-                    }
-                };
-
-                format!(
-                    "UPDATE request SET state = '{}' WHERE id = '{}'",
-                    state, id
-                )
-            }
-            RequestManagerEvent::UpdateVersion { id, version } => {
-                format!(
-                    "UPDATE request SET version = '{}' WHERE id = '{}'",
-                    version, id
-                )
-            }
-        };
-
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(&sql, params![]).map_err(async |e| {
-                let e = Error::ExtDB(format!(
-                    "Can not update request state: {}",
-                    e
-                ));
-                error!(TARGET_SQLITE, "Subscriber<RequestManagerEvent>: {}", e);
-                if let Err(e) =
-                    self.manager.tell(DBManagerMessage::Error(e)).await
-                {
-                    error!(
-                        TARGET_SQLITE,
-                        "Can no send message to DBManager actor: {}", e
-                    );
-                }
-            });
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<RequestManagerEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<RequestHandlerEvent> for SqliteLocal {
-    async fn notify(&self, event: RequestHandlerEvent) {
-        let (id, state, insert, mut error) = match event {
-            RequestHandlerEvent::Abort { id, error, .. } => {
-                (id, "Abort".to_owned(), false, error)
-            }
-            RequestHandlerEvent::EventToQueue { id, .. } => {
-                (id, "In queue".to_owned(), true, String::default())
-            }
-            RequestHandlerEvent::Invalid { id, error, .. } => {
-                (id, "Invalid".to_owned(), false, error)
-            }
-            RequestHandlerEvent::FinishHandling { id, .. } => {
-                (id, "Finish".to_owned(), false, String::default())
-            }
-            RequestHandlerEvent::EventToHandling { request_id, .. } => (
-                request_id,
-                "In Handling".to_owned(),
-                false,
-                String::default(),
-            ),
-        };
-
-        let sql = if insert {
-            "INSERT INTO request (id, state, version) VALUES (?1, ?2, 0)"
-                .to_owned()
-        } else {
-            if !error.is_empty() {
-                error = format!(", error = '{}'", error);
-            }
-            format!("UPDATE request SET state = ?2{} WHERE id = ?1", error)
-        };
-
-        let id_clone = id.clone();
-        let state_clone = state.clone();
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(&sql, params![id_clone, state_clone]).map_err(
-                async |e| {
-                    let e = Error::ExtDB(format!(
-                        "Update request_id {} state {}: {}",
-                        id, state, e
-                    ));
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<RequestHandlerEvent>: {}", e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                },
-            );
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<RequestHandlerEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
-
-        if state == "Finish"
-            && let Err(e) = self
-                .manager
-                .tell(DBManagerMessage::Delete(DeleteTypes::Request { id }))
-                .await
-        {
-            error!(
-                TARGET_SQLITE,
-                "Can no send message to DBManager actor: {}", e
-            );
-        }
     }
 }
 

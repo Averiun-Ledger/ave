@@ -1,9 +1,8 @@
 use ave_common::{
-    ValueWrapper,
-    identity::{
+    RequestState, ValueWrapper, identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
-    },
+    }
 };
 use ave_core::{
     Api,
@@ -85,7 +84,7 @@ pub async fn create_node(
         network: network_config,
         contracts_path,
         always_accept,
-        garbage_collector: Duration::from_secs(500),
+        tracking_size: 100,
     };
 
     let mut registry = Registry::default();
@@ -329,16 +328,27 @@ pub async fn get_signatures(
     }
 }
 
+/*
+    Abort,
+    InQueue,
+    Invalid,
+    Finish,
+    Reboot,
+    Evaluation,
+    Approval,
+    Validation,
+    Distribution
+*/
 pub async fn wait_request(
     node: &Api,
     request_id: DigestIdentifier,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if let Ok(state) = node.request_state(request_id.clone()).await {
-            if state.status == "Finish"
-                || state.status == "In Approval"
-                || state.status == "Invalid"
-                || state.status == "Abort"
+            if state.state == RequestState::Abort
+                || state.state == RequestState::Approval
+                || state.state == RequestState::Invalid
+                || state.state == RequestState::Finish
             {
                 break;
             }
@@ -433,9 +443,9 @@ pub async fn emit_approve(
 
     loop {
         if let Ok(state) = node.request_state(request_id.clone()).await {
-            if state.status == "Finish"
-                || state.status == "In Approval"
-                || state.status == "Invalid"
+            if state.state == RequestState::Finish
+                || state.state == RequestState::Approval
+                || state.state == RequestState::Invalid
             {
                 break;
             }

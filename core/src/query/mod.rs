@@ -52,9 +52,6 @@ pub enum QueryMessage {
         reverse: Option<bool>,
         success: Option<bool>,
     },
-    GetRequestState {
-        request_id: String,
-    },
     GetApproval {
         subject_id: String,
     },
@@ -183,15 +180,6 @@ impl Handler<Query> for Query {
                         warn!(TARGET_QUERY, "GetFirstOrEndEvents, Can not obtain first or end events: {}", e);
                         ActorError::Functional(e.to_string())})?;
                 Ok(QueryResponse::Events(data))
-            }
-            QueryMessage::GetRequestState { request_id } => {
-                let res = helper
-                    .get_request_id_status(&request_id)
-                    .await
-                    .map_err(|e| {
-                        warn!(TARGET_QUERY, "GetRequestState, Can not obtain request status: {}", e);
-                        ActorError::Functional(e.to_string())})?;
-                Ok(QueryResponse::RequestState(res))
             }
             QueryMessage::GetApproval { subject_id } => {
                 let data =

@@ -1,9 +1,19 @@
 use std::{collections::VecDeque, fmt::Display, time::Duration};
 
 use crate::{
-    ActorMessage, EventRequest, NetworkMessage, db::Storable, governance::{Governance, data::GovernanceData}, intermediary::Intermediary, model::{
-        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::get_metadata}, network::{RetryNetwork, TimeOutResponse}
-    }
+    ActorMessage, EventRequest, NetworkMessage,
+    db::Storable,
+    governance::{Governance, data::GovernanceData},
+    intermediary::Intermediary,
+    model::{
+        SignTypesNode,
+        common::{
+            emit_fail,
+            node::{UpdateData, get_sign, update_ledger_network},
+            subject::get_metadata,
+        },
+        network::{RetryNetwork, TimeOutResponse},
+    },
 };
 use async_trait::async_trait;
 use ave_actors::{
@@ -111,24 +121,69 @@ impl From<bool> for VotationType {
     }
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Approver {
-    node: PublicKey,
+    #[serde(skip)]
+    node_key: PublicKey,
+    #[serde(skip)]
+    subject_id: String,
+    #[serde(skip)]
     request_id: String,
     version: u64,
-    subject_id: String,
     pass_votation: VotationType,
     state: Option<ApprovalState>,
     request: Option<ApprovalReq>,
     info: Option<ComunicateInfo>,
 }
 
+impl BorshSerialize for Approver {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.request_id, writer)?;
+        BorshSerialize::serialize(&self.version, writer)?;
+        BorshSerialize::serialize(&self.state, writer)?;
+        BorshSerialize::serialize(&self.request, writer)?;
+        BorshSerialize::serialize(&self.info, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Approver {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let request_id = String::deserialize_reader(reader)?;
+        let version = u64::deserialize_reader(reader)?;
+        let state = Option::<ApprovalState>::deserialize_reader(reader)?;
+        let request = Option::<ApprovalReq>::deserialize_reader(reader)?;
+        let info = Option::<ComunicateInfo>::deserialize_reader(reader)?;
+
+        let node_key = PublicKey::default();
+        let pass_votation = VotationType::AlwaysAccept;
+        let subject_id = String::default();
+
+        Ok(Self {
+            node_key,
+            request_id,
+            version,
+            subject_id,
+            pass_votation,
+            state,
+            request,
+            info,
+        })
+    }
+}
+
 pub struct InitApprover {
     pub request_id: String,
     pub version: u64,
-    pub node: PublicKey,
+    pub node_key: PublicKey,
     pub subject_id: String,
     pub pass_votation: VotationType,
 }
@@ -143,17 +198,17 @@ impl Approver {
     ) -> Result<(), ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match GovernanceData::try_from(metadata.properties.clone())
-        {
-            Ok(gov) => gov,
-            Err(e) => {
-                let e = format!(
-                    "can not convert governance from properties: {}",
-                    e
-                );
-                return Err(ActorError::FunctionalFail(e));
-            }
-        };
+        let governance =
+            match GovernanceData::try_from(metadata.properties.clone()) {
+                Ok(gov) => gov,
+                Err(e) => {
+                    let e = format!(
+                        "can not convert governance from properties: {}",
+                        e
+                    );
+                    return Err(ActorError::FunctionalFail(e));
+                }
+            };
 
         match gov_version.cmp(&governance.version) {
             std::cmp::Ordering::Equal => {
@@ -166,7 +221,7 @@ impl Approver {
                     gov_version: governance.version,
                     subject_id: governance_id,
                     our_node,
-                    other_node: self.node.clone(),
+                    other_node: self.node_key.clone(),
                 };
                 update_ledger_network(ctx, data).await?;
             }
@@ -254,7 +309,7 @@ impl Approver {
                         approval_res: ApprovalRes::Response(
                             signature, response,
                         ),
-                        sender: self.node.clone(),
+                        sender: self.node_key.clone(),
                     })
                     .await?;
             } else {
@@ -617,7 +672,7 @@ impl Handler<Approver> for Approver {
                 version,
             } => {
                 if request_id == self.request_id && version == self.version {
-                    if self.node != approval_res.signature.signer {
+                    if self.node_key != approval_res.signature.signer {
                         let e = "We received an approval from a node which we were not expecting to receive.";
                         error!(TARGET_APPROVER, "NetworkResponse, {}", e);
                         return Err(ActorError::Functional(e.to_owned()));
@@ -645,7 +700,7 @@ impl Handler<Approver> for Approver {
                         if let Err(e) = approval_actor
                             .tell(ApprovalMessage::Response {
                                 approval_res: approval_res.content,
-                                sender: self.node.clone(),
+                                sender: self.node_key.clone(),
                             })
                             .await
                         {
@@ -882,10 +937,10 @@ impl Handler<Approver> for Approver {
                                 TimeOutResponse {
                                     re_trys: 3,
                                     timestamp: TimeStamp::now(),
-                                    who: self.node.clone(),
+                                    who: self.node_key.clone(),
                                 },
                             ),
-                            sender: self.node.clone(),
+                            sender: self.node_key.clone(),
                         })
                         .await
                     {
@@ -929,9 +984,17 @@ impl PersistentActor for Approver {
     type Persistence = LightPersistence;
     type InitParams = InitApprover;
 
+    fn update(&mut self, state: Self) {
+        self.request_id = state.request_id;
+        self.version = state.version;
+        self.state = state.state;
+        self.request = state.request;
+        self.info = state.info;
+    }
+
     fn create_initial(params: Self::InitParams) -> Self {
         let Self::InitParams {
-            node,
+            node_key,
             request_id,
             version,
             subject_id,
@@ -939,7 +1002,7 @@ impl PersistentActor for Approver {
         } = params;
 
         Self {
-            node,
+            node_key,
             request_id,
             version,
             subject_id,

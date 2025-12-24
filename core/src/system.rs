@@ -18,7 +18,8 @@ use crate::{
 pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
-    pub hash_algorithm: HashAlgorithm
+    pub hash_algorithm: HashAlgorithm,
+    pub tracking_size: usize
 }
 
 impl From<Config> for ConfigHelper {
@@ -26,7 +27,8 @@ impl From<Config> for ConfigHelper {
         Self {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
-            hash_algorithm: value.hash_algorithm
+            hash_algorithm: value.hash_algorithm,
+            tracking_size: value.tracking_size
         }
     }
 }
@@ -87,7 +89,7 @@ pub async fn system(
     let db_manager_actor = system
         .create_root_actor(
             "db_manager",
-            DBManager::initial(config.garbage_collector),
+            DBManager,
         )
         .await
         .map_err(|e| Error::System(e.to_string()))?;
@@ -163,7 +165,7 @@ pub mod tests {
             network: newtork_config,
             contracts_path: contracts_path,
             always_accept: false,
-            garbage_collector: Duration::from_secs(500),
+            tracking_size: 100,
         };
 
         let (sys, handlers) = system(

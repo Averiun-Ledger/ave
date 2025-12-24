@@ -68,11 +68,39 @@ fn merge_options(
 }
 
 #[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+    Clone, Debug, Serialize, Deserialize
 )]
 pub struct Auth {
-    our_node: PublicKey,
+    our_key: PublicKey,
     auth: HashMap<String, AuthWitness>,
+}
+
+impl BorshSerialize for Auth {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.auth, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Auth {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let auth = HashMap::<String, AuthWitness>::deserialize_reader(reader)?;
+
+        let our_key = PublicKey::default();
+
+        Ok(Self {
+            our_key,
+            auth,
+        })
+    }
 }
 
 impl Auth {
@@ -237,7 +265,7 @@ impl Handler<Auth> for Auth {
                     }.iter().cloned().collect();
                     let data = UpdateNew {
                         subject_id: subject_id.clone(),
-                        our_key: self.our_node.clone(),
+                        our_key: self.our_key.clone(),
                         response: None,
                         witnesses,
                         request: None,
@@ -361,7 +389,7 @@ impl Handler<Auth> for Auth {
                         AuthWitness::One(key_identifier) => {
                             let info = ComunicateInfo {
                                 receiver: key_identifier.clone(),
-                                sender: self.our_node.clone(),
+                                sender: self.our_key.clone(),
                                 request_id: String::default(),
                                 version: 0,
                                 receiver_actor: format!(
@@ -406,7 +434,7 @@ impl Handler<Auth> for Auth {
                             let witnesses = vec.iter().cloned().collect();
                             let data = UpdateNew {
                                 subject_id: subject_id.clone(),
-                                our_key: self.our_node.clone(),
+                                our_key: self.our_key.clone(),
                                 response: Some(UpdateRes::Sn(sn)),
                                 witnesses,
                                 request: Some(request),
@@ -475,9 +503,13 @@ impl PersistentActor for Auth {
     type Persistence = LightPersistence;
     type InitParams = PublicKey;
 
+    fn update(&mut self, state: Self) {
+        self.auth = state.auth;
+    }
+
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            our_node: params,
+            our_key: params,
             auth: HashMap::new(),
         }
     }

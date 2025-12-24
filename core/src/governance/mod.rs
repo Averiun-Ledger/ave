@@ -29,10 +29,8 @@ use crate::{
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
         common::{
-            emit_fail, get_last_event, get_n_events, get_node_key,
-            node::{UpdateData, try_to_update},
-            purge_storage,
-            subject::get_last_state,
+            emit_fail, get_last_event, get_n_events,
+            node::try_to_update, purge_storage, subject::get_last_state,
         },
         event::{Ledger, LedgerValue},
         request::{EventRequest, SchemaType},
@@ -45,7 +43,7 @@ use crate::{
         sinkdata::{SinkData, SinkDataMessage},
     },
     system::ConfigHelper,
-    update::{self, TransferResponse},
+    update::TransferResponse,
     validation::{
         Validation,
         schema::{ValidationSchema, ValidationSchemaMessage},
@@ -79,28 +77,46 @@ pub mod roles_register;
 
 const TARGET_GOVERNANCE: &str = "Ave-Governance";
 
-#[derive(
-    Default,
-    Debug,
-    Serialize,
-    Deserialize,
-    Clone,
-    BorshDeserialize,
-    BorshSerialize,
-)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Governance {
+    #[serde(skip)]
+    pub our_key: PublicKey,
+
     pub subject_metadata: SubjectMetadata,
     /// The current status of the subject.
     pub properties: GovernanceData,
 }
 
-impl From<CreateSubjectData> for Governance {
-    fn from(value: CreateSubjectData) -> Self {
-        Governance {
-            subject_metadata: SubjectMetadata::new(&value),
-            properties: serde_json::from_value::<GovernanceData>(value.value.0)
-                .expect("schema_id is governance"),
-        }
+impl BorshSerialize for Governance {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.subject_metadata, writer)?;
+        BorshSerialize::serialize(&self.properties, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Governance {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
+        let properties = GovernanceData::deserialize_reader(reader)?;
+
+        // Create a default/placeholder KeyPair for 'owner'
+        // This will be replaced by the actual owner during actor initialization
+        let our_key = PublicKey::default();
+
+        Ok(Self {
+            our_key,
+            subject_metadata,
+            properties,
+        })
     }
 }
 
@@ -209,11 +225,10 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let our_key = get_node_key(ctx).await?;
         let current_sn = self.subject_metadata.sn;
         let current_new_owner_some = self.subject_metadata.new_owner.is_some();
-        let i_current_new_owner =
-            self.subject_metadata.new_owner.clone() == Some(our_key.clone());
+        let i_current_new_owner = self.subject_metadata.new_owner.clone()
+            == Some(self.our_key.clone());
         let current_owner = self.subject_metadata.owner.clone();
 
         let current_properties = self.properties.clone();
@@ -239,15 +254,19 @@ impl Subject for Governance {
             let old_gov = GovernanceData::try_from(current_properties)
                 .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
             if !self.subject_metadata.active {
-                if current_owner == our_key {
+                if current_owner == self.our_key {
                     Self::down_owner(ctx).await?;
                 } else {
-                    Self::down_not_owner(ctx, old_gov.clone(), our_key.clone())
-                        .await?;
+                    Self::down_not_owner(
+                        ctx,
+                        old_gov.clone(),
+                        self.our_key.clone(),
+                    )
+                    .await?;
                 }
 
                 let old_schemas_eval = old_gov
-                    .schemas(ProtocolTypes::Evaluation, &our_key)
+                    .schemas(ProtocolTypes::Evaluation, &self.our_key)
                     .iter()
                     .map(|x| x.0.clone())
                     .collect::<Vec<SchemaType>>();
@@ -255,7 +274,7 @@ impl Subject for Governance {
                     .await?;
 
                 let old_schemas_val = old_gov
-                    .schemas(ProtocolTypes::Validation, &our_key)
+                    .schemas(ProtocolTypes::Validation, &self.our_key)
                     .iter()
                     .map(|x| x.0.clone())
                     .collect::<Vec<SchemaType>>();
@@ -274,11 +293,11 @@ impl Subject for Governance {
 
                 let new_owner_some = self.subject_metadata.new_owner.is_some();
                 let i_new_owner = self.subject_metadata.new_owner.clone()
-                    == Some(our_key.clone());
+                    == Some(self.our_key.clone());
                 let mut up_not_owner: bool = false;
                 let mut up_owner: bool = false;
 
-                if current_owner == our_key {
+                if current_owner == self.our_key {
                     // Eramos dueños
                     if current_owner != self.subject_metadata.owner {
                         // Ya no somos dueño
@@ -299,7 +318,7 @@ impl Subject for Governance {
                 } else {
                     // No eramos dueño
                     if current_owner != self.subject_metadata.owner
-                        && self.subject_metadata.owner == our_key
+                        && self.subject_metadata.owner == self.our_key
                     {
                         // Ahora Somos dueños
                         if !new_owner_some && !i_current_new_owner {
@@ -320,17 +339,21 @@ impl Subject for Governance {
                     Self::up_not_owner(
                         ctx,
                         new_gov.clone(),
-                        our_key.clone(),
+                        self.our_key.clone(),
                         ext_db.clone(),
                         self.subject_metadata.subject_id.clone(),
                     )
                     .await?;
                 } else if up_owner {
-                    Self::down_not_owner(ctx, old_gov.clone(), our_key.clone())
-                        .await?;
+                    Self::down_not_owner(
+                        ctx,
+                        old_gov.clone(),
+                        self.our_key.clone(),
+                    )
+                    .await?;
                     Self::up_owner(
                         ctx,
-                        our_key.clone(),
+                        self.our_key.clone(),
                         self.subject_metadata.subject_id.clone(),
                         ext_db.clone(),
                     )
@@ -341,13 +364,13 @@ impl Subject for Governance {
                 // pero tenemos que ver si tenemos un rol nuevo.
                 if !up_not_owner
                     && !up_owner
-                    && our_key != self.subject_metadata.owner
+                    && self.our_key != self.subject_metadata.owner
                 {
                     Self::up_down_not_owner(
                         ctx,
                         new_gov.clone(),
                         old_gov.clone(),
-                        our_key.clone(),
+                        self.our_key.clone(),
                         ext_db.clone(),
                         self.subject_metadata.subject_id.clone(),
                     )
@@ -355,9 +378,9 @@ impl Subject for Governance {
                 }
 
                 let old_schemas_eval =
-                    old_gov.schemas(ProtocolTypes::Evaluation, &our_key);
+                    old_gov.schemas(ProtocolTypes::Evaluation, &self.our_key);
                 let new_schemas_eval =
-                    new_gov.schemas(ProtocolTypes::Evaluation, &our_key);
+                    new_gov.schemas(ProtocolTypes::Evaluation, &self.our_key);
 
                 // Bajamos los compilers que ya no soy evaluador
                 let down = old_schemas_eval
@@ -401,13 +424,13 @@ impl Subject for Governance {
                     .map(|x| x.0.clone())
                     .collect::<Vec<SchemaType>>();
                 let mut old_schemas_val = old_gov
-                    .schemas(ProtocolTypes::Validation, &our_key)
+                    .schemas(ProtocolTypes::Validation, &self.our_key)
                     .iter()
                     .map(|x| x.0.clone())
                     .collect::<Vec<SchemaType>>();
 
                 let new_creators =
-                    new_gov.subjects_schemas_rol_namespace(&our_key);
+                    new_gov.subjects_schemas_rol_namespace(&self.our_key);
 
                 for creators in new_creators {
                     if let Some(eval_users) = creators.evaluation {
@@ -517,21 +540,33 @@ impl Subject for Governance {
 }
 
 impl Governance {
-    pub fn from_create_event(ledger: &Signed<Ledger>) -> Result<Self, Error> {
+    pub fn from_create_subject_data(
+        subject_data: CreateSubjectData,
+    ) -> (SubjectMetadata, GovernanceData) {
+        (
+            SubjectMetadata::new(&subject_data),
+            serde_json::from_value::<GovernanceData>(subject_data.value.0)
+                .expect("schema_id is governance"),
+        )
+    }
+
+    pub fn from_create_event(
+        ledger: &Signed<Ledger>,
+    ) -> Result<(SubjectMetadata, GovernanceData), Error> {
         if let EventRequest::Create(request) =
             &ledger.content.event_request.content
         {
-            Ok(Governance {
-                subject_metadata: SubjectMetadata::from_create_request(
+            Ok((
+                SubjectMetadata::from_create_request(
                     ledger.content.subject_id.clone(),
                     request,
                     ledger.content.event_request.signature.signer.clone(),
                     DigestIdentifier::default(),
                 ),
-                properties: GovernanceData::new(
+                GovernanceData::new(
                     ledger.content.event_request.signature.signer.clone(),
                 ),
-            })
+            ))
         } else {
             Err(Error::Governance(
                 "Invalid create event request".to_string(),
@@ -665,7 +700,7 @@ impl Governance {
             let init_approver = InitApprover {
                 request_id: String::default(),
                 version: 0,
-                node: our_key.clone(),
+                node_key: our_key.clone(),
                 subject_id: subject_id.to_string(),
                 pass_votation: VotationType::from(always_accept),
             };
@@ -782,7 +817,7 @@ impl Governance {
                 let init_approver = InitApprover {
                     request_id: String::default(),
                     version: 0,
-                    node: our_key.clone(),
+                    node_key: our_key.clone(),
                     subject_id: subject_id.to_string(),
                     pass_votation: VotationType::from(always_accept),
                 };
@@ -885,7 +920,7 @@ impl Governance {
         let init_approver = InitApprover {
             request_id: String::default(),
             version: 0,
-            node: our_key.clone(),
+            node_key: our_key.clone(),
             subject_id: subject_id.to_string(),
             pass_votation: VotationType::from(always_accept),
         };
@@ -1663,7 +1698,7 @@ impl Actor for Governance {
     ) -> Result<(), ActorError> {
         self.init_store("governance", None, true, ctx).await?;
 
-        let our_key = get_node_key(ctx).await?;
+        let our_key = self.our_key.clone();
 
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
@@ -1862,10 +1897,25 @@ impl Handler<Governance> for Governance {
 #[async_trait]
 impl PersistentActor for Governance {
     type Persistence = FullPersistence;
-    type InitParams = Option<Self>;
+    type InitParams = (Option<(SubjectMetadata, GovernanceData)>, PublicKey);
+
+    fn update(&mut self, state: Self) {
+        self.properties = state.properties;
+        self.subject_metadata = state.subject_metadata;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        params.unwrap_or_default()
+        let (subject_metadata, properties) =
+            if let Some((subject_metadata, properties)) = params.0 {
+                (subject_metadata, properties)
+            } else {
+                Default::default()
+            };
+        Self {
+            our_key: params.1,
+            subject_metadata,
+            properties,
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

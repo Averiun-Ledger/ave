@@ -53,7 +53,7 @@ pub enum DeleteTypes {
     BorshSerialize,
 )]
 pub struct RelationShip {
-    owner_subjects: HashMap<OwnerSchema, Vec<String>>,
+    subjects: HashMap<OwnerSchema, Vec<String>>,
 }
 
 impl RelationShip {}
@@ -124,7 +124,7 @@ impl Handler<RelationShip> for RelationShip {
     ) -> Result<RelationShipResponse, ActorError> {
         match msg {
             RelationShipMessage::GetSubjectsCount(owner_schema) => {
-                if let Some(vec) = self.owner_subjects.get(&owner_schema) {
+                if let Some(vec) = self.subjects.get(&owner_schema) {
                     Ok(RelationShipResponse::Count(vec.len()))
                 } else {
                     Ok(RelationShipResponse::Count(0))
@@ -135,7 +135,7 @@ impl Handler<RelationShip> for RelationShip {
                 subject_id,
                 max_quantity,
             } => {
-                let quantity = if let Some(vec) = self.owner_subjects.get(&data)
+                let quantity = if let Some(vec) = self.subjects.get(&data)
                 {
                     vec.len()
                 } else {
@@ -196,13 +196,13 @@ impl PersistentActor for RelationShip {
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
             RelationShipEvent::NewRegister { data, subject_id } => {
-                self.owner_subjects
+                self.subjects
                     .entry(data.clone())
                     .or_default()
                     .push(subject_id.clone());
             }
             RelationShipEvent::DeleteSubject { data, subject_id } => {
-                self.owner_subjects.entry(data.clone()).and_modify(|vec| {
+                self.subjects.entry(data.clone()).and_modify(|vec| {
                     if let Some(pos) =
                         vec.iter().position(|x| x.clone() == subject_id.clone())
                     {

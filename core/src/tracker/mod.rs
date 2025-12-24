@@ -7,30 +7,38 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
-        model::CreatorQuantity, relationship::{OwnerSchema, RelationShip, RelationShipMessage, RelationShipResponse},
+        model::CreatorQuantity,
+        relationship::{
+            OwnerSchema, RelationShip, RelationShipMessage,
+            RelationShipResponse,
+        },
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
         Namespace,
         common::{
-            emit_fail, get_last_event, get_n_events, get_node_key, node::try_to_update, purge_storage, subject::{get_gov, get_last_state}
+            emit_fail, get_last_event, get_n_events,
+            node::try_to_update,
+            purge_storage,
+            subject::{get_gov, get_last_state},
         },
         event::{Ledger, LedgerValue},
         request::EventRequest,
     },
     node::register::RegisterMessage,
     subject::{
-        CreateSubjectData, DataForSink, LastStateData,
-        Metadata, SignedLedger, Subject, SubjectMetadata, VerifyData,
-        laststate::LastState, sinkdata::{SinkData, SinkDataMessage},
+        CreateSubjectData, DataForSink, LastStateData, Metadata, SignedLedger,
+        Subject, SubjectMetadata, VerifyData,
+        laststate::LastState,
+        sinkdata::{SinkData, SinkDataMessage},
     },
     update::TransferResponse,
     validation::Validation,
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    Handler, Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Message, Response, Sink,
 };
 use ave_common::{
     ValueWrapper,
@@ -38,9 +46,7 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
-use ave_actors::{
-    FullPersistence, PersistentActor,
-};
+use ave_actors::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
@@ -48,16 +54,11 @@ use tracing::{error, warn};
 
 const TARGET_TRACKER: &str = "Ave-Tracker";
 
-#[derive(
-    Default,
-    Debug,
-    Serialize,
-    Deserialize,
-    Clone,
-    BorshDeserialize,
-    BorshSerialize,
-)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Tracker {
+    #[serde(skip)]
+    pub our_key: PublicKey,
+
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
     /// The namespace of the subject.
@@ -68,27 +69,69 @@ pub struct Tracker {
     pub properties: ValueWrapper,
 }
 
-impl From<CreateSubjectData> for Tracker {
-    fn from(value: CreateSubjectData) -> Self {
-        Tracker {
-            subject_metadata: SubjectMetadata::new(&value),
-            governance_id: value.create_req.governance_id,
-            genesis_gov_version: value.genesis_gov_version,
-            namespace: value.create_req.namespace,
-            properties: value.value,
-        }
+#[derive(Default)]
+pub struct TrackerInit {
+    pub subject_metadata: SubjectMetadata,
+    pub governance_id: DigestIdentifier,
+    pub namespace: Namespace,
+    pub genesis_gov_version: u64,
+    pub properties: ValueWrapper,
+}
+
+impl BorshSerialize for Tracker {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.subject_metadata, writer)?;
+        BorshSerialize::serialize(&self.governance_id, writer)?;
+        BorshSerialize::serialize(&self.namespace, writer)?;
+        BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
+        BorshSerialize::serialize(&self.properties, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Tracker {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
+        let governance_id = DigestIdentifier::deserialize_reader(reader)?;
+        let namespace = Namespace::deserialize_reader(reader)?;
+        let genesis_gov_version = u64::deserialize_reader(reader)?;
+        let properties = ValueWrapper::deserialize_reader(reader)?;
+
+        // Create a default/placeholder KeyPair for 'owner'
+        // This will be replaced by the actual owner during actor initialization
+        let our_key = PublicKey::default();
+
+        Ok(Self {
+            our_key,
+            subject_metadata,
+            governance_id,
+            namespace,
+            genesis_gov_version,
+            properties,
+        })
     }
 }
 
 #[async_trait]
 impl Subject for Tracker {
-        async fn delete_subject(
+    async fn delete_subject(
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        
         self.delete_relation(ctx).await?;
-        Self::delet_node_subject(ctx, &self.subject_metadata.subject_id.to_string()).await?;
+        Self::delet_node_subject(
+            ctx,
+            &self.subject_metadata.subject_id.to_string(),
+        )
+        .await?;
 
         purge_storage(ctx).await?;
 
@@ -172,7 +215,7 @@ impl Subject for Tracker {
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let our_key = get_node_key(ctx).await?;
+        let our_key = self.our_key.clone();
         let current_sn = self.subject_metadata.sn;
 
         let i_current_new_owner =
@@ -244,14 +287,26 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
+    pub fn from_create_subject_data(
+        subject_data: CreateSubjectData,
+    ) -> TrackerInit {
+        TrackerInit {
+            subject_metadata: SubjectMetadata::new(&subject_data),
+            governance_id: subject_data.create_req.governance_id,
+            genesis_gov_version: subject_data.genesis_gov_version,
+            namespace: subject_data.create_req.namespace,
+            properties: subject_data.value,
+        }
+    }
+
     pub fn from_create_event(
         ledger: &Signed<Ledger>,
         properties: ValueWrapper,
-    ) -> Result<Self, Error> {
+    ) -> Result<TrackerInit, Error> {
         if let EventRequest::Create(request) =
             &ledger.content.event_request.content
         {
-            Ok(Tracker {
+            Ok(TrackerInit {
                 subject_metadata: SubjectMetadata::from_create_request(
                     ledger.content.subject_id.clone(),
                     request,
@@ -416,7 +471,7 @@ impl Tracker {
             )
             .await
             {
-                self.delete_subject(ctx,).await?;
+                self.delete_subject(ctx).await?;
 
                 return Err(ActorError::Functional(e.to_string()));
             }
@@ -700,7 +755,7 @@ impl Actor for Tracker {
     ) -> Result<(), ActorError> {
         self.init_store("tracker", None, true, ctx).await?;
 
-        let our_key = get_node_key(ctx).await?;
+        let our_key = self.our_key.clone();
 
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
@@ -815,9 +870,9 @@ impl Handler<Tracker> for Tracker {
             TrackerMessage::GetOwner => {
                 Ok(TrackerResponse::Owner(self.subject_metadata.owner.clone()))
             }
-            TrackerMessage::GetMetadata => {
-                Ok(TrackerResponse::Metadata(Box::new(Metadata::from(self.clone()))))
-            }
+            TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
+                Box::new(Metadata::from(self.clone())),
+            )),
             TrackerMessage::UpdateLedger { events } => {
                 if let Err(e) =
                     self.manager_new_ledger_events(ctx, events).await
@@ -878,10 +933,30 @@ impl Handler<Tracker> for Tracker {
 #[async_trait]
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
-    type InitParams = Option<Self>;
+    type InitParams = (Option<TrackerInit>, PublicKey);
+
+    fn update(&mut self, state: Self) {
+        self.properties = state.properties;
+        self.governance_id = state.governance_id;
+        self.namespace = state.namespace;
+        self.genesis_gov_version = state.genesis_gov_version;
+        self.subject_metadata = state.subject_metadata;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        params.unwrap_or_default()
+        let init = if let Some(init) = params.0 {
+            init
+        } else {
+            Default::default()
+        };
+        Self {
+            our_key: params.1,
+            subject_metadata: init.subject_metadata,
+            properties: init.properties,
+            genesis_gov_version: init.genesis_gov_version,
+            governance_id: init.governance_id,
+            namespace: init.namespace,
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {

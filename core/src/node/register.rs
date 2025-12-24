@@ -299,7 +299,7 @@ impl PersistentActor for Register {
     type InitParams = ();
 
     fn create_initial(_params: Self::InitParams) -> Self {
-        Register::default()
+        Self::default()
     }
 
     /// Change node state.

@@ -59,10 +59,13 @@ pub enum Error {
     /// Subject error.
     #[error("Subject error: {0}")]
     Subject(String),
-    /// Subject error.
+    /// Tracker error.
     #[error("Tracker error: {0}")]
     Tracker(String),
     /// Bridge error.
     #[error("Subject error: {0}")]
     Bridge(String),
+    /// Bridge error.
+    #[error("RequestTracking error: {0}")]
+    RequestTracking(String),
 }

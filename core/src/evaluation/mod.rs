@@ -803,7 +803,7 @@ mod tests {
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use ave_common::{
-        ValueWrapper,
+        RequestState, ValueWrapper,
         identity::{
             Blake3Hasher, DigestIdentifier, KeyPair, KeyPairAlgorithm, Signed,
             hash_borsh,
@@ -829,6 +829,7 @@ mod tests {
         query::{Query, QueryMessage, QueryResponse},
         request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
+            tracking::{RequestTracking, RequestTrackingMessage, RequestTrackingResponse},
         },
         subject::laststate::{LastState, LastStateMessage, LastStateResponse},
         tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -844,6 +845,7 @@ mod tests {
             query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -889,17 +891,17 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let QueryResponse::RequestState(state) = query_actor
-            .ask(QueryMessage::GetRequestState {
-                request_id: request_id.request_id.clone(),
-            })
+        let RequestTrackingResponse::Info(state) = tracking
+            .ask(RequestTrackingMessage::SearchRequest(
+                request_id.request_id.clone(),
+            ))
             .await
             .unwrap()
         else {
             panic!("Invalid response")
         };
 
-        assert_eq!("In Approval", state.status);
+        assert_eq!(RequestState::Approval, state.state);
         let QueryResponse::ApprovalState(data) = query_actor
             .ask(QueryMessage::GetApproval {
                 subject_id: subject_id.to_string(),
@@ -1005,6 +1007,7 @@ mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -1174,6 +1177,7 @@ mod tests {
         ActorRef<Query>,
         ActorRef<Governance>,
         ActorRef<LastState>,
+        ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -1184,6 +1188,7 @@ mod tests {
             query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -1279,10 +1284,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(9)).await;
 
-        let QueryResponse::RequestState(_state) = query_actor
-            .ask(QueryMessage::GetRequestState {
-                request_id: request_id.request_id.clone(),
-            })
+
+        let RequestTrackingResponse::Info(_state) = tracking
+            .ask(RequestTrackingMessage::SearchRequest( request_id.request_id.clone()))
             .await
             .unwrap()
         else {
@@ -1395,6 +1399,7 @@ mod tests {
             query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dir,
         )
@@ -1412,6 +1417,7 @@ mod tests {
         ActorRef<Query>,
         ActorRef<Tracker>,
         ActorRef<LastState>,
+        ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -1422,6 +1428,7 @@ mod tests {
             query_actor,
             _subject_actor,
             _last_state_actor,
+            tracking,
             gov_id,
             _dir,
         ) = init_gov_sub().await;
@@ -1461,17 +1468,16 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let QueryResponse::RequestState(state) = query_actor
-            .ask(QueryMessage::GetRequestState {
-                request_id: request_id.request_id.clone(),
-            })
+
+        let RequestTrackingResponse::Info(state) = tracking
+            .ask(RequestTrackingMessage::SearchRequest( request_id.request_id.clone()))
             .await
             .unwrap()
         else {
             panic!("Invalid response")
         };
 
-        assert_eq!("Finish", state.status);
+        assert_eq!(RequestState::Finish, state.state);
 
         let last_state_actor: ActorRef<LastState> = system
             .get_actor(&ActorPath::from(format!(
@@ -1546,6 +1552,7 @@ mod tests {
             query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             DigestIdentifier::from_str(&request_id.subject_id).unwrap(),
             _dir,
         )
@@ -1565,6 +1572,7 @@ mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
+            tracking,
             subject_id,
             _dir,
         ) = create_subject().await;
