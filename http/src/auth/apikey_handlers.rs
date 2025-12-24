@@ -67,6 +67,17 @@ pub async fn create_api_key_for_user(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
+    // SECURITY FIX: Prevent API key impersonation
+    // Only superadmin can create keys for other users
+    if user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can create API keys for other users".to_string(),
+            }),
+        ));
+    }
+
     let (api_key, key_info) = db
         .create_api_key(
             user_id,
@@ -230,6 +241,20 @@ pub async fn revoke_api_key(
         ));
     }
 
+    // SECURITY FIX: Prevent API key DoS by revoking other users' keys
+    // Get the key to check ownership
+    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+
+    // Only superadmin can revoke keys of other users
+    if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can revoke API keys of other users".to_string(),
+            }),
+        ));
+    }
+
     db.revoke_api_key(&id, Some(auth_ctx.user_id), req.reason.as_deref())
         .map_err(db_error_to_response)?;
 
@@ -282,6 +307,17 @@ pub async fn rotate_api_key(
 
     // Fetch existing key for user and defaults
     let existing = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent API key theft via rotation of other users' keys
+    // Only superadmin can rotate keys of other users
+    if existing.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can rotate API keys of other users".to_string(),
+            }),
+        ));
+    }
 
     // Revoke old key first
     db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.reason.as_deref())

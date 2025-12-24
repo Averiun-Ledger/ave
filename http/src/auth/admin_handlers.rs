@@ -394,15 +394,31 @@ pub async fn update_user(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "put")?;
 
-    // SECURITY FIX: Protect superadmin account from being deactivated
+    // SECURITY FIX: Protect superadmin account
     let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
-    if is_superadmin_user(&db, &target_user)? && req.is_active == Some(false) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Cannot deactivate superadmin account".to_string(),
-            }),
-        ));
+    let is_target_superadmin = is_superadmin_user(&db, &target_user)?;
+
+    if is_target_superadmin {
+        // Prevent deactivating superadmin
+        if req.is_active == Some(false) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot deactivate superadmin account".to_string(),
+                }),
+            ));
+        }
+
+        // SECURITY FIX: Prevent non-superadmin from changing superadmin's password
+        // This prevents privilege escalation via password reset
+        if req.password.is_some() && !auth_ctx.is_superadmin() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Only superadmin can change superadmin's password".to_string(),
+                }),
+            ));
+        }
     }
 
     // Update user
@@ -974,6 +990,18 @@ pub async fn set_role_permission(
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
 
+    // SECURITY FIX: Prevent privilege escalation via role permission modification
+    // Only superadmin can modify role permissions to prevent users from
+    // granting themselves additional privileges by editing their own roles
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify role permissions".to_string(),
+            }),
+        ));
+    }
+
     db.set_role_permission(role_id, &req.resource, &req.action, req.allowed)
         .map_err(db_error_to_response)?;
 
@@ -1202,6 +1230,18 @@ pub async fn remove_role_permission(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
+
+    // SECURITY FIX: Prevent privilege escalation via role permission modification
+    // Only superadmin can modify role permissions to prevent users from
+    // granting themselves additional privileges by editing their own roles
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify role permissions".to_string(),
+            }),
+        ));
+    }
 
     db.remove_role_permission(role_id, &params.resource, &params.action)
         .map_err(db_error_to_response)?;

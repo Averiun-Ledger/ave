@@ -59,7 +59,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         assert_eq!(user.username, "testuser");
@@ -71,10 +71,10 @@ mod tests {
     fn test_create_user_duplicate() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let result =
-            db.create_user("testuser", "TestPass123!", None, None, None);
+            db.create_user("testuser", "TestPass123!", None, None, Some(false));
 
         assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
     }
@@ -84,7 +84,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let created = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let fetched = db.get_user_by_id(created.id).unwrap();
 
@@ -97,7 +97,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Update password
@@ -113,7 +113,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Deactivate
@@ -128,9 +128,9 @@ mod tests {
     fn test_list_users() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("user1", "TestPass123!", None, None, None)
+        db.create_user("user1", "TestPass123!", None, None, Some(false))
             .unwrap();
-        db.create_user("user2", "TestPass123!", None, None, None)
+        db.create_user("user2", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let users = db.list_users(false).unwrap();
@@ -144,7 +144,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         db.delete_user(user.id).unwrap();
@@ -162,7 +162,7 @@ mod tests {
     fn test_verify_credentials_success() {
         let (db, _dirs) = create_test_db();
 
-        let user = db.create_user("testuser", "TestPass123!", None, None, None)
+        let user = db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Force password change requirement
@@ -184,7 +184,7 @@ mod tests {
     fn test_verify_credentials_wrong_password() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let result = db.verify_credentials("testuser", "WrongPassword");
@@ -195,7 +195,7 @@ mod tests {
     fn test_account_lockout_after_failed_attempts() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // 5 failed attempts (lockout threshold)
@@ -261,7 +261,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -276,7 +276,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -292,7 +292,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role1 = db.create_role("editor", None).unwrap();
         let role2 = db.create_role("viewer", None).unwrap();
@@ -326,7 +326,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (api_key, key_info) = db
@@ -343,7 +343,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("key_verify"), None, None, false)
@@ -369,7 +369,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Create key with 1 second TTL
@@ -405,7 +405,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // No TTL provided -> should use system default
@@ -432,7 +432,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (_, capped) = db
@@ -449,7 +449,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser2", "TestPass123!", None, None, None)
+            .create_user("testuser2", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (_, info) = db
@@ -463,7 +463,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, key_info) = db
             .create_api_key(user.id, Some("revoke"), None, None, false)
@@ -482,7 +482,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         db.create_api_key(user.id, Some("key1"), None, None, false)
@@ -500,7 +500,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, key_info) = db
             .create_api_key(user.id, Some("tracking"), None, None, false)
@@ -523,7 +523,7 @@ mod tests {
         let (mut db, _dir) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("perm_effective"), None, None, false)
@@ -571,7 +571,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Set user-specific permission
@@ -593,7 +593,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -617,7 +617,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -649,7 +649,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rate1"), None, None, false)
@@ -680,7 +680,7 @@ mod tests {
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rate2"), None, None, false)
@@ -718,7 +718,7 @@ mod tests {
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key1) = db
             .create_api_key(user.id, Some("rlip1"), None, None, false)
@@ -768,7 +768,7 @@ mod tests {
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rlkey"), None, None, false)
@@ -886,7 +886,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", None, None, None)
+            .create_user("apiuser", "Pass123!", None, None, Some(false))
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key"), None, None, false)
@@ -954,7 +954,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", None, None, None)
+            .create_user("apiuser", "Pass123!", None, None, Some(false))
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key2"), None, None, false)

@@ -17,7 +17,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("key1"), None, None, false)
@@ -39,7 +39,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -65,7 +65,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -94,7 +94,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -124,7 +124,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key1, _) = db
             .create_api_key(user.id, Some("key1"), None, None, false)
@@ -165,7 +165,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role1 = db.create_role("reader", None).unwrap();
         let role2 = db.create_role("writer", None).unwrap();
@@ -198,7 +198,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // User has explicit deny
@@ -226,10 +226,10 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user1 = db
-            .create_user("user1", "TestPass123!", None, None, None)
+            .create_user("user1", "TestPass123!", None, None, Some(false))
             .unwrap();
         let user2 = db
-            .create_user("user2", "TestPass123!", None, None, None)
+            .create_user("user2", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -272,7 +272,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role1 = db.create_role("role1", None).unwrap();
         let role2 = db.create_role("role2", None).unwrap();
@@ -305,7 +305,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("temp_role", None).unwrap();
 
@@ -610,31 +610,39 @@ async fn test_admin_roles_endpoints(
     base_url: &str,
     api_key: &str,
     should_have_access: bool,
+    is_superadmin: bool,
 ) {
     let endpoints = vec![
-        ("GET", "/admin/roles", None),
-        ("POST", "/admin/roles", Some(json!({"name": "test_role"}))),
-        ("GET", "/admin/roles/999", None),
+        // Role CRUD operations - anyone with admin_roles permission can do these
+        ("GET", "/admin/roles", None, should_have_access),
+        ("POST", "/admin/roles", Some(json!({"name": "test_role"})), should_have_access),
+        ("GET", "/admin/roles/999", None, should_have_access),
         (
             "PUT",
             "/admin/roles/999",
             Some(json!({"description": "updated"})),
+            should_have_access,
         ),
-        ("DELETE", "/admin/roles/999", None),
-        ("GET", "/admin/roles/999/permissions", None),
+        ("DELETE", "/admin/roles/999", None, should_have_access),
+        ("GET", "/admin/roles/999/permissions", None, should_have_access),
+
+        // Role permission modification - ONLY superadmin can do these
+        // Non-superadmin will get 403 Forbidden (blocked by security check)
         (
             "POST",
             "/admin/roles/999/permissions",
             Some(json!({"resource": "test", "action": "get", "allowed": true})),
+            should_have_access && is_superadmin,
         ),
         (
             "DELETE",
             "/admin/roles/999/permissions?resource=test&action=get",
             None,
+            should_have_access && is_superadmin,
         ),
     ];
 
-    for (method, path, body) in endpoints {
+    for (method, path, body, expected_access) in endpoints {
         let url = format!("{}{}", base_url, path);
         let request = match method {
             "GET" => client.get(&url),
@@ -650,9 +658,9 @@ async fn test_admin_roles_endpoints(
         let access = has_access(status);
 
         assert_eq!(
-            access, should_have_access,
+            access, expected_access,
             "{} {} - Expected access: {}, Got status: {} (access: {})",
-            method, path, should_have_access, status, access
+            method, path, expected_access, status, access
         );
     }
 }
@@ -663,33 +671,47 @@ async fn test_admin_apikeys_endpoints(
     base_url: &str,
     api_key: &str,
     should_have_access: bool,
+    is_superadmin: bool,
 ) {
     let endpoints = vec![
-        (
-            "POST",
-            "/admin/api-keys/user/999",
-            Some(json!({"name": "test_key"})),
-        ),
+        // GET endpoints - work for any admin with admin_api_key:get permission
         (
             "GET",
             "/admin/api-keys/user/999?include_revoked=false",
             None,
+            should_have_access,
         ),
-        ("GET", "/admin/api-keys?include_revoked=false", None),
-        ("GET", "/admin/api-keys/999", None),
+        ("GET", "/admin/api-keys?include_revoked=false", None, should_have_access),
+        ("GET", "/admin/api-keys/999", None, should_have_access),
+
+        // POST create for other user (user 999):
+        // - Non-superadmin: Gets 403 Forbidden (blocked by ownership check) → NO ACCESS
+        // - Superadmin: Gets 404 Not Found (user doesn't exist) → HAS ACCESS
+        (
+            "POST",
+            "/admin/api-keys/user/999",
+            Some(json!({"name": "test_key"})),
+            should_have_access && is_superadmin,
+        ),
+
+        // DELETE/rotate for non-existent key (999):
+        // - Gets 404 Not Found (key doesn't exist, checked before ownership) → HAS ACCESS
+        // - Anyone with the permission will get 404
         (
             "DELETE",
             "/admin/api-keys/999",
             Some(json!({"reason": "test"})),
+            should_have_access,
         ),
         (
             "POST",
             "/admin/api-keys/999/rotate",
             Some(json!({"name": "rotated_key"})),
+            should_have_access,
         ),
     ];
 
-    for (method, path, body) in endpoints {
+    for (method, path, body, expected_access) in endpoints {
         let url = format!("{}{}", base_url, path);
         let request = match method {
             "GET" => client.get(&url),
@@ -704,9 +726,9 @@ async fn test_admin_apikeys_endpoints(
         let access = has_access(status);
 
         assert_eq!(
-            access, should_have_access,
+            access, expected_access,
             "{} {} - Expected access: {}, Got status: {} (access: {})",
-            method, path, should_have_access, status, access
+            method, path, expected_access, status, access
         );
     }
 }
@@ -804,8 +826,8 @@ mod endpoint_access_tests {
         test_node_endpoints(&client, &base_url, &mgmt_key, true, &[]).await;
         test_user_endpoints(&client, &base_url, &mgmt_key, true, true).await;
         test_admin_users_endpoints(&client, &base_url, &mgmt_key, true).await;
-        test_admin_roles_endpoints(&client, &base_url, &mgmt_key, true).await;
-        test_admin_apikeys_endpoints(&client, &base_url, &mgmt_key, true).await;
+        test_admin_roles_endpoints(&client, &base_url, &mgmt_key, true, true).await;
+        test_admin_apikeys_endpoints(&client, &base_url, &mgmt_key, true, true).await;
         test_admin_system_endpoints(&client, &base_url, &mgmt_key, true).await;
 
         // Test with service key - should have access to node endpoints and /me (except /me/api-keys)
@@ -815,9 +837,9 @@ mod endpoint_access_tests {
             .await;
         test_admin_users_endpoints(&client, &base_url, &service_key, false)
             .await;
-        test_admin_roles_endpoints(&client, &base_url, &service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, &service_key, false, true)
             .await;
-        test_admin_apikeys_endpoints(&client, &base_url, &service_key, false)
+        test_admin_apikeys_endpoints(&client, &base_url, &service_key, false, true)
             .await;
         test_admin_system_endpoints(&client, &base_url, &service_key, false)
             .await;
@@ -927,9 +949,9 @@ mod endpoint_access_tests {
             .await;
         test_admin_users_endpoints(&client, &base_url, test_mgmt_key, true)
             .await;
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, true)
+        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, true, false)
             .await;
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, true)
+        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, true, false)
             .await;
         test_admin_system_endpoints(&client, &base_url, test_mgmt_key, true)
             .await;
@@ -941,12 +963,13 @@ mod endpoint_access_tests {
             .await;
         test_admin_users_endpoints(&client, &base_url, test_service_key, false)
             .await;
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
             .await;
         test_admin_apikeys_endpoints(
             &client,
             &base_url,
             test_service_key,
+            false,
             false,
         )
         .await;
@@ -1062,9 +1085,9 @@ mod endpoint_access_tests {
         test_node_endpoints(&client, &base_url, test_mgmt_key, true, &[]).await;
         test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
         test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
@@ -1076,12 +1099,13 @@ mod endpoint_access_tests {
             .await;
         test_admin_users_endpoints(&client, &base_url, test_service_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
             .await; // Should NOT have access
         test_admin_apikeys_endpoints(
             &client,
             &base_url,
             test_service_key,
+            false,
             false,
         )
         .await; // Should NOT have access
@@ -1211,9 +1235,9 @@ mod endpoint_access_tests {
         .await; // Only Node-Request should pass
         test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
         test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
@@ -1231,12 +1255,13 @@ mod endpoint_access_tests {
         .await; // Only Node-Request should pass
         test_admin_users_endpoints(&client, &base_url, test_service_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
             .await; // Should NOT have access
         test_admin_apikeys_endpoints(
             &client,
             &base_url,
             test_service_key,
+            false,
             false,
         )
         .await; // Should NOT have access
@@ -1444,9 +1469,9 @@ mod endpoint_access_tests {
         .await; // Allowed node/system actions should pass
         test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
         test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
@@ -1464,12 +1489,13 @@ mod endpoint_access_tests {
         .await; // Allowed node/system actions should pass
         test_admin_users_endpoints(&client, &base_url, test_service_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
             .await; // Should NOT have access
         test_admin_apikeys_endpoints(
             &client,
             &base_url,
             test_service_key,
+            false,
             false,
         )
         .await; // Should NOT have access
@@ -1645,9 +1671,9 @@ mod endpoint_access_tests {
         .await; // Read-only node/system access
         test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false)
+        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
             .await; // Should NOT have access
         test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
             .await; // Should NOT have access
@@ -1665,12 +1691,13 @@ mod endpoint_access_tests {
         .await; // Read-only node/system access
         test_admin_users_endpoints(&client, &base_url, test_service_key, false)
             .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false)
+        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
             .await; // Should NOT have access
         test_admin_apikeys_endpoints(
             &client,
             &base_url,
             test_service_key,
+            false,
             false,
         )
         .await; // Should NOT have access

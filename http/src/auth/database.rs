@@ -564,6 +564,16 @@ impl AuthDatabase {
                 params![password_hash, user_id],
             )
             .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+            // SECURITY FIX: Revoke all API keys when password is changed
+            // This prevents compromised accounts from maintaining persistent access
+            // via existing API keys after the password has been changed
+            Self::revoke_user_api_keys_internal(
+                &conn,
+                user_id,
+                None, // Admin-initiated password change
+                "Password changed via update_user",
+            )?;
         }
 
         // Update active status if provided
@@ -916,6 +926,16 @@ impl AuthDatabase {
         )
         .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
+        // SECURITY FIX: Revoke all API keys when password is changed
+        // This prevents compromised accounts from maintaining persistent access
+        // via existing API keys after the password has been changed
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user.id,
+            Some(user.id), // User-initiated revocation
+            "Password changed by user",
+        )?;
+
         // Refresh user
         user.must_change_password = false;
         user.password_hash = password_hash;
@@ -954,6 +974,16 @@ impl AuthDatabase {
             params![password_hash, user_id],
         )
         .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+        // SECURITY FIX: Revoke all API keys when password is reset
+        // This prevents compromised accounts from maintaining persistent access
+        // via existing API keys after the password has been changed
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user_id,
+            None, // System-initiated revocation
+            "Password reset by administrator",
+        )?;
 
         Self::get_user_by_id_internal(&conn, user_id)
     }

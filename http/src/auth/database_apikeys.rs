@@ -463,6 +463,15 @@ impl AuthDatabase {
             ));
         }
 
+        // SECURITY FIX: Enforce must_change_password policy for API keys
+        // Users with must_change_password cannot use API keys until they change their password
+        // This prevents bypassing the forced password change requirement
+        if user.must_change_password {
+            return Err(DatabaseError::PasswordChangeRequired(
+                "Password change required. Please change your password before using API keys".to_string(),
+            ));
+        }
+
         // Get user roles
         let roles = AuthDatabase::get_user_roles_internal(&conn, user_id)?;
 
