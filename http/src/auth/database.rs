@@ -360,13 +360,14 @@ impl AuthDatabase {
         // SECURITY FIX: Enforce single superadmin rule
         // Check if trying to assign superadmin role
         if let Some(ref roles) = role_ids {
-            let superadmin_role_id: Result<i64, _> = conn.query_row(
+            // Try to get superadmin role ID - fail strictly if query fails
+            let superadmin_role_id: Option<i64> = conn.query_row(
                 "SELECT id FROM roles WHERE name = 'superadmin'",
                 [],
                 |row| row.get(0),
-            );
+            ).ok();
 
-            if let Ok(sa_role_id) = superadmin_role_id {
+            if let Some(sa_role_id) = superadmin_role_id {
                 if roles.contains(&sa_role_id) {
                     // Use the already-acquired connection to avoid deadlock
                     let existing_count: i64 = conn.query_row(
@@ -377,7 +378,7 @@ impl AuthDatabase {
                          WHERE r.name = 'superadmin' AND u.is_deleted = 0",
                         [],
                         |row| row.get(0),
-                    ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                    ).map_err(|e| DatabaseError::QueryError(format!("Failed to count superadmins: {}", e)))?;
 
                     if existing_count > 0 {
                         return Err(DatabaseError::ValidationError(

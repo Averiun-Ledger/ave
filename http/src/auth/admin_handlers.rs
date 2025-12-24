@@ -49,6 +49,100 @@ fn is_superadmin_user(
     Ok(roles.iter().any(|r| r == "superadmin"))
 }
 
+/// Get superadmin role ID from database
+fn get_superadmin_role_id(
+    db: &AuthDatabase,
+) -> Result<Option<i64>, (StatusCode, Json<ErrorResponse>)> {
+    let role_id = db
+        .lock_conn()
+        .map_err(db_error_to_response)?
+        .query_row(
+            "SELECT id FROM roles WHERE name = 'superadmin'",
+            [],
+            |row| row.get(0)
+        )
+        .ok();
+    Ok(role_id)
+}
+
+/// Validate superadmin role assignment
+/// Returns Ok(()) if assignment is allowed, Err otherwise
+fn validate_superadmin_assignment(
+    db: &AuthDatabase,
+    auth_ctx: &AuthContext,
+    target_user_id: i64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    // Only superadmin can assign superadmin role
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can assign superadmin role".to_string(),
+            }),
+        ));
+    }
+
+    // Get target user to check if already superadmin
+    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+    let is_target_already_superadmin = is_superadmin_user(db, &target_user)?;
+
+    if !is_target_already_superadmin {
+        // Trying to make someone else superadmin - verify only one exists
+        let existing_superadmin_count = db.count_superadmins()
+            .map_err(db_error_to_response)?;
+
+        if existing_superadmin_count > 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                }),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate superadmin role removal
+/// Returns Ok(()) if removal is allowed, Err otherwise
+fn validate_superadmin_removal(
+    db: &AuthDatabase,
+    auth_ctx: &AuthContext,
+    target_user_id: i64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    // Only superadmin can remove superadmin role
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can remove superadmin role".to_string(),
+            }),
+        ));
+    }
+
+    // Get target user
+    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+
+    // Check if target is superadmin
+    if is_superadmin_user(db, &target_user)? {
+        // Cannot remove superadmin role from the only superadmin
+        let superadmin_count = db.count_superadmins()
+            .map_err(db_error_to_response)?;
+
+        if superadmin_count <= 1 {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot remove superadmin role from the only superadmin. System must have at least one superadmin.".to_string(),
+                }),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Determine if a user has admin-level permissions (superadmin role or admin resources)
 fn is_admin_account(
     db: &AuthDatabase,
@@ -318,6 +412,24 @@ pub async fn update_user(
 
     // Update roles if provided
     if let Some(role_ids) = &req.role_ids {
+        // SECURITY FIX: Protect superadmin role assignment and removal
+        let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+        if let Some(sa_role_id) = superadmin_role_id {
+            // Check if target user currently has superadmin role
+            let is_target_currently_superadmin = is_superadmin_user(&db, &target_user)?;
+
+            // Validate if trying to ADD superadmin role
+            if role_ids.contains(&sa_role_id) {
+                validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
+            }
+            // Validate if trying to REMOVE superadmin role (user has it but new roles don't)
+            else if is_target_currently_superadmin {
+                // Trying to remove superadmin role via update
+                validate_superadmin_removal(&db, &auth_ctx, user_id)?;
+            }
+        }
+
         // Remove all current roles
         let current_roles =
             db.get_user_roles(user_id).map_err(db_error_to_response)?;
@@ -524,6 +636,15 @@ pub async fn assign_role(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Protect superadmin role assignment
+    let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+    if let Some(sa_role_id) = superadmin_role_id {
+        if role_id == sa_role_id {
+            validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
+        }
+    }
+
     db.assign_role_to_user(user_id, role_id, Some(auth_ctx.user_id))
         .map_err(db_error_to_response)?;
 
@@ -569,6 +690,15 @@ pub async fn remove_role(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
+
+    // SECURITY FIX: Protect superadmin role removal
+    let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+    if let Some(sa_role_id) = superadmin_role_id {
+        if role_id == sa_role_id {
+            validate_superadmin_removal(&db, &auth_ctx, user_id)?;
+        }
+    }
 
     db.remove_role_from_user(user_id, role_id)
         .map_err(db_error_to_response)?;

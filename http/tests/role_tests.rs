@@ -560,8 +560,9 @@ async fn test_admin_users_endpoints(
             Some(json!({"password": "NewPass123!"})),
         ),
         ("DELETE", "/admin/users/999", None),
-        ("POST", "/admin/users/999/roles/1", None),
-        ("DELETE", "/admin/users/999/roles/1", None),
+        // Use role ID 2 instead of 1 (superadmin) to avoid permission issues
+        ("POST", "/admin/users/999/roles/2", None),
+        ("DELETE", "/admin/users/999/roles/2", None),
         ("GET", "/admin/users/999/permissions", None),
         (
             "POST",
