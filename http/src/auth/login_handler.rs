@@ -127,7 +127,6 @@ pub async fn login(
     let user_info = UserInfo {
         id: user.id,
         username: user.username.clone(),
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,

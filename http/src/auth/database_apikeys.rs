@@ -494,7 +494,6 @@ impl AuthDatabase {
         Ok(AuthContext {
             user_id,
             username: user.username,
-            is_superadmin: user.is_superadmin,
             roles,
             permissions,
             api_key_id: key_id,

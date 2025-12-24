@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    is_superadmin BOOLEAN NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT 1,
     is_deleted BOOLEAN NOT NULL DEFAULT 0,
     must_change_password BOOLEAN NOT NULL DEFAULT 0,

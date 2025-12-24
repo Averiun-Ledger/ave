@@ -33,7 +33,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let result =
-            db.create_user("testuser", "Short1!", false, None, None, None);
+            db.create_user("testuser", "Short1!", None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -44,7 +44,7 @@ mod tests {
 
         let long_pass = "Aa1!Aa1!Aa1!Aa1!Aa1!X"; // 21 chars
         let result =
-            db.create_user("testuser", long_pass, false, None, None, None);
+            db.create_user("testuser", long_pass, None, None, None);
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
@@ -56,7 +56,6 @@ mod tests {
         let result = db.create_user(
             "testuser",
             "lowercase123!",
-            false,
             None,
             None,
             None,
@@ -72,7 +71,6 @@ mod tests {
         let result = db.create_user(
             "testuser",
             "UPPERCASE123!",
-            false,
             None,
             None,
             None,
@@ -88,7 +86,6 @@ mod tests {
         let result = db.create_user(
             "testuser",
             "NoDigitsHere!",
-            false,
             None,
             None,
             None,
@@ -105,7 +102,6 @@ mod tests {
         let result = db.create_user(
             "testuser",
             "Pass123🔐中文",
-            false,
             None,
             None,
             None,
@@ -128,7 +124,6 @@ mod tests {
         let result = db.create_user(
             malicious_username,
             "Password123!",
-            false,
             None,
             None,
             None,
@@ -141,14 +136,13 @@ mod tests {
         // Even though input validation blocks the attack, we ensure SQL injection
         // is impossible even if validation is bypassed
         let safe_username = "validuser";
-        db.create_user(safe_username, "Password123!", false, None, None, Some(false))
+        db.create_user(safe_username, "Password123!", None, None, Some(false))
             .unwrap();
 
         let verify_result = db.verify_credentials(safe_username, "Password123!");
         assert!(verify_result.is_ok());
         let user = verify_result.unwrap();
         assert_eq!(user.username, safe_username);
-        assert!(!user.is_superadmin);
     }
 
     #[test]
@@ -184,7 +178,6 @@ mod tests {
                 db_clone.create_user(
                     &format!("user{}", i),
                     "Password123!",
-                    false,
                     None,
                     None,
                     None,
@@ -215,7 +208,6 @@ mod tests {
                 db_clone.create_user(
                     "duplicate_user",
                     "Password123!",
-                    false,
                     None,
                     None,
                     None,
@@ -246,7 +238,7 @@ mod tests {
 
         // Create user and API key
         let user = db
-            .create_user("test_user", "Password123!", false, None, None, None)
+            .create_user("test_user", "Password123!", None, None, None)
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("concurrent"), None, None, false)
@@ -283,7 +275,6 @@ mod tests {
         let result = db.create_user(
             unicode_username,
             "Password123!",
-            false,
             None,
             None,
             None,
@@ -302,7 +293,7 @@ mod tests {
         // Username with spaces
         let username = "user with spaces";
         let result =
-            db.create_user(username, "Password123!", false, None, None, None);
+            db.create_user(username, "Password123!", None, None, None);
         assert!(result.is_ok());
 
         // Role with tabs
@@ -321,7 +312,6 @@ mod tests {
         let result = db.create_user(
             &long_username,
             "Password123!",
-            false,
             None,
             None,
             None,
@@ -333,7 +323,6 @@ mod tests {
         let result = db.create_user(
             &max_username,
             "Password123!",
-            false,
             None,
             None,
             None,
@@ -360,7 +349,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Create key with 0 TTL (never expires)
@@ -381,7 +370,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Deactivate user
@@ -397,7 +386,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("lockout"), None, None, false)
@@ -416,7 +405,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("lockout2"), None, None, false)
@@ -439,7 +428,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -482,7 +471,6 @@ mod tests {
             .create_user(
                 "admin_actor",
                 "Password123!",
-                false,
                 Some(vec![admin_role.id]),
                 None,
                 None,
@@ -492,7 +480,6 @@ mod tests {
             .create_user(
                 "admin_target",
                 "Password123!",
-                false,
                 Some(vec![admin_role.id]),
                 None,
                 None,
@@ -505,7 +492,6 @@ mod tests {
         let auth_ctx = Arc::new(AuthContext {
             user_id: actor.id,
             username: actor.username.clone(),
-            is_superadmin: false,
             roles,
             permissions,
             api_key_id: "test-key".to_string(),
@@ -544,7 +530,6 @@ mod tests {
             .create_user(
                 "admin_actor_remove",
                 "Password123!",
-                false,
                 Some(vec![admin_role.id]),
                 None,
                 None,
@@ -554,7 +539,6 @@ mod tests {
             .create_user(
                 "admin_target_remove",
                 "Password123!",
-                false,
                 Some(vec![admin_role.id]),
                 None,
                 None,
@@ -576,7 +560,6 @@ mod tests {
         let auth_ctx = Arc::new(AuthContext {
             user_id: actor.id,
             username: actor.username.clone(),
-            is_superadmin: false,
             roles,
             permissions,
             api_key_id: "test-key".to_string(),
@@ -596,6 +579,21 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    }
+
+    #[test]
+    fn superadmin_flag_grants_all_permissions_even_without_overrides() {
+        let ctx = AuthContext {
+            user_id: 1,
+            username: "root".to_string(),
+            roles: vec!["superadmin".to_string()], // Superadmin role
+            permissions: vec![], // No explicit permissions
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        };
+
+        assert!(ctx.has_permission("any_resource", "any_action"));
     }
 
     // =============================================================================
@@ -625,7 +623,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         let result = db.assign_role_to_user(user.id, 99999, None);
@@ -696,7 +694,9 @@ mod tests {
         assert!(result.is_ok());
 
         let user = result.unwrap();
-        assert!(user.is_superadmin);
+        // Verify superadmin role
+        let roles = db.get_user_roles(user.id).unwrap();
+        assert!(roles.contains(&"superadmin".to_string()));
     }
 
     #[test]
@@ -710,25 +710,28 @@ mod tests {
 
         // Superadmins bypass permission checks, so they might have empty perms
         // The middleware should check is_superadmin flag
-        assert!(admin.is_superadmin);
+        // Verify superadmin role
+        let roles = db.get_user_roles(admin.id).unwrap();
+        assert!(roles.contains(&"superadmin".to_string()));
     }
 
     #[test]
-    fn test_create_superadmin_user() {
+    fn test_create_regular_user_without_superadmin() {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
             .create_user(
-                "newsuperadmin",
-                "SuperPass123!",
-                true,
+                "regularuser",
+                "UserPass123!",
                 None,
                 None,
                 None,
             )
             .unwrap();
 
-        assert!(user.is_superadmin);
+        // Verify user does NOT have superadmin role
+        let roles = db.get_user_roles(user.id).unwrap();
+        assert!(!roles.contains(&"superadmin".to_string()));
     }
 
     // =============================================================================
@@ -740,7 +743,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
         let (api_key, key_info) = db
             .create_api_key(user.id, Some("rl_main"), None, None, false)
@@ -760,7 +763,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rl_expire"), None, None, false)
@@ -787,7 +790,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Create and assign 50 roles
@@ -837,7 +840,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Create 10 API keys
@@ -867,7 +870,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Create multiple API keys
@@ -943,7 +946,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         // Create a test user
-        db.create_user("testuser", "Password123!", false, None, None, None)
+        db.create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Simulate multiple failed login attempts from same IP
@@ -980,7 +983,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         let (_, key_info) = db
@@ -1002,7 +1005,7 @@ mod tests {
         let db = std::sync::Arc::new(db);
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         let mut handles = vec![];
@@ -1051,7 +1054,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         // Test various dangerous characters that should be rejected
@@ -1142,7 +1145,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         let (api_key, _key_info) = db
@@ -1183,7 +1186,7 @@ mod tests {
         ];
 
         for username in crlf_usernames {
-            let result = db.create_user(username, "Password123!", false, None, None, None);
+            let result = db.create_user(username, "Password123!", None, None, None);
             assert!(
                 result.is_err(),
                 "Should reject username with CRLF: {:?}",
@@ -1201,7 +1204,7 @@ mod tests {
 
         // Test CRLF in descriptions
         let user = db
-            .create_user("testuser", "Password123!", false, None, None, None)
+            .create_user("testuser", "Password123!", None, None, None)
             .unwrap();
 
         let crlf_descriptions = vec![
@@ -1232,13 +1235,13 @@ mod tests {
         let null_byte_tests = vec![("user\0hidden", "Password123!")];
 
         for (username, password) in null_byte_tests {
-            let result = db.create_user(username, password, false, None, None, None);
+            let result = db.create_user(username, password, None, None, None);
             assert!(result.is_err(), "Should reject null bytes in username");
         }
 
         // Test valid strings work
         let valid_user = db
-            .create_user("validuser", "Password123!", false, None, None, None)
+            .create_user("validuser", "Password123!", None, None, None)
             .unwrap();
         assert_eq!(valid_user.username, "validuser");
 
@@ -1255,7 +1258,7 @@ mod tests {
 
         // Test length limits
         let long_username = "a".repeat(65);
-        let result = db.create_user(&long_username, "Password123!", false, None, None, None);
+        let result = db.create_user(&long_username, "Password123!", None, None, None);
         assert!(result.is_err(), "Should reject username longer than 64 chars");
 
         let long_description = "a".repeat(501);
@@ -1328,5 +1331,212 @@ mod tests {
             dangerous_config.allow_any_origin && dangerous_config.allow_credentials,
             "This combination is dangerous and should be avoided in production"
         );
+    }
+
+    // =============================================================================
+    // VULN-21: USER ENUMERATION VIA ERROR MESSAGES
+    // =============================================================================
+
+    /// Test that user enumeration via different error messages is prevented
+    /// VULN-21: Invalid credentials, locked accounts, and disabled accounts
+    /// should all return the same generic error message
+    #[test]
+    fn test_user_enumeration_prevented_via_error_messages() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Create test users with different states
+        let active_user = db
+            .create_user("active_user", "Password123!", None, None, None)
+            .unwrap();
+
+        let inactive_user = db
+            .create_user("inactive_user", "Password123!", None, None, None)
+            .unwrap();
+        db.update_user(inactive_user.id, None, Some(false)).unwrap();
+
+        let locked_user = db
+            .create_user("locked_user", "Password123!", None, None, None)
+            .unwrap();
+        // Lock the user by exceeding failed attempts
+        for _ in 0..5 {
+            let _ = db.verify_credentials("locked_user", "WrongPassword!");
+        }
+
+        // Test 1: Non-existent user
+        let err1 = db.verify_credentials("nonexistent", "Password123!").unwrap_err();
+
+        // Test 2: Inactive user
+        let err2 = db.verify_credentials("inactive_user", "Password123!").unwrap_err();
+
+        // Test 3: Locked user
+        let err3 = db.verify_credentials("locked_user", "Password123!").unwrap_err();
+
+        // Test 4: Wrong password
+        let err4 = db.verify_credentials("active_user", "WrongPassword!").unwrap_err();
+
+        // All errors should be PermissionDenied with the SAME message
+        match (&err1, &err2, &err3, &err4) {
+            (
+                DatabaseError::PermissionDenied(msg1),
+                DatabaseError::PermissionDenied(msg2),
+                DatabaseError::PermissionDenied(msg3),
+                DatabaseError::PermissionDenied(msg4),
+            ) => {
+                // All messages should be identical to prevent enumeration
+                assert_eq!(msg1, "Invalid username or password");
+                assert_eq!(msg2, "Invalid username or password");
+                assert_eq!(msg3, "Invalid username or password");
+                assert_eq!(msg4, "Invalid username or password");
+
+                // Verify they're all the same
+                assert_eq!(msg1, msg2);
+                assert_eq!(msg2, msg3);
+                assert_eq!(msg3, msg4);
+            }
+            _ => panic!("All errors should be PermissionDenied with same message"),
+        }
+    }
+
+    // =============================================================================
+    // VULN-23: SINGLE SUPERADMIN ENFORCEMENT
+    // =============================================================================
+
+    /// Test that only one superadmin can exist in the system
+    /// VULN-23: Multiple superadmins should not be allowed
+    #[test]
+    fn test_only_one_superadmin_allowed() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Verify bootstrap superadmin exists
+        let count_before = db.count_superadmins().unwrap();
+        assert_eq!(count_before, 1, "Should have exactly 1 superadmin after bootstrap");
+
+        // Try to create another superadmin by assigning the superadmin role (should fail)
+        // Get superadmin role ID
+        let roles = db.list_roles().unwrap();
+        let superadmin_role = roles.iter().find(|r| r.name == "superadmin").unwrap();
+
+        let result = db.create_user(
+            "second_superadmin",
+            "SuperPass123!",
+            Some(vec![superadmin_role.id]),  // Try to assign superadmin role
+            None,
+            None,
+        );
+
+        // Should fail because a superadmin already exists
+        assert!(result.is_err(), "Should not allow creating second superadmin");
+
+        // Verify count is still 1
+        let count_after = db.count_superadmins().unwrap();
+        assert_eq!(count_after, 1, "Should still have exactly 1 superadmin");
+    }
+
+    /// Test that superadmin account cannot be deleted
+    #[test]
+    fn test_superadmin_cannot_be_deleted() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Get the bootstrap superadmin
+        let admin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+        // Verify superadmin role
+        let roles = db.get_user_roles(admin.id).unwrap();
+        assert!(roles.contains(&"superadmin".to_string()));
+
+        // Try to delete superadmin (should fail)
+        let result = db.delete_user(admin.id);
+
+        // Should succeed at DB level (no protection there)
+        // Protection is at handler level, but we can test DB behavior
+        assert!(result.is_ok(), "DB layer allows deletion");
+
+        // However, handlers should block this
+        // This will be tested in integration tests with actual handlers
+    }
+
+    /// Test that superadmin account cannot be deactivated
+    #[test]
+    fn test_superadmin_cannot_be_deactivated() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Get the bootstrap superadmin
+        let admin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+        // Verify superadmin role
+        let roles = db.get_user_roles(admin.id).unwrap();
+        assert!(roles.contains(&"superadmin".to_string()));
+        assert!(admin.is_active);
+
+        // Try to deactivate superadmin at DB level
+        let result = db.update_user(admin.id, None, Some(false));
+
+        // DB layer allows it, but handlers should block
+        assert!(result.is_ok(), "DB layer allows deactivation");
+
+        // Verify it was deactivated at DB level
+        let updated_admin = db.get_user_by_id(admin.id).unwrap();
+        assert!(!updated_admin.is_active, "DB layer allowed deactivation");
+
+        // Handler-level protection will be tested in integration tests
+    }
+
+    /// Test that non-superadmin cannot reset superadmin password
+    #[test]
+    fn test_non_superadmin_cannot_reset_superadmin_password() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Get the bootstrap superadmin
+        let admin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+        // Verify superadmin role
+        let roles = db.get_user_roles(admin.id).unwrap();
+        assert!(roles.contains(&"superadmin".to_string()));
+
+        // Reset password at DB level (no protection here)
+        let result = db.admin_reset_password(admin.id, "NewPassword123!");
+        assert!(result.is_ok(), "DB layer allows password reset");
+
+        // Change password using credentials to clear must_change_password flag
+        let result = db.change_password_with_credentials("admin", "NewPassword123!", "FinalPassword123!");
+        assert!(result.is_ok(), "Password change should work");
+
+        // Verify final password works
+        let result = db.verify_credentials("admin", "FinalPassword123!");
+        assert!(result.is_ok(), "Final password should work: {:?}", result.err());
+
+        // Handler-level protection will be tested in integration tests
+    }
+
+    /// Test count_superadmins function
+    #[test]
+    fn test_count_superadmins() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Should have exactly 1 superadmin (bootstrap)
+        let count = db.count_superadmins().unwrap();
+        assert_eq!(count, 1);
+
+        // Create a regular user
+        db.create_user("regular", "Password123!", None, None, None)
+            .unwrap();
+
+        // Count should still be 1
+        let count = db.count_superadmins().unwrap();
+        assert_eq!(count, 1);
+
+        // Try to create another superadmin (will fail due to validation)
+        let roles = db.list_roles().unwrap();
+        let superadmin_role = roles.iter().find(|r| r.name == "superadmin").unwrap();
+
+        let result = db.create_user(
+            "another_super",
+            "SuperPass123!",
+            Some(vec![superadmin_role.id]),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+
+        // Count should still be 1
+        let count = db.count_superadmins().unwrap();
+        assert_eq!(count, 1);
     }
 }

@@ -17,7 +17,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("key1"), None, None, false)
@@ -39,7 +39,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -65,7 +65,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -94,7 +94,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -124,7 +124,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let (api_key1, _) = db
             .create_api_key(user.id, Some("key1"), None, None, false)
@@ -165,7 +165,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role1 = db.create_role("reader", None).unwrap();
         let role2 = db.create_role("writer", None).unwrap();
@@ -198,7 +198,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
 
         // User has explicit deny
@@ -226,10 +226,10 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user1 = db
-            .create_user("user1", "TestPass123!", false, None, None, None)
+            .create_user("user1", "TestPass123!", None, None, None)
             .unwrap();
         let user2 = db
-            .create_user("user2", "TestPass123!", false, None, None, None)
+            .create_user("user2", "TestPass123!", None, None, None)
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -272,7 +272,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role1 = db.create_role("role1", None).unwrap();
         let role2 = db.create_role("role2", None).unwrap();
@@ -305,7 +305,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, None)
             .unwrap();
         let role = db.create_role("temp_role", None).unwrap();
 

@@ -60,7 +60,6 @@ pub struct User {
     pub username: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
-    pub is_superadmin: bool,
     pub is_active: bool,
     pub is_deleted: bool,
     pub must_change_password: bool,
@@ -81,8 +80,6 @@ pub struct UserInfo {
     pub id: i64,
     /// Username
     pub username: String,
-    /// Is superadmin
-    pub is_superadmin: bool,
     /// Is account active
     pub is_active: bool,
     /// Must change password on next login
@@ -103,7 +100,6 @@ pub struct UserInfo {
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
-    pub is_superadmin: Option<bool>,
     pub role_ids: Option<Vec<i64>>,
     pub must_change_password: Option<bool>,
 }
@@ -313,7 +309,6 @@ pub struct LoginResponse {
 pub struct AuthContext {
     pub user_id: i64,
     pub username: String,
-    pub is_superadmin: bool,
     pub roles: Vec<String>,
     pub permissions: Vec<Permission>,
     pub api_key_id: String,  // UUID
@@ -322,10 +317,15 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
+    /// Check if user has the superadmin role
+    pub fn is_superadmin(&self) -> bool {
+        self.roles.iter().any(|r| r == "superadmin")
+    }
+
     /// Check if user has permission for a specific resource and action
     pub fn has_permission(&self, resource: &str, action: &str) -> bool {
-        // Superadmin always has all permissions
-        if self.is_superadmin {
+        // Superadmin role always has all permissions
+        if self.is_superadmin() {
             return true;
         }
 

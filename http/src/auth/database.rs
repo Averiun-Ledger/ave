@@ -258,8 +258,8 @@ impl AuthDatabase {
 
         // Create superadmin user
         conn.execute(
-            "INSERT INTO users (username, password_hash, is_superadmin, is_active)
-             VALUES (?1, ?2, 1, 1)",
+            "INSERT INTO users (username, password_hash, is_active)
+             VALUES (?1, ?2, 1)",
             params![superadmin, password_hash],
         ).map_err(|e| DatabaseError::InsertError(format!("Failed to create superadmin: {}", e)))?;
 
@@ -331,7 +331,6 @@ impl AuthDatabase {
         &self,
         username: &str,
         password: &str,
-        is_superadmin: bool,
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
         must_change_password: Option<bool>,
@@ -358,6 +357,37 @@ impl AuthDatabase {
         // Validate password
         validate_password(password).map_err(DatabaseError::ValidationError)?;
 
+        // SECURITY FIX: Enforce single superadmin rule
+        // Check if trying to assign superadmin role
+        if let Some(ref roles) = role_ids {
+            let superadmin_role_id: Result<i64, _> = conn.query_row(
+                "SELECT id FROM roles WHERE name = 'superadmin'",
+                [],
+                |row| row.get(0),
+            );
+
+            if let Ok(sa_role_id) = superadmin_role_id {
+                if roles.contains(&sa_role_id) {
+                    // Use the already-acquired connection to avoid deadlock
+                    let existing_count: i64 = conn.query_row(
+                        "SELECT COUNT(DISTINCT u.id)
+                         FROM users u
+                         INNER JOIN user_roles ur ON u.id = ur.user_id
+                         INNER JOIN roles r ON ur.role_id = r.id
+                         WHERE r.name = 'superadmin' AND u.is_deleted = 0",
+                        [],
+                        |row| row.get(0),
+                    ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+                    if existing_count > 0 {
+                        return Err(DatabaseError::ValidationError(
+                            "A superadmin already exists. Only one superadmin is allowed.".to_string()
+                        ));
+                    }
+                }
+            }
+        }
+
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
             DatabaseError::CryptoError(format!(
@@ -369,9 +399,9 @@ impl AuthDatabase {
         // Insert user
         let must_change = must_change_password.unwrap_or(true);
         conn.execute(
-            "INSERT INTO users (username, password_hash, is_superadmin, is_active, must_change_password)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![username, password_hash, is_superadmin, true, must_change],
+            "INSERT INTO users (username, password_hash, is_active, must_change_password)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![username, password_hash, true, must_change],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
@@ -396,7 +426,7 @@ impl AuthDatabase {
         user_id: i64,
     ) -> Result<User, DatabaseError> {
         conn.query_row(
-            "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+            "SELECT id, username, password_hash, is_active, is_deleted,
                     must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
              FROM users
              WHERE id = ?1 AND is_deleted = 0",
@@ -406,15 +436,14 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     username: row.get(1)?,
                     password_hash: row.get(2)?,
-                    is_superadmin: row.get(3)?,
-                    is_active: row.get(4)?,
-                    is_deleted: row.get(5)?,
-                    must_change_password: row.get(6)?,
-                    failed_login_attempts: row.get(7)?,
-                    locked_until: row.get(8)?,
-                    last_login_at: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    is_active: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    must_change_password: row.get(5)?,
+                    failed_login_attempts: row.get(6)?,
+                    locked_until: row.get(7)?,
+                    last_login_at: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 };
                 Ok(user)
             },
@@ -430,6 +459,25 @@ impl AuthDatabase {
         Self::get_user_by_id_internal(&conn, user_id)
     }
 
+    /// Count superadmin users (users with the superadmin role)
+    pub fn count_superadmins(&self) -> Result<i64, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT u.id)
+                 FROM users u
+                 INNER JOIN user_roles ur ON u.id = ur.user_id
+                 INNER JOIN roles r ON ur.role_id = r.id
+                 WHERE r.name = 'superadmin' AND u.is_deleted = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        Ok(count)
+    }
+
     /// List all users
     pub fn list_users(
         &self,
@@ -438,13 +486,13 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         let query = if include_inactive {
-            "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
+            "SELECT u.id, u.username, u.is_active, u.failed_login_attempts,
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0
              ORDER BY u.username"
         } else {
-            "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
+            "SELECT u.id, u.username, u.is_active, u.failed_login_attempts,
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0 AND u.is_active = 1
@@ -463,13 +511,12 @@ impl AuthDatabase {
                     UserInfo {
                         id: user_id,
                         username: row.get(1)?,
-                        is_superadmin: row.get(2)?,
-                        is_active: row.get(3)?,
-                        failed_login_attempts: row.get(4)?,
-                        locked_until: row.get(5)?,
-                        last_login_at: row.get(6)?,
-                        created_at: row.get(7)?,
-                        must_change_password: row.get(8)?,
+                        is_active: row.get(2)?,
+                        failed_login_attempts: row.get(3)?,
+                        locked_until: row.get(4)?,
+                        last_login_at: row.get(5)?,
+                        created_at: row.get(6)?,
+                        must_change_password: row.get(7)?,
                         roles: Vec::new(), // Will be filled below
                     },
                 ))
@@ -641,7 +688,7 @@ impl AuthDatabase {
 
         // Try to find the user
         let user_result = conn.query_row(
-            "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+            "SELECT id, username, password_hash, is_active, is_deleted,
                     must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
              FROM users
              WHERE username = ?1 AND is_deleted = 0",
@@ -651,15 +698,14 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     username: row.get(1)?,
                     password_hash: row.get(2)?,
-                    is_superadmin: row.get(3)?,
-                    is_active: row.get(4)?,
-                    is_deleted: row.get(5)?,
-                    must_change_password: row.get(6)?,
-                    failed_login_attempts: row.get(7)?,
-                    locked_until: row.get(8)?,
-                    last_login_at: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    is_active: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    must_change_password: row.get(5)?,
+                    failed_login_attempts: row.get(6)?,
+                    locked_until: row.get(7)?,
+                    last_login_at: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 };
                 Ok(user)
             },
@@ -768,7 +814,7 @@ impl AuthDatabase {
 
         let user_result = conn
             .query_row(
-                "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+                "SELECT id, username, password_hash, is_active, is_deleted,
                         must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
                  FROM users
                  WHERE username = ?1 AND is_deleted = 0",
@@ -778,15 +824,14 @@ impl AuthDatabase {
                         id: row.get(0)?,
                         username: row.get(1)?,
                         password_hash: row.get(2)?,
-                        is_superadmin: row.get(3)?,
-                        is_active: row.get(4)?,
-                        is_deleted: row.get(5)?,
-                        must_change_password: row.get(6)?,
-                        failed_login_attempts: row.get(7)?,
-                        locked_until: row.get(8)?,
-                        last_login_at: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
+                        is_active: row.get(3)?,
+                        is_deleted: row.get(4)?,
+                        must_change_password: row.get(5)?,
+                        failed_login_attempts: row.get(6)?,
+                        locked_until: row.get(7)?,
+                        last_login_at: row.get(8)?,
+                        created_at: row.get(9)?,
+                        updated_at: row.get(10)?,
                     };
                     Ok(user)
                 },

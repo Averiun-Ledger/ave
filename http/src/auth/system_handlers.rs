@@ -269,7 +269,6 @@ pub async fn get_me(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -337,7 +336,7 @@ pub async fn get_my_permissions_detailed(
     let response = DetailedPermissionsResponse {
         user_id: auth_ctx.user_id,
         username: auth_ctx.username.clone(),
-        is_superadmin: auth_ctx.is_superadmin,
+        is_superadmin: auth_ctx.is_superadmin(),
         roles: auth_ctx.roles.clone(),
         role_permissions,
         user_overrides,

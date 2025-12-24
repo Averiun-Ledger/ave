@@ -40,12 +40,22 @@ fn db_error_to_response(
     (status, Json(ErrorResponse { error: message }))
 }
 
-/// Determine if a user has admin-level permissions (superadmin or admin resources)
+/// Check if a user has the superadmin role
+fn is_superadmin_user(
+    db: &AuthDatabase,
+    user: &User,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    let roles = db.get_user_roles(user.id).map_err(db_error_to_response)?;
+    Ok(roles.iter().any(|r| r == "superadmin"))
+}
+
+/// Determine if a user has admin-level permissions (superadmin role or admin resources)
 fn is_admin_account(
     db: &AuthDatabase,
     user: &User,
 ) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
-    if user.is_superadmin {
+    // Check if user has superadmin role
+    if is_superadmin_user(db, user)? {
         return Ok(true);
     }
 
@@ -93,12 +103,54 @@ pub async fn create_user(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "post")?;
 
+    // SECURITY FIX: Enforce single superadmin rule
+    // Check if trying to assign superadmin role
+    if let Some(ref role_ids) = req.role_ids {
+        let superadmin_role_id: Option<i64> = db
+            .lock_conn()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT id FROM roles WHERE name = 'superadmin'",
+                    [],
+                    |row| row.get(0)
+                ).ok()
+            });
+
+        if let Some(sa_role_id) = superadmin_role_id {
+            if role_ids.contains(&sa_role_id) {
+                // Only one superadmin is allowed in the system
+                // Only the current superadmin can attempt this operation
+                if !auth_ctx.is_superadmin() {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "Only superadmin can assign superadmin role".to_string(),
+                        }),
+                    ));
+                }
+
+                // Verify that no other superadmin exists
+                let existing_superadmin_count = db.count_superadmins()
+                    .map_err(db_error_to_response)?;
+
+                if existing_superadmin_count > 0 {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse {
+                            error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
     // Create user
     let user = db
         .create_user(
             &req.username,
             &req.password,
-            req.is_superadmin.unwrap_or(false),
             req.role_ids.clone(),
             Some(auth_ctx.user_id),
             req.must_change_password,
@@ -111,7 +163,6 @@ pub async fn create_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -125,7 +176,6 @@ pub async fn create_user(
     // SECURITY FIX: Sanitize request to avoid logging password
     let audit_details = serde_json::json!({
         "username": req.username,
-        "is_superadmin": req.is_superadmin,
         "role_ids": req.role_ids,
         "must_change_password": req.must_change_password,
     });
@@ -211,7 +261,6 @@ pub async fn get_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -251,6 +300,17 @@ pub async fn update_user(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "put")?;
 
+    // SECURITY FIX: Protect superadmin account from being deactivated
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    if is_superadmin_user(&db, &target_user)? && req.is_active == Some(false) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Cannot deactivate superadmin account".to_string(),
+            }),
+        ));
+    }
+
     // Update user
     let user = db
         .update_user(user_id, req.password.as_deref(), req.is_active)
@@ -279,7 +339,6 @@ pub async fn update_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -343,6 +402,17 @@ pub async fn reset_user_password(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "post")?;
 
+    // SECURITY FIX: Protect superadmin account
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    if is_superadmin_user(&db, &target_user)? && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can reset superadmin password".to_string(),
+            }),
+        ));
+    }
+
     db.admin_reset_password(user_id, &req.password)
         .map_err(db_error_to_response)?;
 
@@ -394,6 +464,17 @@ pub async fn delete_user(
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "Cannot delete your own account".to_string(),
+            }),
+        ));
+    }
+
+    // SECURITY FIX: Protect superadmin account from deletion
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    if is_superadmin_user(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Cannot delete superadmin account".to_string(),
             }),
         ));
     }
@@ -844,7 +925,7 @@ pub async fn set_user_permission(
 
     // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
     // Superadmins are exempt because they get permissions implicitly (always have all)
-    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin {
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -858,7 +939,7 @@ pub async fn set_user_permission(
 
     // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
     // Only superadmins can modify permissions of other admins (separation of duties)
-    if !auth_ctx.is_superadmin && is_admin_account(&db, &target_user)? {
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -922,7 +1003,7 @@ pub async fn remove_user_permission(
 
     // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
     // Superadmins are exempt because they get permissions implicitly (always have all)
-    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin {
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -935,7 +1016,7 @@ pub async fn remove_user_permission(
     let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
     // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
-    if !auth_ctx.is_superadmin && is_admin_account(&db, &target_user)? {
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {

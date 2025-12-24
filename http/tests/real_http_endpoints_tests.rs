@@ -105,15 +105,16 @@ async fn test_create_user() {
         Some(&api_key),
         Some(json!({
             "username": username,
-            "password": "TestPass123!",
-            "is_superadmin": false
+            "password": "TestPass123!"
         })),
     )
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["username"], username);
-    assert_eq!(body["is_superadmin"], false);
+    // Verify user has no superadmin role
+    assert!(body["roles"].as_array().unwrap().is_empty() ||
+            !body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
@@ -200,7 +201,8 @@ async fn test_get_user_by_id() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
-    assert_eq!(body["is_superadmin"], true);
+    // Verify admin has superadmin role
+    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
@@ -799,7 +801,8 @@ async fn test_get_me() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
-    assert_eq!(body["is_superadmin"], true);
+    // Verify admin has superadmin role
+    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
