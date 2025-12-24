@@ -204,9 +204,9 @@ mod tests {
             let _ = db.verify_credentials("testuser", "WrongPassword");
         }
 
-        // Even correct password should fail now
+        // Even correct password should fail now (generic error to avoid enumeration)
         let result = db.verify_credentials("testuser", "TestPass123!");
-        assert!(matches!(result, Err(DatabaseError::AccountLocked(_))));
+        assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
     }
 
     #[test]

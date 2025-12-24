@@ -9,6 +9,20 @@ use ave_http::auth::database::DatabaseError;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::{
+        extract::{Path, Query},
+        http::StatusCode,
+        Extension, Json,
+    };
+    use ave_http::auth::{
+        admin_handlers::{
+            remove_user_permission, set_user_permission, RemovePermissionQuery,
+        },
+        middleware::AuthContextExtractor,
+        models::{AuthContext, Permission},
+    };
 
     // =============================================================================
     // PASSWORD POLICY VALIDATION TESTS
@@ -326,10 +340,15 @@ mod tests {
         );
         assert!(result.is_ok(), "Should accept username of exactly 64 chars");
 
-        // Very long role name - role validation may not be as strict
+        // Very long role name now rejected by validation (limit is 100)
         let long_role_name = "b".repeat(255);
         let role = db.create_role(&long_role_name, None);
-        assert!(role.is_ok(), "Role names may allow longer strings");
+        assert!(role.is_err(), "Should reject role names longer than 100 chars");
+
+        // Boundary: max allowed role name (100 chars) should work
+        let max_role_name = "b".repeat(100);
+        let role = db.create_role(&max_role_name, None);
+        assert!(role.is_ok(), "Should accept role name of exactly 100 chars");
     }
 
     // =============================================================================
@@ -442,6 +461,141 @@ mod tests {
         assert!(!perms_after.iter().any(|p| p.resource == "node_subject"
             && p.action == "get"
             && p.allowed));
+    }
+
+    // =============================================================================
+    // ADMIN PERMISSION GUARDS
+    // =============================================================================
+
+    #[tokio::test]
+    async fn non_superadmin_cannot_modify_permissions_of_admin_via_role_inheritance(
+    ) {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        let admin_role =
+            db.create_role("admin_guard", Some("Admin guard role")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true)
+            .unwrap();
+
+        let actor = db
+            .create_user(
+                "admin_actor",
+                "Password123!",
+                false,
+                Some(vec![admin_role.id]),
+                None,
+                None,
+            )
+            .unwrap();
+        let target = db
+            .create_user(
+                "admin_target",
+                "Password123!",
+                false,
+                Some(vec![admin_role.id]),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let permissions = db.get_effective_permissions(actor.id).unwrap();
+        let roles = db.get_user_roles(actor.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: actor.id,
+            username: actor.username.clone(),
+            is_superadmin: false,
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        let result = set_user_permission(
+            AuthContextExtractor(auth_ctx),
+            Extension(db.clone()),
+            Path(target.id),
+            Json(Permission {
+                resource: "admin_system".to_string(),
+                action: "all".to_string(),
+                allowed: true,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
+    }
+
+    #[tokio::test]
+    async fn non_superadmin_cannot_remove_permissions_of_admin_via_role_inheritance(
+    ) {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        let admin_role = db
+            .create_role("admin_guard_remove", Some("Admin guard role"))
+            .unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true)
+            .unwrap();
+
+        let actor = db
+            .create_user(
+                "admin_actor_remove",
+                "Password123!",
+                false,
+                Some(vec![admin_role.id]),
+                None,
+                None,
+            )
+            .unwrap();
+        let target = db
+            .create_user(
+                "admin_target_remove",
+                "Password123!",
+                false,
+                Some(vec![admin_role.id]),
+                None,
+                None,
+            )
+            .unwrap();
+
+        db.set_user_permission(
+            target.id,
+            "node_subject",
+            "get",
+            true,
+            Some(actor.id),
+        )
+        .unwrap();
+
+        let permissions = db.get_effective_permissions(actor.id).unwrap();
+        let roles = db.get_user_roles(actor.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: actor.id,
+            username: actor.username.clone(),
+            is_superadmin: false,
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        let result = remove_user_permission(
+            AuthContextExtractor(auth_ctx),
+            Extension(db.clone()),
+            Path(target.id),
+            Query(RemovePermissionQuery {
+                resource: "node_subject".to_string(),
+                action: "get".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err((StatusCode::FORBIDDEN, _))));
     }
 
     // =============================================================================

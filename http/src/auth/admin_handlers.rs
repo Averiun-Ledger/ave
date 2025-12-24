@@ -40,6 +40,32 @@ fn db_error_to_response(
     (status, Json(ErrorResponse { error: message }))
 }
 
+/// Determine if a user has admin-level permissions (superadmin or admin resources)
+fn is_admin_account(
+    db: &AuthDatabase,
+    user: &User,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    if user.is_superadmin {
+        return Ok(true);
+    }
+
+    let admin_resources = [
+        "admin_users",
+        "admin_roles",
+        "admin_api_key",
+        "admin_system",
+        "user_api_key",
+    ];
+
+    let effective_permissions = db
+        .get_effective_permissions(user.id)
+        .map_err(db_error_to_response)?;
+
+    Ok(effective_permissions.iter().any(|perm| {
+        perm.allowed && admin_resources.contains(&perm.resource.as_str())
+    }))
+}
+
 // =============================================================================
 // USER MANAGEMENT ENDPOINTS
 // =============================================================================
@@ -828,7 +854,18 @@ pub async fn set_user_permission(
     }
 
     // Ensure user exists
-    db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
+    // Only superadmins can modify permissions of other admins (separation of duties)
+    if !auth_ctx.is_superadmin && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify permissions of other admins".to_string(),
+            }),
+        ));
+    }
 
     db.set_user_permission(
         user_id,
@@ -895,7 +932,17 @@ pub async fn remove_user_permission(
     }
 
     // Ensure user exists
-    db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
+    if !auth_ctx.is_superadmin && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify permissions of other admins".to_string(),
+            }),
+        ));
+    }
 
     db.remove_user_permission(user_id, &params.resource, &params.action)
         .map_err(db_error_to_response)?;
