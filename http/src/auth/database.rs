@@ -836,6 +836,14 @@ impl AuthDatabase {
             ));
         }
 
+        // SECURITY: Only allow password change if it's required
+        // This prevents users from resetting their lockout counter by changing password
+        if !user.must_change_password {
+            return Err(DatabaseError::PermissionDenied(
+                "Password change not required. Use authenticated endpoints to change your password.".to_string(),
+            ));
+        }
+
         // Validate new password
         validate_password(new_password)
             .map_err(DatabaseError::ValidationError)?;
