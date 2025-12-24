@@ -816,6 +816,17 @@ pub async fn set_user_permission(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
+    // Superadmins are exempt because they get permissions implicitly (always have all)
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot modify your own permissions".to_string(),
+            }),
+        ));
+    }
+
     // Ensure user exists
     db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
@@ -871,6 +882,17 @@ pub async fn remove_user_permission(
     Query(params): Query<RemovePermissionQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
+
+    // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
+    // Superadmins are exempt because they get permissions implicitly (always have all)
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot modify your own permissions".to_string(),
+            }),
+        ));
+    }
 
     // Ensure user exists
     db.get_user_by_id(user_id).map_err(db_error_to_response)?;
