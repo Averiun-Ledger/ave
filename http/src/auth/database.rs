@@ -848,6 +848,13 @@ impl AuthDatabase {
         validate_password(new_password)
             .map_err(DatabaseError::ValidationError)?;
 
+        // Prevent setting the same password
+        if current_password == new_password {
+            return Err(DatabaseError::ValidationError(
+                "New password must be different from current password".to_string(),
+            ));
+        }
+
         let password_hash = hash_password(new_password).map_err(|e| {
             DatabaseError::CryptoError(format!(
                 "Failed to hash password: {}",
