@@ -96,6 +96,13 @@ pub async fn create_user(
     };
 
     // Audit log
+    // SECURITY FIX: Sanitize request to avoid logging password
+    let audit_details = serde_json::json!({
+        "username": req.username,
+        "is_superadmin": req.is_superadmin,
+        "role_ids": req.role_ids,
+        "must_change_password": req.must_change_password,
+    });
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
@@ -105,7 +112,7 @@ pub async fn create_user(
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
     });
@@ -257,6 +264,12 @@ pub async fn update_user(
     };
 
     // Audit log
+    // SECURITY FIX: Sanitize request to avoid logging password
+    let audit_details = serde_json::json!({
+        "is_active": req.is_active,
+        "role_ids": req.role_ids,
+        "password_changed": req.password.is_some(),
+    });
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
@@ -266,7 +279,7 @@ pub async fn update_user(
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
     });

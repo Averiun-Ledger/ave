@@ -185,15 +185,40 @@ impl AuthDatabase {
 
         sql.push_str(" ORDER BY timestamp DESC");
 
-        if let Some(limit) = query.limit {
-            sql.push_str(" LIMIT ?");
-            params_vec.push(Box::new(limit));
-        }
+        // SECURITY FIX: Validate and enforce safe limits for pagination
+        const MAX_LIMIT: i64 = 1000;
+        const DEFAULT_LIMIT: i64 = 100;
 
-        if let Some(offset) = query.offset {
-            sql.push_str(" OFFSET ?");
-            params_vec.push(Box::new(offset));
-        }
+        let limit = match query.limit {
+            Some(l) if l > 0 && l <= MAX_LIMIT => l,
+            Some(l) if l <= 0 => {
+                return Err(DatabaseError::ValidationError(
+                    format!("Limit must be positive (got {})", l)
+                ));
+            }
+            Some(l) => {
+                return Err(DatabaseError::ValidationError(
+                    format!("Limit must not exceed {} (got {})", MAX_LIMIT, l)
+                ));
+            }
+            None => DEFAULT_LIMIT,
+        };
+
+        let offset = match query.offset {
+            Some(o) if o >= 0 => o,
+            Some(o) => {
+                return Err(DatabaseError::ValidationError(
+                    format!("Offset must be non-negative (got {})", o)
+                ));
+            }
+            None => 0,
+        };
+
+        sql.push_str(" LIMIT ?");
+        params_vec.push(Box::new(limit));
+
+        sql.push_str(" OFFSET ?");
+        params_vec.push(Box::new(offset));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
