@@ -82,11 +82,36 @@ impl AuthDatabase {
     ) -> Result<Role, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        // Check if role already exists
+        // SECURITY FIX: Validate role name length and characters
+        const MAX_NAME_LENGTH: usize = 100;
+        const MAX_DESC_LENGTH: usize = 500;
+
         if name.trim().is_empty() {
             return Err(DatabaseError::ValidationError(
                 "Role name cannot be empty".to_string(),
             ));
+        }
+
+        if name.len() > MAX_NAME_LENGTH {
+            return Err(DatabaseError::ValidationError(
+                format!("Role name must not exceed {} characters (got {})", MAX_NAME_LENGTH, name.len())
+            ));
+        }
+
+        // Validate no dangerous control characters
+        if name.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(DatabaseError::ValidationError(
+                "Role name contains invalid control characters".to_string()
+            ));
+        }
+
+        // Validate description length
+        if let Some(desc) = description {
+            if desc.len() > MAX_DESC_LENGTH {
+                return Err(DatabaseError::ValidationError(
+                    format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
+                ));
+            }
         }
         let exists: bool = conn
             .query_row(
@@ -163,6 +188,17 @@ impl AuthDatabase {
         description: Option<&str>,
     ) -> Result<Role, DatabaseError> {
         let conn = self.lock_conn()?;
+
+        // SECURITY FIX: Validate description length
+        const MAX_DESC_LENGTH: usize = 500;
+
+        if let Some(desc) = description {
+            if desc.len() > MAX_DESC_LENGTH {
+                return Err(DatabaseError::ValidationError(
+                    format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
+                ));
+            }
+        }
 
         // Check if role is system role
         let role = Self::get_role_by_id_internal(&conn, role_id)?;
