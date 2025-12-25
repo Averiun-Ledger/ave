@@ -133,10 +133,56 @@ mod tests {
         db.create_user("user2", "TestPass123!", None, None, Some(false))
             .unwrap();
 
-        let users = db.list_users(false).unwrap();
+        let users = db.list_users(false, 100, 0).unwrap();
 
         // At least 3 users (admin + user1 + user2)
         assert!(users.len() >= 3);
+    }
+
+    #[test]
+    fn test_list_users_pagination() {
+        let (db, _dirs) = create_test_db();
+
+        // Create 5 test users
+        for i in 1..=5 {
+            db.create_user(
+                &format!("user{}", i),
+                "TestPass123!",
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap();
+        }
+
+        // Test limit
+        let page1 = db.list_users(false, 2, 0).unwrap();
+        assert_eq!(page1.len(), 2, "First page should have 2 users");
+
+        // Test offset
+        let page2 = db.list_users(false, 2, 2).unwrap();
+        assert_eq!(page2.len(), 2, "Second page should have 2 users");
+
+        // Verify different users on different pages
+        assert_ne!(
+            page1[0].username, page2[0].username,
+            "Pages should have different users"
+        );
+
+        // Test getting all users
+        let all_users = db.list_users(false, 100, 0).unwrap();
+        assert!(
+            all_users.len() >= 6,
+            "Should have at least 6 users (admin + 5 created)"
+        );
+
+        // Test offset beyond available users
+        let beyond = db.list_users(false, 10, 100).unwrap();
+        assert_eq!(beyond.len(), 0, "Offset beyond users should return empty");
+
+        // Test limit of 1
+        let single = db.list_users(false, 1, 0).unwrap();
+        assert_eq!(single.len(), 1, "Limit 1 should return exactly 1 user");
     }
 
     #[test]

@@ -483,6 +483,8 @@ impl AuthDatabase {
     pub fn list_users(
         &self,
         include_inactive: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<UserInfo>, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -491,13 +493,15 @@ impl AuthDatabase {
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0
-             ORDER BY u.username"
+             ORDER BY u.username
+             LIMIT ?1 OFFSET ?2"
         } else {
             "SELECT u.id, u.username, u.is_active, u.failed_login_attempts,
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0 AND u.is_active = 1
-             ORDER BY u.username"
+             ORDER BY u.username
+             LIMIT ?1 OFFSET ?2"
         };
 
         let mut stmt = conn
@@ -505,7 +509,7 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         let users = stmt
-            .query_map([], |row| {
+            .query_map(params![limit, offset], |row| {
                 let user_id: i64 = row.get(0)?;
                 Ok((
                     user_id,

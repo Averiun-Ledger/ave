@@ -297,7 +297,9 @@ pub async fn create_user(
     operation_id = "listUsers",
     tag = "User Management",
     params(
-        ("include_inactive" = Option<bool>, Query, description = "Include inactive users")
+        ("include_inactive" = Option<bool>, Query, description = "Include inactive users"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 100, max: 1000)"),
+        ("offset" = Option<i64>, Query, description = "Number of users to skip for pagination (default: 0)")
     ),
     responses(
         (status = 200, description = "List of users", body = Vec<UserInfo>),
@@ -313,8 +315,22 @@ pub async fn list_users(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
 
+    // Set defaults and limits for pagination
+    const DEFAULT_LIMIT: i64 = 100;
+    const MAX_LIMIT: i64 = 1000;
+
+    let limit = params.limit
+        .unwrap_or(DEFAULT_LIMIT)
+        .min(MAX_LIMIT)
+        .max(1);
+    let offset = params.offset.unwrap_or(0).max(0);
+
     let users = db
-        .list_users(params.include_inactive.unwrap_or(false))
+        .list_users(
+            params.include_inactive.unwrap_or(false),
+            limit,
+            offset,
+        )
         .map_err(db_error_to_response)?;
 
     Ok(Json(users))
@@ -323,6 +339,10 @@ pub async fn list_users(
 #[derive(Deserialize, ToSchema)]
 pub struct ListUsersQuery {
     pub include_inactive: Option<bool>,
+    /// Maximum number of users to return (default: 100, max: 1000)
+    pub limit: Option<i64>,
+    /// Number of users to skip (default: 0)
+    pub offset: Option<i64>,
 }
 
 /// Get user by ID

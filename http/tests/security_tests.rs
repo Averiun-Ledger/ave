@@ -158,7 +158,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Tables should still exist
-        let users = db.list_users(false);
+        let users = db.list_users(false, 100, 0);
         assert!(users.is_ok());
     }
 

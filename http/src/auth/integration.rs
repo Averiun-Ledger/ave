@@ -71,8 +71,8 @@ pub async fn initialize_auth_database(
 ///
 /// This function logs useful information about the current state of the auth system
 pub async fn log_auth_statistics(db: &AuthDatabase) {
-    // Get total users
-    match db.list_users(false) {
+    // Get total users (using a high limit to get all users for statistics)
+    match db.list_users(false, 10000, 0) {
         Ok(users) => {
             info!(TARGET, "Total active users: {}", users.len());
         }
