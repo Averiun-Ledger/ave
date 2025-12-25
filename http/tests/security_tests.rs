@@ -43,9 +43,9 @@ mod tests {
     fn test_password_too_long() {
         let (db, _dirs) = common::create_test_db();
 
-        let long_pass = "Aa1!Aa1!Aa1!Aa1!Aa1!X"; // 21 chars
+        let long_pass = "Aa1!".repeat(33); // 132 chars (exceeds 128 limit)
         let result =
-            db.create_user("testuser", long_pass, None, None, Some(false));
+            db.create_user("testuser", &long_pass, None, None, Some(false));
 
         assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
     }
