@@ -545,7 +545,9 @@ impl AuthDatabase {
                     (SELECT MAX(CASE WHEN rp.allowed THEN 1 ELSE 0 END)
                      FROM role_permissions rp
                      INNER JOIN user_roles ur ON rp.role_id = ur.role_id
-                     WHERE ur.user_id = ?1 AND rp.resource_id = res.id AND rp.action_id = act.id)
+                     INNER JOIN roles r ON ur.role_id = r.id
+                     WHERE ur.user_id = ?1 AND rp.resource_id = res.id AND rp.action_id = act.id
+                       AND r.is_deleted = 0)
                 ) as allowed
              FROM resources res
              CROSS JOIN actions act

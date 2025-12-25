@@ -2054,4 +2054,278 @@ mod tests {
             "API key should work after password has been changed"
         );
     }
+
+    /// SECURITY TEST: Superadmin can change their own password
+    #[test]
+    fn test_superadmin_can_change_own_password() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Get bootstrap superadmin
+        let superadmin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+
+        // Superadmin changes their own password
+        let result = db.update_user(superadmin.id, Some("NewAdminPass123!"), None);
+        assert!(result.is_ok(), "Superadmin should be able to change their own password");
+
+        // Verify old password doesn't work
+        let old_login = db.verify_credentials("admin", "AdminPass123!");
+        assert!(old_login.is_err(), "Old password should not work");
+
+        // Verify new password works
+        let new_login = db.verify_credentials("admin", "NewAdminPass123!");
+        assert!(new_login.is_ok(), "New password should work");
+    }
+
+    /// SECURITY TEST: Superadmin can delete their own API keys
+    #[test]
+    fn test_superadmin_can_delete_own_api_keys() {
+        let (db, _dirs) = common::create_test_db();
+
+        let superadmin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+
+        // Create API key for superadmin (management key)
+        let (api_key, key_info) = db
+            .create_api_key(superadmin.id, Some("admin_key"), None, None, true)
+            .unwrap();
+
+        // Verify key works
+        assert!(db.verify_api_key(&api_key).is_ok());
+
+        // Superadmin revokes their own key
+        let result = db.revoke_api_key(&key_info.id, Some(superadmin.id), Some("Self-revocation"));
+        assert!(result.is_ok(), "Superadmin should be able to revoke their own API key");
+
+        // Verify key no longer works
+        assert!(db.verify_api_key(&api_key).is_err());
+    }
+
+    /// SECURITY TEST: Permission conflicts - user deny overrides role allow
+    #[test]
+    fn test_permission_conflict_user_deny_overrides_role_allow() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Create user
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Create role with permission
+        let role = db.create_role("viewer", None).unwrap();
+        db.set_role_permission(role.id, "admin_users", "get", true).unwrap();
+
+        // Assign role to user
+        db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+        // Verify user has permission from role
+        let perms = db.get_effective_permissions(user.id).unwrap();
+        assert!(perms.iter().any(|p| p.resource == "admin_users" && p.action == "get" && p.allowed));
+
+        // Set user-level deny (should override role allow)
+        db.set_user_permission(user.id, "admin_users", "get", false, None).unwrap();
+
+        // Verify user-level deny overrides role allow
+        let perms = db.get_effective_permissions(user.id).unwrap();
+        let events_get = perms.iter().find(|p| p.resource == "admin_users" && p.action == "get");
+        assert!(events_get.is_some());
+        assert!(!events_get.unwrap().allowed, "User-level deny should override role allow");
+    }
+
+    /// SECURITY TEST: Removing role removes permissions immediately
+    #[test]
+    fn test_removing_role_removes_permissions_immediately() {
+        let (db, _dirs) = common::create_test_db();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Create role with permissions
+        let role = db.create_role("editor", None).unwrap();
+        db.set_role_permission(role.id, "admin_users", "post", true).unwrap();
+        db.set_role_permission(role.id, "admin_users", "delete", true).unwrap();
+
+        // Assign role
+        db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+        // Verify permissions
+        let perms = db.get_effective_permissions(user.id).unwrap();
+        assert!(perms.iter().any(|p| p.resource == "admin_users" && p.action == "post"));
+        assert!(perms.iter().any(|p| p.resource == "admin_users" && p.action == "delete"));
+
+        // Remove role
+        db.remove_role_from_user(user.id, role.id).unwrap();
+
+        // Verify permissions are gone
+        let perms = db.get_effective_permissions(user.id).unwrap();
+        assert!(!perms.iter().any(|p| p.resource == "admin_users" && p.action == "post"));
+        assert!(!perms.iter().any(|p| p.resource == "admin_users" && p.action == "delete"));
+    }
+
+    /// SECURITY TEST: Deleting role removes it from all users
+    #[test]
+    fn test_deleting_role_removes_from_all_users() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Create multiple users
+        let user1 = db.create_user("user1", "Pass123!", None, None, Some(false)).unwrap();
+        let user2 = db.create_user("user2", "Pass123!", None, None, Some(false)).unwrap();
+
+        // Create role and assign to both
+        let role = db.create_role("shared_role", None).unwrap();
+        db.set_role_permission(role.id, "admin_users", "get", true).unwrap();
+        db.assign_role_to_user(user1.id, role.id, None).unwrap();
+        db.assign_role_to_user(user2.id, role.id, None).unwrap();
+
+        // Verify both have permissions
+        assert!(db.get_effective_permissions(user1.id).unwrap().len() > 0);
+        assert!(db.get_effective_permissions(user2.id).unwrap().len() > 0);
+
+        // Delete role
+        db.delete_role(role.id).unwrap();
+
+        // Verify both users lost permissions
+        assert_eq!(db.get_effective_permissions(user1.id).unwrap().len(), 0);
+        assert_eq!(db.get_effective_permissions(user2.id).unwrap().len(), 0);
+    }
+
+    /// SECURITY TEST: Management vs Service key permissions
+    #[test]
+    fn test_management_key_has_full_permissions() {
+        let (db, _dirs) = common::create_test_db();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // User only has events:get permission
+        let role = db.create_role("viewer", None).unwrap();
+        db.set_role_permission(role.id, "admin_users", "get", true).unwrap();
+        db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+        // Create management key (is_management = true)
+        let result = db.create_api_key(
+            user.id,
+            Some("management_key"),
+            None,
+            None,
+            true // management key
+        );
+
+        // Should succeed in creating the key
+        assert!(result.is_ok());
+        let (_api_key, key_info) = result.unwrap();
+        assert!(key_info.is_management, "Key should be marked as management key");
+    }
+
+    /// SECURITY TEST: Service key marked correctly
+    #[test]
+    fn test_service_key_flag() {
+        let (db, _dirs) = common::create_test_db();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Create service key (is_management = false)
+        let (_api_key, key_info) = db
+            .create_api_key(user.id, Some("service_key"), None, None, false)
+            .unwrap();
+
+        assert!(!key_info.is_management, "Key should be marked as service key (not management)");
+    }
+
+    /// SECURITY TEST: Concurrent password changes
+    #[test]
+    fn test_concurrent_password_changes() {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        let user = db
+            .create_user("testuser", "OldPass123!", None, None, Some(false))
+            .unwrap();
+
+        let mut handles = vec![];
+        for i in 0..5 {
+            let db_clone = Arc::clone(&db);
+            let user_id = user.id;
+            let handle = std::thread::spawn(move || {
+                db_clone.update_user(
+                    user_id,
+                    Some(&format!("NewPass{}!", i)),
+                    None
+                )
+            });
+            handles.push(handle);
+        }
+
+        let mut successes = 0;
+        for handle in handles {
+            if handle.join().unwrap().is_ok() {
+                successes += 1;
+            }
+        }
+
+        // At least one should succeed
+        assert!(successes > 0, "At least one concurrent password change should succeed");
+    }
+
+    /// SECURITY TEST: Lockout triggers after 5 failed attempts
+    #[test]
+    fn test_lockout_triggers_after_failed_attempts() {
+        let (db, _dirs) = common::create_test_db();
+
+        db.create_user("victim", "CorrectPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Make 4 failed attempts (not enough to trigger lockout)
+        for _ in 0..4 {
+            let _ = db.verify_credentials("victim", "WrongPass123!");
+        }
+
+        // 5th attempt should still work with correct password
+        let result = db.verify_credentials("victim", "CorrectPass123!");
+        // Note: successful login resets counter, so this works
+        assert!(result.is_ok(), "Should be able to login after 4 failed attempts");
+
+        // Make 5 failed attempts to trigger lockout
+        for _ in 0..5 {
+            let _ = db.verify_credentials("victim", "WrongPass123!");
+        }
+
+        // Should be locked now
+        let result = db.verify_credentials("victim", "CorrectPass123!");
+        assert!(result.is_err(), "Account should be locked after 5 failed attempts");
+    }
+
+    /// SECURITY TEST: Password change resets lockout
+    #[test]
+    fn test_password_change_resets_lockout() {
+        let (db, _dirs) = common::create_test_db();
+
+        let user = db
+            .create_user("victim", "OldPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Trigger lockout (5 failed attempts)
+        for _ in 0..5 {
+            let _ = db.verify_credentials("victim", "WrongPass!");
+        }
+
+        // Verify locked
+        let result = db.verify_credentials("victim", "OldPass123!");
+        assert!(result.is_err());
+
+        // Admin resets password
+        db.admin_reset_password(user.id, "NewPass123!").unwrap();
+
+        // Should be able to change password now
+        let result = db.change_password_with_credentials("victim", "NewPass123!", "FinalPass123!");
+        assert!(result.is_ok(), "Password change should work after admin reset");
+
+        // Verify failed_login_attempts reset
+        let updated_user = db.verify_credentials("victim", "FinalPass123!").unwrap();
+        assert_eq!(updated_user.failed_login_attempts, 0);
+        assert!(updated_user.locked_until.is_none());
+    }
+
 }

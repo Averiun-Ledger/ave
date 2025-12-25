@@ -793,6 +793,95 @@ mod tests {
         assert!(matches!(result, Err(DatabaseError::RateLimitExceeded(_))));
     }
 
+    #[test]
+    fn test_rate_limit_by_both_key_and_ip() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 2,
+            limit_by_key: true,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
+
+        let user1 = db
+            .create_user("user1", "TestPass123!", None, None, Some(false))
+            .unwrap();
+        let user2 = db
+            .create_user("user2", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        let (_, key1) = db
+            .create_api_key(user1.id, Some("key1"), None, None, false)
+            .unwrap();
+        let (_, key2) = db
+            .create_api_key(user2.id, Some("key2"), None, None, false)
+            .unwrap();
+
+        // Scenario 1: Same key, different IPs - each IP should have independent limit
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@10.0.0.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key1@10.0.0.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_err(),
+            "Third request from key1@10.0.0.1 should exceed limit"
+        );
+
+        // Same key from different IP should work (independent counter)
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@10.0.0.2 should pass (different IP)"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key1@10.0.0.2 should pass"
+        );
+
+        // Scenario 2: Different keys, same IP - each key should have independent limit
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key2@192.168.1.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key2@192.168.1.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_err(),
+            "Third request from key2@192.168.1.1 should exceed limit"
+        );
+
+        // Different key from same IP should work (independent counter)
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@192.168.1.1 should pass (different key)"
+        );
+
+        // Scenario 3: Verify that limit is per (key, IP) combination
+        // key1 from 10.0.0.2 already has 2 requests, should fail on 3rd
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_err(),
+            "Third request from key1@10.0.0.2 should exceed limit"
+        );
+    }
+
     // =============================================================================
     // AUDIT LOG TESTS
     // =============================================================================
