@@ -306,7 +306,9 @@ impl PersistentActor for Register {
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
             RegisterEvent::EOLGov { gov_id } => {
-                self.register_gov.get_mut(gov_id).map(|x| x.active = false);
+                if let Some(gov) = self.register_gov.get_mut(gov_id) {
+                    gov.active = false;
+                };
             }
             RegisterEvent::EOLSubj { gov_id, subj_id } => {
                 self.register_subj

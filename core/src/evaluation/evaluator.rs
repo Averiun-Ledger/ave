@@ -1,9 +1,26 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    Error, EventRequest, evaluation::response::Response as EvalRes, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData, model::Schema}, helpers::network::{NetworkMessage, intermediary::Intermediary}, model::{
-        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::get_metadata}, network::{RetryNetwork, TimeOutResponse}, request::SchemaType
-    }, system::ConfigHelper
+    Error, EventRequest,
+    evaluation::response::Response as EvalRes,
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse,
+        data::GovernanceData, model::Schema,
+    },
+    helpers::network::{
+        NetworkMessage, service::HelperService,
+    },
+    model::{
+        SignTypesNode,
+        common::{
+            emit_fail,
+            node::{UpdateData, get_sign, update_ledger_network},
+            subject::get_metadata,
+        },
+        network::{RetryNetwork, TimeOutResponse},
+        request::SchemaType,
+    },
+    system::ConfigHelper,
 };
 
 use crate::helpers::network::ActorMessage;
@@ -135,17 +152,17 @@ impl Evaluator {
     ) -> Result<bool, ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match GovernanceData::try_from(metadata.properties.clone())
-        {
-            Ok(gov) => gov,
-            Err(e) => {
-                let e = format!(
-                    "can not convert governance from properties: {}",
-                    e
-                );
-                return Err(ActorError::FunctionalFail(e));
-            }
-        };
+        let governance =
+            match GovernanceData::try_from(metadata.properties.clone()) {
+                Ok(gov) => gov,
+                Err(e) => {
+                    let e = format!(
+                        "can not convert governance from properties: {}",
+                        e
+                    );
+                    return Err(ActorError::FunctionalFail(e));
+                }
+            };
 
         match gov_version.cmp(&governance.version) {
             std::cmp::Ordering::Equal => {
@@ -322,7 +339,9 @@ impl Evaluator {
         };
 
         match response {
-            GovernanceResponse::NewCompilers(new_compilers) => Ok(new_compilers),
+            GovernanceResponse::NewCompilers(new_compilers) => {
+                Ok(new_compilers)
+            }
             _ => Err(ActorError::UnexpectedResponse(
                 subject_path,
                 "GovernanceResponse::NewCompilers".to_owned(),
@@ -432,17 +451,18 @@ pub enum EvaluatorMessage {
     NetworkEvaluation {
         evaluation_req: Signed<EvaluationReq>,
         schema_id: SchemaType,
-        node_key: PublicKey,
-        our_key: PublicKey,
+        node_key: PublicKey
     },
     NetworkResponse {
         evaluation_res: Signed<EvaluationRes>,
         request_id: String,
         version: u64,
+        sender: PublicKey
     },
     NetworkRequest {
         evaluation_req: Signed<EvaluationReq>,
         schema_id: SchemaType,
+        sender: PublicKey,
         info: ComunicateInfo,
     },
 }
@@ -471,8 +491,7 @@ impl Handler<Evaluator> for Evaluator {
                 evaluation_req,
                 our_key,
             } => {
-                let is_governance =
-                    evaluation_req.context.schema_id.is_gov();
+                let is_governance = evaluation_req.context.schema_id.is_gov();
 
                 // Get governance id
                 let governance_id = if is_governance {
@@ -567,7 +586,6 @@ impl Handler<Evaluator> for Evaluator {
                 evaluation_req,
                 schema_id,
                 node_key,
-                our_key,
             } => {
                 let receiver_actor = if schema_id.is_gov() {
                     format!(
@@ -586,7 +604,6 @@ impl Handler<Evaluator> for Evaluator {
                     info: ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor,
                     },
@@ -639,9 +656,10 @@ impl Handler<Evaluator> for Evaluator {
                 evaluation_res,
                 request_id,
                 version,
+                sender
             } => {
                 if request_id == self.request_id && version == self.version {
-                    if self.node != evaluation_res.signature.signer {
+                    if self.node != sender {
                         let e = "We received an evaluation where the request indicates one subject but the info indicates another.";
                         error!(TARGET_EVALUATOR, "NetworkResponse, {}", e);
                         return Err(ActorError::Functional(e.to_owned()));
@@ -720,6 +738,7 @@ impl Handler<Evaluator> for Evaluator {
             EvaluatorMessage::NetworkRequest {
                 evaluation_req,
                 info,
+                sender,
                 schema_id,
             } => {
                 let info_subject_path =
@@ -750,7 +769,7 @@ impl Handler<Evaluator> for Evaluator {
                     return Err(ActorError::Functional(e.to_owned()));
                 }
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -852,8 +871,7 @@ impl Handler<Evaluator> for Evaluator {
                 };
 
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver.clone(),
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(

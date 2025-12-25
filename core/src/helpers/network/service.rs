@@ -2,6 +2,7 @@
 //!
 
 use crate::Error;
+use ave_actors::ActorError;
 use network::CommandHelper as Command;
 use tokio::sync::mpsc::Sender;
 
@@ -24,11 +25,11 @@ impl HelperService {
     pub async fn send_command(
         &mut self,
         command: Command<NetworkMessage>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ActorError> {
         self.command_sender
             .send(command)
             .await
-            .map_err(|e| Error::Network(e.to_string()))
+            .map_err(|e|  ActorError::Functional(Error::Network(e.to_string()).to_string()))
     }
 
     /// Send a message to the Helper worker.

@@ -191,7 +191,6 @@ impl Approval {
                 .tell(ApproverMessage::NetworkApproval {
                     approval_req: approval_req.clone(),
                     node_key: signer,
-                    our_key,
                 })
                 .await?;
         }
@@ -528,7 +527,6 @@ impl PersistentActor for Approval {
         self.approvers = state.approvers; 
         self.approvers_response = state.approvers_response; 
         self.approvers_quantity = state.approvers_quantity; 
-
     }
 
     fn create_initial(params: Self::InitParams) -> Self {

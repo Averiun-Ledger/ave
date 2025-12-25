@@ -642,7 +642,7 @@ impl Tracker {
     ) -> Result<(), ActorError> {
         let relation_path = ActorPath::from(&format!(
             "/user/node/{}/relation_ship",
-            self.governance_id.to_string()
+            self.governance_id
         ));
         let relation_actor: Option<ActorRef<RelationShip>> =
             ctx.system().get_actor(&relation_path).await;
@@ -678,7 +678,7 @@ impl Tracker {
     ) -> Result<(), ActorError> {
         let relation_path = ActorPath::from(&format!(
             "/user/node/{}/relation_ship",
-            self.governance_id.to_string()
+            self.governance_id
         ));
         let relation_actor: Option<ActorRef<RelationShip>> =
             ctx.system().get_actor(&relation_path).await;
@@ -944,11 +944,8 @@ impl PersistentActor for Tracker {
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        let init = if let Some(init) = params.0 {
-            init
-        } else {
-            Default::default()
-        };
+        let init = params.0.unwrap_or_default();
+
         Self {
             our_key: params.1,
             subject_metadata: init.subject_metadata,

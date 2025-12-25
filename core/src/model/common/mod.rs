@@ -1,4 +1,3 @@
-use ave_common::{RequestInfo, RequestState};
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
@@ -56,13 +55,13 @@ where
         let mut out: Vec<(u64, T)> = Vec::new();
 
         if let Some((key, value)) = self.inner.range(..lower).next_back() {
-            out.push((key.clone(), value.clone()));
+            out.push((*key, value.clone()));
         }
 
         for (key, value) in
             self.inner.range((Included(&lower), Included(&upper)))
         {
-            out.push((key.clone(), value.clone()));
+            out.push((*key, value.clone()));
         }
 
         out
@@ -79,8 +78,8 @@ where
 impl CeilingMap<HashSet<PublicKey>> {
     pub fn contains_from(&self, key: u64, target: &PublicKey) -> Option<u64> {
         for (k, v) in self.inner.range((Included(&key), Unbounded)) {
-            if v.contains(&target) {
-                return Some(k.clone());
+            if v.contains(target) {
+                return Some(*k);
             }
         }
         None
@@ -94,8 +93,8 @@ impl CeilingMap<HashMap<PublicKey, BTreeSet<String>>> {
         target: &PublicKey,
     ) -> Option<(u64, BTreeSet<String>)> {
         for (k, v) in self.inner.range((Included(&key), Unbounded)) {
-            if let Some(povs) = v.get(&target) {
-                return Some((k.clone(), povs.clone()));
+            if let Some(povs) = v.get(target) {
+                return Some((*k, povs.clone()));
             }
         }
         None

@@ -251,8 +251,7 @@ impl Subject for Governance {
         };
 
         if current_sn < self.subject_metadata.sn {
-            let old_gov = GovernanceData::try_from(current_properties)
-                .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
+            let old_gov = current_properties;
             if !self.subject_metadata.active {
                 if current_owner == self.our_key {
                     Self::down_owner(ctx).await?;
@@ -282,8 +281,7 @@ impl Subject for Governance {
                 Self::down_schemas(ctx, old_schemas_eval, old_schemas_val)
                     .await?;
             } else {
-                let new_gov = GovernanceData::try_from(self.properties.clone())
-                    .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
+                let new_gov = self.properties.clone();
 
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
@@ -581,8 +579,7 @@ impl Governance {
         ext_db: ExternalDB,
     ) -> Result<(), ActorError> {
         // If subject is a governance
-        let gov = GovernanceData::try_from(self.properties.clone())
-            .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
+        let gov = self.properties.clone();
 
         let owner = our_key == self.subject_metadata.owner;
         let new_owner = self.subject_metadata.new_owner.is_some();

@@ -159,10 +159,10 @@ impl GovernanceEvent {
         // (!set.is_empty()).then(|| set.into_iter().collect())
         if appr_quorum
             || approvers
-            || !eval_quorum.is_none()
-            || !vali_quorum.is_none()
-            || !evaluators.is_none()
-            || !validators.is_none()
+            || eval_quorum.is_some()
+            || vali_quorum.is_some()
+            || evaluators.is_some()
+            || validators.is_some()
         {
             Some(RolesRegisterUpdate {
                 appr_quorum,

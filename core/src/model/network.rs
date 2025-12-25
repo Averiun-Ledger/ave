@@ -7,7 +7,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{NetworkMessage, intermediary::Intermediary};
+use crate::{NetworkMessage, helpers::network::service::HelperService};
 
 use super::common::emit_fail;
 
@@ -52,7 +52,7 @@ impl Handler<RetryNetwork> for RetryNetwork {
         msg: NetworkMessage,
         ctx: &mut ActorContext<RetryNetwork>,
     ) -> Result<(), ActorError> {
-        let helper: Option<Intermediary> =
+        let helper: Option<HelperService> =
             ctx.system().get_helper("network").await;
 
         let Some(mut helper) = helper else {

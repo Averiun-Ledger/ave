@@ -28,7 +28,6 @@ use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, Signed};
 use config::Config as AveBaseConfig;
 use error::Error;
-use helpers::db::ExternalDB;
 use helpers::db::common::{
     ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
     SubjectInfo,
@@ -132,7 +131,7 @@ impl Api {
         })?;
 
         // Create worker
-        let service = Intermediary::new(
+        let service = Intermediary::build(
             worker.service().sender().clone(),
             system.clone(),
             token.clone(),
@@ -140,7 +139,7 @@ impl Api {
 
         let peer_id = worker.local_peer_id().to_string();
 
-        worker.add_helper_sender(service.service().sender());
+        worker.add_helper_sender(service.sender());
 
         system.add_helper("network", service).await;
 

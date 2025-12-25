@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
 use tracing::{error, warn};
 
+use crate::helpers::network::service::HelperService;
 use crate::model::common::node::{get_node_subject_data, subject_old};
 use crate::model::common::subject::get_gov;
 use crate::{
     ActorMessage, NetworkMessage,
     db::Storable,
     governance::model::WitnessesData,
-    intermediary::Intermediary,
     model::common::{emit_fail},
     update::{Update, UpdateMessage, UpdateNew, UpdateRes},
 };
@@ -71,6 +71,7 @@ fn merge_options(
     Clone, Debug, Serialize, Deserialize
 )]
 pub struct Auth {
+    #[serde(skip)]
     our_key: PublicKey,
     auth: HashMap<String, AuthWitness>,
 }
@@ -389,7 +390,6 @@ impl Handler<Auth> for Auth {
                         AuthWitness::One(key_identifier) => {
                             let info = ComunicateInfo {
                                 receiver: key_identifier.clone(),
-                                sender: self.our_key.clone(),
                                 request_id: String::default(),
                                 version: 0,
                                 receiver_actor: format!(
@@ -398,7 +398,7 @@ impl Handler<Auth> for Auth {
                                 ),
                             };
 
-                            let helper: Option<Intermediary> =
+                            let helper: Option<HelperService> =
                                 ctx.system().get_helper("network").await;
 
                             let Some(mut helper) = helper else {

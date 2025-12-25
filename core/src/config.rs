@@ -3,8 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Display},
-    path::PathBuf,
-    time::Duration,
+    path::PathBuf
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};

@@ -42,6 +42,7 @@ pub enum EvaluationSchemaMessage {
     NetworkRequest {
         evaluation_req: Box<Signed<EvaluationReq>>,
         info: ComunicateInfo,
+        sender: PublicKey,
         schema_id: SchemaType,
     },
     UpdateEvaluators(HashSet<PublicKey>, u64),
@@ -70,6 +71,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
             EvaluationSchemaMessage::NetworkRequest {
                 evaluation_req,
                 info,
+                sender,
                 schema_id,
             } => {
                 if self.gov_version < evaluation_req.content.gov_version
@@ -143,6 +145,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                     .tell(EvaluatorMessage::NetworkRequest {
                         evaluation_req: *evaluation_req,
                         info,
+                        sender,
                         schema_id,
                     })
                     .await

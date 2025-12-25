@@ -2,7 +2,6 @@ use crate::{
     approval::approver::ApproverEvent,
     error::Error,
     external_db::DBManager,
-    request::{RequestHandlerEvent, manager::RequestManagerEvent},
     subject::{
         SignedLedger, laststate::{LastStateEvent}, sinkdata::SinkDataEvent
     },
@@ -13,7 +12,7 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 use common::{
-    ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
+    ApproveInfo, EventInfo, PaginatorEvents, SignaturesInfo,
     SubjectInfo,
 };
 #[cfg(feature = "ext-sqlite")]

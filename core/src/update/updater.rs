@@ -37,18 +37,18 @@ pub enum UpdaterMessage {
     Transfer {
         subject_id: DigestIdentifier,
         node_key: PublicKey,
-        our_key: PublicKey,
     },
     TransferResponse {
         res: TransferResponse,
+        sender: PublicKey,
     },
     NetworkLastSn {
         subject_id: DigestIdentifier,
         node_key: PublicKey,
-        our_key: PublicKey,
     },
     NetworkResponse {
         sn: u64,
+        sender: PublicKey,
     },
 }
 
@@ -86,66 +86,70 @@ impl Handler<Updater> for Updater {
         ctx: &mut ActorContext<Updater>,
     ) -> Result<(), ActorError> {
         match msg {
-            UpdaterMessage::TransferResponse { res } => {
-                let update_path = ctx.path().parent();
-                let update_actor: Option<ActorRef<Update>> =
-                    ctx.system().get_actor(&update_path).await;
+            UpdaterMessage::TransferResponse { res, sender } => {
+                if sender == self.node {
+                    let update_path = ctx.path().parent();
+                    let update_actor: Option<ActorRef<Update>> =
+                        ctx.system().get_actor(&update_path).await;
 
-                if let Some(update_actor) = update_actor {
-                    if let Err(e) = update_actor
-                        .tell(UpdateMessage::TransferRes {
-                            sender: self.node.clone(),
-                            res,
-                        })
-                        .await
-                    {
+                    if let Some(update_actor) = update_actor {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::TransferRes {
+                                sender: self.node.clone(),
+                                res,
+                            })
+                            .await
+                        {
+                            error!(
+                                TARGET_UPDATER,
+                                "NetworkResponse, can not send response to Update actor: {}",
+                                e
+                            );
+                            return Err(e);
+                        }
+                    } else {
+                        let e = ActorError::NotFound(update_path);
                         error!(
                             TARGET_UPDATER,
-                            "NetworkResponse, can not send response to Update actor: {}",
+                            "NetworkResponse, can not obtain Update actor: {}",
                             e
                         );
                         return Err(e);
                     }
+
+                    'retry: {
+                        let Some(retry) = ctx
+                            .get_child::<RetryActor<RetryNetwork>>("retry")
+                            .await
+                        else {
+                            // Aquí me da igual, porque al parar este actor para el hijo
+                            break 'retry;
+                        };
+
+                        if let Err(e) = retry.tell(RetryMessage::End).await {
+                            warn!(
+                                TARGET_UPDATER,
+                                "NetworkResponse, can not end Retry actor: {}",
+                                e
+                            );
+                            // Aquí me da igual, porque al parar este actor para el hijo
+                            break 'retry;
+                        };
+                    }
+
+                    ctx.stop(None).await;
                 } else {
-                    let e = ActorError::NotFound(update_path);
-                    error!(
-                        TARGET_UPDATER,
-                        "NetworkResponse, can not obtain Update actor: {}", e
-                    );
-                    return Err(e);
+                    warn!(TARGET_UPDATER, "Invalid sender");
                 }
-
-                'retry: {
-                    let Some(retry) = ctx
-                        .get_child::<RetryActor<RetryNetwork>>("retry")
-                        .await
-                    else {
-                        // Aquí me da igual, porque al parar este actor para el hijo
-                        break 'retry;
-                    };
-
-                    if let Err(e) = retry.tell(RetryMessage::End).await {
-                        warn!(
-                            TARGET_UPDATER,
-                            "NetworkResponse, can not end Retry actor: {}", e
-                        );
-                        // Aquí me da igual, porque al parar este actor para el hijo
-                        break 'retry;
-                    };
-                }
-
-                ctx.stop(None).await;
             }
             UpdaterMessage::Transfer {
                 subject_id,
                 node_key,
-                our_key,
             } => {
                 let message = NetworkMessage {
                     info: ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
@@ -188,13 +192,11 @@ impl Handler<Updater> for Updater {
             UpdaterMessage::NetworkLastSn {
                 subject_id,
                 node_key,
-                our_key,
             } => {
                 let message = NetworkMessage {
                     info: ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
@@ -235,55 +237,59 @@ impl Handler<Updater> for Updater {
                     return Err(emit_fail(ctx, e).await);
                 };
             }
-            UpdaterMessage::NetworkResponse { sn } => {
-                let update_path = ctx.path().parent();
-                let update_actor: Option<ActorRef<Update>> =
-                    ctx.system().get_actor(&update_path).await;
+            UpdaterMessage::NetworkResponse { sn, sender } => {
+                if sender == self.node {
+                    let update_path = ctx.path().parent();
+                    let update_actor: Option<ActorRef<Update>> =
+                        ctx.system().get_actor(&update_path).await;
 
-                if let Some(update_actor) = update_actor {
-                    if let Err(e) = update_actor
-                        .tell(UpdateMessage::Response {
-                            sender: self.node.clone(),
-                            sn,
-                        })
-                        .await
-                    {
+                    if let Some(update_actor) = update_actor {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::Response {
+                                sender: self.node.clone(),
+                                sn,
+                            })
+                            .await
+                        {
+                            error!(
+                                TARGET_UPDATER,
+                                "NetworkResponse, can not send response to Update actor: {}",
+                                e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    } else {
+                        let e = ActorError::NotFound(update_path);
                         error!(
                             TARGET_UPDATER,
-                            "NetworkResponse, can not send response to Update actor: {}",
+                            "NetworkResponse, can not obtain Update actor: {}",
                             e
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                } else {
-                    let e = ActorError::NotFound(update_path);
-                    error!(
-                        TARGET_UPDATER,
-                        "NetworkResponse, can not obtain Update actor: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
+
+                    'retry: {
+                        let Some(retry) = ctx
+                            .get_child::<RetryActor<RetryNetwork>>("retry")
+                            .await
+                        else {
+                            // Aquí me da igual, porque al parar este actor para el hijo
+                            break 'retry;
+                        };
+
+                        if let Err(e) = retry.tell(RetryMessage::End).await {
+                            warn!(
+                                TARGET_UPDATER,
+                                "NetworkResponse, can not end Retry actor: {}",
+                                e
+                            );
+                            // Aquí me da igual, porque al parar este actor para el hijo
+                            break 'retry;
+                        };
+                    }
+
+                    ctx.stop(None).await;
                 }
-
-                'retry: {
-                    let Some(retry) = ctx
-                        .get_child::<RetryActor<RetryNetwork>>("retry")
-                        .await
-                    else {
-                        // Aquí me da igual, porque al parar este actor para el hijo
-                        break 'retry;
-                    };
-
-                    if let Err(e) = retry.tell(RetryMessage::End).await {
-                        warn!(
-                            TARGET_UPDATER,
-                            "NetworkResponse, can not end Retry actor: {}", e
-                        );
-                        // Aquí me da igual, porque al parar este actor para el hijo
-                        break 'retry;
-                    };
-                }
-
-                ctx.stop(None).await;
             }
         };
 

@@ -1,5 +1,5 @@
 use ave_actors::Message;
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::identity::{DigestIdentifier, Signed};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
@@ -46,9 +46,7 @@ pub enum ActorMessage {
         last_proof: ValidationProof,
         last_vali_res: Vec<ProtocolsSignatures>,
     },
-    DistributionLastEventRes {
-        signer: PublicKey,
-    },
+    DistributionLastEventRes,
     DistributionLedgerReq {
         gov_version: Option<u64>,
         actual_sn: Option<u64>,

@@ -215,7 +215,7 @@ impl SubjectMetadata {
         Self {
             name: request.name.clone(),
             description: request.description.clone(),
-            subject_id: subject_id,
+            subject_id,
             owner: owner.clone(),
             schema_id: request.schema_id.clone(),
             new_owner: None,

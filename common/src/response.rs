@@ -3,7 +3,7 @@
 use crate::namespace::Namespace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashSet, fmt::{Display, write}};
+use std::{collections::HashSet, fmt::Display};
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
@@ -196,7 +196,7 @@ pub enum RequestState {
     Evaluation,
     Approval,
     Validation,
-    Distribution
+    Distribution,
 }
 
 impl Display for RequestState {

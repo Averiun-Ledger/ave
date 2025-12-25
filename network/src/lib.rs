@@ -155,6 +155,8 @@ where
     },
     /// Received a message.
     ReceivedMessage {
+        /// Sender public key
+        sender: [u8; 32],
         /// The message received.
         message: Bytes,
     },
@@ -169,8 +171,6 @@ pub struct ComunicateInfo {
     pub request_id: String,
     /// The request version.
     pub version: u64,
-    /// The sender key identifier.
-    pub sender: PublicKey,
     /// The receiver key identifier.
     pub receiver: PublicKey,
     /// The receiver actor.

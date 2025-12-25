@@ -75,9 +75,7 @@ impl Distribution {
             Ok(child) => child,
             Err(e) => return Err(e),
         };
-
-        let our_key = self.node_key.clone();
-
+        
         let request_id = match self.dis_type {
             DistributionType::Manual => {
                 format!("node/manual_distribution/{}", self.request_id.clone())
@@ -94,7 +92,6 @@ impl Distribution {
                 ledger,
                 event,
                 node_key: signer,
-                our_key,
                 last_proof,
                 last_vali_res,
             })

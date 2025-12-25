@@ -18,16 +18,15 @@ use crate::{
         data::GovernanceData,
         model::{CreatorQuantity, HashThisRole, RoleTypes},
     },
-    intermediary::Intermediary,
+    helpers::network::service::HelperService,
     model::{
         Namespace,
         common::{
             emit_fail,
-            node::{
-                get_node_subject_data, subject_old_owner,
-                try_to_update,
+            node::{get_node_subject_data, subject_old_owner, try_to_update},
+            subject::{
+                get_gov, get_quantity, update_last_state, update_ledger,
             },
-            subject::{get_gov, get_quantity, update_last_state, update_ledger},
         },
         event::{Ledger, ProtocolsSignatures},
         network::RetryNetwork,
@@ -258,6 +257,7 @@ impl Distributor {
         info: ComunicateInfo,
         ledger: Ledger,
         auth_data: AuthGovData,
+        sender: PublicKey,
     ) -> Result<(), ActorError> {
         let our_key = info.receiver.clone();
         let subject_id = ledger.subject_id.clone();
@@ -345,6 +345,7 @@ impl Distributor {
                     gov_version,
                     gov_id_digest,
                     info,
+                    sender,
                     &auth_data.schema_id,
                 )
                 .await?;
@@ -383,6 +384,7 @@ impl Distributor {
         gov_version: u64,
         governance_id: DigestIdentifier,
         info: ComunicateInfo,
+        sender: PublicKey,
         schema_id: &SchemaType,
     ) -> Result<(), ActorError> {
         let governance_id_string = governance_id.to_string();
@@ -392,8 +394,7 @@ impl Distributor {
             std::cmp::Ordering::Less => {
                 // Mi version es menor, me actualizo. y no le envío nada
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver,
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
@@ -402,7 +403,7 @@ impl Distributor {
                     ),
                 };
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -433,7 +434,6 @@ impl Distributor {
                 if !schema_id.is_gov() {
                     let new_info = ComunicateInfo {
                         receiver: info.receiver,
-                        sender: info.sender,
                         request_id: info.request_id,
                         version: info.version,
                         receiver_actor: format!(
@@ -460,6 +460,7 @@ impl Distributor {
                             actual_sn: Some(gov_version),
                             subject_id: governance_id_string,
                             info: new_info,
+                            sender,
                         })
                         .await?;
                     warn!(
@@ -479,6 +480,7 @@ impl Distributor {
         subject_id: &str,
         gov_version: Option<u64>,
         info: &ComunicateInfo,
+        sender: PublicKey,
     ) -> Result<bool, ActorError> {
         let data = get_node_subject_data(ctx, subject_id).await?;
         let (namespace, governance_id, owner, schema_id, new_owner) =
@@ -528,29 +530,30 @@ impl Distributor {
                 gov_version,
                 gov_id_digest,
                 info.clone(),
+                sender.clone(),
                 &schema_id,
             )
             .await?;
         }
 
-        let sender = info.sender.to_string();
+        let sender_str = sender.to_string();
         if let Some(new_owner) = new_owner {
-            if owner == sender || new_owner == sender {
+            if owner == sender_str || new_owner == sender_str {
                 return Ok(is_gov);
             }
-        } else if owner == sender {
+        } else if owner == sender_str {
             return Ok(is_gov);
         }
 
         let has_this_role = if is_gov {
             HashThisRole::Gov {
-                who: info.sender.clone(),
+                who: sender.clone(),
                 role: RoleTypes::Witness,
             }
         } else {
             let owner = PublicKey::from_str(&owner).map_err(|e| ActorError::FunctionalFail(format!("Can not conver owner PublicKey (String) into PublicKey: {}", e)))?;
             HashThisRole::SchemaWitness {
-                who: info.sender.clone(),
+                who: sender.clone(),
                 creator: owner,
                 schema_id,
                 namespace,
@@ -608,11 +611,13 @@ pub enum DistributorMessage {
     Transfer {
         subject_id: String,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
     // HECHO
     GetLastSn {
         subject_id: String,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
     // HECHO
     // Un nodo nos solicitó la copia del ledger.
@@ -621,6 +626,7 @@ pub enum DistributorMessage {
         actual_sn: Option<u64>,
         subject_id: String,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
     // HECHO
     // Enviar a un nodo la replicación.
@@ -629,14 +635,13 @@ pub enum DistributorMessage {
         event: Signed<AveEvent>,
         ledger: SignedLedger,
         node_key: PublicKey,
-        our_key: PublicKey,
         last_proof: ValidationProof,
         last_vali_res: Vec<ProtocolsSignatures>,
     },
     // HECHO
     // El nodo al que le enviamos la replica la recivió, parar los reintentos.
     NetworkResponse {
-        signer: PublicKey,
+        sender: PublicKey,
     },
     // Nos llega una replica, guardarla en informar que la hemos recivido
     LastEventDistribution {
@@ -645,6 +650,7 @@ pub enum DistributorMessage {
         last_proof: ValidationProof,
         last_vali_res: Vec<ProtocolsSignatures>,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
     LedgerDistribution {
         events: Vec<SignedLedger>,
@@ -653,6 +659,7 @@ pub enum DistributorMessage {
         schema_id: SchemaType,
         governance_id: DigestIdentifier,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
 }
 
@@ -669,7 +676,11 @@ impl Handler<Distributor> for Distributor {
         ctx: &mut ActorContext<Distributor>,
     ) -> Result<(), ActorError> {
         match msg {
-            DistributorMessage::Transfer { subject_id, info } => {
+            DistributorMessage::Transfer {
+                subject_id,
+                info,
+                sender,
+            } => {
                 let (subject_data, new_owner) = match get_node_subject_data(
                     ctx,
                     &subject_id,
@@ -700,10 +711,10 @@ impl Handler<Distributor> for Distributor {
                     }
                 };
 
-                let sender = info.sender.to_string();
+                let sender_str = sender.to_string();
 
                 if let Some(_new_owner) = new_owner
-                    && subject_data.owner == sender
+                    && subject_data.owner == sender_str
                 {
                     // Todavía no se ha emitido evento de confirm ni de reject
                     return Ok(());
@@ -712,7 +723,7 @@ impl Handler<Distributor> for Distributor {
                 let is_old_owner = match subject_old_owner(
                     ctx,
                     &subject_id.to_string(),
-                    info.sender.clone(),
+                    sender.clone(),
                 )
                 .await
                 {
@@ -732,7 +743,7 @@ impl Handler<Distributor> for Distributor {
 
                 let res = if is_old_owner {
                     TransferResponse::Confirm
-                } else if !is_old_owner && subject_data.owner == sender {
+                } else if !is_old_owner && subject_data.owner == sender_str {
                     TransferResponse::Reject
                 } else {
                     let e = "Sender is not the owner and is not a old owner";
@@ -742,8 +753,7 @@ impl Handler<Distributor> for Distributor {
                 };
 
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver.clone(),
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
@@ -752,7 +762,7 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -780,7 +790,11 @@ impl Handler<Distributor> for Distributor {
                     return Err(emit_fail(ctx, e).await);
                 };
             }
-            DistributorMessage::GetLastSn { subject_id, info } => {
+            DistributorMessage::GetLastSn {
+                subject_id,
+                info,
+                sender,
+            } => {
                 let (subject_data, new_owner) = match get_node_subject_data(
                     ctx,
                     &subject_id,
@@ -828,23 +842,23 @@ impl Handler<Distributor> for Distributor {
                         return Err(emit_fail(ctx, e).await);
                     }
                 };
-                let sender = info.sender.to_string();
+                let sender_str = sender.to_string();
 
                 let is_owner = if let Some(new_owner) = new_owner {
-                    subject_data.owner == sender || new_owner == sender
+                    subject_data.owner == sender_str || new_owner == sender_str
                 } else {
-                    subject_data.owner == sender
+                    subject_data.owner == sender_str
                 };
 
                 let has_this_role = if subject_data.schema_id.is_gov() {
                     HashThisRole::Gov {
-                        who: info.sender.clone(),
+                        who: sender.clone(),
                         role: RoleTypes::Witness,
                     }
                 } else {
                     let owner = PublicKey::from_str(&subject_data.owner).map_err(|e| ActorError::FunctionalFail(format!("Can not conver owner PublicKey (String) into PublicKey: {}", e)))?;
                     HashThisRole::SchemaWitness {
-                        who: info.sender.clone(),
+                        who: sender.clone(),
                         creator: owner,
                         schema_id: subject_data.schema_id,
                         namespace: subject_data.namespace.clone(),
@@ -858,8 +872,7 @@ impl Handler<Distributor> for Distributor {
                 }
 
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver.clone(),
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
@@ -868,7 +881,7 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -903,9 +916,16 @@ impl Handler<Distributor> for Distributor {
                 info,
                 gov_version,
                 subject_id,
+                sender,
             } => {
                 let is_gov = match self
-                    .check_gov_version(ctx, &subject_id, gov_version, &info)
+                    .check_gov_version(
+                        ctx,
+                        &subject_id,
+                        gov_version,
+                        &info,
+                        sender.clone(),
+                    )
                     .await
                 {
                     Ok(is_gov) => is_gov,
@@ -971,8 +991,7 @@ impl Handler<Distributor> for Distributor {
                     };
 
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver,
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
@@ -981,7 +1000,7 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -1028,7 +1047,6 @@ impl Handler<Distributor> for Distributor {
                 request_id,
                 event,
                 node_key,
-                our_key,
                 ledger,
                 last_proof,
                 last_vali_res,
@@ -1042,7 +1060,6 @@ impl Handler<Distributor> for Distributor {
                     info: ComunicateInfo {
                         request_id,
                         version: 0,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor,
                     },
@@ -1094,8 +1111,8 @@ impl Handler<Distributor> for Distributor {
                     return Err(emit_fail(ctx, e).await);
                 };
             }
-            DistributorMessage::NetworkResponse { signer } => {
-                if signer == self.node {
+            DistributorMessage::NetworkResponse { sender } => {
+                if sender == self.node {
                     let distribution_path = ctx.path().parent();
 
                     let distribution_actor: Option<ActorRef<Distribution>> =
@@ -1153,6 +1170,7 @@ impl Handler<Distributor> for Distributor {
                 info,
                 last_proof,
                 last_vali_res,
+                sender,
             } => {
                 let auth_data = AuthGovData {
                     gov_version: Some(ledger.content.gov_version),
@@ -1170,6 +1188,7 @@ impl Handler<Distributor> for Distributor {
                         info.clone(),
                         ledger.content.clone(),
                         auth_data,
+                        sender.clone(),
                     )
                     .await
                 {
@@ -1300,8 +1319,7 @@ impl Handler<Distributor> for Distributor {
                                 let our_gov_version = gov.version;
 
                                 let new_info = ComunicateInfo {
-                                    receiver: info.sender,
-                                    sender: info.receiver,
+                                    receiver: sender,
                                     request_id: info.request_id,
                                     version: info.version,
                                     receiver_actor: format!(
@@ -1310,7 +1328,7 @@ impl Handler<Distributor> for Distributor {
                                     ),
                                 };
 
-                                let helper: Option<Intermediary> =
+                                let helper: Option<HelperService> =
                                     ctx.system().get_helper("network").await;
 
                                 let Some(mut helper) = helper else {
@@ -1410,8 +1428,7 @@ impl Handler<Distributor> for Distributor {
                     };
 
                     let new_info = ComunicateInfo {
-                        receiver: info.sender,
-                        sender: info.receiver.clone(),
+                        receiver: sender,
                         request_id: info.request_id,
                         version: info.version,
                         receiver_actor: format!(
@@ -1421,7 +1438,7 @@ impl Handler<Distributor> for Distributor {
                         ),
                     };
 
-                    let helper: Option<Intermediary> =
+                    let helper: Option<HelperService> =
                         ctx.system().get_helper("network").await;
 
                     let Some(mut helper) = helper else {
@@ -1437,10 +1454,7 @@ impl Handler<Distributor> for Distributor {
                         .send_command(network::CommandHelper::SendMessage {
                             message: NetworkMessage {
                                 info: new_info,
-                                message:
-                                    ActorMessage::DistributionLastEventRes {
-                                        signer: info.receiver,
-                                    },
+                                message: ActorMessage::DistributionLastEventRes,
                             },
                         })
                         .await
@@ -1472,6 +1486,7 @@ impl Handler<Distributor> for Distributor {
                 namespace,
                 schema_id,
                 governance_id,
+                sender,
             } => {
                 if events.is_empty() {
                     warn!(
@@ -1497,6 +1512,7 @@ impl Handler<Distributor> for Distributor {
                         info.clone(),
                         events[0].content.clone(),
                         auth_data,
+                        sender.clone(),
                     )
                     .await
                 {
@@ -1679,6 +1695,7 @@ impl Handler<Distributor> for Distributor {
                                             actual_sn: Some(actual_sn),
                                             subject_id: subject_id.to_string(),
                                             info,
+                                            sender,
                                         },
                                     )
                                     .await
@@ -1713,8 +1730,7 @@ impl Handler<Distributor> for Distributor {
                     };
 
                     let new_info = ComunicateInfo {
-                        receiver: info.sender,
-                        sender: info.receiver.clone(),
+                        receiver: sender,
                         request_id: info.request_id,
                         version: info.version,
                         receiver_actor: format!(
@@ -1723,7 +1739,7 @@ impl Handler<Distributor> for Distributor {
                         ),
                     };
 
-                    let helper: Option<Intermediary> =
+                    let helper: Option<HelperService> =
                         ctx.system().get_helper("network").await;
 
                     let Some(mut helper) = helper else {

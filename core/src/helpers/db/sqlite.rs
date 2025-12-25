@@ -13,19 +13,16 @@ use crate::approval::request::ApprovalReq;
 use crate::error::Error;
 use crate::external_db::{DBManager, DBManagerMessage};
 use crate::helpers::db::common::{ApprovalReqInfo, ApproveInfo, EventDB};
-use crate::model::event::{LedgerValue};
-use crate::request::RequestHandlerEvent;
-use crate::request::manager::RequestManagerEvent;
-use crate::request::types::RequestManagerState;
+use crate::model::event::LedgerValue;
 use crate::subject::SignedLedger;
 use crate::subject::laststate::LastStateEvent;
 use crate::subject::sinkdata::{SinkDataEvent, SinkDataMessage};
 
+use super::Querys;
 use super::common::{
     EventInfo, Paginator, PaginatorEvents, SignaturesDB, SignaturesInfo,
     SubjectDB, SubjectInfo,
 };
-use super::{Querys, RequestInfo};
 
 const TARGET_SQLITE: &str = "Ave-Helper-DB-Sqlite";
 
@@ -542,7 +539,6 @@ impl Subscriber<ApproverEvent> for SqliteLocal {
     }
 }
 
-
 #[async_trait]
 impl Subscriber<LastStateEvent> for SqliteLocal {
     async fn notify(&self, event: LastStateEvent) {
@@ -651,8 +647,6 @@ impl Subscriber<LastStateEvent> for SqliteLocal {
         }
     }
 }
-
-
 
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {

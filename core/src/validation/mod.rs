@@ -13,7 +13,11 @@ use crate::{
     model::{
         SignTypesNode,
         common::{
-            emit_fail, node::{get_sign, try_to_update}, send_reboot_to_req, subject::get_signers_quorum_gov_version, take_random_signers
+            emit_fail,
+            node::{get_sign, try_to_update},
+            send_reboot_to_req,
+            subject::get_signers_quorum_gov_version,
+            take_random_signers,
         },
         event::{ProofEvent, ProtocolsSignatures},
         request::SchemaType,
@@ -178,7 +182,6 @@ impl Validation {
                 .tell(ValidatorMessage::NetworkValidation {
                     validation_req,
                     node_key: signer,
-                    our_key,
                     schema_id: schema_id.to_owned(),
                 })
                 .await?
@@ -581,7 +584,7 @@ pub mod tests {
     use tempfile::TempDir;
     use test_log::test;
 
-    use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
+    use ave_actors::{ActorPath, ActorRef, PersistentActor, SystemRef};
     use ave_common::{
         ValueWrapper,
         identity::{
@@ -591,11 +594,22 @@ pub mod tests {
     };
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, helpers::db::ExternalDB, model::{
+        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage,
+        NodeResponse, Signed,
+        governance::{
+            Governance, GovernanceMessage, GovernanceResponse,
+            data::GovernanceData,
+        },
+        model::{
             Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
-        }, query::Query, request::{
-            RequestHandler, RequestHandlerMessage, RequestHandlerResponse, tracking::RequestTracking,
-        }, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system
+        },
+        query::Query,
+        request::{
+            RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
+            tracking::RequestTracking,
+        },
+        subject::laststate::{LastState, LastStateMessage, LastStateResponse},
+        system::tests::create_system,
     };
 
     pub async fn create_subject_gov() -> (
@@ -777,7 +791,7 @@ pub mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
-            tracking,
+            _tracking,
             subject_id,
             _dirs,
         ) = create_subject_gov().await;

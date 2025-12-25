@@ -6,7 +6,7 @@ use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
 use network::ComunicateInfo;
 
 use crate::{
-    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse, auth::{Auth, AuthMessage, WitnessesAuth}, intermediary::Intermediary, model::SignTypesNode, node::{
+    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse, auth::{Auth, AuthMessage, WitnessesAuth}, helpers::network::service::HelperService, model::SignTypesNode, node::{
         SubjectData,
         transfer::{
             TransferRegister, TransferRegisterMessage, TransferRegisterResponse,
@@ -180,13 +180,12 @@ where
 
     let info = ComunicateInfo {
         receiver: data.other_node,
-        sender: data.our_node,
         request_id: String::default(),
         version: 0,
         receiver_actor: format!("/user/node/distributor_{}", subject_string),
     };
 
-    let helper: Option<Intermediary> = ctx.system().get_helper("network").await;
+    let helper: Option<HelperService> = ctx.system().get_helper("network").await;
 
     let Some(mut helper) = helper else {
         let e = ActorError::NotHelper("network".to_owned());

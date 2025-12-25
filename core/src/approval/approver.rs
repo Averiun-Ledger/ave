@@ -4,7 +4,7 @@ use crate::{
     ActorMessage, EventRequest, NetworkMessage,
     db::Storable,
     governance::{Governance, data::GovernanceData},
-    intermediary::Intermediary,
+    helpers::network::service::HelperService,
     model::{
         SignTypesNode,
         common::{
@@ -128,12 +128,12 @@ pub struct Approver {
     #[serde(skip)]
     subject_id: String,
     #[serde(skip)]
+    pass_votation: VotationType,
     request_id: String,
     version: u64,
-    pass_votation: VotationType,
+    sender: Option<PublicKey>,
     state: Option<ApprovalState>,
     request: Option<ApprovalReq>,
-    info: Option<ComunicateInfo>,
 }
 
 impl BorshSerialize for Approver {
@@ -146,7 +146,7 @@ impl BorshSerialize for Approver {
         BorshSerialize::serialize(&self.version, writer)?;
         BorshSerialize::serialize(&self.state, writer)?;
         BorshSerialize::serialize(&self.request, writer)?;
-        BorshSerialize::serialize(&self.info, writer)?;
+        BorshSerialize::serialize(&self.sender, writer)?;
 
         Ok(())
     }
@@ -161,7 +161,7 @@ impl BorshDeserialize for Approver {
         let version = u64::deserialize_reader(reader)?;
         let state = Option::<ApprovalState>::deserialize_reader(reader)?;
         let request = Option::<ApprovalReq>::deserialize_reader(reader)?;
-        let info = Option::<ComunicateInfo>::deserialize_reader(reader)?;
+        let sender = Option::<PublicKey>::deserialize_reader(reader)?;
 
         let node_key = PublicKey::default();
         let pass_votation = VotationType::AlwaysAccept;
@@ -175,7 +175,7 @@ impl BorshDeserialize for Approver {
             pass_votation,
             state,
             request,
-            info,
+            sender,
         })
     }
 }
@@ -240,7 +240,6 @@ impl Approver {
         ctx: &mut ActorContext<Approver>,
         request: ApprovalReq,
         response: bool,
-        info: Option<ComunicateInfo>,
     ) -> Result<(), ActorError> {
         let sign_type = SignTypesNode::ApprovalSignature(ApprovalSignature {
             request: request.clone(),
@@ -249,7 +248,7 @@ impl Approver {
 
         let signature = get_sign(ctx, sign_type).await?;
 
-        if let Some(info) = info {
+        if let Some(sender) = self.sender.clone() {
             let res = ApprovalRes::Response(signature, response);
 
             let signature = get_sign(
@@ -263,20 +262,18 @@ impl Approver {
                 signature,
             };
 
-            let helper: Option<Intermediary> =
+            let helper: Option<HelperService> =
                 ctx.system().get_helper("network").await;
             let Some(mut helper) = helper else {
                 return Err(ActorError::NotHelper("network".to_string()));
             };
             let new_info = ComunicateInfo {
-                receiver: info.sender,
-                sender: info.receiver.clone(),
-                request_id: info.request_id,
-                version: info.version,
+                receiver: sender,
+                request_id: self.request_id.clone(),
+                version: self.version,
                 receiver_actor: format!(
                     "/user/node/{}/approval/{}",
-                    request.subject_id,
-                    info.receiver.clone()
+                    request.subject_id, self.node_key
                 ),
             };
 
@@ -335,18 +332,19 @@ pub enum ApproverMessage {
     NetworkApproval {
         approval_req: Signed<ApprovalReq>,
         node_key: PublicKey,
-        our_key: PublicKey,
     },
     // Finaliza los retries y recibe la respuesta de la network
     NetworkResponse {
         approval_res: Signed<ApprovalRes>,
         request_id: String,
         version: u64,
+        sender: PublicKey
     },
     // Mensaje para pedir aprobación desde el helper y devolver ahi
     NetworkRequest {
         approval_req: Signed<ApprovalReq>,
         info: ComunicateInfo,
+        sender: PublicKey,
     },
     ChangeResponse {
         response: ApprovalStateRes,
@@ -364,12 +362,12 @@ pub enum ApproverEvent {
         state: ApprovalState,
     },
     SafeState {
+        subject_id: String,
         request_id: String,
         version: u64,
-        subject_id: String,
         request: Box<ApprovalReq>,
         state: ApprovalState,
-        info: Option<ComunicateInfo>,
+        sender: Option<PublicKey>,
     },
 }
 
@@ -472,12 +470,7 @@ impl Handler<Approver> for Approver {
                         };
 
                         if let Err(e) = self
-                            .send_response(
-                                ctx,
-                                approval_req,
-                                response,
-                                self.info.clone(),
-                            )
+                            .send_response(ctx, approval_req, response)
                             .await
                         {
                             error!(
@@ -582,7 +575,7 @@ impl Handler<Approver> for Approver {
                             request_id,
                             request: Box::new(approval_req),
                             state,
-                            info: None,
+                            sender: None,
                         },
                         ctx,
                     )
@@ -592,7 +585,6 @@ impl Handler<Approver> for Approver {
             ApproverMessage::NetworkApproval {
                 approval_req,
                 node_key,
-                our_key,
             } => {
                 // Solo admitimos eventos FACT
                 let subject_id = if let EventRequest::Fact(event) =
@@ -618,7 +610,6 @@ impl Handler<Approver> for Approver {
                     info: ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor,
                     },
@@ -670,9 +661,10 @@ impl Handler<Approver> for Approver {
                 approval_res,
                 request_id,
                 version,
+                sender
             } => {
                 if request_id == self.request_id && version == self.version {
-                    if self.node_key != approval_res.signature.signer {
+                    if self.node_key != sender {
                         let e = "We received an approval from a node which we were not expecting to receive.";
                         error!(TARGET_APPROVER, "NetworkResponse, {}", e);
                         return Err(ActorError::Functional(e.to_owned()));
@@ -748,7 +740,11 @@ impl Handler<Approver> for Approver {
                     );
                 }
             }
-            ApproverMessage::NetworkRequest { approval_req, info } => {
+            ApproverMessage::NetworkRequest {
+                approval_req,
+                info,
+                sender,
+            } => {
                 let info_subject_path =
                     ActorPath::from(info.receiver_actor.clone()).parent().key();
                 // Nos llegó una approvación donde en la request se indica un sujeto pero en el info otro
@@ -803,13 +799,29 @@ impl Handler<Approver> for Approver {
 
                     let state = if self.pass_votation
                         == VotationType::AlwaysAccept
-                    {
-                        if let Err(e) = self
+                    { ApprovalState::RespondedAccepted } else  {
+                        ApprovalState::Pending
+                    };
+
+                    self.on_event(
+                        ApproverEvent::SafeState {
+                            subject_id: self.subject_id.clone(),
+                            request_id: info.request_id.clone(),
+                            version: info.version,
+                            request: Box::new(approval_req.content.clone()),
+                            state: state.clone(),
+                            sender: Some(sender),
+                        },
+                        ctx,
+                    )
+                    .await;
+
+                    if state == ApprovalState::RespondedAccepted 
+                        && let Err(e) = self
                             .send_response(
                                 ctx,
                                 approval_req.content.clone(),
                                 true,
-                                Some(info.clone()),
                             )
                             .await
                         {
@@ -820,24 +832,7 @@ impl Handler<Approver> for Approver {
                             );
                             return Err(emit_fail(ctx, e).await);
                         };
-
-                        ApprovalState::RespondedAccepted
-                    } else {
-                        ApprovalState::Pending
-                    };
-
-                    self.on_event(
-                        ApproverEvent::SafeState {
-                            subject_id: self.subject_id.clone(),
-                            request_id: info.request_id.clone(),
-                            version: info.version,
-                            request: Box::new(approval_req.content),
-                            state,
-                            info: Some(info),
-                        },
-                        ctx,
-                    )
-                    .await;
+                    
                 } else if !self.request_id.is_empty() {
                     let state = if let Some(state) = self.state.clone() {
                         state
@@ -880,7 +875,6 @@ impl Handler<Approver> for Approver {
                             ctx,
                             approval_req.clone(),
                             response,
-                            Some(info),
                         )
                         .await
                     {
@@ -989,7 +983,7 @@ impl PersistentActor for Approver {
         self.version = state.version;
         self.state = state.state;
         self.request = state.request;
-        self.info = state.info;
+        self.sender = state.sender;
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
@@ -1009,7 +1003,7 @@ impl PersistentActor for Approver {
             pass_votation,
             state: None,
             request: None,
-            info: None,
+            sender: None,
         }
     }
 
@@ -1021,16 +1015,16 @@ impl PersistentActor for Approver {
             ApproverEvent::SafeState {
                 request,
                 state,
-                info,
                 request_id,
                 version,
+                sender,
                 ..
             } => {
                 self.version = *version;
                 self.request_id.clone_from(request_id);
                 self.request = Some(*request.clone());
                 self.state = Some(state.clone());
-                self.info.clone_from(info);
+                self.sender.clone_from(sender);
             }
         };
 

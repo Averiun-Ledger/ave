@@ -134,7 +134,7 @@ impl GovernanceData {
         &self,
         schema_id: &SchemaType,
     ) -> Result<ValueWrapper, Error> {
-        let Some(schema) = self.schemas.get(&schema_id) else {
+        let Some(schema) = self.schemas.get(schema_id) else {
             return Err(Error::Governance("Schema not found.".to_owned()));
         };
 
@@ -298,7 +298,7 @@ impl GovernanceData {
                 .roles_all_schemas
                 .get_signers(role.clone(), namespace.clone());
             let (mut schema_signers, schema_any) = if let Some(roles) =
-                self.roles_schema.get(&schema_id)
+                self.roles_schema.get(schema_id)
             {
                 roles.get_signers(role, namespace)
             } else {
@@ -399,7 +399,7 @@ impl GovernanceData {
         if schema_id.is_gov() {
             self.policies_gov.get_quorum(role)
         } else {
-            let policie = self.policies_schema.get(&schema_id)?;
+            let policie = self.policies_schema.get(schema_id)?;
 
             policie.get_quorum(role)
         }

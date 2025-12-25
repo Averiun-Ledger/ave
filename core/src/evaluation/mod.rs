@@ -170,7 +170,6 @@ impl Evaluation {
                 .tell(EvaluatorMessage::NetworkEvaluation {
                     evaluation_req,
                     node_key: signer,
-                    our_key,
                     schema_id: schema_id.to_owned(),
                 })
                 .await?
@@ -1007,7 +1006,7 @@ mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
-            tracking,
+            _tracking,
             subject_id,
             _dir,
         ) = create_subject_gov().await;
@@ -1572,7 +1571,7 @@ mod tests {
             _query_actor,
             subject_actor,
             last_state_actor,
-            tracking,
+            _tracking,
             subject_id,
             _dir,
         ) = create_subject().await;

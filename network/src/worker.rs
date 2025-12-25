@@ -10,7 +10,7 @@ use crate::{
     utils::{
         Action, Due, Fact, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
         MetricLabels, NetworkState, REQRES_PROTOCOL, RetryKind, RetryState,
-        ScheduleType, TELL_PROTOCOL, convert_addresses, convert_boot_nodes,
+        ScheduleType, TELL_PROTOCOL, convert_addresses, convert_boot_nodes, peer_id_to_ed25519_pubkey_bytes,
     },
 };
 
@@ -979,13 +979,22 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
     }
 
-    async fn message_to_helper(&mut self, message: MessagesHelper) {
+    async fn message_to_helper(&mut self, message: MessagesHelper, peer_id: &PeerId) {
+        let sender = match peer_id_to_ed25519_pubkey_bytes(peer_id) {
+            Ok(public_key) => public_key,
+            Err(e) => {
+                error!(TARGET_WORKER, "Message to helper: {:?}", e);
+                return ;
+            }
+        };
+
         'Send: {
             if let Some(helper_sender) = self.helper_sender.as_ref() {
                 match message {
                     MessagesHelper::Single(items) => {
                         if helper_sender
                             .send(CommandHelper::ReceivedMessage {
+                                sender,
                                 message: items,
                             })
                             .await
@@ -998,6 +1007,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         for item in items {
                             if helper_sender
                                 .send(CommandHelper::ReceivedMessage {
+                                    sender,
                                     message: item,
                                 })
                                 .await
@@ -1070,7 +1080,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             {
                                 self.message_to_helper(MessagesHelper::Vec(
                                     messages.clone(),
-                                ))
+                                ), &peer_id)
                                 .await;
                             };
 
@@ -1130,7 +1140,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         if self.peer_identify.contains(&peer_id) {
                             self.message_to_helper(MessagesHelper::Single(
                                 message_data,
-                            ))
+                            ), &peer_id)
                             .await;
                         } else {
                             self.pending_inbound_messages
@@ -1154,7 +1164,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         if self.peer_identify.contains(&peer_id) {
                             self.message_to_helper(MessagesHelper::Single(
                                 message.message,
-                            ))
+                            ), &peer_id)
                             .await;
                         } else {
                             self.pending_inbound_messages

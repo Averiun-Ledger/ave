@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
+use ave_actors::{ActorSystem, EncryptedKey, SystemRef};
 use ave_common::identity::{HashAlgorithm, hash_borsh};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -112,7 +112,6 @@ pub mod tests {
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::{Config as NetworkConfig};
-    use std::time::Duration;
     use tempfile::TempDir;
     use test_log::test;
 

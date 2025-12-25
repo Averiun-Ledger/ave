@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::governance::data::GovernanceData;
 use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
+use crate::helpers::network::service::HelperService;
 use crate::model::common::node::get_sign;
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
@@ -40,7 +41,6 @@ use crate::{
         Evaluation, EvaluationMessage, request::EvaluationReq,
         response::EvalLedgerResponse,
     },
-    intermediary::Intermediary,
     model::{
         SignTypesNode,
         common::emit_fail,
@@ -82,7 +82,7 @@ pub enum InitRequestManager {
         id: String,
         subject_id: String,
         command: ReqManInitMessage,
-        request: Signed<EventRequest>,
+        request: Box<Signed<EventRequest>>,
     },
     Continue {
         our_key: PublicKey,
@@ -816,7 +816,6 @@ impl RequestManager {
 
                 let info = ComunicateInfo {
                     receiver: key_identifier.clone(),
-                    sender: self.our_key.clone(),
                     version: 0,
                     request_id: String::default(),
                     receiver_actor: format!(
@@ -825,7 +824,7 @@ impl RequestManager {
                     )
                 };
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -996,8 +995,8 @@ pub enum RequestManagerEvent {
     },
     SafeState {
         command: ReqManInitMessage,
-        request: Signed<EventRequest>,
-        state: RequestManagerState,
+        request: Box<Signed<EventRequest>>,
+        state: Box<RequestManagerState>,
         version: u64,
     },
 }
@@ -1225,8 +1224,8 @@ impl Handler<RequestManager> for RequestManager {
                     self.on_event(
                         RequestManagerEvent::SafeState {
                             command: self.command.clone(),
-                            request: self.request.clone(),
-                            state: self.state.clone(),
+                            request: Box::new(self.request.clone()),
+                            state: Box::new(self.state.clone()),
                             version: self.version,
                         },
                         ctx,
@@ -1781,7 +1780,7 @@ impl PersistentActor for RequestManager {
                 id,
                 subject_id,
                 command,
-                request,
+                request: *request,
                 state: RequestManagerState::Starting,
                 version: 0,
             },
@@ -1817,8 +1816,8 @@ impl PersistentActor for RequestManager {
                 version,
             } => {
                 self.version = *version;
-                self.state = state.clone();
-                self.request = request.clone();
+                self.state = *state.clone();
+                self.request = *request.clone();
                 self.command = command.clone();
             }
         };

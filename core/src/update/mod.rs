@@ -13,12 +13,7 @@ use tracing::error;
 use updater::{Updater, UpdaterMessage};
 
 use crate::{
-    ActorMessage, NetworkMessage,
-    governance::{Governance, GovernanceMessage},
-    intermediary::Intermediary,
-    model::common::emit_fail,
-    request::manager::{RequestManager, RequestManagerMessage},
-    tracker::{Tracker, TrackerMessage},
+    ActorMessage, NetworkMessage, governance::{Governance, GovernanceMessage}, helpers::network::service::HelperService, model::common::emit_fail, request::manager::{RequestManager, RequestManagerMessage}, tracker::{Tracker, TrackerMessage}
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -211,7 +206,6 @@ impl Handler<Update> for Update {
                         .tell(UpdaterMessage::Transfer {
                             subject_id: self.subject_id.clone(),
                             node_key: witness,
-                            our_key: self.our_key.clone(),
                         })
                         .await
                     {
@@ -244,7 +238,6 @@ impl Handler<Update> for Update {
                         .tell(UpdaterMessage::NetworkLastSn {
                             subject_id: self.subject_id.clone(),
                             node_key: witness,
-                            our_key: self.our_key.clone(),
                         })
                         .await
                     {
@@ -292,7 +285,6 @@ impl Handler<Update> for Update {
                         if let Some(node) = self.better.clone() {
                             let info = ComunicateInfo {
                                 receiver: node,
-                                sender: self.our_key.clone(),
                                 request_id: String::default(),
                                 version: 0,
                                 receiver_actor: format!(
@@ -301,7 +293,7 @@ impl Handler<Update> for Update {
                                 ),
                             };
 
-                            let helper: Option<Intermediary> =
+                            let helper: Option<HelperService> =
                                 ctx.system().get_helper("network").await;
 
                             let Some(mut helper) = helper else {

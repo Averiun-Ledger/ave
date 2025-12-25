@@ -511,11 +511,11 @@ impl PersistentActor for RolesRegister {
                     }
                 }
 
-                if let Some(approvers) = approvers {
-                    if !approvers.is_empty() {
+                if let Some(approvers) = approvers 
+                    && !approvers.is_empty() {
                         self.approvers.insert(*version, approvers.clone());
                     }
-                }
+                
             }
         }
         Ok(())

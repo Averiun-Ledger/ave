@@ -70,6 +70,14 @@ impl SchemaType {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        match self {
+            SchemaType::Governance => false,
+            SchemaType::Type(schschema_id) => schschema_id.is_empty(),
+            SchemaType::AllSchemas => false,
+        } 
+    }
+
     pub fn is_valid(&self) -> bool {
         match self {
             SchemaType::Governance => true,

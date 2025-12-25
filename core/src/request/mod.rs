@@ -4,8 +4,8 @@ use ave_actors::{
     Handler, Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::RequestState;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
-use ave_common::{RequestInfo, RequestState};
 use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
@@ -210,10 +210,7 @@ impl RequestHandler {
         )
         .await
         {
-            error!(
-                TARGET_REQUEST,
-                "PopQueue, can not update tracking: {}", e
-            );
+            error!(TARGET_REQUEST, "PopQueue, can not update tracking: {}", e);
             ctx.system().stop_system();
             return Err(e);
         }
@@ -281,6 +278,58 @@ impl RequestHandler {
             error!(TARGET_REQUEST, "{}, {}", message, e);
 
             Err(ActorError::Functional(e.to_owned()))
+        }
+    }
+
+    async fn abort_request(
+        &mut self,
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &str,
+        request_id: &str,
+        error: &str,
+    ) -> Result<(), ActorError> {
+        self.on_event(
+            RequestHandlerEvent::Abort {
+                subject_id: subject_id.to_owned(),
+            },
+            ctx,
+        )
+        .await;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: request_id.to_string(),
+                state: RequestState::Abort,
+                error: Some(error.to_string()),
+            },
+        )
+        .await?;
+
+        RequestHandler::queued_event(ctx, subject_id).await?;
+
+        Ok(())
+    }
+
+    async fn approval(
+        &self,
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &str,
+        state: ApprovalStateRes,
+    ) -> Result<(), ActorError> {
+        let approver_path =
+            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+        let approver_actor: Option<ActorRef<Approver>> =
+            ctx.system().get_actor(&approver_path).await;
+
+        if let Some(approver_actor) = approver_actor {
+            approver_actor
+                .tell(ApproverMessage::ChangeResponse {
+                    response: state.clone(),
+                })
+                .await
+        } else {
+            Err(ActorError::NotFound(approver_path))
         }
     }
 }
@@ -423,43 +472,14 @@ impl Handler<RequestHandler> for RequestHandler {
                     error
                 );
 
-                self.on_event(
-                    RequestHandlerEvent::Abort {
-                        subject_id: subject_id.to_owned(),
-                    },
-                    ctx,
-                )
-                .await;
-
-                if let Err(e) = send_to_tracking(
-                    ctx,
-                    RequestTrackingMessage::UpdateState {
-                        request_id: id.clone(),
-                        state: RequestState::Abort,
-                        error: Some(error),
-                    },
-                )
-                .await
-                {
-                    error!(
-                        TARGET_REQUEST,
-                        "AbortRequest, can not update tracking: {}", e
-                    );
-                    ctx.system().stop_system();
-                    return Err(e);
-                }
-
                 if let Err(e) =
-                    RequestHandler::queued_event(ctx, &subject_id.to_string())
-                        .await
+                    self.abort_request(ctx, &subject_id, &id, &error).await
                 {
-                    error!(
-                        TARGET_REQUEST,
-                        "AbortRequest, Can not enqueue new event: {}", e
-                    );
+                    error!(TARGET_REQUEST, "AbortRequest, {}", e);
                     ctx.system().stop_system();
                     return Err(e);
                 };
+
                 Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::ChangeApprovalState {
@@ -473,48 +493,23 @@ impl Handler<RequestHandler> for RequestHandler {
                     state
                 );
 
-                match state.to_string().as_str() {
-                    "RespondedAccepted" | "RespondedRejected" => {}
-                    _ => {
-                        error!(
-                            TARGET_REQUEST,
-                            "ChangeApprovalState, Invalid approval response"
-                        );
-                        return Err(ActorError::Functional(
-                            "Invalid Response".to_owned(),
-                        ));
-                    }
-                };
-
-                let approver_path = ActorPath::from(format!(
-                    "/user/node/{}/approver",
-                    subject_id
-                ));
-                let approver_actor: Option<ActorRef<Approver>> =
-                    ctx.system().get_actor(&approver_path).await;
-
-                if let Some(approver_actor) = approver_actor {
-                    if let Err(e) = approver_actor
-                        .tell(ApproverMessage::ChangeResponse {
-                            response: state.clone(),
-                        })
-                        .await
-                    {
-                        error!(
-                            TARGET_REQUEST,
-                            "ChangeApprovalState, can not send message to Approver actor: {}",
-                            e
-                        );
-                        ctx.system().stop_system();
-                        return Err(e);
-                    }
-                } else {
+                if state == ApprovalStateRes::Obsolete {
                     error!(
                         TARGET_REQUEST,
-                        "ChangeApprovalState, can not obtain Approver actor"
+                        "ChangeApprovalState, Invalid approval response"
                     );
-                    return Err(ActorError::NotFound(approver_path));
-                };
+                    return Err(ActorError::Functional(
+                        "Invalid Response".to_owned(),
+                    ));
+                }
+
+                if let Err(e) =
+                    self.approval(ctx, &subject_id, state.clone()).await
+                {
+                    error!(TARGET_REQUEST, "ChangeApprovalState, {}", e);
+
+                    return Err(e);
+                }
 
                 Ok(RequestHandlerResponse::Response(format!(
                     "The approval request for subject {} has changed to {}",
@@ -1112,7 +1107,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     id: request_id.clone(),
                     subject_id: subject_id.clone(),
                     command,
-                    request: event.clone(),
+                    request: Box::new(event.clone()),
                 };
 
                 let request_actor = match ctx

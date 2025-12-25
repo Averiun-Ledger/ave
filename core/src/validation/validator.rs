@@ -3,9 +3,19 @@ use std::{collections::HashSet, time::Duration};
 use crate::{
     Signed,
     governance::{data::GovernanceData, model::SignersType},
-    helpers::network::{NetworkMessage, intermediary::Intermediary},
+    helpers::network::{
+        NetworkMessage, service::HelperService,
+    },
     model::{
-        SignTypesNode, common::{emit_fail, node::{UpdateData, get_sign, update_ledger_network}, subject::{get_gov, get_metadata}}, event::ProtocolsSignatures, network::{RetryNetwork, TimeOutResponse}, request::SchemaType
+        SignTypesNode,
+        common::{
+            emit_fail,
+            node::{UpdateData, get_sign, update_ledger_network},
+            subject::{get_gov, get_metadata},
+        },
+        event::ProtocolsSignatures,
+        network::{RetryNetwork, TimeOutResponse},
+        request::SchemaType,
     },
 };
 
@@ -57,17 +67,17 @@ impl Validator {
     ) -> Result<bool, ActorError> {
         let governance_string = governance_id.to_string();
         let metadata = get_metadata(ctx, &governance_string).await?;
-        let governance = match GovernanceData::try_from(metadata.properties.clone())
-        {
-            Ok(gov) => gov,
-            Err(e) => {
-                let e = format!(
-                    "can not convert governance from properties: {}",
-                    e
-                );
-                return Err(ActorError::FunctionalFail(e));
-            }
-        };
+        let governance =
+            match GovernanceData::try_from(metadata.properties.clone()) {
+                Ok(gov) => gov,
+                Err(e) => {
+                    let e = format!(
+                        "can not convert governance from properties: {}",
+                        e
+                    );
+                    return Err(ActorError::FunctionalFail(e));
+                }
+            };
 
         match gov_version.cmp(&governance.version) {
             std::cmp::Ordering::Equal => {
@@ -201,16 +211,17 @@ pub enum ValidatorMessage {
         validation_req: Signed<ValidationReq>,
         schema_id: SchemaType,
         node_key: PublicKey,
-        our_key: PublicKey,
     },
     NetworkResponse {
         validation_res: Signed<ValidationRes>,
         request_id: String,
         version: u64,
+        sender: PublicKey
     },
     NetworkRequest {
         validation_req: Box<Signed<ValidationReq>>,
         info: ComunicateInfo,
+        sender: PublicKey,
         schema_id: SchemaType,
     },
 }
@@ -297,7 +308,6 @@ impl Handler<Validator> for Validator {
                 validation_req,
                 schema_id,
                 node_key,
-                our_key,
             } => {
                 let receiver_actor = if schema_id.is_gov() {
                     format!(
@@ -316,7 +326,6 @@ impl Handler<Validator> for Validator {
                     info: ComunicateInfo {
                         request_id: self.request_id.to_owned(),
                         version: self.version,
-                        sender: our_key,
                         receiver: node_key,
                         receiver_actor,
                     },
@@ -370,9 +379,10 @@ impl Handler<Validator> for Validator {
                 validation_res,
                 request_id,
                 version,
+                sender
             } => {
                 if request_id == self.request_id && version == self.version {
-                    if self.node != validation_res.signature.signer {
+                    if self.node != sender {
                         warn!(
                             TARGET_VALIDATOR,
                             "NetworkResponse, invalid signer"
@@ -456,6 +466,7 @@ impl Handler<Validator> for Validator {
             ValidatorMessage::NetworkRequest {
                 validation_req,
                 info,
+                sender,
                 schema_id,
             } => {
                 let info_subject_path =
@@ -480,7 +491,7 @@ impl Handler<Validator> for Validator {
                     return Err(ActorError::Functional(e.to_owned()));
                 }
 
-                let helper: Option<Intermediary> =
+                let helper: Option<HelperService> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -546,8 +557,7 @@ impl Handler<Validator> for Validator {
                 };
 
                 let new_info = ComunicateInfo {
-                    receiver: info.sender,
-                    sender: info.receiver.clone(),
+                    receiver: sender,
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
