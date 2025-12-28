@@ -15,7 +15,7 @@ mod tests {
     use super::*;
 
     use ave_bridge::auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, SessionConfig,
+        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, SessionConfig,
     };
     use ave_http::auth::database::AuthDatabase;
     use tempfile::TempDir;
@@ -721,6 +721,7 @@ mod tests {
             limit_by_key: true,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
@@ -759,6 +760,7 @@ mod tests {
             limit_by_key: false,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
@@ -809,6 +811,7 @@ mod tests {
             limit_by_key: true,
             limit_by_ip: false,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
@@ -848,6 +851,7 @@ mod tests {
             limit_by_key: true,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
@@ -963,6 +967,7 @@ mod tests {
                 limit_by_key: true,
                 limit_by_ip: true,
                 cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
             },
             session,
         };
@@ -1160,5 +1165,87 @@ mod tests {
         let result = db.update_system_config("read_only_mode", "1", None);
 
         assert!(result.is_err());
+    }
+
+    /// Test endpoint-specific rate limiting with sensitive endpoints
+    #[test]
+    fn test_endpoint_specific_rate_limiting() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 100, // Default limit: 100 requests
+            limit_by_key: false,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![
+                EndpointRateLimit {
+                    endpoint: "/login".to_string(),
+                    max_requests: 5, // Login limited to 5 requests
+                    window_seconds: None, // Use default window
+                },
+                EndpointRateLimit {
+                    endpoint: "/change-password".to_string(),
+                    max_requests: 3, // Password change limited to 3 requests
+                    window_seconds: Some(120), // Custom 2-minute window
+                },
+            ],
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
+
+        // Test 1: Regular endpoint should allow 100 requests
+        for i in 1..=100 {
+            assert!(
+                db.check_rate_limit(None, Some("1.2.3.4"), Some("/api/regular"))
+                    .is_ok(),
+                "Regular endpoint request {} should pass", i
+            );
+        }
+
+        // 101st request should fail
+        let result = db.check_rate_limit(None, Some("1.2.3.4"), Some("/api/regular"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "Regular endpoint should be rate limited at 100 requests"
+        );
+
+        // Test 2: /login endpoint should only allow 5 requests
+        for i in 1..=5 {
+            assert!(
+                db.check_rate_limit(None, Some("2.3.4.5"), Some("/login"))
+                    .is_ok(),
+                "/login request {} should pass", i
+            );
+        }
+
+        // 6th request should fail
+        let result = db.check_rate_limit(None, Some("2.3.4.5"), Some("/login"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "/login should be rate limited at 5 requests"
+        );
+
+        // Test 3: /change-password should only allow 3 requests
+        for i in 1..=3 {
+            assert!(
+                db.check_rate_limit(None, Some("3.4.5.6"), Some("/change-password"))
+                    .is_ok(),
+                "/change-password request {} should pass", i
+            );
+        }
+
+        // 4th request should fail
+        let result = db.check_rate_limit(None, Some("3.4.5.6"), Some("/change-password"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "/change-password should be rate limited at 3 requests"
+        );
+
+        // Test 4: Different IP should have independent limits
+        assert!(
+            db.check_rate_limit(None, Some("4.5.6.7"), Some("/login"))
+                .is_ok(),
+            "Different IP should have independent /login limit"
+        );
     }
 }

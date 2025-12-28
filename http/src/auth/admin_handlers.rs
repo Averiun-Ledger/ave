@@ -448,6 +448,16 @@ pub async fn update_user(
 
     // Update roles if provided
     if let Some(role_ids) = &req.role_ids {
+        // SECURITY FIX: Prevent non-superadmin from modifying roles of other admins
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Only superadmin can modify roles of other admins".to_string(),
+                }),
+            ));
+        }
+
         // SECURITY FIX: Protect superadmin role assignment and removal
         let superadmin_role_id = get_superadmin_role_id(&db)?;
 
@@ -672,6 +682,19 @@ pub async fn assign_role(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from assigning roles to other admins
+    // Get target user to check if they're an admin
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify roles of other admins".to_string(),
+            }),
+        ));
+    }
+
     // SECURITY FIX: Protect superadmin role assignment
     let superadmin_role_id = get_superadmin_role_id(&db)?;
 
@@ -726,6 +749,19 @@ pub async fn remove_role(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
+
+    // SECURITY FIX: Prevent non-superadmin from removing roles from other admins
+    // Get target user to check if they're an admin
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify roles of other admins".to_string(),
+            }),
+        ));
+    }
 
     // SECURITY FIX: Protect superadmin role removal
     let superadmin_role_id = get_superadmin_role_id(&db)?;

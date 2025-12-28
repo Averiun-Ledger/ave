@@ -19,7 +19,7 @@ mod tests {
     use ave_http::auth::{
         admin_handlers::{
             remove_user_permission, set_user_permission, set_role_permission,
-            remove_role_permission, update_user, RemovePermissionQuery,
+            remove_role_permission, update_user, assign_role, remove_role, RemovePermissionQuery,
         },
         middleware::AuthContextExtractor,
         models::{AuthContext, Permission, SetPermissionRequest, UpdateUserRequest},
@@ -936,6 +936,7 @@ mod tests {
                 limit_by_key: true,
                 limit_by_ip: true,
                 cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
             },
             session: SessionConfig {
                 audit_enable: true,
@@ -2326,6 +2327,260 @@ mod tests {
         let updated_user = db.verify_credentials("victim", "FinalPass123!").unwrap();
         assert_eq!(updated_user.failed_login_attempts, 0);
         assert!(updated_user.locked_until.is_none());
+    }
+
+    /// SECURITY TEST: Non-superadmin cannot assign roles to other admins
+    /// This prevents admins from modifying other admins' privileges
+    #[tokio::test]
+    async fn test_admin_cannot_assign_role_to_other_admin() {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        // Create an admin role with admin_users:all permission
+        let admin_role = db.create_role("user_admin", Some("Can manage users")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true).unwrap();
+
+        // Create another role that gives admin permissions
+        let editor_role = db.create_role("editor_admin", Some("Editor admin")).unwrap();
+        db.set_role_permission(editor_role.id, "admin_roles", "all", true).unwrap();
+
+        // Create two admin users
+        let admin_actor = db
+            .create_user(
+                "admin_actor",
+                "Password123!",
+                Some(vec![admin_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        let admin_target = db
+            .create_user(
+                "admin_target",
+                "Password123!",
+                Some(vec![editor_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        // Verify both are considered admins
+        let actor_user = db.get_user_by_id(admin_actor.id).unwrap();
+        let target_user = db.get_user_by_id(admin_target.id).unwrap();
+
+        // Build auth context for admin_actor
+        let permissions = db.get_effective_permissions(admin_actor.id).unwrap();
+        let roles = db.get_user_roles(admin_actor.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: admin_actor.id,
+            username: admin_actor.username.clone(),
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Try to assign a role to the other admin (should fail)
+        let result = assign_role(
+            AuthContextExtractor(auth_ctx.clone()),
+            Extension(db.clone()),
+            Path((admin_target.id, editor_role.id)),
+        )
+        .await;
+
+        // Should be FORBIDDEN
+        assert!(
+            matches!(result, Err((StatusCode::FORBIDDEN, _))),
+            "Non-superadmin admin should not be able to assign roles to other admins"
+        );
+    }
+
+    /// SECURITY TEST: Non-superadmin cannot remove roles from other admins
+    /// This prevents admins from neutralizing other admins by removing their roles
+    #[tokio::test]
+    async fn test_admin_cannot_remove_role_from_other_admin() {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        // Create an admin role with admin_users:all permission
+        let admin_role = db.create_role("user_admin_2", Some("Can manage users")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true).unwrap();
+
+        // Create another role that gives admin permissions
+        let system_admin_role = db.create_role("system_admin", Some("System admin")).unwrap();
+        db.set_role_permission(system_admin_role.id, "admin_system", "all", true).unwrap();
+
+        // Create two admin users
+        let admin_actor = db
+            .create_user(
+                "admin_actor_2",
+                "Password123!",
+                Some(vec![admin_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        let admin_target = db
+            .create_user(
+                "admin_target_2",
+                "Password123!",
+                Some(vec![system_admin_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        // Build auth context for admin_actor
+        let permissions = db.get_effective_permissions(admin_actor.id).unwrap();
+        let roles = db.get_user_roles(admin_actor.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: admin_actor.id,
+            username: admin_actor.username.clone(),
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Try to remove role from the other admin (should fail)
+        let result = remove_role(
+            AuthContextExtractor(auth_ctx.clone()),
+            Extension(db.clone()),
+            Path((admin_target.id, system_admin_role.id)),
+        )
+        .await;
+
+        // Should be FORBIDDEN
+        assert!(
+            matches!(result, Err((StatusCode::FORBIDDEN, _))),
+            "Non-superadmin admin should not be able to remove roles from other admins"
+        );
+    }
+
+    /// SECURITY TEST: Admin CAN assign roles to regular users
+    /// This verifies that admins can still manage regular (non-admin) users
+    #[tokio::test]
+    async fn test_admin_can_assign_role_to_regular_user() {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        // Create an admin role with admin_users:all permission
+        let admin_role = db.create_role("user_admin_3", Some("Can manage users")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true).unwrap();
+
+        // Create a regular (non-admin) role
+        let viewer_role = db.create_role("viewer", Some("Viewer role")).unwrap();
+        // No admin permissions for this role
+
+        // Create admin user
+        let admin_user = db
+            .create_user(
+                "admin_user",
+                "Password123!",
+                Some(vec![admin_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        // Create regular user (no admin permissions)
+        let regular_user = db
+            .create_user(
+                "regular_user",
+                "Password123!",
+                None, // No roles = not admin
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        // Build auth context for admin
+        let permissions = db.get_effective_permissions(admin_user.id).unwrap();
+        let roles = db.get_user_roles(admin_user.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: admin_user.id,
+            username: admin_user.username.clone(),
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Admin should be able to assign role to regular user
+        let result = assign_role(
+            AuthContextExtractor(auth_ctx.clone()),
+            Extension(db.clone()),
+            Path((regular_user.id, viewer_role.id)),
+        )
+        .await;
+
+        // Should succeed
+        assert!(
+            result.is_ok(),
+            "Admin should be able to assign roles to regular (non-admin) users"
+        );
+    }
+
+    /// SECURITY TEST: Superadmin CAN assign roles to other admins
+    /// This verifies that superadmin has full control
+    #[tokio::test]
+    async fn test_superadmin_can_assign_role_to_admin() {
+        let (db, _dirs) = common::create_test_db();
+        let db = Arc::new(db);
+
+        // Get the superadmin
+        let superadmin = db.verify_credentials("admin", "AdminPass123!").unwrap();
+
+        // Create an admin role
+        let admin_role = db.create_role("new_admin_role", Some("New admin role")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true).unwrap();
+
+        // Create another admin user
+        let other_admin = db
+            .create_user(
+                "other_admin",
+                "Password123!",
+                Some(vec![admin_role.id]),
+                None,
+                Some(false),
+            )
+            .unwrap();
+
+        // Build auth context for superadmin
+        let permissions = db.get_effective_permissions(superadmin.id).unwrap();
+        let roles = db.get_user_roles(superadmin.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: superadmin.id,
+            username: superadmin.username.clone(),
+            roles,
+            permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Superadmin should be able to assign role to other admin
+        let result = assign_role(
+            AuthContextExtractor(auth_ctx.clone()),
+            Extension(db.clone()),
+            Path((other_admin.id, admin_role.id)),
+        )
+        .await;
+
+        // Should succeed
+        assert!(
+            result.is_ok(),
+            "Superadmin should be able to assign roles to other admins"
+        );
     }
 
 }

@@ -53,6 +53,7 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
             limit_by_key: true,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![], // No sensitive endpoints in basic tests
         },
         session: SessionConfig {
             audit_enable: true,

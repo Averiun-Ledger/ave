@@ -4,7 +4,7 @@
 
 use ave_bridge::{
     HttpConfig, MemoryLimit, auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
+        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, RateLimitConfig, SessionConfig,
     }
 };
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,7 @@ pub struct RateLimitConfigHttp {
     pub limit_by_key: bool,
     pub limit_by_ip: bool,
     pub cleanup_interval_seconds: i64,
+    pub sensitive_endpoints: Vec<EndpointRateLimitHttp>,
 }
 
 impl From<RateLimitConfig> for RateLimitConfigHttp {
@@ -115,6 +116,27 @@ impl From<RateLimitConfig> for RateLimitConfigHttp {
             limit_by_key: value.limit_by_key,
             limit_by_ip: value.limit_by_ip,
             cleanup_interval_seconds: value.cleanup_interval_seconds,
+            sensitive_endpoints: value.sensitive_endpoints
+                .into_iter()
+                .map(EndpointRateLimitHttp::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct EndpointRateLimitHttp {
+    pub endpoint: String,
+    pub max_requests: u32,
+    pub window_seconds: Option<i64>,
+}
+
+impl From<EndpointRateLimit> for EndpointRateLimitHttp {
+    fn from(value: EndpointRateLimit) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            max_requests: value.max_requests,
+            window_seconds: value.window_seconds,
         }
     }
 }

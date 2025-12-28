@@ -420,10 +420,13 @@ impl AuthDatabase {
             None
         };
 
+        // SECURITY: Check if this endpoint has a specific rate limit configuration
+        let (max_requests, window_seconds) = self.get_endpoint_rate_limit(endpoint);
+
         let conn = self.lock_conn()?;
 
         let now = Self::now();
-        let window_start = now - self.config.rate_limit.window_seconds;
+        let window_start = now - window_seconds;
 
         // SECURITY FIX: Build WHERE clause dynamically to avoid SQL NULL comparison issues
         // Using IS for parameters can cause incorrect behavior with NULL values
@@ -457,13 +460,11 @@ impl AuthDatabase {
             .optional()
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
-        let max_requests = self.config.rate_limit.max_requests as i64;
-
         if let Some(count) = current_count {
-            if count >= max_requests {
+            if count >= max_requests as i64 {
                 return Err(DatabaseError::RateLimitExceeded(format!(
                     "Rate limit exceeded: {} requests in {} seconds",
-                    max_requests, self.config.rate_limit.window_seconds
+                    max_requests, window_seconds
                 )));
             }
 
@@ -487,6 +488,33 @@ impl AuthDatabase {
         }
 
         Ok(true)
+    }
+
+    /// Get endpoint-specific rate limit configuration
+    /// Returns (max_requests, window_seconds) tuple
+    fn get_endpoint_rate_limit(&self, endpoint: Option<&str>) -> (u32, i64) {
+        // If no endpoint specified, use defaults
+        let Some(endpoint_path) = endpoint else {
+            return (
+                self.config.rate_limit.max_requests,
+                self.config.rate_limit.window_seconds,
+            );
+        };
+
+        // Check if this endpoint has a specific configuration
+        for endpoint_config in &self.config.rate_limit.sensitive_endpoints {
+            if endpoint_config.endpoint == endpoint_path {
+                let window = endpoint_config.window_seconds
+                    .unwrap_or(self.config.rate_limit.window_seconds);
+                return (endpoint_config.max_requests, window);
+            }
+        }
+
+        // No specific config found, use defaults
+        (
+            self.config.rate_limit.max_requests,
+            self.config.rate_limit.window_seconds,
+        )
     }
 
     /// Cleanup old rate limit entries
