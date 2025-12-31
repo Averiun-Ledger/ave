@@ -429,13 +429,24 @@ pub async fn update_user(
             ));
         }
 
-        // SECURITY FIX: Prevent non-superadmin from changing superadmin's password
-        // This prevents privilege escalation via password reset
-        if req.password.is_some() && !auth_ctx.is_superadmin() {
+        // SECURITY FIX: Block ALL password changes for superadmin account
+        // Password can only be changed directly in the database for security
+        if req.password.is_some() {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Only superadmin can change superadmin's password".to_string(),
+                    error: "Cannot change superadmin password through API. Use direct database access.".to_string(),
+                }),
+            ));
+        }
+
+        // SECURITY FIX: Block role changes for superadmin account
+        // Superadmin always has all permissions, roles are unnecessary
+        if req.role_ids.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot modify superadmin roles. Superadmin has all permissions automatically.".to_string(),
                 }),
             ));
         }
@@ -560,13 +571,14 @@ pub async fn reset_user_password(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "post")?;
 
-    // SECURITY FIX: Protect superadmin account
+    // SECURITY FIX: Block ALL password resets for superadmin account
+    // Password can only be changed directly in the database for security
     let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
-    if is_superadmin_user(&db, &target_user)? && !auth_ctx.is_superadmin() {
+    if is_superadmin_user(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can reset superadmin password".to_string(),
+                error: "Cannot reset superadmin password through API. Use direct database access.".to_string(),
             }),
         ));
     }

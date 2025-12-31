@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     resource_id INTEGER NOT NULL,
     action_id INTEGER NOT NULL,
     allowed BOOLEAN NOT NULL DEFAULT 1, -- TRUE = allow, FALSE = deny
+    is_system BOOLEAN NOT NULL DEFAULT 0, -- System permissions cannot be modified/deleted
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
     FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,

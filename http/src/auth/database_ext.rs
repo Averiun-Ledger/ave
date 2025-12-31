@@ -377,6 +377,21 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
+        // Check if role is a system role (directly in the same connection)
+        let is_system: bool = conn
+            .query_row(
+                "SELECT is_system FROM roles WHERE id = ?1",
+                params![role_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::NotFoundError(format!("Role not found: {}", e)))?;
+
+        if is_system {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot modify permissions of system roles".to_string()
+            ));
+        }
+
         // Get resource and action IDs
         let resource_id =
             Self::get_resource_by_name_internal(&conn, resource)?.id;
@@ -401,6 +416,21 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
 
+        // Check if role is a system role (directly in the same connection)
+        let is_system: bool = conn
+            .query_row(
+                "SELECT is_system FROM roles WHERE id = ?1",
+                params![role_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::NotFoundError(format!("Role not found: {}", e)))?;
+
+        if is_system {
+            return Err(DatabaseError::PermissionDenied(
+                "Cannot remove permissions from system roles".to_string()
+            ));
+        }
+
         let resource_id =
             Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
@@ -424,7 +454,7 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(
-                "SELECT res.name, act.name, rp.allowed
+                "SELECT res.name, act.name, rp.allowed, res.is_system
              FROM role_permissions rp
              INNER JOIN resources res ON rp.resource_id = res.id
              INNER JOIN actions act ON rp.action_id = act.id
@@ -439,6 +469,9 @@ impl AuthDatabase {
                     resource: row.get(0)?,
                     action: row.get(1)?,
                     allowed: row.get(2)?,
+                    is_system: row.get::<_, Option<i64>>(3)?.map(|v| v != 0),
+                    source: None,
+                    role_name: None,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -463,6 +496,57 @@ impl AuthDatabase {
             Self::get_resource_by_name_internal(&conn, resource)?.id;
         let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
 
+        // VALIDATION: Prevent redundant permissions within direct user permissions
+        // This only affects direct user permissions, NOT role permissions
+        if action == "all" {
+            // Check if user has any individual direct permissions for this resource
+            let individual_perms: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM user_permissions up
+                     INNER JOIN actions a ON up.action_id = a.id
+                     WHERE up.user_id = ?1 AND up.resource_id = ?2 AND a.name != 'all'",
+                    params![user_id, resource_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+            if individual_perms > 0 {
+                // Remove individual direct permissions when assigning "all"
+                // This keeps permissions clean and non-redundant
+                conn.execute(
+                    "DELETE FROM user_permissions
+                     WHERE user_id = ?1 AND resource_id = ?2 AND action_id IN (
+                         SELECT id FROM actions WHERE name != 'all'
+                     )",
+                    params![user_id, resource_id],
+                )
+                .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+            }
+        } else {
+            // Check if user already has direct "all" permission for this resource
+            let has_all: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM user_permissions up
+                         INNER JOIN actions a ON up.action_id = a.id
+                         WHERE up.user_id = ?1 AND up.resource_id = ?2 AND a.name = 'all'
+                     )",
+                    params![user_id, resource_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+            if has_all {
+                return Err(DatabaseError::ValidationError(
+                    format!(
+                        "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions.",
+                        resource
+                    )
+                ));
+            }
+        }
+
+        // Insert or replace the permission
         conn.execute(
             "INSERT OR REPLACE INTO user_permissions (user_id, resource_id, action_id, allowed, granted_by)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -495,35 +579,74 @@ impl AuthDatabase {
         Ok(())
     }
 
-    /// Get user permissions (direct overrides only)
+    /// Get all user permissions including both role-inherited and direct permissions
+    /// Each permission is tagged with source ('role' or 'direct') and role_name (if from role)
     pub fn get_user_permissions(
         &self,
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT res.name, act.name, up.allowed
-             FROM user_permissions up
-             INNER JOIN resources res ON up.resource_id = res.id
-             INNER JOIN actions act ON up.action_id = act.id
-             WHERE up.user_id = ?1
-             ORDER BY res.name, act.name",
-            )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        // Get role-inherited permissions
+        let mut role_perms_stmt = conn.prepare(
+            "SELECT DISTINCT res.name, act.name, rp.allowed, res.is_system, r.name as role_name
+             FROM role_permissions rp
+             INNER JOIN user_roles ur ON rp.role_id = ur.role_id
+             INNER JOIN roles r ON ur.role_id = r.id
+             INNER JOIN resources res ON rp.resource_id = res.id
+             INNER JOIN actions act ON rp.action_id = act.id
+             WHERE ur.user_id = ?1 AND r.is_deleted = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM user_permissions up2
+                   WHERE up2.user_id = ?1
+                     AND up2.resource_id = rp.resource_id
+                     AND up2.action_id = rp.action_id
+               )
+             ORDER BY res.name, act.name"
+        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
-        let permissions = stmt
+        let mut permissions: Vec<Permission> = role_perms_stmt
             .query_map(params![user_id], |row| {
                 Ok(Permission {
                     resource: row.get(0)?,
                     action: row.get(1)?,
                     allowed: row.get(2)?,
+                    is_system: row.get::<_, Option<i64>>(3)?.map(|v| v != 0),
+                    source: Some("role".to_string()),
+                    role_name: row.get(4)?,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // Get direct permissions
+        let mut direct_perms_stmt = conn.prepare(
+            "SELECT res.name, act.name, up.allowed, res.is_system
+             FROM user_permissions up
+             INNER JOIN resources res ON up.resource_id = res.id
+             INNER JOIN actions act ON up.action_id = act.id
+             WHERE up.user_id = ?1
+             ORDER BY res.name, act.name"
+        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        let direct_perms: Vec<Permission> = direct_perms_stmt
+            .query_map(params![user_id], |row| {
+                Ok(Permission {
+                    resource: row.get(0)?,
+                    action: row.get(1)?,
+                    allowed: row.get(2)?,
+                    is_system: row.get::<_, Option<i64>>(3)?.map(|v| v != 0),
+                    source: Some("direct".to_string()),
+                    role_name: None,
+                })
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // Combine both
+        permissions.extend(direct_perms);
 
         Ok(permissions)
     }
@@ -561,6 +684,9 @@ impl AuthDatabase {
                     resource: row.get(0)?,
                     action: row.get(1)?,
                     allowed: row.get(2)?,
+                    is_system: None,
+                    source: None,
+                    role_name: None,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?
@@ -604,6 +730,9 @@ impl AuthDatabase {
                     resource: row.get(0)?,
                     action: row.get(1)?,
                     allowed: row.get(2)?,
+                    is_system: None,
+                    source: None,
+                    role_name: None,
                 })
             })
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?

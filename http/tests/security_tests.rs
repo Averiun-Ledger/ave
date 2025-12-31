@@ -508,6 +508,9 @@ mod tests {
                 resource: "admin_system".to_string(),
                 action: "all".to_string(),
                 allowed: true,
+                is_system: None,
+                source: None,
+                role_name: None,
             }),
         )
         .await;
@@ -1846,6 +1849,148 @@ mod tests {
         );
     }
 
+    /// SECURITY TEST:
+    /// Test that system permissions cannot be modified or deleted
+    /// Ensures that initial system permissions (is_system = 1) are protected
+    #[test]
+    fn test_cannot_modify_system_permissions() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Get the superadmin role (which has system permissions)
+        let superadmin_role = db.get_role_by_name("superadmin").unwrap();
+
+        // Get one of the system permissions
+        let perms = db.get_role_permissions(superadmin_role.id).unwrap();
+        assert!(!perms.is_empty(), "Superadmin should have permissions");
+
+        // Find a system permission
+        let system_perm = perms.iter().find(|p| p.is_system == Some(true));
+        assert!(
+            system_perm.is_some(),
+            "Superadmin should have at least one system permission"
+        );
+
+        let perm = system_perm.unwrap();
+
+        // Try to modify the system permission (change allowed from true to false)
+        let result = db.set_role_permission(
+            superadmin_role.id,
+            &perm.resource,
+            &perm.action,
+            false,
+        );
+
+        // Should fail - cannot modify system role permissions
+        assert!(
+            matches!(result, Err(DatabaseError::PermissionDenied(_))),
+            "Should not be able to modify permissions of system role. Got: {:?}",
+            result
+        );
+
+        // Try to remove the system permission
+        let result = db.remove_role_permission(
+            superadmin_role.id,
+            &perm.resource,
+            &perm.action,
+        );
+
+        // Should fail - cannot delete system role permissions
+        assert!(
+            matches!(result, Err(DatabaseError::PermissionDenied(_))),
+            "Should not be able to delete permissions of system role. Got: {:?}",
+            result
+        );
+    }
+
+    /// SECURITY TEST:
+    /// Test that all system roles (superadmin, admin, owner, etc.) are protected
+    #[test]
+    fn test_all_system_roles_are_protected() {
+        let (db, _dirs) = common::create_test_db();
+
+        let system_roles = vec!["superadmin", "admin", "owner", "sender", "manager", "data"];
+
+        for role_name in system_roles {
+            let role = db.get_role_by_name(role_name).unwrap();
+            assert!(role.is_system, "Role {} should be a system role", role_name);
+
+            let perms = db.get_role_permissions(role.id).unwrap();
+
+            // Each system role should have at least one permission
+            assert!(!perms.is_empty(), "System role {} should have permissions", role_name);
+
+            // Try to modify the first permission
+            let first_perm = &perms[0];
+            let result = db.set_role_permission(
+                role.id,
+                &first_perm.resource,
+                &first_perm.action,
+                !first_perm.allowed,
+            );
+
+            // Should fail - cannot modify system role permissions
+            assert!(
+                matches!(result, Err(DatabaseError::PermissionDenied(_))),
+                "Should not be able to modify permissions of system role {}. Got: {:?}",
+                role_name,
+                result
+            );
+
+            // Try to remove a permission
+            let result = db.remove_role_permission(
+                role.id,
+                &first_perm.resource,
+                &first_perm.action,
+            );
+
+            // Should also fail
+            assert!(
+                matches!(result, Err(DatabaseError::PermissionDenied(_))),
+                "Should not be able to delete permissions of system role {}. Got: {:?}",
+                role_name,
+                result
+            );
+        }
+    }
+
+    /// SECURITY TEST:
+    /// Test that non-system permissions CAN be modified on custom roles
+    /// Ensures the validation doesn't block legitimate operations
+    #[test]
+    fn test_can_modify_non_system_permissions() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Create a custom (non-system) role
+        let custom_role = db.create_role("modifiable_role", Some("Test role")).unwrap();
+        assert!(!custom_role.is_system, "Custom role should not be a system role");
+
+        // Add a permission to the custom role
+        // Note: The resource "user" is a system resource, but we CAN modify permissions
+        // on a non-system role, even if the resource is a system resource
+        db.set_role_permission(custom_role.id, "user", "get", true)
+            .unwrap();
+
+        // Verify it was added
+        let perms = db.get_role_permissions(custom_role.id).unwrap();
+        let perm = perms.iter().find(|p| p.resource == "user" && p.action == "get");
+        assert!(perm.is_some(), "Permission should be added");
+        // The resource "user" is a system resource
+        assert_eq!(perm.unwrap().is_system, Some(true), "The 'user' resource is a system resource");
+
+        // Modify the permission (change allowed to false)
+        let result = db.set_role_permission(custom_role.id, "user", "get", false);
+        assert!(result.is_ok(), "Should be able to modify permissions on non-system role");
+
+        // Remove the permission
+        let result = db.remove_role_permission(custom_role.id, "user", "get");
+        assert!(result.is_ok(), "Should be able to remove permissions from non-system role");
+
+        // Verify it was removed
+        let perms = db.get_role_permissions(custom_role.id).unwrap();
+        let perm = perms.iter().find(|p| p.resource == "user" && p.action == "get");
+        assert!(perm.is_none(), "Permission should be removed");
+    }
+
     /// SECURITY REGRESSION TEST:
     /// Test that API keys are revoked when admin resets password
     /// Attack vector: Compromised account maintains persistent access via existing API keys
@@ -2581,6 +2726,493 @@ mod tests {
             result.is_ok(),
             "Superadmin should be able to assign roles to other admins"
         );
+    }
+
+    // =============================================================================
+    // PERMISSION SOURCE TRACKING TESTS
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_permission_source_field_distinguishes_direct_and_role_permissions() {
+        use ave_http::auth::admin_handlers::get_user_permissions;
+
+        let (db, _dirs) = common::create_test_db();
+
+        // Create superadmin
+        let superadmin = db
+            .create_user("superadmin", "SuperPass123!", None, None, Some(false))
+            .unwrap();
+        db.assign_role_to_user(superadmin.id, 1, None).unwrap(); // Assign superadmin role
+
+        // Create a test role with specific permissions
+        let test_role = db.create_role("test_role", Some("Role for testing permission sources")).unwrap();
+
+        // Add a role permission (admin_users:get)
+        db.set_role_permission(test_role.id, "admin_users", "get", true).unwrap();
+
+        // Create a regular user
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Assign the test_role to the user
+        db.assign_role_to_user(user.id, test_role.id, None).unwrap();
+
+        // Add a DIRECT permission to the user (admin_roles:post)
+        db.set_user_permission(user.id, "admin_roles", "post", true, None).unwrap();
+
+        // Create auth context for superadmin
+        let superadmin_permissions = db.get_effective_permissions(superadmin.id).unwrap();
+        let superadmin_roles = db.get_user_roles(superadmin.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: superadmin.id,
+            username: superadmin.username.clone(),
+            roles: superadmin_roles,
+            permissions: superadmin_permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Get user permissions via the endpoint
+        let result = get_user_permissions(
+            AuthContextExtractor(auth_ctx),
+            Extension(Arc::new(db.clone())),
+            Path(user.id),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Should successfully retrieve user permissions");
+
+        let Json(permissions) = result.unwrap();
+
+        // Verify we got permissions
+        assert!(!permissions.is_empty(), "User should have permissions");
+
+        // Find the role-inherited permission (admin_users:get)
+        let role_perm = permissions.iter().find(|p|
+            p.resource == "admin_users" && p.action == "get"
+        );
+
+        assert!(role_perm.is_some(), "Should have admin_users:get from role");
+        let role_perm = role_perm.unwrap();
+
+        // Verify it has source = "role"
+        assert_eq!(
+            role_perm.source.as_deref(),
+            Some("role"),
+            "admin_users:get should have source='role'"
+        );
+
+        // Verify it has the role_name populated
+        assert_eq!(
+            role_perm.role_name.as_deref(),
+            Some("test_role"),
+            "admin_users:get should have role_name='test_role'"
+        );
+
+        // Find the direct permission (admin_roles:post)
+        let direct_perm = permissions.iter().find(|p|
+            p.resource == "admin_roles" && p.action == "post"
+        );
+
+        assert!(direct_perm.is_some(), "Should have admin_roles:post direct permission");
+        let direct_perm = direct_perm.unwrap();
+
+        // Verify it has source = "direct"
+        assert_eq!(
+            direct_perm.source.as_deref(),
+            Some("direct"),
+            "admin_roles:post should have source='direct'"
+        );
+
+        // Verify role_name is None for direct permissions
+        assert!(
+            direct_perm.role_name.is_none(),
+            "Direct permissions should not have role_name"
+        );
+
+        println!("✓ Permission source tracking works correctly:");
+        println!("  - Role permission has source='role' and role_name");
+        println!("  - Direct permission has source='direct' and no role_name");
+    }
+
+    #[tokio::test]
+    async fn test_direct_permission_overrides_role_permission() {
+        use ave_http::auth::admin_handlers::get_user_permissions;
+
+        let (db, _dirs) = common::create_test_db();
+
+        // Create superadmin
+        let superadmin = db
+            .create_user("superadmin", "SuperPass123!", None, None, Some(false))
+            .unwrap();
+        db.assign_role_to_user(superadmin.id, 1, None).unwrap();
+
+        // Create a role that allows admin_system:all
+        let role = db.create_role("system_admin", Some("System administrator")).unwrap();
+        db.set_role_permission(role.id, "admin_system", "all", true).unwrap();
+
+        // Create user and assign role
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+        db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+        // Now add a DIRECT deny override for the same permission
+        db.set_user_permission(user.id, "admin_system", "all", false, None).unwrap();
+
+        // Create auth context
+        let superadmin_permissions = db.get_effective_permissions(superadmin.id).unwrap();
+        let superadmin_roles = db.get_user_roles(superadmin.id).unwrap();
+
+        let auth_ctx = Arc::new(AuthContext {
+            user_id: superadmin.id,
+            username: superadmin.username.clone(),
+            roles: superadmin_roles,
+            permissions: superadmin_permissions,
+            api_key_id: "test-key".to_string(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        // Get permissions
+        let result = get_user_permissions(
+            AuthContextExtractor(auth_ctx),
+            Extension(Arc::new(db.clone())),
+            Path(user.id),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let Json(permissions) = result.unwrap();
+
+        // Find admin_system:all permission
+        let perm = permissions.iter().find(|p|
+            p.resource == "admin_system" && p.action == "all"
+        );
+
+        assert!(perm.is_some(), "Should have admin_system:all permission");
+        let perm = perm.unwrap();
+
+        // Should be marked as direct (not from role) since user override exists
+        assert_eq!(
+            perm.source.as_deref(),
+            Some("direct"),
+            "Direct override should take precedence, showing source='direct'"
+        );
+
+        // Should be denied
+        assert_eq!(
+            perm.allowed,
+            false,
+            "Direct deny should override role allow"
+        );
+
+        // Should NOT have role_name since it's a direct permission
+        assert!(
+            perm.role_name.is_none(),
+            "Direct permission override should not have role_name"
+        );
+
+        println!("✓ Direct permission override correctly takes precedence over role permission");
+    }
+
+    /// SECURITY TEST:
+    /// Test that direct permission denials take precedence over role permissions
+    /// Scenario: User has role with "all" permission, but direct deny on specific action
+    /// Expected: Direct deny blocks access even though role grants it
+    #[tokio::test]
+    async fn test_direct_deny_blocks_role_allow_functionally() {
+        let (db, _dirs) = common::create_test_db();
+
+        // Create a role with admin_users:all permission (grants everything)
+        let admin_role = db.create_role("user_admin", Some("User administrator")).unwrap();
+        db.set_role_permission(admin_role.id, "admin_users", "all", true).unwrap();
+
+        // Create user and assign role
+        let user = db
+            .create_user("blocked_user", "TestPass123!", None, None, Some(false))
+            .unwrap();
+        db.assign_role_to_user(user.id, admin_role.id, None).unwrap();
+
+        // Verify user has role permission for admin_users:get via role
+        let role_perms = db.get_role_permissions(admin_role.id).unwrap();
+        assert!(
+            role_perms.iter().any(|p| p.resource == "admin_users" && p.action == "all" && p.allowed),
+            "Role should have admin_users:all permission"
+        );
+
+        // Now add a DIRECT DENY for admin_users:get
+        // This should OVERRIDE the role's "all" permission
+        db.set_user_permission(user.id, "admin_users", "get", false, None).unwrap();
+
+        // Get effective permissions (what's actually used for authorization)
+        let effective_perms = db.get_effective_permissions(user.id).unwrap();
+
+        // Find the admin_users:get permission in effective permissions
+        let get_perm = effective_perms.iter().find(|p|
+            p.resource == "admin_users" && p.action == "get"
+        );
+
+        assert!(
+            get_perm.is_some(),
+            "Should have admin_users:get in effective permissions"
+        );
+
+        let get_perm = get_perm.unwrap();
+
+        // CRITICAL: The effective permission should be DENIED (false)
+        // because direct permission overrides role permission
+        assert_eq!(
+            get_perm.allowed,
+            false,
+            "Direct deny should override role 'all' permission - user should be BLOCKED"
+        );
+
+        // Verify role's "all" permission still works for OTHER actions that aren't denied
+        let post_perm = effective_perms.iter().find(|p|
+            p.resource == "admin_users" && p.action == "post"
+        );
+
+        if let Some(post_perm) = post_perm {
+            assert!(
+                post_perm.allowed,
+                "Other actions not explicitly denied should still be allowed via role"
+            );
+        }
+
+        // Create AuthContext to test functional authorization
+        let user_roles = db.get_user_roles(user.id).unwrap();
+        let auth_ctx = AuthContext {
+            user_id: user.id,
+            username: user.username.clone(),
+            roles: user_roles,
+            permissions: effective_perms,
+            api_key_id: "test-key".to_string(),
+            is_management_key: false,
+            ip_address: None,
+        };
+
+        // Verify that has_permission returns FALSE (blocked)
+        assert!(
+            !auth_ctx.has_permission("admin_users", "get"),
+            "User should be BLOCKED from admin_users:get despite role having 'all' permission"
+        );
+
+        println!("✓ Direct deny successfully blocks access despite role granting 'all' permission");
+        println!("  - Role grants admin_users:all (should allow everything)");
+        println!("  - Direct deny on admin_users:get (blocks this specific action)");
+        println!("  - Result: User CANNOT access admin_users:get ✓");
+    }
+
+    /// SECURITY TEST:
+    /// Test that service API keys CANNOT manage (create/revoke) other API keys
+    /// Only management keys (from login) can manage API keys
+    #[tokio::test]
+    async fn test_service_key_cannot_manage_api_keys() {
+        use ave_http::auth::apikey_handlers::{create_my_api_key, revoke_my_api_key};
+        use ave_http::auth::models::CreateApiKeyRequest;
+
+        let (db, _dirs) = common::create_test_db();
+
+        // Create a user with permission to manage their own API keys
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Give user permission to manage personal API keys
+        db.set_user_permission(user.id, "user_api_key", "post", true, None).unwrap();
+        db.set_user_permission(user.id, "user_api_key", "delete", true, None).unwrap();
+
+        // Create a MANAGEMENT key (simulating login)
+        let (management_key, management_info) = db
+            .create_api_key(user.id, Some("management_session"), None, None, true)
+            .unwrap();
+
+        assert!(management_info.is_management, "Should be a management key");
+
+        // Create a SERVICE key using the management key
+        let user_roles = db.get_user_roles(user.id).unwrap();
+        let user_perms = db.get_effective_permissions(user.id).unwrap();
+
+        let management_ctx = Arc::new(AuthContext {
+            user_id: user.id,
+            username: "testuser".to_string(),
+            roles: user_roles.clone(),
+            permissions: user_perms.clone(),
+            api_key_id: management_info.id.clone(),
+            is_management_key: true,
+            ip_address: None,
+        });
+
+        let create_req = CreateApiKeyRequest {
+            name: "service_key".to_string(),
+            description: Some("Service key for automation".to_string()),
+            expires_in_seconds: None,
+        };
+
+        let result = create_my_api_key(
+            AuthContextExtractor(management_ctx.clone()),
+            Extension(Arc::new(db.clone())),
+            Json(create_req),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Management key should be able to create service keys");
+        let (status, Json(response)) = result.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let service_key = response.api_key;
+        let service_info = response.key_info;
+
+        assert!(!service_info.is_management, "Created key should be a service key");
+
+        // Now try to use the SERVICE key to create another API key
+        // This should FAIL because service keys cannot manage API keys
+        let service_ctx = Arc::new(AuthContext {
+            user_id: user.id,
+            username: "testuser".to_string(),
+            roles: user_roles.clone(),
+            permissions: user_perms.clone(),
+            api_key_id: service_info.id.clone(),
+            is_management_key: false, // This is a service key
+            ip_address: None,
+        });
+
+        let create_req2 = CreateApiKeyRequest {
+            name: "another_service_key".to_string(),
+            description: Some("Trying to create another key".to_string()),
+            expires_in_seconds: None,
+        };
+
+        let result = create_my_api_key(
+            AuthContextExtractor(service_ctx.clone()),
+            Extension(Arc::new(db.clone())),
+            Json(create_req2),
+        )
+        .await;
+
+        // Should FAIL - service keys cannot create other API keys
+        assert!(result.is_err(), "Service key should NOT be able to create API keys");
+        let (status, Json(err)) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(err.error.contains("management API key"), "Error should mention management key requirement");
+
+        // Also test that service key cannot revoke other keys
+        let result = revoke_my_api_key(
+            AuthContextExtractor(service_ctx),
+            Extension(Arc::new(db.clone())),
+            Path(service_info.name.clone()),
+            None,
+        )
+        .await;
+
+        // Should FAIL - service keys cannot revoke API keys
+        assert!(result.is_err(), "Service key should NOT be able to revoke API keys");
+        let (status, Json(err)) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(err.error.contains("management API key"), "Error should mention management key requirement");
+
+        println!("✓ Service keys correctly blocked from managing API keys");
+        println!("  - Service key CANNOT create new API keys");
+        println!("  - Service key CANNOT revoke API keys");
+        println!("  - Only management keys (from login) can manage API keys");
+    }
+
+    /// SECURITY TEST:
+    /// Test that "all" permission prevents individual permissions and vice versa
+    /// Only applies to DIRECT user permissions, NOT role permissions
+    #[test]
+    fn test_all_permission_validation() {
+        let (db, _dirs) = common::create_test_db();
+
+        let user = db
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        // Test 1: Assign individual permissions first, then "all" should remove them
+        db.set_user_permission(user.id, "admin_users", "get", true, None).unwrap();
+        db.set_user_permission(user.id, "admin_users", "post", true, None).unwrap();
+        db.set_user_permission(user.id, "admin_users", "put", true, None).unwrap();
+
+        // Verify individual permissions exist
+        let all_perms_before = db.get_user_permissions(user.id).unwrap();
+        let perms_before: Vec<_> = all_perms_before.iter()
+            .filter(|p| p.source.as_deref() == Some("direct"))
+            .collect();
+        let get_perm = perms_before.iter().find(|p| p.resource == "admin_users" && p.action == "get");
+        let post_perm = perms_before.iter().find(|p| p.resource == "admin_users" && p.action == "post");
+        assert!(get_perm.is_some(), "Should have get permission");
+        assert!(post_perm.is_some(), "Should have post permission");
+
+        // Assign "all" - should automatically remove individual permissions
+        db.set_user_permission(user.id, "admin_users", "all", true, None).unwrap();
+
+        // Verify individual permissions were removed, only "all" remains
+        let all_perms_after = db.get_user_permissions(user.id).unwrap();
+        let perms_after: Vec<_> = all_perms_after.iter()
+            .filter(|p| p.source.as_deref() == Some("direct"))
+            .collect();
+        let get_perm_after = perms_after.iter().find(|p| p.resource == "admin_users" && p.action == "get");
+        let post_perm_after = perms_after.iter().find(|p| p.resource == "admin_users" && p.action == "post");
+        let all_perm = perms_after.iter().find(|p| p.resource == "admin_users" && p.action == "all");
+
+        assert!(get_perm_after.is_none(), "Individual 'get' permission should be removed");
+        assert!(post_perm_after.is_none(), "Individual 'post' permission should be removed");
+        assert!(all_perm.is_some(), "Should have 'all' permission");
+
+        println!("✓ Test 1 passed: Assigning 'all' removes individual permissions");
+
+        // Test 2: Try to assign individual permission when "all" exists - should fail
+        let result = db.set_user_permission(user.id, "admin_users", "delete", true, None);
+        assert!(result.is_err(), "Should not allow individual permission when 'all' exists");
+
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("already has 'all' permission"), "Error message should mention 'all' permission");
+        } else {
+            panic!("Expected ValidationError, got: {:?}", result);
+        }
+
+        println!("✓ Test 2 passed: Cannot assign individual permission when 'all' exists");
+
+        // Test 3: Role permissions should NOT be affected
+        // Create a role with individual permissions
+        let role = db.create_role("test_role", Some("Test role")).unwrap();
+        db.set_role_permission(role.id, "admin_roles", "get", true).unwrap();
+        db.set_role_permission(role.id, "admin_roles", "post", true).unwrap();
+        db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+        // User should be able to have "all" direct permission even though role has individual permissions
+        let result = db.set_user_permission(user.id, "admin_roles", "all", false, None);
+        assert!(result.is_ok(), "Should allow direct 'all' permission even when role has individual permissions");
+
+        // Verify role permissions still exist and user has direct "all" override
+        let all_perms = db.get_user_permissions(user.id).unwrap();
+
+        // Should have role permissions (get, post)
+        let role_get = all_perms.iter().find(|p|
+            p.resource == "admin_roles" && p.action == "get" && p.source.as_deref() == Some("role")
+        );
+        let role_post = all_perms.iter().find(|p|
+            p.resource == "admin_roles" && p.action == "post" && p.source.as_deref() == Some("role")
+        );
+
+        // Should have direct "all" override
+        let direct_all = all_perms.iter().find(|p|
+            p.resource == "admin_roles" && p.action == "all" && p.source.as_deref() == Some("direct")
+        );
+
+        assert!(role_get.is_some(), "Role 'get' permission should still exist");
+        assert!(role_post.is_some(), "Role 'post' permission should still exist");
+        assert!(direct_all.is_some(), "Direct 'all' override should exist");
+        assert!(!direct_all.unwrap().allowed, "Direct 'all' should be denied (override)");
+
+        println!("✓ Test 3 passed: Role permissions are not affected by direct permission validation");
+        println!("✓ All permission validation works correctly:");
+        println!("  - Assigning 'all' removes individual direct permissions");
+        println!("  - Cannot assign individual when 'all' exists");
+        println!("  - Role permissions remain independent");
     }
 
 }

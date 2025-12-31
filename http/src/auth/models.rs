@@ -183,6 +183,14 @@ pub struct Permission {
     pub resource: String,
     pub action: String,
     pub allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_system: Option<bool>,
+    /// Source of the permission: 'direct' (user-specific) or 'role' (inherited from role)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// If source is 'role', the name of the role providing this permission
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

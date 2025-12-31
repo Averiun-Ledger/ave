@@ -672,7 +672,7 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         conn.execute(
-            "UPDATE system_config SET value = ?1, updated_by = ?2 WHERE key = ?3",
+            "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
             params![value, updated_by, key],
         ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
