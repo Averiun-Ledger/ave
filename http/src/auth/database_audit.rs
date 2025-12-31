@@ -671,6 +671,78 @@ impl AuthDatabase {
     ) -> Result<SystemConfig, DatabaseError> {
         let conn = self.lock_conn()?;
 
+        // SECURITY: Validate specific config values
+        match key {
+            "api_key_default_ttl_seconds" => {
+                let ttl_value: i64 = value.parse().map_err(|_| {
+                    DatabaseError::ValidationError(
+                        "api_key_default_ttl_seconds must be a valid integer".to_string()
+                    )
+                })?;
+
+                if ttl_value < 0 {
+                    return Err(DatabaseError::ValidationError(
+                        "api_key_default_ttl_seconds must be >= 0 (0 = no expiration)".to_string()
+                    ));
+                }
+            }
+            "max_login_attempts" => {
+                let attempts: u32 = value.parse().map_err(|_| {
+                    DatabaseError::ValidationError(
+                        "max_login_attempts must be a valid positive integer".to_string()
+                    )
+                })?;
+
+                if attempts == 0 {
+                    return Err(DatabaseError::ValidationError(
+                        "max_login_attempts must be > 0".to_string()
+                    ));
+                }
+            }
+            "lockout_duration_seconds" => {
+                let duration: i64 = value.parse().map_err(|_| {
+                    DatabaseError::ValidationError(
+                        "lockout_duration_seconds must be a valid integer".to_string()
+                    )
+                })?;
+
+                if duration <= 0 {
+                    return Err(DatabaseError::ValidationError(
+                        "lockout_duration_seconds must be > 0".to_string()
+                    ));
+                }
+            }
+            "rate_limit_window_seconds" => {
+                let window: i64 = value.parse().map_err(|_| {
+                    DatabaseError::ValidationError(
+                        "rate_limit_window_seconds must be a valid integer".to_string()
+                    )
+                })?;
+
+                if window <= 0 {
+                    return Err(DatabaseError::ValidationError(
+                        "rate_limit_window_seconds must be > 0".to_string()
+                    ));
+                }
+            }
+            "rate_limit_max_requests" => {
+                let max_requests: u32 = value.parse().map_err(|_| {
+                    DatabaseError::ValidationError(
+                        "rate_limit_max_requests must be a valid positive integer".to_string()
+                    )
+                })?;
+
+                if max_requests == 0 {
+                    return Err(DatabaseError::ValidationError(
+                        "rate_limit_max_requests must be > 0".to_string()
+                    ));
+                }
+            }
+            _ => {
+                // Unknown config key - allow it but no specific validation
+            }
+        }
+
         conn.execute(
             "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
             params![value, updated_by, key],

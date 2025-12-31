@@ -10,6 +10,7 @@ use ave_http::auth::database::DatabaseError;
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::path::PathBuf;
 
     use axum::{
         extract::{Path, Query},
@@ -23,6 +24,7 @@ mod tests {
         },
         middleware::AuthContextExtractor,
         models::{AuthContext, Permission, SetPermissionRequest, UpdateUserRequest},
+        AuthDatabase,
     };
 
     // =============================================================================
@@ -3213,6 +3215,147 @@ mod tests {
         println!("  - Assigning 'all' removes individual direct permissions");
         println!("  - Cannot assign individual when 'all' exists");
         println!("  - Role permissions remain independent");
+    }
+
+    #[test]
+    fn test_system_config_ttl_validation() {
+        use ave_bridge::auth::{ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig};
+
+        let config = AuthConfig {
+            enable: true,
+            database_path: PathBuf::from(":memory:"),
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig::default(),
+            lockout: LockoutConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            session: SessionConfig::default(),
+        };
+
+        let db = AuthDatabase::new(config, "TestPass123!").expect("Failed to create database");
+
+        // ========== API Key TTL Tests ==========
+        println!("Testing api_key_default_ttl_seconds validation:");
+
+        // Test 1: Valid positive TTL should be accepted
+        let result = db.update_system_config("api_key_default_ttl_seconds", "3600", Some(1));
+        assert!(result.is_ok(), "Valid positive TTL should be accepted");
+        assert_eq!(result.unwrap().value, "3600");
+
+        // Test 2: Zero TTL (no expiration) should be accepted
+        let result = db.update_system_config("api_key_default_ttl_seconds", "0", Some(1));
+        assert!(result.is_ok(), "Zero TTL (no expiration) should be accepted");
+        assert_eq!(result.unwrap().value, "0");
+
+        // Test 3: Negative TTL should be rejected
+        let result = db.update_system_config("api_key_default_ttl_seconds", "-1", Some(1));
+        assert!(result.is_err(), "Negative TTL should be rejected");
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("must be >= 0"));
+        } else {
+            panic!("Expected ValidationError for negative TTL");
+        }
+
+        // Test 4: Invalid integer should be rejected
+        let result = db.update_system_config("api_key_default_ttl_seconds", "not_a_number", Some(1));
+        assert!(result.is_err(), "Invalid integer should be rejected");
+
+        // ========== Max Login Attempts Tests ==========
+        println!("Testing max_login_attempts validation:");
+
+        // Valid positive value
+        let result = db.update_system_config("max_login_attempts", "5", Some(1));
+        assert!(result.is_ok(), "Valid max_login_attempts should be accepted");
+        assert_eq!(result.unwrap().value, "5");
+
+        // Zero should be rejected (must be > 0)
+        let result = db.update_system_config("max_login_attempts", "0", Some(1));
+        assert!(result.is_err(), "Zero max_login_attempts should be rejected");
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("must be > 0"));
+        } else {
+            panic!("Expected ValidationError for zero max_login_attempts");
+        }
+
+        // Invalid value
+        let result = db.update_system_config("max_login_attempts", "invalid", Some(1));
+        assert!(result.is_err(), "Invalid max_login_attempts should be rejected");
+
+        // ========== Lockout Duration Tests ==========
+        println!("Testing lockout_duration_seconds validation:");
+
+        // Valid positive value
+        let result = db.update_system_config("lockout_duration_seconds", "300", Some(1));
+        assert!(result.is_ok(), "Valid lockout_duration should be accepted");
+        assert_eq!(result.unwrap().value, "300");
+
+        // Zero should be rejected (must be > 0)
+        let result = db.update_system_config("lockout_duration_seconds", "0", Some(1));
+        assert!(result.is_err(), "Zero lockout_duration should be rejected");
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("must be > 0"));
+        } else {
+            panic!("Expected ValidationError for zero lockout_duration");
+        }
+
+        // Negative should be rejected
+        let result = db.update_system_config("lockout_duration_seconds", "-100", Some(1));
+        assert!(result.is_err(), "Negative lockout_duration should be rejected");
+
+        // ========== Rate Limit Window Tests ==========
+        println!("Testing rate_limit_window_seconds validation:");
+
+        // Valid positive value
+        let result = db.update_system_config("rate_limit_window_seconds", "60", Some(1));
+        assert!(result.is_ok(), "Valid rate_limit_window should be accepted");
+        assert_eq!(result.unwrap().value, "60");
+
+        // Zero should be rejected (must be > 0)
+        let result = db.update_system_config("rate_limit_window_seconds", "0", Some(1));
+        assert!(result.is_err(), "Zero rate_limit_window should be rejected");
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("must be > 0"));
+        } else {
+            panic!("Expected ValidationError for zero rate_limit_window");
+        }
+
+        // Negative should be rejected
+        let result = db.update_system_config("rate_limit_window_seconds", "-60", Some(1));
+        assert!(result.is_err(), "Negative rate_limit_window should be rejected");
+
+        // ========== Rate Limit Max Requests Tests ==========
+        println!("Testing rate_limit_max_requests validation:");
+
+        // Valid positive value
+        let result = db.update_system_config("rate_limit_max_requests", "100", Some(1));
+        assert!(result.is_ok(), "Valid rate_limit_max_requests should be accepted");
+        assert_eq!(result.unwrap().value, "100");
+
+        // Zero should be rejected (must be > 0)
+        let result = db.update_system_config("rate_limit_max_requests", "0", Some(1));
+        assert!(result.is_err(), "Zero rate_limit_max_requests should be rejected");
+        if let Err(DatabaseError::ValidationError(msg)) = result {
+            assert!(msg.contains("must be > 0"));
+        } else {
+            panic!("Expected ValidationError for zero rate_limit_max_requests");
+        }
+
+        // Invalid value
+        let result = db.update_system_config("rate_limit_max_requests", "invalid", Some(1));
+        assert!(result.is_err(), "Invalid rate_limit_max_requests should be rejected");
+
+        // ========== Unknown Config Key ==========
+        println!("Testing unknown config key:");
+
+        // Unknown keys should fail (key not found), but not due to validation
+        let result = db.update_system_config("some_other_config", "-1", Some(1));
+        assert!(result.is_err(), "Non-existent key should fail");
+
+        println!("✓ All system config validations work correctly:");
+        println!("  - api_key_default_ttl_seconds: >= 0 (allows 0 for no expiration)");
+        println!("  - max_login_attempts: > 0");
+        println!("  - lockout_duration_seconds: > 0");
+        println!("  - rate_limit_window_seconds: > 0");
+        println!("  - rate_limit_max_requests: > 0");
     }
 
 }
