@@ -214,7 +214,7 @@ pub async fn get_api_key(
     params(
         ("id" = String, Path, description = "API Key ID (UUID)")
     ),
-    request_body = RevokeApiKeyRequest,
+    request_body(content = RevokeApiKeyRequest, description = "Optional revocation reason", content_type = "application/json"),
     responses(
         (status = 204, description = "API key revoked successfully"),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -226,7 +226,7 @@ pub async fn revoke_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
     Path(id): Path<String>,
-    Json(req): Json<RevokeApiKeyRequest>,
+    req: Option<Json<RevokeApiKeyRequest>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
@@ -255,7 +255,9 @@ pub async fn revoke_api_key(
         ));
     }
 
-    db.revoke_api_key(&id, Some(auth_ctx.user_id), req.reason.as_deref())
+    let reason = req.as_ref().and_then(|r| r.reason.as_deref());
+
+    db.revoke_api_key(&id, Some(auth_ctx.user_id), reason)
         .map_err(db_error_to_response)?;
 
     // Audit log
@@ -268,7 +270,10 @@ pub async fn revoke_api_key(
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(
+            &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+                .unwrap_or_default(),
+        ),
         success: true,
         error_message: None,
     });
