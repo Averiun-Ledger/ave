@@ -164,13 +164,19 @@ impl AuthDatabase {
 
         let effective_ttl = match expires_in_seconds {
             Some(ttl) if ttl > 0 => {
+                // Explicit positive TTL requested
                 if config_ttl > 0 {
                     Some(std::cmp::min(ttl, config_ttl))
                 } else {
                     Some(ttl)
                 }
             }
-            Some(0) | None => {
+            Some(0) => {
+                // Explicit TTL=0 means never expire (useful for service keys)
+                None
+            }
+            None => {
+                // No TTL specified, use system default
                 if config_ttl > 0 {
                     Some(config_ttl)
                 } else {

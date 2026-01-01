@@ -460,11 +460,11 @@ mod tests {
             .unwrap();
         assert_eq!(info1.expires_at, Some(info1.created_at + 100));
 
-        // TTL = 0 provided -> should still use system default
+        // TTL = 0 provided -> should NEVER expire (explicit permanent key)
         let (_, info2) = db
             .create_api_key(user.id, Some("default2"), None, Some(0), false)
             .unwrap();
-        assert_eq!(info2.expires_at, Some(info2.created_at + 100));
+        assert_eq!(info2.expires_at, None, "TTL=0 should create permanent key (never expires)");
     }
 
     #[test]

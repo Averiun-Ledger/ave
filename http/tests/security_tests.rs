@@ -369,6 +369,68 @@ mod tests {
     }
 
     #[test]
+    fn test_explicit_zero_ttl_overrides_default() {
+        use tempfile::TempDir;
+        use std::path::PathBuf;
+        use ave_bridge::auth::{ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig};
+
+        // Create temp directory for isolated test
+        let _tmp_dir = TempDir::new().unwrap();
+
+        // Create config with a default TTL of 30 days
+        let config = AuthConfig {
+            enable: true,
+            database_path: _tmp_dir.path().to_path_buf(),
+            superadmin: "admin".to_string(),
+            api_key: ApiKeyConfig {
+                default_ttl_seconds: 2592000, // 30 days
+                max_keys_per_user: 10,
+            },
+            lockout: LockoutConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            session: SessionConfig::default(),
+        };
+
+        let db = AuthDatabase::new(config, "TestPass123!").expect("Failed to create database");
+
+        let user = db
+            .create_user("ttluser", "Password123!", None, None, Some(false))
+            .unwrap();
+
+        // Test 1: Create key with explicit TTL=0 (should never expire despite default_ttl)
+        let (api_key_zero, key_info_zero) = db
+            .create_api_key(user.id, Some("never-expire"), None, Some(0), false)
+            .unwrap();
+
+        assert!(key_info_zero.expires_at.is_none(),
+            "Key with explicit TTL=0 should never expire (expires_at should be None)");
+
+        // Verify key works
+        assert!(db.verify_api_key(&api_key_zero).is_ok());
+
+        // Test 2: Create key without TTL (should use default_ttl of 30 days)
+        let (_api_key_default, key_info_default) = db
+            .create_api_key(user.id, Some("use-default"), None, None, false)
+            .unwrap();
+
+        assert!(key_info_default.expires_at.is_some(),
+            "Key without explicit TTL should use default_ttl (expires_at should be Some)");
+
+        // Test 3: Create key with explicit positive TTL
+        let (_api_key_custom, key_info_custom) = db
+            .create_api_key(user.id, Some("custom-ttl"), None, Some(3600), false)
+            .unwrap();
+
+        assert!(key_info_custom.expires_at.is_some(),
+            "Key with explicit positive TTL should have expiration");
+
+        println!("✓ Explicit TTL=0 correctly overrides default_ttl:");
+        println!("  - TTL=0 explicit: never expires (None)");
+        println!("  - TTL=None: uses default_ttl (Some)");
+        println!("  - TTL=3600: custom expiration (Some)");
+    }
+
+    #[test]
     fn test_inactive_user_cannot_login() {
         let (db, _dirs) = common::create_test_db();
 
