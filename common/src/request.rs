@@ -22,7 +22,6 @@ pub struct BridgeSignedEventRequest {
 /// Event request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
-#[serde(tag = "type")]
 pub enum BridgeEventRequest {
     Create(BridgeCreateRequest),
     Fact(BridgeFactRequest),
