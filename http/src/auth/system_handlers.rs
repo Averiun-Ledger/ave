@@ -371,7 +371,7 @@ pub async fn get_rate_limit_stats(
     let hours = query.hours.unwrap_or(24);
 
     let stats = db
-        .get_rate_limit_stats(None, hours)
+        .get_rate_limit_details(hours)
         .map_err(db_error_to_response)?;
     Ok(Json(stats))
 }

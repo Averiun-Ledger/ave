@@ -302,7 +302,7 @@ pub async fn rotate_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
     Path(id): Path<String>,
-    Json(req): Json<RotateApiKeyRequest>,
+    req: Option<Json<RotateApiKeyRequest>>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
@@ -324,19 +324,28 @@ pub async fn rotate_api_key(
         ));
     }
 
+    // Extract request body or use defaults
+    let req = req.as_ref().map(|r| &r.0);
+
     // Revoke old key first
-    db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.reason.as_deref())
+    db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.and_then(|r| r.reason.as_deref()))
         .map_err(db_error_to_response)?;
 
     // Create replacement key
+    // Use provided values or fall back to existing values
+    let new_name = req.and_then(|r| r.name.as_deref()).unwrap_or(existing.name.as_str());
+    let new_description = req.and_then(|r| r.description.as_deref())
+        .or(existing.description.as_deref());
+
+    // Handle expires_in_seconds: if provided in request, use it; otherwise keep existing TTL
+    let new_expires_in = req.and_then(|r| r.expires_in_seconds);
+
     let (api_key, key_info) = db
         .create_api_key(
             existing.user_id,
-            req.name.as_deref().or(Some(existing.name.as_str())),
-            req.description
-                .as_deref()
-                .or(existing.description.as_deref()),
-            req.expires_in_seconds,
+            Some(new_name),
+            new_description,
+            new_expires_in,
             existing.is_management,
         )
         .map_err(db_error_to_response)?;

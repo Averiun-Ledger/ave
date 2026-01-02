@@ -594,6 +594,125 @@ impl AuthDatabase {
             "requests_per_window": requests_per_window,
         }))
     }
+
+    /// Get detailed rate limit breakdown by API key, IP, and endpoint
+    pub fn get_rate_limit_details(
+        &self,
+        hours: u32,
+    ) -> Result<serde_json::Value, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let cutoff = Self::now() - (hours as i64 * 3600);
+
+        // Get top API keys by request count
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    rl.api_key_id,
+                    ak.name as key_name,
+                    ak.user_id,
+                    u.username,
+                    SUM(rl.request_count) as total_requests,
+                    MAX(rl.last_request_at) as last_request
+                 FROM rate_limits rl
+                 LEFT JOIN api_keys ak ON rl.api_key_id = ak.id
+                 LEFT JOIN users u ON ak.user_id = u.id
+                 WHERE rl.window_start >= ?1 AND rl.api_key_id IS NOT NULL
+                 GROUP BY rl.api_key_id
+                 ORDER BY total_requests DESC
+                 LIMIT 50"
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        let by_api_key: Vec<serde_json::Value> = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(serde_json::json!({
+                    "api_key_id": row.get::<_, Option<String>>(0)?,
+                    "key_name": row.get::<_, Option<String>>(1)?,
+                    "user_id": row.get::<_, Option<i64>>(2)?,
+                    "username": row.get::<_, Option<String>>(3)?,
+                    "total_requests": row.get::<_, i64>(4)?,
+                    "last_request_at": row.get::<_, Option<i64>>(5)?.map(format_ts),
+                }))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // Get top IPs by request count
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    rl.ip_address,
+                    SUM(rl.request_count) as total_requests,
+                    MAX(rl.last_request_at) as last_request,
+                    COUNT(DISTINCT rl.api_key_id) as unique_keys
+                 FROM rate_limits rl
+                 WHERE rl.window_start >= ?1 AND rl.ip_address IS NOT NULL
+                 GROUP BY rl.ip_address
+                 ORDER BY total_requests DESC
+                 LIMIT 50"
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        let by_ip: Vec<serde_json::Value> = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(serde_json::json!({
+                    "ip_address": row.get::<_, Option<String>>(0)?,
+                    "total_requests": row.get::<_, i64>(1)?,
+                    "last_request_at": row.get::<_, Option<i64>>(2)?.map(format_ts),
+                    "unique_api_keys": row.get::<_, i64>(3)?,
+                }))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // Get top endpoints by request count
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    rl.endpoint,
+                    SUM(rl.request_count) as total_requests,
+                    MAX(rl.last_request_at) as last_request
+                 FROM rate_limits rl
+                 WHERE rl.window_start >= ?1 AND rl.endpoint IS NOT NULL
+                 GROUP BY rl.endpoint
+                 ORDER BY total_requests DESC
+                 LIMIT 50"
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        let by_endpoint: Vec<serde_json::Value> = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(serde_json::json!({
+                    "endpoint": row.get::<_, Option<String>>(0)?,
+                    "total_requests": row.get::<_, i64>(1)?,
+                    "last_request_at": row.get::<_, Option<i64>>(2)?.map(format_ts),
+                }))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // Get total requests in period
+        let total_requests: i64 = conn
+            .query_row(
+                "SELECT SUM(request_count) FROM rate_limits WHERE window_start >= ?1",
+                params![cutoff],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok(serde_json::json!({
+            "total_requests": total_requests,
+            "window_seconds": self.config.rate_limit.window_seconds,
+            "max_requests_per_window": self.config.rate_limit.max_requests,
+            "by_api_key": by_api_key,
+            "by_ip": by_ip,
+            "by_endpoint": by_endpoint,
+        }))
+    }
 }
 
 fn format_ts(ts: i64) -> String {
