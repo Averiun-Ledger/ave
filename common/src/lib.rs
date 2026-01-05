@@ -10,14 +10,12 @@
 //!
 //! ```rust
 //! use ave_common::{
-//!     identity::{KeyPair, Signature},
+//!     identity::{KeyPair, Signature, KeyPairAlgorithm},
 //!     ValueWrapper,
-//!     BridgeEventRequest,
-//!     BridgeFactRequest,
 //! };
 //!
 //! // Create a new keypair
-//! let keypair = KeyPair::default();
+//! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 //!
 //! // Sign some data
 //! let data = b"Hello, Ave!";
@@ -32,19 +30,19 @@
 
 // Re-export the entire identity module
 pub use ave_identity as identity;
+pub use borsh;
 
 pub mod wrapper;
 // Internal modules
 pub mod error;
 pub mod namespace;
+pub mod bridge;
 pub mod request;
-pub mod response;
-pub mod signature;
+pub mod schematype;
 
 // Re-export commonly used types
 pub use error::Error;
+pub use schematype::SchemaType;
 pub use namespace::Namespace;
-pub use request::*;
-pub use response::*;
-pub use signature::*;
+pub use bridge::*;
 pub use wrapper::ValueWrapper;
