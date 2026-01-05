@@ -103,7 +103,7 @@ impl Ed25519Signer {
     ///
     /// # Example
     /// ```
-    /// use ave_common::identity::keys::Ed25519Signer;
+    /// use ave_identity::keys::Ed25519Signer;
     ///
     /// // Derive from a passphrase
     /// let signer = Ed25519Signer::derive_from_data(b"my secure passphrase").unwrap();
@@ -143,7 +143,7 @@ impl Ed25519Signer {
     ///
     /// # Example
     /// ```
-    /// use ave_common::identity::keys::Ed25519Signer;
+    /// use ave_identity::keys::Ed25519Signer;
     ///
     /// let seed = [42u8; 32];
     /// let signer = Ed25519Signer::from_seed(&seed).unwrap();

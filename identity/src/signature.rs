@@ -64,8 +64,8 @@ impl Signature {
     ///
     /// # Example
     /// ```
-    /// use ave_common::identity::signature::Signature;
-    /// use ave_common::identity::keys::Ed25519Signer;
+    /// use ave_identity::signature::Signature;
+    /// use ave_identity::keys::Ed25519Signer;
     /// use borsh::{BorshSerialize, BorshDeserialize};
     ///
     /// #[derive(BorshSerialize, BorshDeserialize)]
@@ -164,9 +164,9 @@ impl Signature {
 )]
 pub struct Signed<T: BorshSerialize + BorshDeserialize + Clone> {
     /// The actual data content
-    pub content: T,
+    content: T,
     /// The signature for this content
-    pub signature: Signature,
+    signature: Signature,
 }
 
 impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
@@ -191,13 +191,12 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
     }
 
     /// Get the signer's public key
-    pub fn signer(&self) -> &PublicKey {
-        &self.signature.signer
+    pub fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    /// Get the timestamp of the signature
-    pub fn timestamp(&self) -> TimeStamp {
-        self.signature.timestamp
+    pub fn content(&self) -> &T {
+        &self.content
     }
 }
 
@@ -285,7 +284,7 @@ mod tests {
         let signature = Signature::new(&data, &signer).unwrap();
         let signed = Signed::from_parts(data.clone(), signature);
 
-        assert_eq!(signed.content.value, "test");
+        assert_eq!(signed.content().value, "test");
         assert!(signed.verify().is_ok());
     }
 
@@ -298,7 +297,7 @@ mod tests {
         };
 
         let signed = Signed::new(data, &signer).unwrap();
-        let public_key = signed.signer();
+        let public_key = signed.signature().signer.clone();
 
         // Verify the public key matches
         let expected_pubkey = PublicKey::new(
@@ -307,7 +306,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(public_key, &expected_pubkey);
+        assert_eq!(public_key, expected_pubkey);
     }
 
     #[test]
@@ -322,7 +321,7 @@ mod tests {
         let signed = Signed::new(data, &signer).unwrap();
         let after = TimeStamp::now();
 
-        let ts = signed.timestamp();
+        let ts = signed.signature().timestamp;
         assert!(ts >= before);
         assert!(ts <= after);
     }
@@ -366,6 +365,6 @@ mod tests {
 
         // Should still verify
         assert!(deserialized.verify().is_ok());
-        assert_eq!(deserialized.content.value, "roundtrip");
+        assert_eq!(deserialized.content().value, "roundtrip");
     }
 }
