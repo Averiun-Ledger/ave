@@ -12,6 +12,11 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
+use crate::governance::model::Quorum;
+use crate::governance::roles_register::{
+    RoleDataRegister, RolesRegister, RolesRegisterMessage,
+    RolesRegisterResponse, SearchRole,
+};
 use crate::request::manager::{RequestManager, RequestManagerMessage};
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
@@ -19,6 +24,85 @@ use std::ops::Bound::{Included, Unbounded};
 pub mod contract;
 pub mod node;
 pub mod subject;
+
+pub fn check_quorum_signers(
+    signers: &HashSet<PublicKey>,
+    quorum: &Quorum,
+    workers: &HashSet<PublicKey>,
+) -> bool {
+    signers.is_subset(workers)
+        && quorum.check_quorum(workers.len() as u32, signers.len() as u32)
+}
+
+pub async fn get_actual_roles_register<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &str,
+    evaluation: SearchRole,
+    approval: bool,
+    version: u64,
+) -> Result<(RoleDataRegister, Option<RoleDataRegister>), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path =
+        ActorPath::from(format!("/user/node/{}/roles_register", governance_id));
+    let actor: Option<ActorRef<RolesRegister>> =
+        ctx.system().get_actor(&actor_path).await;
+
+    let response = if let Some(actor) = actor {
+        actor
+            .ask(RolesRegisterMessage::SearchActualRoles {
+                version,
+                evaluation,
+                approval,
+            })
+            .await?
+    } else {
+        return Err(ActorError::NotFound(actor_path));
+    };
+
+    match response {
+        RolesRegisterResponse::ActualRoles {
+            evaluation,
+            approval,
+        } => Ok((evaluation, approval)),
+        _ => Err(ActorError::UnexpectedResponse(
+            actor_path,
+            "RolesRegisterResponse::ActualRoles".to_string(),
+        )),
+    }
+}
+
+pub async fn get_validation_roles_register<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &str,
+    search: SearchRole,
+    version: u64,
+) -> Result<RoleDataRegister, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path =
+        ActorPath::from(format!("/user/node/{}/roles_register", governance_id));
+    let actor: Option<ActorRef<RolesRegister>> =
+        ctx.system().get_actor(&actor_path).await;
+
+    let response = if let Some(actor) = actor {
+        actor
+            .ask(RolesRegisterMessage::SearchValidators { search, version })
+            .await?
+    } else {
+        return Err(ActorError::NotFound(actor_path));
+    };
+
+    match response {
+        RolesRegisterResponse::Validation(validation) => Ok(validation),
+        _ => Err(ActorError::UnexpectedResponse(
+            actor_path,
+            "RolesRegisterResponse::Validation".to_string(),
+        )),
+    }
+}
 
 #[derive(
     Debug,
@@ -103,7 +187,7 @@ impl CeilingMap<HashMap<PublicKey, BTreeSet<String>>> {
 
 pub async fn send_to_tracking<A>(
     ctx: &mut ActorContext<A>,
-    message: RequestTrackingMessage
+    message: RequestTrackingMessage,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
@@ -113,9 +197,7 @@ where
         ctx.system().get_actor(&tracking_path).await;
 
     if let Some(tracking_actor) = tracking_actor {
-        tracking_actor
-            .tell(message)
-            .await
+        tracking_actor.tell(message).await
     } else {
         Err(ActorError::NotFound(tracking_path))
     }

@@ -1,7 +1,6 @@
-use crate::model::request::EventRequest;
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, Signed},
+    identity::{DigestIdentifier, PublicKey, Signed}, request::EventRequest,
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -28,9 +27,7 @@ pub struct ApprovalReq {
     /// The patch to apply to the state.
     pub patch: ValueWrapper,
     /// The hash of the state after applying the patch.
-    pub state_hash: DigestIdentifier,
-    /// The hash of the previous event.
-    pub hash_prev_event: DigestIdentifier,
-    /// The hash of the previous event.
-    pub subject_id: DigestIdentifier,
+    pub properties_hash: DigestIdentifier,
+
+    pub signer: PublicKey
 }

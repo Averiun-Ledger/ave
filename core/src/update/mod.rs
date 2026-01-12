@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 use updater::{Updater, UpdaterMessage};
 
 use crate::{
-    ActorMessage, NetworkMessage, governance::{Governance, GovernanceMessage}, helpers::network::service::HelperService, model::common::emit_fail, request::manager::{RequestManager, RequestManagerMessage}, tracker::{Tracker, TrackerMessage}
+    ActorMessage, NetworkMessage, governance::{Governance, GovernanceMessage}, helpers::network::service::NetworkSender, model::common::emit_fail, request::manager::{RequestManager, RequestManagerMessage}, tracker::{Tracker, TrackerMessage}
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -35,11 +35,12 @@ pub enum UpdateType {
 
 pub struct UpdateNew {
     pub subject_id: DigestIdentifier,
-    pub our_key: PublicKey,
+    pub our_key: Arc<PublicKey>,
     pub response: Option<UpdateRes>,
     pub witnesses: HashSet<PublicKey>,
     pub request: Option<ActorMessage>,
     pub update_type: UpdateType,
+    pub network: Arc<NetworkSender>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,15 +49,16 @@ pub enum UpdateRes {
     Transfer(TransferResponse),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Update {
     subject_id: DigestIdentifier,
-    our_key: PublicKey,
+    our_key: Arc<PublicKey>,
     response: Option<UpdateRes>,
     witnesses: HashSet<PublicKey>,
     better: Option<PublicKey>,
     request: Option<ActorMessage>,
     update_type: UpdateType,
+    network: Arc<NetworkSender>
 }
 
 impl Update {
@@ -80,7 +82,7 @@ impl Update {
                 .tell(TrackerMessage::UpdateTransfer(res))
                 .await
         } else {
-            Err(ActorError::NotFound(path))
+            Err(ActorError::NotFound {path})
         }
     }
 
@@ -99,10 +101,8 @@ impl Update {
                         }
                         Some(UpdateRes::Sn(_)) => {} // No actualizar si update_sn <= sn
                         Some(_) => {
-                            return Err(ActorError::Functional(
-                                "self response must be UpdateRes::Sn"
-                                    .to_owned(),
-                            ));
+                            return Err(ActorError::Functional {description: "self response must be UpdateRes::Sn"
+                                    .to_owned(),});
                         }
                         None => {
                             self.response = Some(update);
@@ -123,6 +123,7 @@ impl Update {
 
     pub fn new(data: UpdateNew) -> Self {
         Self {
+            network: data.network,
             subject_id: data.subject_id,
             our_key: data.our_key,
             response: data.response,
@@ -159,18 +160,12 @@ impl Actor for Update {
     type Message = UpdateMessage;
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Update", id = id)
+        } else {
+            info_span!("Update", id = id)
+        }
     }
 }
 
@@ -187,7 +182,7 @@ impl Handler<Update> for Update {
         match msg {
             UpdateMessage::Transfer => {
                 for witness in self.witnesses.clone() {
-                    let updater = Updater::new(witness.clone());
+                    let updater = Updater::new(witness.clone(), self.network.clone());
                     let child = match ctx
                         .create_child(&witness.to_string(), updater)
                         .await
@@ -293,7 +288,7 @@ impl Handler<Update> for Update {
                                 ),
                             };
 
-                            let helper: Option<HelperService> =
+                            let helper: Option<Arc<NetworkSender>> =
                                 ctx.system().get_helper("network").await;
 
                             let Some(mut helper) = helper else {

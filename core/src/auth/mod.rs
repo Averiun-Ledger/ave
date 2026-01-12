@@ -8,10 +8,11 @@ use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{collections::HashMap, vec};
 use tracing::{error, warn};
 
-use crate::helpers::network::service::HelperService;
+use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{get_node_subject_data, subject_old};
 use crate::model::common::subject::get_gov;
 use crate::{
@@ -72,7 +73,7 @@ fn merge_options(
 )]
 pub struct Auth {
     #[serde(skip)]
-    our_key: PublicKey,
+    our_key: Arc<PublicKey>,
     auth: HashMap<String, AuthWitness>,
 }
 
@@ -95,7 +96,7 @@ impl BorshDeserialize for Auth {
         // Deserialize the persisted fields
         let auth = HashMap::<String, AuthWitness>::deserialize_reader(reader)?;
 
-        let our_key = PublicKey::default();
+        let our_key = Arc::new(PublicKey::default());
 
         Ok(Self {
             our_key,
@@ -398,10 +399,10 @@ impl Handler<Auth> for Auth {
                                 ),
                             };
 
-                            let helper: Option<HelperService> =
+                            let helper: Option<Arc<NetworkSender>> =
                                 ctx.system().get_helper("network").await;
 
-                            let Some(mut helper) = helper else {
+                            let Some(helper) = helper else {
                                 error!(
                                     TARGET_AUTH,
                                     "Update, can not obtain network helper"
@@ -501,7 +502,7 @@ impl Handler<Auth> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
-    type InitParams = PublicKey;
+    type InitParams = Arc<PublicKey>;
 
     fn update(&mut self, state: Self) {
         self.auth = state.auth;

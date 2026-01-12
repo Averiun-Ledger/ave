@@ -5,11 +5,10 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
-use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::model::common::{emit_fail, subject::{get_last_state, get_metadata}};
+use crate::model::common::{emit_fail, subject::get_last_sn};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 
@@ -17,47 +16,18 @@ const TARGET_REBOOT: &str = "Ave-Request-Reboot";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reboot {
-    governance_id: DigestIdentifier,
-    sn_ledger: u64,
-    sn_event: u64,
+    governance_id: String,
+    actual_sn: u64,
+    count: u64,
 }
 
 impl Reboot {
-    pub fn new(governance_id: DigestIdentifier) -> Self {
+    pub fn new(governance_id: String) -> Self {
         Self {
             governance_id,
-            sn_ledger: 0,
-            sn_event: 0,
+            actual_sn: 0,
+            count: 0,
         }
-    }
-
-    async fn update_event_sn(
-        &mut self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
-    ) -> Result<(), ActorError> {
-        self.sn_event =
-            match get_last_state(ctx, &self.governance_id.to_string()).await {
-                Ok((last_event, ..)) => last_event.content.sn,
-                Err(e) => {
-                    if let ActorError::Functional(_) = e {
-                        0
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-        Ok(())
-    }
-
-    async fn update_ledger_sn(
-        &mut self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
-    ) -> Result<(), ActorError> {
-        let metadata =
-            get_metadata(ctx, &self.governance_id.to_string()).await?;
-        self.sn_ledger = metadata.sn;
-
-        Ok(())
     }
 
     async fn sleep(
@@ -66,10 +36,7 @@ impl Reboot {
     ) -> Result<(), ActorError> {
         let actor = ctx.reference().await;
         if let Some(actor) = actor {
-            let request = RebootMessage::Update {
-                last_sn_event: self.sn_event,
-                last_sn_ledger: self.sn_ledger,
-            };
+            let request = RebootMessage::Update;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 if let Err(e) = actor.tell(request).await {
@@ -110,10 +77,7 @@ impl Reboot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RebootMessage {
     Init,
-    Update {
-        last_sn_event: u64,
-        last_sn_ledger: u64,
-    },
+    Update,
 }
 
 impl Message for RebootMessage {}
@@ -151,20 +115,15 @@ impl Handler<Reboot> for Reboot {
     ) -> Result<(), ActorError> {
         match msg {
             RebootMessage::Init => {
-                if let Err(e) = self.update_event_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Init, can not uptade event sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if let Err(e) = self.update_ledger_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Init, can not uptade ledger sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
+                match get_last_sn(ctx, &self.governance_id).await {
+                    Ok(sn) => self.actual_sn = sn,
+                    Err(e) => {
+                        error!(
+                            TARGET_REBOOT,
+                            "Init, can not get last sn: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
                 };
 
                 if let Err(e) = self.sleep(ctx).await {
@@ -172,19 +131,25 @@ impl Handler<Reboot> for Reboot {
                     return Err(emit_fail(ctx, e).await);
                 };
             }
-            RebootMessage::Update {
-                last_sn_event,
-                last_sn_ledger,
-            } => {
-                if let Err(e) = self.update_event_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Update, can not uptade event sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
+            RebootMessage::Update => {
+                let actual_sn = self.actual_sn;
+
+                match get_last_sn(ctx, &self.governance_id).await {
+                    Ok(sn) => self.actual_sn = sn,
+                    Err(e) => {
+                        error!(
+                            TARGET_REBOOT,
+                            "Init, can not get last sn: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
                 };
 
-                if self.sn_event > last_sn_event {
+                if actual_sn == self.actual_sn {
+                    self.count += 1;
+                }
+
+                if self.count >= 3 {
                     if let Err(e) = Self::finish(ctx).await {
                         error!(
                             TARGET_REBOOT,
@@ -192,30 +157,11 @@ impl Handler<Reboot> for Reboot {
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                    return Ok(());
-                }
-
-                if let Err(e) = self.update_ledger_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Update, can not uptade ledger sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if self.sn_ledger > last_sn_ledger
-                    && let Err(e) = self.sleep(ctx).await
-                {
-                    error!(TARGET_REBOOT, "Update, can not sleep: {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                }
-
-                if let Err(e) = Self::finish(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Update, can not finish reboot: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
+                } else {
+                    if let Err(e) = self.sleep(ctx).await {
+                        error!(TARGET_REBOOT, "Init, can not sleep: {}", e);
+                        return Err(emit_fail(ctx, e).await);
+                    };
                 }
             }
         };

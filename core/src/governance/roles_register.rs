@@ -6,9 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     governance::model::Quorum,
     model::{
-        Namespace,
         common::{CeilingMap, emit_fail},
-        request::SchemaType,
     },
 };
 use async_trait::async_trait;
@@ -17,7 +15,7 @@ use ave_actors::{
     LightPersistence, Message, PersistentActor, Response,
 };
 
-use ave_common::identity::PublicKey;
+use ave_common::{Namespace, SchemaType, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -28,8 +26,8 @@ const TARGET_ROLES: &str = "Kore-Subject-Roles";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct SearchRole {
-    schema: SchemaType,
-    namespace: Namespace,
+    pub schema_id: SchemaType,
+    pub namespace: Namespace,
 }
 
 #[derive(
@@ -114,16 +112,20 @@ pub struct UpdateQuorum {
 }
 
 #[derive(Debug, Clone)]
+pub struct RoleDataRegister {
+    pub workers: HashSet<PublicKey>,
+    pub quorum: Quorum,
+}
+
+#[derive(Debug, Clone)]
 pub enum RolesRegisterMessage {
+    SearchActualRoles {
+        version: u64,
+        evaluation: SearchRole,
+        approval: bool,
+    },
     SearchValidators {
         search: SearchRole,
-        version: u64,
-    },
-    SearchEvaluators {
-        search: SearchRole,
-        version: u64,
-    },
-    SearchApprovers {
         version: u64,
     },
     Update {
@@ -140,10 +142,11 @@ impl Message for RolesRegisterMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RolesRegisterResponse {
-    Roles {
-        roles: HashSet<PublicKey>,
-        quorum: Quorum,
+    ActualRoles {
+        evaluation: RoleDataRegister,
+        approval: Option<RoleDataRegister>,
     },
+    Validation(RoleDataRegister),
     MissingData,
     OutOfVersion,
     Ok,
@@ -200,188 +203,95 @@ impl Handler<RolesRegister> for RolesRegister {
         ctx: &mut ActorContext<RolesRegister>,
     ) -> Result<RolesRegisterResponse, ActorError> {
         match msg {
-            RolesRegisterMessage::SearchApprovers { version } => {
-                'data: {
-                    let gov_approvers = if let Some(approvers) =
-                        self.approvers.get_prev_or_equal(version)
-                    {
-                        approvers
-                    } else {
-                        break 'data;
-                    };
-
-                    let Some(quorum) =
-                        self.appr_quorum.get_prev_or_equal(version)
-                    else {
-                        break 'data;
-                    };
-
-                    if gov_approvers.is_empty() {
-                        break 'data;
-                    } else {
-                        return Ok(RolesRegisterResponse::Roles {
-                            roles: gov_approvers,
-                            quorum,
-                        });
-                    }
-                }
-
-                Ok(RolesRegisterResponse::MissingData)
-            }
-            RolesRegisterMessage::SearchValidators { search, version } => {
+            RolesRegisterMessage::SearchActualRoles {
+                version,
+                evaluation,
+                approval,
+            } => {
                 if version > self.version {
                     return Ok(RolesRegisterResponse::OutOfVersion);
                 }
 
-                let mut all_val = if let Some(validators) = self
-                    .validators
-                    .get(&SchemaType::AllSchemas)
-                {
-                    if let Some(validators) =
-                        validators.get_prev_or_equal(version)
-                    {
-                        let mut schema_val = vec![];
-
-                        for witness in validators {
-                            if witness
-                                .namespace
-                                .is_ancestor_of(&search.namespace)
-                                || witness.namespace == search.namespace
-                                || witness.namespace.is_empty()
-                            {
-                                schema_val.push(witness.key);
-                            }
-                        }
-
-                        schema_val
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-
-                let mut schema_val = if let Some(validators) =
-                    self.validators.get(&search.schema)
-                {
-                    if let Some(validators) =
-                        validators.get_prev_or_equal(version)
-                    {
-                        let mut schema_val = vec![];
-
-                        for witness in validators {
-                            if witness
-                                .namespace
-                                .is_ancestor_of(&search.namespace)
-                                || witness.namespace == search.namespace
-                                || witness.namespace.is_empty()
-                            {
-                                schema_val.push(witness.key);
-                            }
-                        }
-
-                        schema_val
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-
                 'data: {
-                    let quorum = if let Some(quorum_schema) =
-                        self.vali_quorum.get(&search.schema)
-                    {
+                    let approvers = if approval {
+                        let gov_approvers = if let Some(approvers) =
+                            self.approvers.get_prev_or_equal(version)
+                        {
+                            approvers
+                        } else {
+                            break 'data;
+                        };
+
                         let Some(quorum) =
-                            quorum_schema.get_prev_or_equal(version)
+                            self.appr_quorum.get_prev_or_equal(version)
                         else {
                             break 'data;
                         };
 
-                        quorum
+                        if gov_approvers.is_empty() {
+                            break 'data;
+                        } else {
+                            Some(RoleDataRegister {
+                                workers: gov_approvers,
+                                quorum,
+                            })
+                        }
                     } else {
-                        break 'data;
+                        None
                     };
 
-                    if schema_val.is_empty() && all_val.is_empty() {
-                        break 'data;
-                    }
-
-                    let mut validators = vec![];
-                    validators.append(&mut schema_val);
-                    validators.append(&mut all_val);
-
-                    return Ok(RolesRegisterResponse::Roles {
-                        roles: validators.iter().cloned().collect(),
-                        quorum,
-                    });
-                }
-
-                Ok(RolesRegisterResponse::MissingData)
-            }
-            RolesRegisterMessage::SearchEvaluators { search, version } => {
-                if version > self.version {
-                    return Ok(RolesRegisterResponse::OutOfVersion);
-                }
-
-                let mut all_eval = if let Some(evaluators) = self
-                    .evaluators
-                    .get(&SchemaType::AllSchemas)
-                {
-                    if let Some(evaluators) =
-                        evaluators.get_prev_or_equal(version)
+                    let mut all_eval = if let Some(evaluators) =
+                        self.evaluators.get(&SchemaType::AllSchemas)
                     {
-                        let mut schema_eval = vec![];
+                        if let Some(evaluators) =
+                            evaluators.get_prev_or_equal(version)
+                        {
+                            let mut schema_eval = vec![];
 
-                        for witness in evaluators {
-                            if witness
-                                .namespace
-                                .is_ancestor_of(&search.namespace)
-                                || witness.namespace == search.namespace
-                                || witness.namespace.is_empty()
-                            {
-                                schema_eval.push(witness.key);
+                            for witness in evaluators {
+                                if witness
+                                    .namespace
+                                    .is_ancestor_or_equal_of(&evaluation.namespace)
+                                {
+                                    schema_eval.push(witness.key);
+                                }
                             }
-                        }
 
-                        schema_eval
+                            schema_eval
+                        } else {
+                            vec![]
+                        }
                     } else {
                         vec![]
-                    }
-                } else {
-                    vec![]
-                };
+                    };
 
-                let mut schema_eval = if let Some(evaluators) =
-                    self.evaluators.get(&search.schema)
-                {
-                    if let Some(evaluators) =
-                        evaluators.get_prev_or_equal(version)
+                    let mut schema_eval = if let Some(evaluators) =
+                        self.evaluators.get(&evaluation.schema_id)
                     {
-                        let mut schema_eval = vec![];
+                        if let Some(evaluators) =
+                            evaluators.get_prev_or_equal(version)
+                        {
+                            let mut schema_eval = vec![];
 
-                        for witness in evaluators {
-                            if witness
-                                .namespace
-                                .is_ancestor_of(&search.namespace)
-                                || witness.namespace == search.namespace
-                                || witness.namespace.is_empty()
-                            {
-                                schema_eval.push(witness.key);
+                            for witness in evaluators {
+                                if witness
+                                    .namespace
+                                    .is_ancestor_or_equal_of(&evaluation.namespace)
+                                {
+                                    schema_eval.push(witness.key);
+                                }
                             }
-                        }
 
-                        schema_eval
+                            schema_eval
+                        } else {
+                            vec![]
+                        }
                     } else {
                         vec![]
-                    }
-                } else {
-                    vec![]
-                };
+                    };
 
-                'data: {
                     let quorum = if let Some(quorum_schema) =
-                        self.eval_quorum.get(&search.schema)
+                        self.eval_quorum.get(&evaluation.schema_id)
                     {
                         let Some(quorum) =
                             quorum_schema.get_prev_or_equal(version)
@@ -402,10 +312,93 @@ impl Handler<RolesRegister> for RolesRegister {
                     evaluators.append(&mut schema_eval);
                     evaluators.append(&mut all_eval);
 
-                    return Ok(RolesRegisterResponse::Roles {
-                        roles: evaluators.iter().cloned().collect(),
-                        quorum,
-                    });
+                    return Ok(RolesRegisterResponse::ActualRoles { evaluation: RoleDataRegister { workers: evaluators.iter().cloned().collect(), quorum }, approval: approvers } );
+                }
+
+                Ok(RolesRegisterResponse::MissingData)
+            }
+            RolesRegisterMessage::SearchValidators { search, version } => {
+                if version > self.version {
+                    return Ok(RolesRegisterResponse::OutOfVersion);
+                }
+
+                let mut all_val = if let Some(validators) =
+                    self.validators.get(&SchemaType::AllSchemas)
+                {
+                    if let Some(validators) =
+                        validators.get_prev_or_equal(version)
+                    {
+                        let mut schema_val = vec![];
+
+                        for witness in validators {
+                            if witness
+                                .namespace
+                                .is_ancestor_or_equal_of(&search.namespace)
+                            {
+                                schema_val.push(witness.key);
+                            }
+                        }
+
+                        schema_val
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                let mut schema_val = if let Some(validators) =
+                    self.validators.get(&search.schema_id)
+                {
+                    if let Some(validators) =
+                        validators.get_prev_or_equal(version)
+                    {
+                        let mut schema_val = vec![];
+
+                        for witness in validators {
+                            if witness
+                                .namespace
+                                .is_ancestor_or_equal_of(&search.namespace)
+                            {
+                                schema_val.push(witness.key);
+                            }
+                        }
+
+                        schema_val
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                'data: {
+                    let quorum = if let Some(quorum_schema) =
+                        self.vali_quorum.get(&search.schema_id)
+                    {
+                        let Some(quorum) =
+                            quorum_schema.get_prev_or_equal(version)
+                        else {
+                            break 'data;
+                        };
+
+                        quorum
+                    } else {
+                        break 'data;
+                    };
+
+                    if schema_val.is_empty() && all_val.is_empty() {
+                        break 'data;
+                    }
+
+                    let mut validators = vec![];
+                    validators.append(&mut schema_val);
+                    validators.append(&mut all_val);
+
+                    return Ok(RolesRegisterResponse::Validation(RoleDataRegister {
+                        workers: validators.iter().cloned().collect(),
+                        quorum
+                    }));
                 }
 
                 Ok(RolesRegisterResponse::MissingData)
@@ -511,11 +504,11 @@ impl PersistentActor for RolesRegister {
                     }
                 }
 
-                if let Some(approvers) = approvers 
-                    && !approvers.is_empty() {
-                        self.approvers.insert(*version, approvers.clone());
-                    }
-                
+                if let Some(approvers) = approvers
+                    && !approvers.is_empty()
+                {
+                    self.approvers.insert(*version, approvers.clone());
+                }
             }
         }
         Ok(())

@@ -1,8 +1,10 @@
-use ave_common::{ValueWrapper, identity::PublicKey};
+use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Namespace, request::SchemaType};
+use crate::{
+    governance::data::GovernanceData
+};
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
@@ -21,27 +23,33 @@ pub struct RunnerResult {
     pub approval_required: bool,
 }
 
+
 #[derive(Debug, Clone)]
-pub enum EvaluateType {
-    AllSchemasFact {
-        contract: String,
-        init_state: ValueWrapper,
-        payload: ValueWrapper,
-    },
+pub enum EvaluateInfo {
     GovFact {
         payload: ValueWrapper,
+        state: GovernanceData,
     },
     GovTransfer {
         new_owner: PublicKey,
-    },
-    AllSchemasTransfer {
-        new_owner: PublicKey,
-        old_owner: PublicKey,
-        namespace: Namespace,
-        schema_id: SchemaType,
+        state: GovernanceData,
     },
     GovConfirm {
         new_owner: PublicKey,
         old_owner_name: Option<String>,
+        state: GovernanceData,
+    },
+    AllSchemasFact {
+        contract: String,
+        init_state: ValueWrapper,
+        state: ValueWrapper,
+        payload: ValueWrapper,
+    },
+    AllSchemasTransfer {
+        governance_data: GovernanceData,
+        new_owner: PublicKey,
+        old_owner: PublicKey,
+        namespace: Namespace,
+        schema_id: SchemaType,
     },
 }

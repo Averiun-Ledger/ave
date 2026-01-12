@@ -2,18 +2,16 @@
 //!
 
 use crate::{
-    Error, EventRequestType,
+    Error,
     approval::{
-        Approval,
-        approver::{Approver, InitApprover, VotationType},
+        persist::{ApprPersist, InitApprPersist},
+        types::VotationType,
     },
     auth::WitnessesAuth,
     db::Storable,
-    distribution::{Distribution, DistributionType},
     evaluation::{
-        Evaluation,
         compiler::{Compiler, CompilerMessage},
-        evaluator::Evaluator,
+        worker::EvalWorker,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
     },
     governance::{
@@ -26,28 +24,25 @@ use crate::{
             UpdateQuorum, UpdateRole,
         },
     },
-    helpers::{db::ExternalDB, sink::AveSink},
+    helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
     model::{
         common::{
-            emit_fail, get_last_event, get_n_events,
-            node::try_to_update, purge_storage, subject::get_last_state,
+            emit_fail, get_last_event, get_n_events, node::try_to_update,
+            purge_storage,
         },
-        event::{Ledger, LedgerValue},
-        request::{EventRequest, SchemaType},
+        event::{Protocols, ValidationMetadata},
     },
     node::register::RegisterMessage,
     subject::{
-        CreateSubjectData, DataForSink, LastStateData, Metadata, SignedLedger,
-        Subject, SubjectMetadata, VerifyData,
-        laststate::LastState,
+        DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
         sinkdata::{SinkData, SinkDataMessage},
     },
     system::ConfigHelper,
     update::TransferResponse,
     validation::{
-        Validation,
+        request::LastData,
         schema::{ValidationSchema, ValidationSchemaMessage},
-        validator::Validator,
+        worker::ValiWorker,
     },
 };
 
@@ -56,8 +51,9 @@ use ave_actors::{
     Message, Response, Sink,
 };
 use ave_common::{
-    Namespace,
-    identity::{DigestIdentifier, PublicKey, Signed, hash_borsh},
+    Namespace, SchemaType, ValueWrapper,
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
+    request::EventRequest,
 };
 
 use async_trait::async_trait;
@@ -67,7 +63,10 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 pub mod data;
 pub mod events;
@@ -80,7 +79,7 @@ const TARGET_GOVERNANCE: &str = "Ave-Governance";
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Governance {
     #[serde(skip)]
-    pub our_key: PublicKey,
+    pub our_key: Arc<PublicKey>,
 
     pub subject_metadata: SubjectMetadata,
     /// The current status of the subject.
@@ -110,7 +109,7 @@ impl BorshDeserialize for Governance {
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
-        let our_key = PublicKey::default();
+        let our_key = Arc::new(PublicKey::default());
 
         Ok(Self {
             our_key,
@@ -122,75 +121,25 @@ impl BorshDeserialize for Governance {
 
 #[async_trait]
 impl Subject for Governance {
-    async fn delete_subject(
+    async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Self::delet_node_subject(
-            ctx,
-            &self.subject_metadata.subject_id.to_string(),
-        )
-        .await?;
-
-        purge_storage(ctx).await?;
-
-        ctx.stop(None).await;
-
-        Ok(())
+    ) -> Result<Option<SignedLedger>, ActorError> {
+        get_last_event(ctx).await
     }
 
-    async fn get_ledger_data(
+    async fn get_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
         last_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError> {
-        let ledger = get_n_events(ctx, last_sn, 100).await?;
-
-        if ledger.len() < 100 {
-            match get_last_state(
-                ctx,
-                &self.subject_metadata.subject_id.to_string(),
-            )
-            .await
-            {
-                Ok((event, proof, vali_res)) => Ok((
-                    ledger,
-                    Some(LastStateData {
-                        event,
-                        proof,
-                        vali_res,
-                    }),
-                )),
-                Err(e) => {
-                    if let ActorError::Functional(_) = e {
-                        Ok((ledger, None))
-                    } else {
-                        error!(
-                            TARGET_GOVERNANCE,
-                            "GetLedger, can not get last event: {}", e
-                        );
-                        Err(e)
-                    }
-                }
-            }
-        } else {
-            Ok((ledger, None))
-        }
+    ) -> Result<Vec<SignedLedger>, ActorError> {
+        get_n_events(ctx, last_sn, 100).await
     }
 
-    fn apply_patch(&mut self, value: LedgerValue) -> Result<(), ActorError> {
-        let json_patch = match value {
-            LedgerValue::Patch(value_wrapper) => value_wrapper,
-            LedgerValue::Error(e) => {
-                let error = format!(
-                    "Apply, event value can not be an error if protocols was successful: {:?}",
-                    e
-                );
-                error!(TARGET_GOVERNANCE, error);
-                return Err(ActorError::Functional(error));
-            }
-        };
-
+    fn apply_patch(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
         let patch_json = match serde_json::from_value::<Patch>(json_patch.0) {
             Ok(patch) => patch,
             Err(e) => {
@@ -225,15 +174,32 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
+        let Some(network) = ctx
+            .system()
+            .get_helper::<Arc<NetworkSender>>("network")
+            .await
+        else {
+            return Err(ActorError::NotHelper("network".to_owned()));
+        };
+
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
+        };
+
         let current_sn = self.subject_metadata.sn;
         let current_new_owner_some = self.subject_metadata.new_owner.is_some();
         let i_current_new_owner = self.subject_metadata.new_owner.clone()
-            == Some(self.our_key.clone());
+            == Some((*self.our_key).clone());
         let current_owner = self.subject_metadata.owner.clone();
 
         let current_properties = self.properties.clone();
 
-        if let Err(e) = self.verify_new_ledger_events(ctx, events).await {
+        if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
+        {
             if let ActorError::Functional(error) = e.clone() {
                 warn!(
                     TARGET_GOVERNANCE,
@@ -253,49 +219,35 @@ impl Subject for Governance {
         if current_sn < self.subject_metadata.sn {
             let old_gov = current_properties;
             if !self.subject_metadata.active {
-                if current_owner == self.our_key {
+                if current_owner == *self.our_key {
                     Self::down_owner(ctx).await?;
                 } else {
                     Self::down_not_owner(
                         ctx,
-                        old_gov.clone(),
+                        &old_gov,
                         self.our_key.clone(),
                     )
                     .await?;
                 }
 
                 let old_schemas_eval = old_gov
-                    .schemas(ProtocolTypes::Evaluation, &self.our_key)
-                    .iter()
-                    .map(|x| x.0.clone())
-                    .collect::<Vec<SchemaType>>();
-                Self::down_compilers_schemas(ctx, old_schemas_eval.clone())
-                    .await?;
+                    .schemas_name(ProtocolTypes::Evaluation, &self.our_key);
+
+                Self::down_compilers_schemas(ctx, &old_schemas_eval).await?;
 
                 let old_schemas_val = old_gov
-                    .schemas(ProtocolTypes::Validation, &self.our_key)
-                    .iter()
-                    .map(|x| x.0.clone())
-                    .collect::<Vec<SchemaType>>();
+                    .schemas_name(ProtocolTypes::Validation, &self.our_key);
 
-                Self::down_schemas(ctx, old_schemas_eval, old_schemas_val)
+                Self::down_schemas(ctx, &old_schemas_eval, &old_schemas_val)
                     .await?;
             } else {
-                let new_gov = self.properties.clone();
-
-                let Some(ext_db): Option<ExternalDB> =
-                    ctx.system().get_helper("ext_db").await
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
                 let new_owner_some = self.subject_metadata.new_owner.is_some();
                 let i_new_owner = self.subject_metadata.new_owner.clone()
-                    == Some(self.our_key.clone());
+                    == Some((*self.our_key).clone());
                 let mut up_not_owner: bool = false;
                 let mut up_owner: bool = false;
 
-                if current_owner == self.our_key {
+                if current_owner == *self.our_key {
                     // Eramos dueños
                     if current_owner != self.subject_metadata.owner {
                         // Ya no somos dueño
@@ -316,7 +268,7 @@ impl Subject for Governance {
                 } else {
                     // No eramos dueño
                     if current_owner != self.subject_metadata.owner
-                        && self.subject_metadata.owner == self.our_key
+                        && self.subject_metadata.owner == *self.our_key
                     {
                         // Ahora Somos dueños
                         if !new_owner_some && !i_current_new_owner {
@@ -334,185 +286,28 @@ impl Subject for Governance {
 
                 if up_not_owner {
                     Self::down_owner(ctx).await?;
-                    Self::up_not_owner(
-                        ctx,
-                        new_gov.clone(),
-                        self.our_key.clone(),
-                        ext_db.clone(),
-                        self.subject_metadata.subject_id.clone(),
-                    )
-                    .await?;
+                    self.up_not_owner(ctx, &hash, &network).await?;
                 } else if up_owner {
                     Self::down_not_owner(
                         ctx,
-                        old_gov.clone(),
+                        &old_gov,
                         self.our_key.clone(),
                     )
                     .await?;
-                    Self::up_owner(
-                        ctx,
-                        self.our_key.clone(),
-                        self.subject_metadata.subject_id.clone(),
-                        ext_db.clone(),
-                    )
-                    .await?;
+                    self.up_not_owner(ctx, &hash, &network).await?;
                 }
 
                 // Seguimos sin ser owner ni new owner,
                 // pero tenemos que ver si tenemos un rol nuevo.
                 if !up_not_owner
                     && !up_owner
-                    && self.our_key != self.subject_metadata.owner
+                    && *self.our_key != self.subject_metadata.owner
                 {
-                    Self::up_down_not_owner(
-                        ctx,
-                        new_gov.clone(),
-                        old_gov.clone(),
-                        self.our_key.clone(),
-                        ext_db.clone(),
-                        self.subject_metadata.subject_id.clone(),
-                    )
-                    .await?;
+                    self.up_down_not_owner(ctx, &old_gov, &hash, &network)
+                        .await?;
                 }
 
-                let old_schemas_eval =
-                    old_gov.schemas(ProtocolTypes::Evaluation, &self.our_key);
-                let new_schemas_eval =
-                    new_gov.schemas(ProtocolTypes::Evaluation, &self.our_key);
-
-                // Bajamos los compilers que ya no soy evaluador
-                let down = old_schemas_eval
-                    .clone()
-                    .iter()
-                    .filter(|x| !new_schemas_eval.contains_key(x.0))
-                    .map(|x| x.0.clone())
-                    .collect();
-                Self::down_compilers_schemas(ctx, down).await?;
-
-                // Subimos los compilers que soy nuevo evaluador
-                let up = new_schemas_eval
-                    .clone()
-                    .iter()
-                    .filter(|x| !old_schemas_eval.contains_key(x.0))
-                    .map(|x| (x.0.clone(), x.1.clone()))
-                    .collect();
-                Self::up_compilers_schemas(
-                    ctx,
-                    up,
-                    self.subject_metadata.subject_id.clone(),
-                )
-                .await?;
-
-                // Compilo los nuevos contratos en el caso de que hayan sido modificados, sino no afecta.
-                let current = new_schemas_eval
-                    .clone()
-                    .iter()
-                    .filter(|x| old_schemas_eval.contains_key(x.0))
-                    .map(|x| (x.0.clone(), x.1.clone()))
-                    .collect();
-                Self::compile_schemas(
-                    ctx,
-                    current,
-                    self.subject_metadata.subject_id.clone(),
-                )
-                .await?;
-
-                let mut old_schemas_eval = old_schemas_eval
-                    .iter()
-                    .map(|x| x.0.clone())
-                    .collect::<Vec<SchemaType>>();
-                let mut old_schemas_val = old_gov
-                    .schemas(ProtocolTypes::Validation, &self.our_key)
-                    .iter()
-                    .map(|x| x.0.clone())
-                    .collect::<Vec<SchemaType>>();
-
-                let new_creators =
-                    new_gov.subjects_schemas_rol_namespace(&self.our_key);
-
-                for creators in new_creators {
-                    if let Some(eval_users) = creators.evaluation {
-                        let pos = old_schemas_eval
-                            .iter()
-                            .position(|x| *x == creators.schema_id);
-
-                        if let Some(pos) = pos {
-                            old_schemas_eval.remove(pos);
-                            let actor: Option<ActorRef<EvaluationSchema>> = ctx
-                                .get_child(&format!(
-                                    "{}_evaluation",
-                                    creators.schema_id
-                                ))
-                                .await;
-                            if let Some(actor) = actor {
-                                if let Err(e) = actor.tell(EvaluationSchemaMessage::UpdateEvaluators(eval_users, new_gov.version)).await {
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                            } else {
-                                let e = ActorError::NotFound(ActorPath::from(
-                                    format!(
-                                        "{}/{}_evaluation",
-                                        ctx.path(),
-                                        creators.schema_id
-                                    ),
-                                ));
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        } else {
-                            let eval_actor = EvaluationSchema::new(
-                                eval_users,
-                                new_gov.version,
-                            );
-                            ctx.create_child(
-                                &format!("{}_evaluation", creators.schema_id),
-                                eval_actor,
-                            )
-                            .await?;
-                        }
-                    }
-
-                    if let Some(val_user) = creators.validation {
-                        let pos = old_schemas_val
-                            .iter()
-                            .position(|x| *x == creators.schema_id);
-                        if let Some(pos) = pos {
-                            old_schemas_val.remove(pos);
-                            let actor: Option<ActorRef<ValidationSchema>> = ctx
-                                .get_child(&format!(
-                                    "{}_validation",
-                                    creators.schema_id
-                                ))
-                                .await;
-                            if let Some(actor) = actor {
-                                if let Err(e) = actor.tell(ValidationSchemaMessage::UpdateValidators(val_user, new_gov.version)).await {
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                            } else {
-                                let e = ActorError::NotFound(ActorPath::from(
-                                    format!(
-                                        "{}/{}_validation",
-                                        ctx.path(),
-                                        creators.schema_id
-                                    ),
-                                ));
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        } else {
-                            let actor = ValidationSchema::new(
-                                val_user,
-                                new_gov.version,
-                            );
-                            ctx.create_child(
-                                &format!("{}_validation", creators.schema_id),
-                                actor,
-                            )
-                            .await?;
-                        }
-                    }
-                }
-
-                Self::down_schemas(ctx, old_schemas_eval, old_schemas_val)
-                    .await?;
+                self.manager_schemas_compilers(ctx, &old_gov).await?;
             }
         }
 
@@ -538,152 +333,458 @@ impl Subject for Governance {
 }
 
 impl Governance {
-    pub fn from_create_subject_data(
-        subject_data: CreateSubjectData,
-    ) -> (SubjectMetadata, GovernanceData) {
-        (
-            SubjectMetadata::new(&subject_data),
-            serde_json::from_value::<GovernanceData>(subject_data.value.0)
-                .expect("schema_id is governance"),
-        )
-    }
-
-    pub fn from_create_event(
-        ledger: &Signed<Ledger>,
-    ) -> Result<(SubjectMetadata, GovernanceData), Error> {
-        if let EventRequest::Create(request) =
-            &ledger.content.event_request.content
-        {
-            Ok((
-                SubjectMetadata::from_create_request(
-                    ledger.content.subject_id.clone(),
-                    request,
-                    ledger.content.event_request.signature.signer.clone(),
-                    DigestIdentifier::default(),
-                ),
-                GovernanceData::new(
-                    ledger.content.event_request.signature.signer.clone(),
-                ),
-            ))
-        } else {
-            Err(Error::Governance(
-                "Invalid create event request".to_string(),
-            ))
-        }
-    }
-
-    async fn build_childs(
+    async fn update_schemas(
         &self,
-        ctx: &mut ActorContext<Governance>,
-        our_key: PublicKey,
-        ext_db: ExternalDB,
+        ctx: &mut ActorContext<Self>,
+        schema_creators_eval: &BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        >,
+        schema_creators_vali: &BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        >,
+        update_eval: &BTreeMap<SchemaType, ValueWrapper>,
+        update_vali: &BTreeMap<SchemaType, ValueWrapper>,
     ) -> Result<(), ActorError> {
-        // If subject is a governance
-        let gov = self.properties.clone();
+        for (schema_id, init_state) in update_eval.iter() {
+            let actor: Option<ActorRef<EvaluationSchema>> =
+                ctx.get_child(&format!("{}_evaluation", schema_id)).await;
 
-        let owner = our_key == self.subject_metadata.owner;
-        let new_owner = self.subject_metadata.new_owner.is_some();
-        let i_new_owner =
-            self.subject_metadata.new_owner == Some(our_key.clone());
-
-        if new_owner {
-            if i_new_owner {
-                Self::up_owner(
-                    ctx,
-                    our_key.clone(),
-                    self.subject_metadata.subject_id.clone(),
-                    ext_db,
-                )
-                .await?;
+            if let Some(actor) = actor {
+                actor
+                    .tell(EvaluationSchemaMessage::Update {
+                        creators: schema_creators_eval
+                            .get(schema_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        sn: self.subject_metadata.sn,
+                        gov_version: self.properties.version,
+                        init_state: init_state.clone(),
+                    })
+                    .await?;
             } else {
-                Self::up_not_owner(
-                    ctx,
-                    gov.clone(),
-                    our_key.clone(),
-                    ext_db,
-                    self.subject_metadata.subject_id.clone(),
-                )
-                .await?;
+                return Err(ActorError::NotFound(ActorPath::from(format!(
+                    "{}/{}_evaluation",
+                    ctx.path(),
+                    schema_id
+                ))));
             }
-        } else if owner {
-            Self::up_owner(
-                ctx,
-                our_key.clone(),
-                self.subject_metadata.subject_id.clone(),
-                ext_db,
-            )
-            .await?;
-        } else {
-            Self::up_not_owner(
-                ctx,
-                gov.clone(),
-                our_key.clone(),
-                ext_db,
-                self.subject_metadata.subject_id.clone(),
-            )
-            .await?;
         }
 
-        let schemas = gov.schemas(ProtocolTypes::Evaluation, &our_key);
-        Self::up_compilers_schemas(
-            ctx,
-            schemas,
-            self.subject_metadata.subject_id.clone(),
-        )
-        .await?;
+        for (schema_id, init_state) in update_vali.iter() {
+            let actor: Option<ActorRef<ValidationSchema>> =
+                ctx.get_child(&format!("{}_validation", schema_id)).await;
 
-        let new_creators = gov.subjects_schemas_rol_namespace(&our_key);
-
-        for creators in new_creators {
-            if let Some(eval_user) = creators.evaluation {
-                let eval_actor = EvaluationSchema::new(eval_user, gov.version);
-                ctx.create_child(
-                    &format!("{}_evaluation", creators.schema_id),
-                    eval_actor,
-                )
-                .await?;
-            }
-
-            if let Some(val_user) = creators.validation {
-                let actor = ValidationSchema::new(val_user, gov.version);
-                ctx.create_child(
-                    &format!("{}_validation", creators.schema_id),
-                    actor,
-                )
-                .await?;
+            if let Some(actor) = actor {
+                actor
+                    .tell(ValidationSchemaMessage::Update {
+                        creators: schema_creators_vali
+                            .get(schema_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        sn: self.subject_metadata.sn,
+                        gov_version: self.properties.version,
+                        init_state: init_state.clone(),
+                    })
+                    .await?;
+            } else {
+                return Err(ActorError::NotFound(ActorPath::from(format!(
+                    "{}/{}_validation",
+                    ctx.path(),
+                    schema_id
+                ))));
             }
         }
 
         Ok(())
     }
 
-    async fn up_not_owner(
+    async fn down_schemas(
         ctx: &mut ActorContext<Self>,
-        gov: GovernanceData,
-        our_key: PublicKey,
-        ext_db: ExternalDB,
-        subject_id: DigestIdentifier,
+        old_schemas_eval: &BTreeSet<SchemaType>,
+        old_schemas_val: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
-        if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        for schema in old_schemas_eval {
+            let actor: Option<ActorRef<EvaluationSchema>> =
+                ctx.get_child(&format!("{}_evaluation", schema)).await;
+            if let Some(actor) = actor {
+                actor.ask_stop().await?;
+            } else {
+                return Err(ActorError::NotFound(ActorPath::from(format!(
+                    "{}/{}_evaluation",
+                    ctx.path(),
+                    schema
+                ))));
+            }
+        }
+
+        for schema_id in old_schemas_val {
+            let actor: Option<ActorRef<ValidationSchema>> =
+                ctx.get_child(&format!("{}_validation", schema_id)).await;
+            if let Some(actor) = actor {
+                actor.ask_stop().await?;
+            } else {
+                return Err(ActorError::NotFound(ActorPath::from(format!(
+                    "{}/{}_validation",
+                    ctx.path(),
+                    schema_id
+                ))));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn up_schemas(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        schema_creators_eval: &BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        >,
+        schema_creators_vali: &BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        >,
+        up_eval: &BTreeMap<SchemaType, ValueWrapper>,
+        up_vali: &BTreeMap<SchemaType, ValueWrapper>,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        for (schema_id, init_state) in up_eval.iter() {
+            let eval_actor = EvaluationSchema {
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                sn: self.subject_metadata.sn,
+                creators: schema_creators_eval
+                    .get(schema_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                schema_id: schema_id.clone(),
+                init_state: init_state.clone(),
+                hash: hash.clone(),
+                network: network.clone(),
+            };
+
+            ctx.create_child(&format!("{}_evaluation", schema_id), eval_actor)
+                .await?;
+        }
+
+        for (schema_id, init_state) in up_vali.iter() {
+            let vali_actor = ValidationSchema {
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                sn: self.subject_metadata.sn,
+                creators: schema_creators_vali
+                    .get(schema_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                schema_id: schema_id.clone(),
+                init_state: init_state.clone(),
+                hash: hash.clone(),
+                network: network.clone(),
+            };
+
+            ctx.create_child(&format!("{}_validation", schema_id), vali_actor)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn manager_schemas_compilers(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        old_gov: &GovernanceData,
+    ) -> Result<(), ActorError> {
+        let Some(network) = ctx
+            .system()
+            .get_helper::<Arc<NetworkSender>>("network")
+            .await
+        else {
+            return Err(ActorError::NotHelper("network".to_owned()));
+        };
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
+        };
+
+        let (old_schemas_eval, new_schemas_eval) = {
+            let old_schemas_eval =
+                old_gov.schemas_name(ProtocolTypes::Evaluation, &self.our_key);
+
+            let new_schemas_eval = self
+                .properties
+                .schemas(ProtocolTypes::Evaluation, &self.our_key);
+
+            // Compilers
+            // Bajamos los compilers que ya no soy evaluador
+            let down = old_schemas_eval
+                .clone()
+                .iter()
+                .filter(|x| !new_schemas_eval.contains_key(x))
+                .map(|x| x.clone())
+                .collect();
+            Self::down_compilers_schemas(ctx, &down).await?;
+
+            // Subimos los compilers que soy nuevo evaluador
+            let up = new_schemas_eval
+                .clone()
+                .iter()
+                .filter(|x| !old_schemas_eval.contains(x.0))
+                .map(|x| (x.0.clone(), x.1.clone()))
+                .collect();
+
+            Self::up_compilers_schemas(
+                ctx,
+                &up,
+                self.subject_metadata.subject_id.clone(),
+            )
+            .await?;
+
+            // Compilo los nuevos contratos en el caso de que hayan sido modificados, sino no afecta.
+            let current = new_schemas_eval
+                .clone()
+                .iter()
+                .filter(|x| old_schemas_eval.contains(x.0))
+                .map(|x| (x.0.clone(), x.1.clone()))
+                .collect();
+
+            Self::compile_schemas(
+                ctx,
+                current,
+                self.subject_metadata.subject_id.clone(),
+            )
+            .await?;
+
+            (
+                old_schemas_eval,
+                new_schemas_eval
+                    .iter()
+                    .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+                    .collect::<BTreeMap<SchemaType, ValueWrapper>>(),
+            )
+        };
+        let old_schemas_vali =
+            old_gov.schemas_name(ProtocolTypes::Validation, &self.our_key);
+
+        let new_schemas_vali = self
+            .properties
+            .schemas_init_value(ProtocolTypes::Validation, &self.our_key);
+
+        // Bajar schemas
+        let down_eval = old_schemas_eval
+            .clone()
+            .iter()
+            .filter(|x| !new_schemas_eval.contains_key(x))
+            .map(|x| x.clone())
+            .collect();
+
+        let down_vali = old_schemas_vali
+            .clone()
+            .iter()
+            .filter(|x| !new_schemas_vali.contains_key(x))
+            .map(|x| x.clone())
+            .collect();
+
+        Self::down_schemas(ctx, &down_eval, &down_vali).await?;
+
+        // Subir los nuevos schemas
+        let schemas_namespace_eval = self
+            .properties
+            .schemas_namespace(ProtocolTypes::Evaluation, &self.our_key);
+
+        let schema_creators_eval = self
+            .properties
+            .schema_creators_namespace(schemas_namespace_eval);
+
+        let up_eval = new_schemas_eval
+            .clone()
+            .iter()
+            .filter(|x| !old_schemas_eval.contains(x.0))
+            .map(|x| (x.0.clone(), x.1.clone()))
+            .collect::<BTreeMap<SchemaType, ValueWrapper>>();
+
+        let schemas_namespace_vali = self
+            .properties
+            .schemas_namespace(ProtocolTypes::Validation, &self.our_key);
+
+        let schema_creators_vali = self
+            .properties
+            .schema_creators_namespace(schemas_namespace_vali);
+
+        let up_vali = new_schemas_vali
+            .clone()
+            .iter()
+            .filter(|x| !old_schemas_vali.contains(x.0))
+            .map(|x| (x.0.clone(), x.1.clone()))
+            .collect::<BTreeMap<SchemaType, ValueWrapper>>();
+        // Up
+        self.up_schemas(
+            ctx,
+            &schema_creators_eval,
+            &schema_creators_vali,
+            &up_eval,
+            &up_vali,
+            &hash,
+            &network,
+        )
+        .await?;
+
+        // Update
+        let update_eval = new_schemas_eval
+            .clone()
+            .iter()
+            .filter(|x| old_schemas_eval.contains(x.0))
+            .map(|x| (x.0.clone(), x.1.clone()))
+            .collect::<BTreeMap<SchemaType, ValueWrapper>>();
+
+        let update_vali = new_schemas_vali
+            .clone()
+            .iter()
+            .filter(|x| old_schemas_vali.contains(x.0))
+            .map(|x| (x.0.clone(), x.1.clone()))
+            .collect::<BTreeMap<SchemaType, ValueWrapper>>();
+
+        self.update_schemas(
+            ctx,
+            &schema_creators_eval,
+            &schema_creators_vali,
+            &update_eval,
+            &update_vali,
+        )
+        .await
+    }
+
+    async fn build_childs(
+        &self,
+        ctx: &mut ActorContext<Governance>,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        // If subject is a governance
+        let owner = *self.our_key == self.subject_metadata.owner;
+        let new_owner = self.subject_metadata.new_owner.is_some();
+        let i_new_owner =
+            self.subject_metadata.new_owner == Some((*self.our_key).clone());
+
+        if new_owner {
+            if i_new_owner {
+                self.up_owner(ctx, hash, network).await?;
+            } else {
+                self.up_not_owner(ctx, hash, network).await?;
+            }
+        } else if owner {
+            self.up_owner(ctx, hash, network).await?;
+        } else {
+            self.up_not_owner(ctx, hash, network).await?;
+        }
+
+        let new_schemas_eval = {
+            let schemas =
+                self.properties.schemas(ProtocolTypes::Evaluation, &self.our_key);
+            Self::up_compilers_schemas(
+                ctx,
+                &schemas,
+                self.subject_metadata.subject_id.clone(),
+            )
+            .await?;
+
+            schemas
+                .iter()
+                .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+                .collect::<BTreeMap<SchemaType, ValueWrapper>>()
+        };
+
+        let schemas_namespace_eval = self
+            .properties
+            .schemas_namespace(ProtocolTypes::Evaluation, &self.our_key);
+
+        let schema_creators_eval = self
+            .properties
+            .schema_creators_namespace(schemas_namespace_eval);
+
+        let schemas_namespace_vali = self
+            .properties
+            .schemas_namespace(ProtocolTypes::Validation, &self.our_key);
+
+        let schema_creators_vali = self
+            .properties
+            .schema_creators_namespace(schemas_namespace_vali);
+
+        let new_schemas_vali = self
+            .properties
+            .schemas_init_value(ProtocolTypes::Validation, &self.our_key);
+
+        self.up_schemas(
+            ctx,
+            &schema_creators_eval,
+            &schema_creators_vali,
+            &new_schemas_eval,
+            &new_schemas_vali,
+            hash,
+            network,
+        )
+        .await
+    }
+
+    async fn up_not_owner(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        let node_key = if let Some(new_owner) = &self.subject_metadata.new_owner
+        {
+            new_owner.clone()
+        } else {
+            self.subject_metadata.owner.clone()
+        };
+
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Validator,
         }) {
             // If we are a validator
-            let validator = Validator::default();
+            let validator = ValiWorker {
+                node_key: node_key.clone(),
+                our_key: self.our_key.clone(),
+                init_state: None,
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                sn: self.subject_metadata.sn,
+                hash: *hash,
+                network: network.clone(),
+            };
             ctx.create_child("validator", validator).await?;
         }
 
-        if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
             // If we are a evaluator
-            let evaluator = Evaluator::default();
+            let evaluator = EvalWorker {
+                node_key: node_key.clone(),
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                sn: self.subject_metadata.sn,
+                init_state: None,
+                hash: *hash,
+                network: network.clone(),
+            };
             ctx.create_child("evaluator", evaluator).await?;
         }
 
-        if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         }) {
             let always_accept = if let Some(config) =
@@ -694,47 +795,57 @@ impl Governance {
                 return Err(ActorError::NotHelper("config".to_owned()));
             };
 
-            let init_approver = InitApprover {
-                request_id: String::default(),
-                version: 0,
-                node_key: our_key.clone(),
-                subject_id: subject_id.to_string(),
-                pass_votation: VotationType::from(always_accept),
+            let pass_votation = if always_accept {
+                VotationType::AlwaysAccept
+            } else {
+                VotationType::Manual
             };
 
-            let approver_actor = ctx
-                .create_child("approver", Approver::initial(init_approver))
-                .await?;
+            let init_approver = InitApprPersist {
+                our_key: self.our_key.clone(),
+                node_key: node_key.clone(),
+                subject_id: self.subject_metadata.subject_id.clone(),
+                pass_votation,
+                helpers: (hash.clone(), network.clone()),
+            };
 
-            let sink =
-                Sink::new(approver_actor.subscribe(), ext_db.get_approver());
-            ctx.system().run_sink(sink).await;
+            ctx.create_child(
+                "approver",
+                ApprPersist::initial(init_approver),
+            )
+            .await?;
         }
 
         Ok(())
     }
 
     async fn up_down_not_owner(
+        &self,
         ctx: &mut ActorContext<Self>,
-        new_gov: GovernanceData,
-        old_gov: GovernanceData,
-        our_key: PublicKey,
-        ext_db: ExternalDB,
-        subject_id: DigestIdentifier,
+        old_gov: &GovernanceData,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
+        let node_key = if let Some(new_owner) = &self.subject_metadata.new_owner
+        {
+            new_owner.clone()
+        } else {
+            self.subject_metadata.owner.clone()
+        };
+
         let old_val = old_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*self.our_key).clone(),
             role: RoleTypes::Validator,
         });
 
-        let new_val = new_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        let new_val = self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Validator,
         });
 
         match (old_val, new_val) {
             (true, false) => {
-                let actor: Option<ActorRef<Validator>> =
+                let actor: Option<ActorRef<ValiWorker>> =
                     ctx.get_child("validator").await;
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
@@ -745,25 +856,35 @@ impl Governance {
                 }
             }
             (false, true) => {
-                let validator = Validator::default();
+                // If we are a validator
+                let validator = ValiWorker {
+                    node_key: node_key.clone(),
+                    our_key: self.our_key.clone(),
+                    init_state: None,
+                    governance_id: self.subject_metadata.subject_id.clone(),
+                    gov_version: self.properties.version,
+                    sn: self.subject_metadata.sn,
+                    hash: *hash,
+                    network: network.clone(),
+                };
                 ctx.create_child("validator", validator).await?;
             }
             _ => {}
         };
 
         let old_eval = old_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*self.our_key).clone(),
             role: RoleTypes::Evaluator,
         });
 
-        let new_eval = new_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        let new_eval = self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Evaluator,
         });
 
         match (old_eval, new_eval) {
             (true, false) => {
-                let actor: Option<ActorRef<Evaluator>> =
+                let actor: Option<ActorRef<EvalWorker>> =
                     ctx.get_child("evaluator").await;
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
@@ -774,25 +895,34 @@ impl Governance {
                 }
             }
             (false, true) => {
-                let evaluator = Evaluator::default();
+                let evaluator = EvalWorker {
+                    node_key: node_key.clone(),
+                    our_key: self.our_key.clone(),
+                    governance_id: self.subject_metadata.subject_id.clone(),
+                    gov_version: self.properties.version,
+                    sn: self.subject_metadata.sn,
+                    init_state: None,
+                    hash: *hash,
+                    network: network.clone(),
+                };
                 ctx.create_child("evaluator", evaluator).await?;
             }
             _ => {}
         };
 
         let old_appr = old_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         });
 
-        let new_appr = new_gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+        let new_appr = self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         });
 
         match (old_appr, new_appr) {
             (true, false) => {
-                let actor: Option<ActorRef<Approver>> =
+                let actor: Option<ActorRef<ApprPersist>> =
                     ctx.get_child("approver").await;
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
@@ -811,23 +941,25 @@ impl Governance {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
-                let init_approver = InitApprover {
-                    request_id: String::default(),
-                    version: 0,
-                    node_key: our_key.clone(),
-                    subject_id: subject_id.to_string(),
-                    pass_votation: VotationType::from(always_accept),
+                let pass_votation = if always_accept {
+                    VotationType::AlwaysAccept
+                } else {
+                    VotationType::Manual
                 };
 
-                let approver_actor = ctx
-                    .create_child("approver", Approver::initial(init_approver))
-                    .await?;
+                let init_approver = InitApprPersist {
+                    our_key: self.our_key.clone(),
+                    node_key: node_key.clone(),
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    pass_votation,
+                    helpers: (hash.clone(), network.clone()),
+                };
 
-                let sink = Sink::new(
-                    approver_actor.subscribe(),
-                    ext_db.get_approver(),
-                );
-                ctx.system().run_sink(sink).await;
+                ctx.create_child(
+                    "approver",
+                    ApprPersist::initial(init_approver),
+                )
+                .await?;
             }
             _ => {}
         };
@@ -837,14 +969,14 @@ impl Governance {
 
     async fn down_not_owner(
         ctx: &mut ActorContext<Self>,
-        gov: GovernanceData,
+        gov: &GovernanceData,
         our_key: PublicKey,
     ) -> Result<(), ActorError> {
         if gov.has_this_role(HashThisRole::Gov {
             who: our_key.clone(),
             role: RoleTypes::Validator,
         }) {
-            let actor: Option<ActorRef<Validator>> =
+            let actor: Option<ActorRef<ValiWorker>> =
                 ctx.get_child("validator").await;
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
@@ -860,7 +992,7 @@ impl Governance {
             who: our_key.clone(),
             role: RoleTypes::Evaluator,
         }) {
-            let actor: Option<ActorRef<Evaluator>> =
+            let actor: Option<ActorRef<ValiWorker>> =
                 ctx.get_child("evaluator").await;
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
@@ -876,7 +1008,7 @@ impl Governance {
             who: our_key.clone(),
             role: RoleTypes::Approver,
         }) {
-            let actor: Option<ActorRef<Approver>> =
+            let actor: Option<ActorRef<ApprPersist>> =
                 ctx.get_child("approver").await;
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
@@ -892,10 +1024,10 @@ impl Governance {
     }
 
     async fn up_owner(
+        &self,
         ctx: &mut ActorContext<Self>,
-        our_key: PublicKey,
-        subject_id: DigestIdentifier,
-        ext_db: ExternalDB,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
         let always_accept = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
@@ -904,34 +1036,22 @@ impl Governance {
         } else {
             return Err(ActorError::NotHelper("config".to_owned()));
         };
-
-        let validation = Validation::new(our_key.clone());
-        ctx.create_child("validation", validation).await?;
-
-        let evaluation = Evaluation::new(our_key.clone());
-        ctx.create_child("evaluation", evaluation).await?;
-
-        ctx.create_child("approval", Approval::initial(our_key.clone()))
-            .await?;
-
-        let init_approver = InitApprover {
-            request_id: String::default(),
-            version: 0,
-            node_key: our_key.clone(),
-            subject_id: subject_id.to_string(),
-            pass_votation: VotationType::from(always_accept),
+        let pass_votation = if always_accept {
+            VotationType::AlwaysAccept
+        } else {
+            VotationType::Manual
         };
 
-        let approver_actor = ctx
-            .create_child("approver", Approver::initial(init_approver))
+        let init_approver = InitApprPersist {
+            our_key: self.our_key.clone(),
+            node_key: (*self.our_key).clone(),
+            subject_id: self.subject_metadata.subject_id.clone(),
+            pass_votation,
+            helpers: (hash.clone(), network.clone()),
+        };
+
+        ctx.create_child("approver", ApprPersist::initial(init_approver))
             .await?;
-
-        let sink = Sink::new(approver_actor.subscribe(), ext_db.get_approver());
-        ctx.system().run_sink(sink).await;
-
-        let distribution =
-            Distribution::new(our_key.clone(), DistributionType::Subject);
-        ctx.create_child("distribution", distribution).await?;
 
         Ok(())
     }
@@ -939,42 +1059,8 @@ impl Governance {
     async fn down_owner(
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let actor: Option<ActorRef<Validation>> =
-            ctx.get_child("validation").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            let e = ActorError::NotFound(ActorPath::from(format!(
-                "{}/validation",
-                ctx.path()
-            )));
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        let actor: Option<ActorRef<Evaluation>> =
-            ctx.get_child("evaluation").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            let e = ActorError::NotFound(ActorPath::from(format!(
-                "{}/evaluation",
-                ctx.path()
-            )));
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        let actor: Option<ActorRef<Approval>> = ctx.get_child("approval").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            let e = ActorError::NotFound(ActorPath::from(format!(
-                "{}/approval",
-                ctx.path()
-            )));
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        let actor: Option<ActorRef<Approver>> = ctx.get_child("approver").await;
+        let actor: Option<ActorRef<ApprPersist>> =
+            ctx.get_child("approver").await;
         if let Some(actor) = actor {
             actor.ask_stop().await?;
         } else {
@@ -985,24 +1071,12 @@ impl Governance {
             return Err(emit_fail(ctx, e).await);
         }
 
-        let actor: Option<ActorRef<Distribution>> =
-            ctx.get_child("distribution").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            let e = ActorError::NotFound(ActorPath::from(format!(
-                "{}/distribution",
-                ctx.path()
-            )));
-            return Err(emit_fail(ctx, e).await);
-        }
-
         Ok(())
     }
 
     async fn up_compilers_schemas(
         ctx: &mut ActorContext<Self>,
-        schemas: BTreeMap<SchemaType, Schema>,
+        schemas: &BTreeMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
@@ -1031,8 +1105,8 @@ impl Governance {
             compiler
                 .tell(CompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
-                    contract,
-                    initial_value: initial_value.0,
+                    contract: contract.clone(),
+                    initial_value: initial_value.0.clone(),
                     contract_path: contracts_path
                         .join("contracts")
                         .join(format!("{}_{}", subject_id, id)),
@@ -1045,9 +1119,9 @@ impl Governance {
 
     async fn down_compilers_schemas(
         ctx: &mut ActorContext<Self>,
-        schemas: Vec<SchemaType>,
+        schemas: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
-        for schema in schemas {
+        for schema in schemas.iter() {
             let actor: Option<ActorRef<Compiler>> =
                 ctx.get_child(&format!("{}_compiler", schema)).await;
             if let Some(actor) = actor {
@@ -1057,42 +1131,6 @@ impl Governance {
                     "{}/{}_compiler",
                     ctx.path(),
                     schema
-                ))));
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn down_schemas(
-        ctx: &mut ActorContext<Self>,
-        old_schemas_eval: Vec<SchemaType>,
-        old_schemas_val: Vec<SchemaType>,
-    ) -> Result<(), ActorError> {
-        for schema in old_schemas_eval {
-            let actor: Option<ActorRef<EvaluationSchema>> =
-                ctx.get_child(&format!("{}_evaluation", schema)).await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_evaluation",
-                    ctx.path(),
-                    schema
-                ))));
-            }
-        }
-
-        for schema_id in old_schemas_val {
-            let actor: Option<ActorRef<ValidationSchema>> =
-                ctx.get_child(&format!("{}_validation", schema_id)).await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_validation",
-                    ctx.path(),
-                    schema_id
                 ))));
             }
         }
@@ -1431,6 +1469,7 @@ impl Governance {
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
+        hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let mut iter = events.into_iter();
         let last_ledger = get_last_event(ctx).await?;
@@ -1442,12 +1481,13 @@ impl Governance {
                 return Ok(());
             };
             if let Err(e) = Self::verify_first_ledger_event(
-                self.subject_metadata.owner.clone(),
+                ctx,
                 &first,
+                hash,
+                Metadata::from(self.clone()),
             )
             .await
             {
-                self.delete_subject(ctx).await?;
                 return Err(ActorError::Functional(e.to_string()));
             }
 
@@ -1485,13 +1525,13 @@ impl Governance {
                     namespace: String::default(),
                     schema_id: self.subject_metadata.schema_id.clone(),
                     issuer: first
-                        .content
+                        .content()
                         .event_request
-                        .signature
+                        .signature()
                         .signer
                         .to_string(),
                 },
-                &first.content.event_request.content,
+                &first.content().event_request.content(),
             )
             .await?;
 
@@ -1499,16 +1539,23 @@ impl Governance {
         };
 
         for event in iter {
+            let actual_ledger_hash = hash_borsh(&*hash.hasher(), &last_ledger.0)
+                .map_err(|e| todo!())?;
+            let last_data = LastData {
+                gov_version: last_ledger.content().gov_version,
+                vali_data: last_ledger
+                    .content()
+                    .protocols
+                    .get_validation_data(),
+            };
+
             let last_event_is_ok = match Self::verify_new_ledger_event(
-                VerifyData {
-                    active: self.subject_metadata.active,
-                    owner: self.subject_metadata.owner.clone(),
-                    new_owner: self.subject_metadata.new_owner.clone(),
-                    is_gov: self.subject_metadata.schema_id.is_gov(),
-                    properties: self.properties.to_value_wrapper(),
-                },
-                &last_ledger,
-                &event,
+                ctx,
+                event,
+                Metadata::from(self.clone()),
+                actual_ledger_hash,
+                last_data,
+                hash,
             )
             .await
             {
@@ -1523,7 +1570,12 @@ impl Governance {
                 }
             };
             let roles_update = if last_event_is_ok {
-                let update = match event.content.event_request.content.clone() {
+                let update = match event
+                    .content()
+                    .event_request
+                    .content()
+                    .clone()
+                {
                     EventRequest::Transfer(transfer_request) => {
                         Governance::new_transfer_subject(
                             ctx,
@@ -1549,7 +1601,7 @@ impl Governance {
                         Governance::change_node_subject(
                             ctx,
                             &confirm_request.subject_id.to_string(),
-                            &event.signature.signer.to_string(),
+                            &event.signature().signer.to_string(),
                             &self.subject_metadata.owner.to_string(),
                         )
                         .await?;
@@ -1593,13 +1645,13 @@ impl Governance {
                         namespace: String::default(),
                         schema_id: self.subject_metadata.schema_id.clone(),
                         issuer: event
-                            .content
+                            .content()
                             .event_request
-                            .signature
+                            .signature()
                             .signer
                             .to_string(),
                     },
-                    &event.content.event_request.content,
+                    &event.content().event_request.content(),
                 )
                 .await?;
 
@@ -1660,9 +1712,8 @@ pub enum GovernanceMessage {
     UpdateLedger {
         events: Vec<SignedLedger>,
     },
+    GetLastSn,
     GetGovernance,
-    GetOwner,
-    DeleteGovernance,
 }
 
 impl Message for GovernanceMessage {}
@@ -1674,11 +1725,13 @@ pub enum GovernanceResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
-        last_state: Option<LastStateData>,
+    },
+    LastLedger {
+        ledger_event: Option<SignedLedger>,
     },
     Governance(Box<GovernanceData>),
-    Owner(PublicKey),
     NewCompilers(Vec<SchemaType>),
+    Sn(u64),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -1695,8 +1748,6 @@ impl Actor for Governance {
     ) -> Result<(), ActorError> {
         self.init_store("governance", None, true, ctx).await?;
 
-        let our_key = self.our_key.clone();
-
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
         else {
@@ -1709,35 +1760,44 @@ impl Actor for Governance {
             return Err(ActorError::NotHelper("sink".to_owned()));
         };
 
-        let last_state_actor = ctx
-            .create_child("last_state", LastState::initial(()))
-            .await?;
+        let Some(network) = ctx
+            .system()
+            .get_helper::<Arc<NetworkSender>>("network")
+            .await
+        else {
+            return Err(ActorError::NotHelper("network".to_owned()));
+        };
 
-        let sink =
-            Sink::new(last_state_actor.subscribe(), ext_db.get_last_state());
-        ctx.system().run_sink(sink).await;
+        let hash = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.hash_algorithm
+        } else {
+            return Err(ActorError::NotHelper("config".to_owned()));
+        };
 
         if self.subject_metadata.active {
-            self.build_childs(ctx, our_key.clone(), ext_db.clone())
+            self.build_childs(ctx, &hash, &network)
                 .await?;
+
+            let sink_actor = ctx
+                .create_child(
+                    "sink_data",
+                    SinkData {
+                        controller_id: self.our_key.to_string(),
+                    },
+                )
+                .await?;
+            let sink =
+                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
+            ctx.system().run_sink(sink).await;
+
+            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
+            ctx.system().run_sink(sink).await;
         }
 
         ctx.create_child("relation_ship", RelationShip::initial(()))
             .await?;
-
-        let sink_actor = ctx
-            .create_child(
-                "sink_data",
-                SinkData {
-                    controller_id: our_key.to_string(),
-                },
-            )
-            .await?;
-        let sink = Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-        ctx.system().run_sink(sink).await;
-
-        let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-        ctx.system().run_sink(sink).await;
 
         ctx.create_child("roles_register", RolesRegister::initial(()))
             .await?;
@@ -1762,6 +1822,9 @@ impl Handler<Governance> for Governance {
         ctx: &mut ActorContext<Governance>,
     ) -> Result<GovernanceResponse, ActorError> {
         match msg {
+            GovernanceMessage::GetLastSn => {
+                Ok(GovernanceResponse::Sn(self.subject_metadata.sn))
+            },
             GovernanceMessage::UpdateTransfer(res) => {
                 match res {
                     TransferResponse::Confirm => {
@@ -1798,11 +1861,6 @@ impl Handler<Governance> for Governance {
 
                 Ok(GovernanceResponse::Ok)
             }
-            GovernanceMessage::DeleteGovernance => {
-                self.delete_subject(ctx).await?;
-
-                Ok(GovernanceResponse::Ok)
-            }
             GovernanceMessage::CreateCompilers(compilers) => {
                 let new_compilers =
                     match Self::create_compilers(ctx, &compilers).await {
@@ -1819,18 +1877,13 @@ impl Handler<Governance> for Governance {
                 Ok(GovernanceResponse::NewCompilers(new_compilers))
             }
             GovernanceMessage::GetLedger { last_sn } => {
-                let (ledger, last_state) =
-                    self.get_ledger_data(ctx, last_sn).await?;
-                Ok(GovernanceResponse::Ledger { ledger, last_state })
+                let ledger = self.get_ledger(ctx, last_sn).await?;
+                Ok(GovernanceResponse::Ledger { ledger })
             }
             GovernanceMessage::GetLastLedger => {
-                let (ledger, last_state) =
-                    self.get_ledger_data(ctx, self.subject_metadata.sn).await?;
-                Ok(GovernanceResponse::Ledger { ledger, last_state })
+                let ledger_event = self.get_last_ledger(ctx).await?;
+                Ok(GovernanceResponse::LastLedger { ledger_event })
             }
-            GovernanceMessage::GetOwner => Ok(GovernanceResponse::Owner(
-                self.subject_metadata.owner.clone(),
-            )),
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),
             )),
@@ -1894,7 +1947,8 @@ impl Handler<Governance> for Governance {
 #[async_trait]
 impl PersistentActor for Governance {
     type Persistence = FullPersistence;
-    type InitParams = (Option<(SubjectMetadata, GovernanceData)>, PublicKey);
+    type InitParams =
+        (Option<(SubjectMetadata, GovernanceData)>, Arc<PublicKey>);
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
@@ -1916,101 +1970,84 @@ impl PersistentActor for Governance {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        let valid_event = match Self::verify_protocols_state(
-            EventRequestType::from(&event.content.event_request.content),
-            event.content.eval_success,
-            event.content.appr_success,
-            event.content.appr_required,
-            event.content.vali_success,
-            true,
+        match (
+            event.content().event_request.content(),
+            &event.content().protocols,
         ) {
-            Ok(is_ok) => is_ok,
-            Err(e) => {
-                let error =
-                    format!("Apply, can not verify protocols state: {}", e);
-                error!(TARGET_GOVERNANCE, error);
-                return Err(ActorError::Functional(error));
-            }
-        };
-
-        if valid_event {
-            match &event.content.event_request.content {
-                EventRequest::Create(create_event) => {
-                    let last_event_hash = hash_borsh(
-                        &*event.signature.content_hash.algorithm().hasher(),
-                        &event,
+            (EventRequest::Create(..), Protocols::Create { validation }) => {
+                if let ValidationMetadata::Metadata(metadata) =
+                    &validation.validation_metadata
+                {
+                    self.subject_metadata = SubjectMetadata::new(metadata);
+                    self.properties = serde_json::from_value::<GovernanceData>(
+                        metadata.properties.0.clone(),
                     )
-                    .map_err(|e| {
-                        let error = format!(
-                            "Apply, can not obtain last event hash: {}",
-                            e
-                        );
-                        error!(TARGET_GOVERNANCE, error);
-                        ActorError::Functional(error)
-                    })?;
-
-                    self.subject_metadata =
-                        SubjectMetadata::from_create_request(
-                            event.content.subject_id.clone(),
-                            create_event,
-                            event
-                                .content
-                                .event_request
-                                .signature
-                                .signer
-                                .clone(),
-                            last_event_hash,
-                        );
-                    self.properties = GovernanceData::new(
-                        event.content.event_request.signature.signer.clone(),
-                    );
-
-                    return Ok(());
+                    .map_err(|e| todo!())?;
+                } else {
+                    todo!()
                 }
-                EventRequest::Fact(_fact_request) => {
-                    self.apply_patch(event.content.value.clone())?;
+
+                return Ok(());
+            }
+            (
+                EventRequest::Fact(..),
+                Protocols::GovFact {
+                    evaluation,
+                    approval,
+                    ..
+                },
+            ) => {
+                if let Some(eval_res) = evaluation.evaluator_res() {
+                    if let Some(appr_res) = approval {
+                        if appr_res.approved {
+                            self.apply_patch(eval_res.patch)?;
+                        }
+                    } else {
+                        todo!()
+                    }
                 }
-                EventRequest::Transfer(transfer_request) => {
+            }
+            (
+                EventRequest::Transfer(transfer_request),
+                Protocols::Transfer { evaluation, .. },
+            ) => {
+                if evaluation.evaluator_res().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                 }
-                EventRequest::Confirm(_confirm_request) => {
-                    self.apply_patch(event.content.value.clone())?;
+            }
+            (
+                EventRequest::Confirm(..),
+                Protocols::GovConfirm { evaluation, .. },
+            ) => {
+                if let Some(eval_res) = evaluation.evaluator_res() {
+                    if let Some(new_owner) =
+                        self.subject_metadata.new_owner.take()
+                    {
+                        self.subject_metadata.owner = new_owner;
+                    } else {
+                        todo!()
+                    }
 
-                    let Some(new_owner) =
-                        self.subject_metadata.new_owner.clone()
-                    else {
-                        let error = "In confirm event was succefully but new owner is empty:";
-                        error!(TARGET_GOVERNANCE, error);
-                        return Err(ActorError::Functional(error.to_owned()));
-                    };
-
-                    self.subject_metadata.owner = new_owner;
-                    self.subject_metadata.new_owner = None;
-                }
-                EventRequest::Reject(_reject_request) => {
-                    self.subject_metadata.new_owner = None;
-                }
-                EventRequest::EOL(_eolrequest) => {
-                    self.subject_metadata.active = false
+                    self.apply_patch(eval_res.patch)?;
                 }
             }
+            (EventRequest::Reject(..), Protocols::Reject { .. }) => {
+                self.subject_metadata.new_owner = None;
+            }
+            (EventRequest::EOL(..), Protocols::EOL { .. }) => {
+                self.subject_metadata.active = false
+            }
+            _ => todo!("Tackers events es una gov esto"),
+        }
 
+        if event.content().protocols.is_success() {
             self.properties.version += 1;
         }
 
-        let last_event_hash = hash_borsh(
-            &*event.signature.content_hash.algorithm().hasher(),
-            &event,
-        )
-        .map_err(|e| {
-            let error = format!("Apply, can not obtain last event hash: {}", e);
-            error!(TARGET_GOVERNANCE, error);
-            ActorError::Functional(error)
-        })?;
-
-        self.subject_metadata.last_event_hash = last_event_hash;
         self.subject_metadata.sn += 1;
+        self.subject_metadata.prev_ledger_event_hash =
+            event.content().prev_ledger_event_hash.clone();
 
         Ok(())
     }

@@ -4,12 +4,12 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{error, warn};
 
-use crate::model::request::SchemaType;
 use crate::{db::Storable, model::common::emit_fail};
 
 const TARGET_REGISTER: &str = "Ave-Node-Register";

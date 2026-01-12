@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -10,15 +10,10 @@ use distributor::{Distributor, DistributorMessage};
 use tracing::{error, warn};
 
 use crate::{
-    Event as AveEvent,
-    governance::model::WitnessesData,
-    model::{
+    Event as AveEvent, governance::model::WitnessesData, helpers::network::service::NetworkSender, model::{
         common::{emit_fail, subject::get_gov},
         event::ProtocolsSignatures,
-    },
-    request::manager::{RequestManager, RequestManagerMessage},
-    subject::SignedLedger,
-    validation::proof::ValidationProof,
+    }, request::manager::{RequestManager, RequestManagerMessage}, subject::SignedLedger
 };
 
 pub mod distributor;
@@ -33,20 +28,22 @@ pub enum DistributionType {
     Request,
 }
 
-#[derive(Default)]
 pub struct Distribution {
     witnesses: HashSet<PublicKey>,
     node_key: PublicKey,
     request_id: String,
     dis_type: DistributionType,
+    network: Arc<NetworkSender>
 }
 
 impl Distribution {
-    pub fn new(node_key: PublicKey, dis_type: DistributionType) -> Self {
+    pub fn new(node_key: PublicKey, dis_type: DistributionType, network: Arc<NetworkSender>) -> Self {
         Distribution {
             node_key,
             dis_type,
-            ..Default::default()
+            network,
+            request_id: String::default(),
+            witnesses: HashSet::new()
         }
     }
 
@@ -68,6 +65,7 @@ impl Distribution {
                 &format!("{}", signer),
                 Distributor {
                     node: signer.clone(),
+                    network: self.network.clone()
                 },
             )
             .await;
@@ -162,7 +160,7 @@ impl Handler<Distribution> for Distribution {
                 last_vali_res,
             } => {
                 self.request_id = request_id;
-                let subject_id = ledger.content.subject_id.clone();
+                let subject_id = ledger.content().subject_id.clone();
                 let governance =
                     match get_gov(ctx, &subject_id.to_string()).await {
                         Ok(gov) => gov,

@@ -1,7 +1,7 @@
 //! Node module
 //!
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, default, path::Path, sync::Arc};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use register::Register;
@@ -10,23 +10,12 @@ use tracing::{error, warn};
 use transfer::TransferRegister;
 
 use crate::{
-    Error, EventRequest,
-    auth::{Auth, AuthMessage, AuthResponse},
-    db::Storable,
-    distribution::distributor::Distributor,
-    governance::{Governance, GovernanceMessage},
-    helpers::db::ExternalDB,
-    manual_distribution::ManualDistribution,
-    model::{
-        Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
-    },
-    subject::{CreateSubjectData, SignedLedger},
-    system::ConfigHelper,
-    tracker::{Tracker, TrackerMessage},
+    Error, EventRequest, auth::{Auth, AuthMessage, AuthResponse}, db::Storable, distribution::distributor::Distributor, governance::{Governance, GovernanceMessage}, helpers::db::ExternalDB, manual_distribution::ManualDistribution, model::common::node::SignTypesNode, subject::SignedLedger, system::ConfigHelper, tracker::{Tracker, TrackerMessage}
 };
 
-use ave_common::identity::{
-    DigestIdentifier, PublicKey, Signature, keys::KeyPair,
+use ave_common::{
+    Namespace, SchemaType,
+    identity::{DigestIdentifier, PublicKey, Signature, keys::KeyPair},
 };
 
 use async_trait::async_trait;
@@ -78,12 +67,12 @@ pub struct Node {
     /// Owner of the node.
     #[serde(skip)]
     owner: KeyPair,
+    #[serde(skip)]
+    our_key: Arc<PublicKey>,
     /// The node's owned subjects.
     owned_subjects: HashMap<String, SubjectData>,
     /// The node's known subjects.
     known_subjects: HashMap<String, SubjectData>,
-    /// The node's temporal subjects.
-    temporal_subjects: HashMap<String, SubjectData>,
 
     transfer_subjects: HashMap<String, TransferData>,
 }
@@ -97,7 +86,6 @@ impl BorshSerialize for Node {
         // Serialize only the fields we want to persist, skipping 'owner'
         BorshSerialize::serialize(&self.owned_subjects, writer)?;
         BorshSerialize::serialize(&self.known_subjects, writer)?;
-        BorshSerialize::serialize(&self.temporal_subjects, writer)?;
         BorshSerialize::serialize(&self.transfer_subjects, writer)?;
         Ok(())
     }
@@ -112,44 +100,25 @@ impl BorshDeserialize for Node {
             HashMap::<String, SubjectData>::deserialize_reader(reader)?;
         let known_subjects =
             HashMap::<String, SubjectData>::deserialize_reader(reader)?;
-        let temporal_subjects =
-            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
         let transfer_subjects =
             HashMap::<String, TransferData>::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
         let owner = KeyPair::default();
+        let our_key = Arc::new(PublicKey::default());
 
         Ok(Self {
+            our_key,
             owner,
             owned_subjects,
             known_subjects,
-            temporal_subjects,
             transfer_subjects,
         })
     }
 }
 
 impl Node {
-    /// Gets the node's owner identifier.
-    ///
-    /// # Returns
-    ///
-    /// A `PublicKey` with the node's owner identifier.
-    ///
-    pub fn owner(&self) -> PublicKey {
-        self.owner.public_key()
-    }
-
-    pub fn add_temporal_subject(
-        &mut self,
-        subject_id: String,
-        data: SubjectData,
-    ) {
-        self.temporal_subjects.insert(subject_id, data);
-    }
-
     /// Adds a subject to the node's owned subjects.
     pub fn transfer_subject(&mut self, data: TransferSubject) {
         self.transfer_subjects.insert(
@@ -160,10 +129,6 @@ impl Node {
                 actual_owner: data.actual_owner,
             },
         );
-    }
-
-    pub fn delete_subject(&mut self, subject_id: &str) {
-        self.temporal_subjects.remove(subject_id);
     }
 
     pub fn update_subject(&mut self, subject_id: String, sn: u64) {
@@ -200,14 +165,12 @@ impl Node {
         };
     }
 
-    pub fn register_subject(&mut self, subject_id: String, iam_owner: bool) {
-        if let Some(data) = self.temporal_subjects.remove(&subject_id) {
-            if iam_owner {
-                self.owned_subjects.insert(subject_id, data);
-            } else {
-                self.known_subjects.insert(subject_id, data);
-            }
-        };
+    pub fn register_subject(&mut self, subject_id: String, data: SubjectData) {
+        if self.owner.public_key().to_string() == data.owner {
+            self.owned_subjects.insert(subject_id, data);
+        } else {
+            self.known_subjects.insert(subject_id, data);
+        }
     }
 
     fn sign<T: BorshSerialize>(&self, content: &T) -> Result<Signature, Error> {
@@ -253,9 +216,13 @@ impl Node {
         let our_key_string = our_key.to_string();
 
         for (subject, data) in self.owned_subjects.clone() {
-            if data.schema_id.is_gov() {
-                let tracker_actor =
-                    ctx.create_child(&subject, Tracker::initial((None, our_key.clone()))).await?;
+            if !data.schema_id.is_gov() {
+                let tracker_actor = ctx
+                    .create_child(
+                        &subject,
+                        Tracker::initial((None, our_key.clone())),
+                    )
+                    .await?;
 
                 let sink =
                     Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
@@ -271,7 +238,10 @@ impl Node {
                 .await?;
             } else {
                 let governance_actor = ctx
-                    .create_child(&subject, Governance::initial((None, our_key.clone())))
+                    .create_child(
+                        &subject,
+                        Governance::initial((None, self.our_key.clone())),
+                    )
                     .await?;
 
                 let sink = Sink::new(
@@ -301,7 +271,10 @@ impl Node {
 
             if data.schema_id.is_gov() {
                 let governance_actor = ctx
-                    .create_child(&subject, Governance::initial((None, our_key.clone())))
+                    .create_child(
+                        &subject,
+                        Governance::initial((None, self.our_key.clone())),
+                    )
                     .await?;
 
                 let sink = Sink::new(
@@ -319,8 +292,12 @@ impl Node {
                 )
                 .await?;
             } else if i_new_owner {
-                let tracker_actor =
-                    ctx.create_child(&subject, Tracker::initial((None, our_key.clone()))).await?;
+                let tracker_actor = ctx
+                    .create_child(
+                        &subject,
+                        Tracker::initial((None, our_key.clone())),
+                    )
+                    .await?;
 
                 let sink =
                     Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
@@ -348,7 +325,6 @@ pub enum NodeMessage {
     SignRequest(SignTypesNode),
     PendingTransfers,
     // System actor
-    UpDistributor(String),
     UpSubject(String, bool),
     GetSubjectData(String),
     UpdateSubject {
@@ -357,16 +333,10 @@ pub enum NodeMessage {
     },
     RejectTransfer(String),
     TransferSubject(TransferSubject),
-    DeleteSubject(String),
-    CreateNewSubjectLedger(SignedLedger),
-    CreateNewSubjectReq(CreateSubjectData),
+    CreateNewSubject(SignedLedger),
     OwnerPendingSubject(String),
     OldSubject(String),
     IsAuthorized(String),
-    RegisterSubject {
-        owner: String,
-        subject_id: String,
-    },
     ChangeSubjectOwner {
         subject_id: String,
         old_owner: String,
@@ -412,13 +382,9 @@ pub enum NodeEvent {
         sn: u64,
     },
     RejectTransfer(String),
-    TemporalSubject {
-        subject_id: String,
-        data: SubjectData,
-    },
     RegisterSubject {
-        iam_owner: bool,
         subject_id: String,
+        data: SubjectData
     },
     ChangeSubjectOwner {
         new_owner: Option<String>,
@@ -426,7 +392,6 @@ pub enum NodeEvent {
     },
     ConfirmTransfer(String),
     TransferSubject(TransferSubject),
-    DeleteSubject(String),
 }
 
 impl Event for NodeEvent {}
@@ -449,13 +414,13 @@ impl Actor for Node {
 
         ctx.create_child(
             "manual_distribution",
-            ManualDistribution::new(self.owner()),
+            ManualDistribution::new(self.our_key.clone()),
         )
         .await?;
 
         self.create_subjects(ctx).await?;
 
-        ctx.create_child("auth", Auth::initial(self.owner()))
+        ctx.create_child("auth", Auth::initial(self.our_key.clone()))
             .await?;
 
         ctx.create_child(
@@ -483,21 +448,20 @@ impl Actor for Node {
 #[async_trait]
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
-    type InitParams = KeyPair;
+    type InitParams = (KeyPair, Arc<PublicKey>);
 
     fn update(&mut self, state: Self) {
         self.owned_subjects = state.owned_subjects;
         self.known_subjects = state.known_subjects;
-        self.temporal_subjects = state.temporal_subjects;
         self.transfer_subjects = state.transfer_subjects;
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            owner: params,
+            owner: params.0,
+            our_key: params.1,
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),
-            temporal_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),
         }
     }
@@ -512,13 +476,10 @@ impl PersistentActor for Node {
                 self.delete_transfer(subject_id.clone());
             }
             NodeEvent::RegisterSubject {
-                iam_owner,
                 subject_id,
+                data
             } => {
-                self.register_subject(subject_id.clone(), *iam_owner);
-            }
-            NodeEvent::TemporalSubject { subject_id, data } => {
-                self.add_temporal_subject(subject_id.clone(), data.clone());
+                self.register_subject(subject_id.clone(), data.clone());
             }
             NodeEvent::RejectTransfer(subject_id) => {
                 self.delete_transfer(subject_id.clone());
@@ -535,9 +496,6 @@ impl PersistentActor for Node {
                     new_owner.clone(),
                 );
             }
-            NodeEvent::DeleteSubject(subject_id) => {
-                self.delete_subject(subject_id);
-            }
         };
 
         Ok(())
@@ -553,27 +511,6 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
-            NodeMessage::UpDistributor(subject_id) => {
-                if let Err(e) = ctx
-                    .create_child(
-                        &format!("distributor_{}", subject_id),
-                        Distributor {
-                            node: self.owner.public_key(),
-                        },
-                    )
-                    .await
-                {
-                    let e =
-                        format!("Can not create distributor for subject {}", e);
-                    error!("UpDistributor, {}", e);
-
-                    ctx.system().stop_system();
-                    let e = ActorError::FunctionalFail(e);
-                    return Err(e);
-                };
-
-                Ok(NodeResponse::None)
-            }
             NodeMessage::UpSubject(subject_id, light) => {
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
@@ -582,7 +519,10 @@ impl Handler<Node> for Node {
                 };
 
                 let tracker_actor = ctx
-                    .create_child(&subject_id, Tracker::initial((None, self.owner.public_key())))
+                    .create_child(
+                        &subject_id,
+                        Tracker::initial((None, self.owner.public_key())),
+                    )
                     .await?;
                 if !light {
                     let sink = Sink::new(
@@ -632,19 +572,6 @@ impl Handler<Node> for Node {
                         .collect(),
                 ))
             }
-            NodeMessage::RegisterSubject { owner, subject_id } => {
-                let iam_owner = owner == self.owner.public_key().to_string();
-                self.on_event(
-                    NodeEvent::RegisterSubject {
-                        iam_owner,
-                        subject_id,
-                    },
-                    ctx,
-                )
-                .await;
-
-                Ok(NodeResponse::None)
-            }
             NodeMessage::RejectTransfer(subject_id) => {
                 self.on_event(NodeEvent::RejectTransfer(subject_id), ctx)
                     .await;
@@ -652,12 +579,6 @@ impl Handler<Node> for Node {
             }
             NodeMessage::TransferSubject(data) => {
                 self.on_event(NodeEvent::TransferSubject(data), ctx).await;
-                Ok(NodeResponse::None)
-            }
-            NodeMessage::DeleteSubject(subject_id) => {
-                self.on_event(NodeEvent::DeleteSubject(subject_id), ctx)
-                    .await;
-
                 Ok(NodeResponse::None)
             }
             NodeMessage::ChangeSubjectOwner {
@@ -691,7 +612,7 @@ impl Handler<Node> for Node {
 
                 Ok(NodeResponse::None)
             }
-            NodeMessage::CreateNewSubjectLedger(ledger) => {
+            NodeMessage::CreateNewSubject(ledger) => {
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
                 else {
@@ -703,8 +624,19 @@ impl Handler<Node> for Node {
                     return Err(ActorError::NotHelper("ext_db".to_owned()));
                 };
 
+                
+
+
+
+
+
+
+
+
+
+
                 if let EventRequest::Create(create_event) =
-                    ledger.content.event_request.content.clone()
+                    ledger.content().event_request.content().clone()
                 {
                     if create_event.schema_id.is_gov() {
                         let governance = Governance::from_create_event(&ledger).map_err(|e| {
@@ -714,18 +646,12 @@ impl Handler<Node> for Node {
 
                         self.on_event(
                             NodeEvent::TemporalSubject {
-                                subject_id: governance.0
-                                    .subject_id
-                                    .to_string(),
+                                subject_id: governance.0.subject_id.to_string(),
                                 data: SubjectData {
-                                    owner: governance.0
-                                        .creator
-                                        .to_string(),
+                                    owner: governance.0.creator.to_string(),
                                     governance_id: None,
                                     sn: 0,
-                                    schema_id: governance.0
-                                        .schema_id
-                                        .clone(),
+                                    schema_id: governance.0.schema_id.clone(),
                                     namespace: Namespace::new(),
                                 },
                             },
@@ -735,8 +661,11 @@ impl Handler<Node> for Node {
 
                         let governance_actor = ctx
                             .create_child(
-                                &format!("{}", ledger.content.subject_id),
-                                Governance::initial((Some(governance.clone()), self.owner.public_key())),
+                                &format!("{}", ledger.content().subject_id),
+                                Governance::initial((
+                                    Some(governance.clone()),
+                                    self.owner.public_key(),
+                                )),
                             )
                             .await
                             .map_err(|e| {
@@ -756,7 +685,7 @@ impl Handler<Node> for Node {
                             .await?;
                     } else {
                         let properties = if let LedgerValue::Patch(init_state) =
-                            ledger.content.value.clone()
+                            ledger.content().value.clone()
                         {
                             init_state
                         } else {
@@ -798,8 +727,11 @@ impl Handler<Node> for Node {
 
                         let tracker_actor = ctx
                             .create_child(
-                                &format!("{}", ledger.content.subject_id),
-                                Tracker::initial((Some(tracker), self.owner.public_key())),
+                                &format!("{}", ledger.content().subject_id),
+                                Tracker::initial((
+                                    Some(tracker),
+                                    self.owner.public_key(),
+                                )),
                             )
                             .await
                             .map_err(|e| {
@@ -826,15 +758,20 @@ impl Handler<Node> for Node {
 
                 self.on_event(
                     NodeEvent::RegisterSubject {
-                        iam_owner: self.owner.public_key() == ledger.content.event_request.signature.signer,
-                        subject_id: ledger.content.subject_id.to_string(),
+                        iam_owner: self.owner.public_key()
+                            == ledger
+                                .content()
+                                .event_request
+                                .signature()
+                                .signer,
+                        subject_id: ledger.content().subject_id.to_string(),
                     },
                     ctx,
                 )
                 .await;
 
                 ctx.create_child(
-                    &format!("distributor_{}", ledger.content.subject_id),
+                    &format!("distributor_{}", ledger.content().subject_id),
                     Distributor { node: self.owner() },
                 )
                 .await
@@ -842,79 +779,10 @@ impl Handler<Node> for Node {
 
                 Ok(NodeResponse::SonWasCreated)
             }
-            NodeMessage::CreateNewSubjectReq(data) => {
-                let Some(ext_db): Option<ExternalDB> =
-                    ctx.system().get_helper("ext_db").await
-                else {
-                    ctx.system().stop_system();
-                    error!(
-                        TARGET_NODE,
-                        "CreateNewSubjectReq, Can not obtain ext_db helper"
-                    );
-                    return Err(ActorError::NotHelper("ext_db".to_owned()));
-                };
-
-                let governance_id = if data.create_req.schema_id.is_gov() {
-                    let governance = Governance::from_create_subject_data(data.clone());
-                    let child = ctx
-                    .create_child(
-                        &format!("{}", data.subject_id),
-                        Governance::initial((Some(governance), self.owner.public_key())),
-                    )
-                    .await?;
-
-                    let sink = Sink::new(child.subscribe(), ext_db.get_subject());
-                    ctx.system().run_sink(sink).await;
-
-                    None
-                } else {
-                    let tracker = Tracker::from_create_subject_data(data.clone());
-                    let child = ctx
-                    .create_child(
-                        &format!("{}", data.subject_id),
-                        Tracker::initial((Some(tracker), self.owner.public_key())),
-                    )
-                    .await?;
-
-                    let sink = Sink::new(child.subscribe(), ext_db.get_subject());
-                    ctx.system().run_sink(sink).await;
-
-                    Some(data.create_req.governance_id.to_string())
-                };
-
-                self.on_event(
-                    NodeEvent::TemporalSubject {
-                        subject_id: data.subject_id.to_string(),
-                        data: SubjectData {
-                            owner: data.creator.to_string(),
-                            governance_id,
-                            sn: 0,
-                            schema_id: data.create_req.schema_id,
-                            namespace: data.create_req.namespace,
-                        },
-                    },
-                    ctx,
-                )
-                .await;
-
-                ctx.create_child(
-                    &format!("distributor_{}", data.subject_id),
-                    Distributor { node: self.owner() },
-                )
-                .await?;
-
-                Ok(NodeResponse::SonWasCreated)
-            }
             NodeMessage::SignRequest(content) => {
                 let sign = match content {
                     SignTypesNode::EventRequest(event_req) => {
                         self.sign(&event_req)
-                    }
-                    SignTypesNode::Validation(validation) => {
-                        self.sign(&*validation)
-                    }
-                    SignTypesNode::ValidationProofEvent(proof_event) => {
-                        self.sign(&proof_event)
                     }
                     SignTypesNode::ValidationReq(validation_req) => {
                         self.sign(&*validation_req)
@@ -934,11 +802,7 @@ impl Handler<Node> for Node {
                     SignTypesNode::ApprovalRes(approval_res) => {
                         self.sign(&*approval_res)
                     }
-                    SignTypesNode::ApprovalSignature(approval_sign) => {
-                        self.sign(&approval_sign)
-                    }
                     SignTypesNode::Ledger(ledger) => self.sign(&ledger),
-                    SignTypesNode::Event(event) => self.sign(&event),
                 }
                 .map_err(|e| {
                     warn!(

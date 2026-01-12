@@ -501,11 +501,11 @@ async fn test_approval_request_deserialization() {
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
     assert_eq!(
-        approval.request.event_request.content.subject_id,
+        approval.request.event_request.content().subject_id,
         request_data.subject_id
     );
     assert_eq!(
-        approval.request.event_request.content.payload,
+        approval.request.event_request.content().payload,
         json!({
             "members": {
                 "add": [

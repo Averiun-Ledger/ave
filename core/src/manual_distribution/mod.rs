@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
@@ -18,51 +20,12 @@ use crate::{
 const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";
 
 pub struct ManualDistribution {
-    our_key: PublicKey,
+    our_key: Arc<PublicKey>,
 }
 
 impl ManualDistribution {
-    pub fn new(our_key: PublicKey) -> Self {
+    pub fn new(our_key: Arc<PublicKey>) -> Self {
         Self { our_key }
-    }
-    async fn get_last_ledger(
-        ctx: &mut ActorContext<ManualDistribution>,
-        subject_id: &str,
-    ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError> {
-        let path = ActorPath::from(format!("/user/node/{}", subject_id));
-
-        if let Some(tracker_actor) =
-            ctx.system().get_actor::<Tracker>(&path).await
-        {
-            let response =
-                tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
-            match response {
-                TrackerResponse::Ledger { ledger, last_state } => {
-                    Ok((ledger, last_state))
-                }
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "TrackerResponse::Ledger".to_owned(),
-                )),
-            }
-        } else if let Some(governance_actor) =
-            ctx.system().get_actor::<Governance>(&path).await
-        {
-            let response = governance_actor
-                .ask(GovernanceMessage::GetLastLedger)
-                .await?;
-            match response {
-                GovernanceResponse::Ledger { ledger, last_state } => {
-                    Ok((ledger, last_state))
-                }
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "GovernanceResponse::Ledger".to_owned(),
-                )),
-            }
-        } else {
-            Err(ActorError::NotFound(path))
-        }
     }
 }
 

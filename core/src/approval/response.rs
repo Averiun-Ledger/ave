@@ -1,10 +1,8 @@
-use crate::model::network::TimeOutResponse;
-use ave_common::identity::Signature;
+use crate::model::network::TimeOut;
+use ave_common::identity::DigestIdentifier;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-
-use super::request::ApprovalReq;
 
 #[derive(
     Debug,
@@ -17,21 +15,10 @@ use super::request::ApprovalReq;
     BorshDeserialize,
 )]
 pub enum ApprovalRes {
-    Response(Signature, bool),
-    TimeOut(TimeOutResponse),
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    Eq,
-    PartialEq,
-    BorshSerialize,
-    BorshDeserialize,
-)]
-pub struct ApprovalSignature {
-    pub request: ApprovalReq,
-    pub response: bool,
+    Response {
+        approval_req_hash: DigestIdentifier,
+        agrees: bool,
+        req_subject_data_hash: DigestIdentifier
+    },
+    TimeOut(TimeOut),
 }

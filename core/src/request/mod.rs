@@ -4,30 +4,33 @@ use ave_actors::{
     Handler, Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::RequestState;
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed, hash_borsh};
+use ave_common::{Namespace, SchemaType};
+use ave_common::identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+};
+use ave_common::request::{CreateRequest, EventRequest};
+use ave_common::response::RequestState;
 use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use tracing::{error, info};
 use types::ReqManInitMessage;
 
+use crate::approval::types::ApprovalStateRes;
 use crate::governance::data::GovernanceData;
+use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::subject_owner;
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{get_gov, get_metadata, get_quantity};
-use crate::model::request::SchemaType;
 use crate::request::manager::InitRequestManager;
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
-use crate::subject::CreateSubjectData;
 use crate::system::ConfigHelper;
 use crate::{
-    CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
-    approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
+    Node, NodeMessage, NodeResponse,
     db::Storable,
     governance::model::CreatorQuantity,
-    model::Namespace,
 };
 
 pub mod manager;
@@ -45,6 +48,8 @@ pub struct RequestData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
+    #[serde(skip)]
+    helpers: Option<(HashAlgorithm, Arc<NetworkSender>)>,
     #[serde(skip)]
     node_key: PublicKey,
     handling: HashMap<String, String>,
@@ -75,6 +80,7 @@ impl BorshDeserialize for RequestHandler {
         let node_key = PublicKey::default();
 
         Ok(Self {
+            helpers: None,
             node_key,
             handling,
             in_queue,
@@ -120,13 +126,13 @@ impl RequestHandler {
             .map_err(|e| ActorError::Functional(e.to_string()))?;
 
         let data = if create_req.schema_id.is_gov() {
-            let gov = GovernanceData::new(request.signature.signer.clone());
+            let gov = GovernanceData::new(request.signature().signer.clone());
             let value = gov.to_value_wrapper();
 
             CreateSubjectData {
                 create_req,
                 subject_id,
-                creator: request.signature.signer.clone(),
+                creator: request.signature().signer.clone(),
                 genesis_gov_version: 0,
                 value,
             }
@@ -140,7 +146,7 @@ impl RequestHandler {
             CreateSubjectData {
                 create_req,
                 subject_id,
-                creator: request.signature.signer.clone(),
+                creator: request.signature().signer.clone(),
                 genesis_gov_version: governance.version,
                 value,
             }
@@ -319,12 +325,12 @@ impl RequestHandler {
     ) -> Result<(), ActorError> {
         let approver_path =
             ActorPath::from(format!("/user/node/{}/approver", subject_id));
-        let approver_actor: Option<ActorRef<Approver>> =
+        let approver_actor: Option<ActorRef<ApproverPersist>> =
             ctx.system().get_actor(&approver_path).await;
 
         if let Some(approver_actor) = approver_actor {
             approver_actor
-                .tell(ApproverMessage::ChangeResponse {
+                .tell(ApproverPersistMessage::ChangeResponse {
                     response: state.clone(),
                 })
                 .await
@@ -420,11 +426,19 @@ impl Actor for RequestHandler {
         ctx.create_child("tracking", RequestTracking::new(tracking_size))
             .await?;
 
+        let Some((hash,network)) = self.helpers.clone() else {
+            let e = " Can not obtain helpers".to_string();
+
+            ctx.system().stop_system();
+            return Err(ActorError::FunctionalFail(e));
+        };
+
         for (subject_id, request_id) in self.handling.clone() {
             let request_manager_init = InitRequestManager::Continue {
                 our_key: self.node_key.clone(),
                 id: request_id.clone(),
                 subject_id,
+                helpers: (hash.clone(), network.clone()),
             };
 
             let request_manager_actor = ctx
@@ -536,7 +550,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::NotHelper("config".to_owned()));
                 };
 
-                let subject_id = request.content.get_subject_id();
+                let subject_id = request.content().get_subject_id();
 
                 let (is_owner,is_pending) = subject_owner(
                     ctx,
@@ -551,7 +565,7 @@ impl Handler<RequestHandler> for RequestHandler {
 
                 if !is_owner
                     && !is_pending
-                    && !request.content.is_create_event()
+                    && !request.content().is_create_event()
                 {
                     let e = "An event is being sent to a subject that does not belong to us or its creation is pending completion, and the subject is not pending event confirmation.";
                     error!(TARGET_REQUEST, "NewRequest, {}", e);
@@ -564,7 +578,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::Functional(e.to_owned()));
                 }
 
-                let metadata = match request.content.clone() {
+                let metadata = match request.content().clone() {
                     EventRequest::Create(create_request) => {
                         if let Some(name) = create_request.name.clone()
                             && (name.is_empty() || name.len() > 100)
@@ -585,7 +599,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         }
 
                         // verificar que el firmante sea el nodo.
-                        if request.signature.signer != self.node_key {
+                        if request.signature().signer != self.node_key {
                             let e = "Only the node can sign creation events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
                             return Err(ActorError::Functional(e.to_owned()));
@@ -741,7 +755,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         metadata
                     }
                     EventRequest::Transfer(transfer_request) => {
-                        if request.signature.signer != self.node_key {
+                        if request.signature().signer != self.node_key {
                             let e = "Only the node can sign transfer events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
                             return Err(ActorError::Functional(e.to_owned()));
@@ -762,7 +776,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         metadata
                     }
                     EventRequest::Confirm(confirm_request) => {
-                        if request.signature.signer != self.node_key {
+                        if request.signature().signer != self.node_key {
                             let e = "Only the node can sign Confirm events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
                             return Err(ActorError::Functional(e.to_owned()));
@@ -785,7 +799,7 @@ impl Handler<RequestHandler> for RequestHandler {
                             return Err(ActorError::Functional(e.to_owned()));
                         }
 
-                        if !metadata.governance_id.is_empty() {
+                        if !metadata.schema_id.is_gov() {
                             let gov = match get_gov(
                                 ctx,
                                 &metadata.governance_id.to_string(),
@@ -822,7 +836,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         metadata
                     }
                     EventRequest::Reject(reject_request) => {
-                        if request.signature.signer != self.node_key {
+                        if request.signature().signer != self.node_key {
                             let e = "Only the node can sign reject events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
                             return Err(ActorError::Functional(e.to_owned()));
@@ -848,7 +862,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         metadata
                     }
                     EventRequest::EOL(eol_request) => {
-                        if request.signature.signer != self.node_key {
+                        if request.signature().signer != self.node_key {
                             let e = "Only the node can sign eol events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
                             return Err(ActorError::Functional(e.to_owned()));
@@ -1015,8 +1029,8 @@ impl Handler<RequestHandler> for RequestHandler {
                     }
                 };
 
-                if !event.content.check_signers(
-                    &event.signature.signer,
+                if !event.content().check_signers(
+                    &event.signature().signer,
                     &metadata,
                     &gov,
                 ) {
@@ -1024,7 +1038,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     return self.error(ctx, e, &subject_id, &request_id).await;
                 }
 
-                let command = match event.content.clone() {
+                let command = match event.content().clone() {
                     EventRequest::Create(create_request) => {
                         if !create_request.schema_id.is_gov()
                             && let Err(e) = self
@@ -1052,7 +1066,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     }
 
                     EventRequest::Confirm(confirm_req) => {
-                        if metadata.governance_id.is_empty() {
+                        if metadata.schema_id.is_gov() {
                             if let Some(name) = confirm_req.name_old_owner
                                 && name.is_empty()
                             {
@@ -1102,12 +1116,21 @@ impl Handler<RequestHandler> for RequestHandler {
                     _ => ReqManInitMessage::Validate,
                 };
 
+                let Some(helpers) = self.helpers.clone() else {
+                    let e = " Can not obtain helpers".to_string();
+                    error!(TARGET_REQUEST, "PopQueue, {}", e);
+
+                    ctx.system().stop_system();
+                    return Err(ActorError::FunctionalFail(e));
+                };
+
                 let request_manager_init = InitRequestManager::Init {
                     our_key: self.node_key.clone(),
                     id: request_id.clone(),
                     subject_id: subject_id.clone(),
                     command,
                     request: Box::new(event.clone()),
+                    helpers,
                 };
 
                 let request_actor = match ctx
@@ -1228,7 +1251,7 @@ impl Storable for RequestHandler {}
 #[async_trait]
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
-    type InitParams = PublicKey;
+    type InitParams = (PublicKey, (HashAlgorithm, Arc<NetworkSender>));
 
     fn update(&mut self, state: Self) {
         self.in_queue = state.in_queue;
@@ -1237,7 +1260,8 @@ impl PersistentActor for RequestHandler {
 
     fn create_initial(params: Self::InitParams) -> Self {
         RequestHandler {
-            node_key: params,
+            node_key: params.0,
+            helpers: Some(params.1),
             handling: HashMap::new(),
             in_queue: HashMap::new(),
         }

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
@@ -9,26 +9,25 @@ use ave_actors::{
 use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
-use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
-    ActorMessage, NetworkMessage,
+    ActorMessage,
+    helpers::network::{NetworkMessage, service::NetworkSender},
     model::{common::emit_fail, network::RetryNetwork},
 };
 
 use super::{TransferResponse, Update, UpdateMessage};
 
-const TARGET_UPDATER: &str = "Ave-Update-Updater";
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug)]
 pub struct Updater {
+    network: Arc<NetworkSender>,
     node: PublicKey,
 }
 
 impl Updater {
-    pub fn new(node: PublicKey) -> Self {
-        Self { node }
+    pub fn new(node: PublicKey, network: Arc<NetworkSender>) -> Self {
+        Self { node, network }
     }
 }
 
@@ -62,18 +61,12 @@ impl Actor for Updater {
     type Message = UpdaterMessage;
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Updater", id = id)
+        } else {
+            info_span!("Updater", id = id)
+        }
     }
 }
 
@@ -101,18 +94,18 @@ impl Handler<Updater> for Updater {
                             .await
                         {
                             error!(
-                                TARGET_UPDATER,
-                                "NetworkResponse, can not send response to Update actor: {}",
-                                e
+                                msg_type = "TransferResponse",
+                                error = %e,
+                                "Failed to send response to update actor"
                             );
                             return Err(e);
                         }
                     } else {
-                        let e = ActorError::NotFound(update_path);
+                        let e = ActorError::NotFound { path: update_path.clone() };
                         error!(
-                            TARGET_UPDATER,
-                            "NetworkResponse, can not obtain Update actor: {}",
-                            e
+                            msg_type = "TransferResponse",
+                            path = %update_path,
+                            "Update actor not found"
                         );
                         return Err(e);
                     }
@@ -128,18 +121,29 @@ impl Handler<Updater> for Updater {
 
                         if let Err(e) = retry.tell(RetryMessage::End).await {
                             warn!(
-                                TARGET_UPDATER,
-                                "NetworkResponse, can not end Retry actor: {}",
-                                e
+                                msg_type = "TransferResponse",
+                                error = %e,
+                                "Failed to end retry actor"
                             );
                             // Aquí me da igual, porque al parar este actor para el hijo
                             break 'retry;
                         };
                     }
 
+                    debug!(
+                        msg_type = "TransferResponse",
+                        sender = %sender,
+                        "Transfer response processed successfully"
+                    );
+
                     ctx.stop(None).await;
                 } else {
-                    warn!(TARGET_UPDATER, "Invalid sender");
+                    warn!(
+                        msg_type = "TransferResponse",
+                        expected_sender = %self.node,
+                        received_sender = %sender,
+                        "Invalid sender"
+                    );
                 }
             }
             UpdaterMessage::Transfer {
@@ -150,13 +154,13 @@ impl Handler<Updater> for Updater {
                     info: ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
-                        receiver: node_key,
+                        receiver: node_key.clone(),
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
-                    message: ActorMessage::Transfer { subject_id },
+                    message: ActorMessage::Transfer { subject_id: subject_id.clone() },
                 };
 
-                let target = RetryNetwork::default();
+                let target = RetryNetwork::new(self.network.clone());
 
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(1, Duration::from_secs(5)),
@@ -174,8 +178,9 @@ impl Handler<Updater> for Updater {
                     Ok(retry) => retry,
                     Err(e) => {
                         error!(
-                            TARGET_UPDATER,
-                            "Transfer, can not create Retry actor: {}", e
+                            msg_type = "Transfer",
+                            error = %e,
+                            "Failed to create retry actor"
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
@@ -183,10 +188,18 @@ impl Handler<Updater> for Updater {
 
                 if let Err(e) = retry.tell(RetryMessage::Retry).await {
                     error!(
-                        TARGET_UPDATER,
-                        "Transfer, can not send retry to Retry actor: {}", e
+                        msg_type = "Transfer",
+                        error = %e,
+                        "Failed to send retry message to retry actor"
                     );
                     return Err(emit_fail(ctx, e).await);
+                } else {
+                    debug!(
+                        msg_type = "Transfer",
+                        subject_id = %subject_id,
+                        node_key = %node_key,
+                        "Transfer request sent to network with retry"
+                    );
                 };
             }
             UpdaterMessage::NetworkLastSn {
@@ -197,13 +210,13 @@ impl Handler<Updater> for Updater {
                     info: ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
-                        receiver: node_key,
+                        receiver: node_key.clone(),
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
-                    message: ActorMessage::DistributionGetLastSn { subject_id },
+                    message: ActorMessage::DistributionGetLastSn { subject_id: subject_id.clone() },
                 };
 
-                let target = RetryNetwork::default();
+                let target = RetryNetwork::new(self.network.clone());
 
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(1, Duration::from_secs(5)),
@@ -221,8 +234,9 @@ impl Handler<Updater> for Updater {
                     Ok(retry) => retry,
                     Err(e) => {
                         error!(
-                            TARGET_UPDATER,
-                            "NetworkLastSn, can not create Retry actor: {}", e
+                            msg_type = "NetworkLastSn",
+                            error = %e,
+                            "Failed to create retry actor"
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
@@ -230,11 +244,18 @@ impl Handler<Updater> for Updater {
 
                 if let Err(e) = retry.tell(RetryMessage::Retry).await {
                     error!(
-                        TARGET_UPDATER,
-                        "NetworkLastSn, can not send retry to Retry actor: {}",
-                        e
+                        msg_type = "NetworkLastSn",
+                        error = %e,
+                        "Failed to send retry message to retry actor"
                     );
                     return Err(emit_fail(ctx, e).await);
+                } else {
+                    debug!(
+                        msg_type = "NetworkLastSn",
+                        subject_id = %subject_id,
+                        node_key = %node_key,
+                        "Last SN request sent to network with retry"
+                    );
                 };
             }
             UpdaterMessage::NetworkResponse { sn, sender } => {
@@ -252,18 +273,18 @@ impl Handler<Updater> for Updater {
                             .await
                         {
                             error!(
-                                TARGET_UPDATER,
-                                "NetworkResponse, can not send response to Update actor: {}",
-                                e
+                                msg_type = "NetworkResponse",
+                                error = %e,
+                                "Failed to send response to update actor"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
                     } else {
-                        let e = ActorError::NotFound(update_path);
+                        let e = ActorError::NotFound { path: update_path.clone() };
                         error!(
-                            TARGET_UPDATER,
-                            "NetworkResponse, can not obtain Update actor: {}",
-                            e
+                            msg_type = "NetworkResponse",
+                            path = %update_path,
+                            "Update actor not found"
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
@@ -279,14 +300,21 @@ impl Handler<Updater> for Updater {
 
                         if let Err(e) = retry.tell(RetryMessage::End).await {
                             warn!(
-                                TARGET_UPDATER,
-                                "NetworkResponse, can not end Retry actor: {}",
-                                e
+                                msg_type = "NetworkResponse",
+                                error = %e,
+                                "Failed to end retry actor"
                             );
                             // Aquí me da igual, porque al parar este actor para el hijo
                             break 'retry;
                         };
                     }
+
+                    debug!(
+                        msg_type = "NetworkResponse",
+                        sn = sn,
+                        sender = %sender,
+                        "Network response processed successfully"
+                    );
 
                     ctx.stop(None).await;
                 }
@@ -302,7 +330,7 @@ impl Handler<Updater> for Updater {
         ctx: &mut ActorContext<Updater>,
     ) {
         match error {
-            ActorError::ReTry => {
+            ActorError::Retry => {
                 let update_path = ctx.path().parent();
 
                 // Evaluation actor.
@@ -318,24 +346,28 @@ impl Handler<Updater> for Updater {
                         .await
                     {
                         error!(
-                            TARGET_UPDATER,
-                            "OnChildError, can not send response to Update actor: {}",
-                            e
+                            error = %e,
+                            "Failed to send timeout response to update actor"
                         );
                         emit_fail(ctx, e).await;
+                    } else {
+                        debug!(
+                            node = %self.node,
+                            "Timeout response sent to update actor"
+                        );
                     }
                 } else {
-                    let e = ActorError::NotFound(update_path);
+                    let e = ActorError::NotFound { path: update_path.clone() };
                     error!(
-                        TARGET_UPDATER,
-                        "OnChildError, can not obtain Update actor: {}", e
+                        path = %update_path,
+                        "Update actor not found"
                     );
                     emit_fail(ctx, e).await;
                 }
                 ctx.stop(None).await;
             }
             _ => {
-                error!(TARGET_UPDATER, "OnChildError, unexpected error");
+                error!(error = %error, "Unexpected child error");
             }
         };
     }
@@ -345,7 +377,7 @@ impl Handler<Updater> for Updater {
         error: ActorError,
         ctx: &mut ActorContext<Updater>,
     ) -> ChildAction {
-        error!(TARGET_UPDATER, "OnChildFault, {}", error);
+        error!(error = %error, "Child fault occurred");
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

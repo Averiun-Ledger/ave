@@ -1,13 +1,24 @@
 //! # Error module.
 //!
 
-use thiserror::Error;
+use crate::evaluation::runner::error::RunnerError;
+use crate::evaluation::compiler::error::CompilerError;
+use crate::subject::error::SubjectError;
 
-use serde::{Deserialize, Serialize};
+
 
 /// Error type.
-#[derive(Error, Debug, Clone, Serialize, Deserialize)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
+    #[error(transparent)]
+    Runner(#[from] RunnerError),
+    #[error(transparent)]
+    Compiler(#[from] CompilerError),
+    #[error(transparent)]
+    Subject(#[from] SubjectError),
+
+
+    
     /// Sink error.
     #[error("Sink error: {0}")]
     Sink(String),
@@ -32,12 +43,8 @@ pub enum Error {
     /// Protocols error.
     #[error("Protocols error: {0}")]
     Protocols(String),
-    /// Runner error.
-    #[error("Runner error: {0}")]
-    Runner(String),
     /// Compiler error.
-    #[error("Compiler error: {0}")]
-    Compiler(String),
+
     /// SN error.
     #[error("SN error: Incorrect sn ledger")]
     Sn,
@@ -57,8 +64,7 @@ pub enum Error {
     #[error("Governance error: {0}")]
     Governance(String),
     /// Subject error.
-    #[error("Subject error: {0}")]
-    Subject(String),
+
     /// Tracker error.
     #[error("Tracker error: {0}")]
     Tracker(String),

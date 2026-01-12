@@ -20,7 +20,7 @@ pub struct DBManager;
 
 impl NotPersistentActor for DBManager {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum DBManagerMessage {
     Error(Error),
 }

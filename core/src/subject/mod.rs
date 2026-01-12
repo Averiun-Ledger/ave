@@ -1,13 +1,19 @@
 //! # Subject module.
 //!
 
+use std::{collections::HashSet, ops::Deref};
+
 use crate::{
-    CreateRequest, Error, EventRequestType, Node,
-    governance::Governance,
+    EventRequestType, Node,
+    governance::{
+        Governance,
+        data::GovernanceData,
+        model::Quorum,
+        roles_register::{RoleDataRegister, SearchRole},
+    },
     model::{
-        Namespace,
-        event::{Event as AveEvent, Ledger, LedgerValue, ProtocolsSignatures},
-        request::{EventRequest, SchemaType},
+        common::{check_quorum_signers, get_validation_roles_register},
+        event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{
         NodeMessage, TransferSubject,
@@ -15,7 +21,7 @@ use crate::{
         transfer::{TransferRegister, TransferRegisterMessage},
     },
     tracker::Tracker,
-    validation::proof::ValidationProof,
+    validation::{request::{ActualProtocols, LastData, ValidationReq}, response::ValidationRes},
 };
 
 use ave_actors::{
@@ -23,11 +29,12 @@ use ave_actors::{
     PersistentActor,
 };
 use ave_common::{
-    ValueWrapper,
-    identity::{DigestIdentifier, PublicKey, Signed, hash_borsh},
+    Namespace, SchemaType, ValueWrapper,
+    identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    },
+    request::{CreateRequest, EventRequest},
 };
-
-use std::ops::Deref;
 
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -35,15 +42,10 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use sinkdata::{SinkData, SinkDataMessage};
 
-pub mod laststate;
+pub mod error;
 pub mod sinkdata;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LastStateData {
-    pub event: Box<Signed<AveEvent>>,
-    pub proof: Box<ValidationProof>,
-    pub vali_res: Vec<ProtocolsSignatures>,
-}
+use error::*;
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
@@ -60,18 +62,30 @@ impl Deref for SignedLedger {
 
 impl Event for SignedLedger {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CreateSubjectData {
-    pub create_req: CreateRequest,
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct RequestSubjectData {
     pub subject_id: DigestIdentifier,
-    pub creator: PublicKey,
-    pub genesis_gov_version: u64,
-    pub value: ValueWrapper,
+    pub governance_id: DigestIdentifier,
+    pub namespace: Namespace,
+    pub schema_id: SchemaType,
+    pub sn: u64,
+    pub gov_version: u64,
+    pub signer: PublicKey,
 }
 
 /// Subject metadata.
 #[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+    PartialEq,
+    Eq,
+    Hash,
 )]
 pub struct Metadata {
     pub name: Option<String>,
@@ -81,7 +95,7 @@ pub struct Metadata {
     /// The identifier of the governance contract.
     pub governance_id: DigestIdentifier,
     pub genesis_gov_version: u64,
-    pub last_event_hash: DigestIdentifier,
+    pub prev_ledger_event_hash: DigestIdentifier,
     /// The identifier of the schema_id used to validate the event.
     pub schema_id: SchemaType,
     /// The namespace of the subject.
@@ -104,10 +118,12 @@ impl From<Governance> for Metadata {
         Metadata {
             name: value.subject_metadata.name,
             description: value.subject_metadata.description,
-            subject_id: value.subject_metadata.subject_id,
-            governance_id: DigestIdentifier::default(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.subject_metadata.subject_id,
             genesis_gov_version: 0,
-            last_event_hash: value.subject_metadata.last_event_hash,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash,
             schema_id: value.subject_metadata.schema_id,
             namespace: Namespace::new(),
             sn: value.subject_metadata.sn,
@@ -128,7 +144,9 @@ impl From<Tracker> for Metadata {
             subject_id: value.subject_metadata.subject_id,
             governance_id: value.governance_id,
             genesis_gov_version: value.genesis_gov_version,
-            last_event_hash: value.subject_metadata.last_event_hash,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash,
             schema_id: value.subject_metadata.schema_id,
             namespace: value.namespace,
             sn: value.subject_metadata.sn,
@@ -149,14 +167,6 @@ pub struct DataForSink {
     pub namespace: String,
     pub schema_id: SchemaType,
     pub issuer: String,
-}
-
-pub struct VerifyData {
-    pub active: bool,
-    pub owner: PublicKey,
-    pub new_owner: Option<PublicKey>,
-    pub is_gov: bool,
-    pub properties: ValueWrapper,
 }
 
 #[derive(
@@ -182,7 +192,7 @@ pub struct SubjectMetadata {
     /// The identifier of the public key of the new subject owner.
     pub new_owner: Option<PublicKey>,
 
-    pub last_event_hash: DigestIdentifier,
+    pub prev_ledger_event_hash: DigestIdentifier,
     /// The identifier of the public key of the subject creator.
     pub creator: PublicKey,
     /// Indicates whether the subject is active or not.
@@ -192,37 +202,18 @@ pub struct SubjectMetadata {
 }
 
 impl SubjectMetadata {
-    pub fn new(data: &CreateSubjectData) -> Self {
+    pub fn new(data: &Metadata) -> Self {
         Self {
-            name: data.create_req.name.clone(),
-            description: data.create_req.description.clone(),
+            name: data.name.clone(),
+            description: data.description.clone(),
             subject_id: data.subject_id.clone(),
             owner: data.creator.clone(),
-            schema_id: data.create_req.schema_id.clone(),
-            new_owner: None,
-            last_event_hash: DigestIdentifier::default(),
+            schema_id: data.schema_id.clone(),
+            new_owner: data.new_owner.clone(),
+            prev_ledger_event_hash: data.prev_ledger_event_hash.clone(),
             creator: data.creator.clone(),
-            active: true,
-            sn: 0,
-        }
-    }
-    pub fn from_create_request(
-        subject_id: DigestIdentifier,
-        request: &CreateRequest,
-        owner: PublicKey,
-        last_event_hash: DigestIdentifier,
-    ) -> Self {
-        Self {
-            name: request.name.clone(),
-            description: request.description.clone(),
-            subject_id,
-            owner: owner.clone(),
-            schema_id: request.schema_id.clone(),
-            new_owner: None,
-            last_event_hash,
-            creator: owner.clone(),
-            active: true,
-            sn: 0,
+            active: data.active.clone(),
+            sn: data.sn.clone(),
         }
     }
 }
@@ -233,90 +224,341 @@ where
     <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
     Self: PersistentActor,
 {
-    fn verify_protocols_state(
-        request: EventRequestType,
-        eval: Option<bool>,
-        approve: Option<bool>,
-        approval_require: bool,
-        val: bool,
-        is_gov: bool,
-    ) -> Result<bool, Error> {
-        match request {
-            EventRequestType::Create
-            | EventRequestType::EOL
-            | EventRequestType::Reject => {
-                if approve.is_some() || eval.is_some() || approval_require {
-                    return Err(Error::Protocols("In create, reject and eol request, approve and eval must be None and approval require must be false".to_owned()));
-                }
-                Ok(val)
+    fn apply_patch_verify(subject_properties: &mut ValueWrapper, json_patch: ValueWrapper) -> Result<(), SubjectError> {
+        let json_patch = match serde_json::from_value::<Patch>(json_patch.0) {
+            Ok(patch) => patch,
+            Err(e) => {
+                todo!()
             }
-            EventRequestType::Transfer => {
-                let Some(eval) = eval else {
-                    return Err(Error::Protocols(
-                        "In Transfer even eval must be Some".to_owned(),
-                    ));
-                };
+        };
 
-                if approve.is_some() || approval_require {
-                    return Err(Error::Protocols("In transfer request, approve must be None and approval require must be false".to_owned()));
-                }
+        if let Err(e) = patch(&mut subject_properties.0, &json_patch) {
+            todo!()
+        };
 
-                Ok(val && eval)
-            }
-            EventRequestType::Fact => {
-                let Some(eval) = eval else {
-                    return Err(Error::Protocols(
-                        "In fact request eval must be Some".to_owned(),
-                    ));
-                };
+        Ok(())
+    }
 
-                if !is_gov {
-                    if approve.is_some() || approval_require {
-                        return Err(Error::Protocols("In fact request (not governace subject), approve must be None and approval require must be false".to_owned()));
+    async fn verify_new_ledger_event(
+        ctx: &mut ActorContext<Self>,
+        new_ledger_event: SignedLedger,
+        subject_metadata: Metadata,
+        actual_ledger_event_hash: DigestIdentifier,
+        last_data: LastData,
+        hash: &HashAlgorithm,
+    ) -> Result<bool, SubjectError> {
+        if !subject_metadata.active {
+            todo!()
+        }
+
+        if new_ledger_event.verify().is_err() {
+            todo!()
+        }
+
+        let signer = if let Some(new_owner) = &subject_metadata.new_owner {
+            new_owner.clone()
+        } else {
+            subject_metadata.owner.clone()
+        };
+
+        if new_ledger_event.signature().signer != signer {
+            todo!()
+        }
+
+        if new_ledger_event.content().event_request.verify().is_err() {
+            todo!()
+        }
+
+        if new_ledger_event.content().sn == subject_metadata.sn + 1 {
+            todo!()
+        }
+
+        if actual_ledger_event_hash != new_ledger_event.content().prev_ledger_event_hash {
+            todo!()
+        }
+
+        let mut modified_subject_metadata = subject_metadata.clone();
+        modified_subject_metadata.sn += 1;
+
+        let (validation, new_actual_protocols) =
+            match (new_ledger_event.content().event_request.content(), &new_ledger_event.content().protocols, subject_metadata.schema_id.is_gov()) {
+                (EventRequest::Fact(..), Protocols::TrackerFact { evaluation, validation }, false) => {
+                    if modified_subject_metadata.new_owner.is_some() {
+                        todo!()
                     }
 
-                    Ok(val && eval)
-                } else if eval {
-                    if !approval_require {
-                        return Err(Error::Protocols("In fact request (governace subject), if eval is success approval require must be true".to_owned()));
+                    if let Some(eval) = evaluation.evaluator_res() {
+                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
                     }
-                    let Some(approve) = approve else {
-                        return Err(Error::Protocols("In fact request if approval was required, approve must be Some".to_owned()));
+                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
+                },
+                (EventRequest::Fact(..), Protocols::GovFact { evaluation, approval, validation }, true) => {
+                    if modified_subject_metadata.new_owner.is_some() {
+                        todo!()
+                    }
+
+                    let actual_protocols = if let Some(eval) = evaluation.evaluator_res() {
+                        if let Some(appr) = approval {
+                            if appr.approved {
+                                Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;  
+                            } 
+
+                            ActualProtocols::EvalApprove { eval_data: evaluation.clone(), approval_data: appr.clone() }
+                        } else {
+                            todo!("error")
+                        }
+                    } else {
+                        if approval.is_some() {
+                            todo!("Error")
+                        } else {
+                            ActualProtocols::Eval { eval_data: evaluation.clone() }
+                        }
                     };
-                    Ok(eval && approve && val)
-                } else {
-                    if approval_require {
-                        return Err(Error::Protocols("In fact request (governace subject), if eval is not success approval require must be false".to_owned()));
+
+                    (validation, actual_protocols)
+                },
+                (EventRequest::Transfer(transfer), Protocols::Transfer { evaluation, validation }, ..) => {
+                    if modified_subject_metadata.new_owner.is_some() {
+                        todo!()
                     }
 
-                    if approve.is_some() {
-                        return Err(Error::Protocols("In fact request if approval was not required, approve must be None".to_owned()));
+                    if let Some(eval) = evaluation.evaluator_res() {
+                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
+                        modified_subject_metadata.new_owner = Some(transfer.new_owner.clone());
                     }
 
-                    Ok(eval && val)
-                }
-            }
-            EventRequestType::Confirm => {
-                if !is_gov {
-                    if approve.is_some() || eval.is_some() || approval_require {
-                        return Err(Error::Protocols("In confirm request (not governance subject), approve and eval must be None and approval require must be false".to_owned()));
-                    }
-                    Ok(val)
-                } else {
-                    let Some(eval) = eval else {
-                        return Err(Error::Protocols(
-                        "In confirm request (governace subject) eval must be Some".to_owned(),
-                    ));
-                    };
-
-                    if approve.is_some() || approval_require {
-                        return Err(Error::Protocols("In confirm request (governace subject), approve must be None and approval require must be false".to_owned()));
+                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
+                },
+                (EventRequest::Confirm( .. ), Protocols::TrackerConfirm { validation }, false) => {
+                    if let Some(new_owner) = &modified_subject_metadata.new_owner.take() {
+                        modified_subject_metadata.owner = new_owner.clone();
+                    } else {
+                        todo!()
                     }
 
-                    Ok(val && eval)
-                }
+                    (validation, ActualProtocols::None)
+                },
+                (EventRequest::Confirm( .. ), Protocols::GovConfirm { evaluation, validation }, true) => {
+                    if let Some(eval) = evaluation.evaluator_res() {
+                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
+
+                        if let Some(new_owner) = &modified_subject_metadata.new_owner.take() {
+                            modified_subject_metadata.owner = new_owner.clone();
+                        } else {
+                            todo!()
+                        }
+                    }
+
+                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
+                },
+                (EventRequest::Reject( .. ), Protocols::Reject { validation }, ..) => {
+                    if modified_subject_metadata.new_owner.take().is_none() {
+                        todo!()
+                    }
+
+                    (validation, ActualProtocols::None)
+                },
+                (EventRequest::EOL( .. ), Protocols::EOL { validation }, .. ) => {
+                    if modified_subject_metadata.new_owner.is_some() {
+                        todo!()
+                    }
+
+                    modified_subject_metadata.active = false;
+                    (validation, ActualProtocols::None)
+                },
+                _ => todo!()
+            };
+
+        let validation_req = ValidationReq::Event { 
+            actual_protocols: new_actual_protocols,
+            event_request: new_ledger_event.content().event_request.clone(),
+            ledger_hash: actual_ledger_event_hash,
+            metadata: subject_metadata.clone(),
+            last_data,
+            gov_version: new_ledger_event.content().gov_version,
+            sn: new_ledger_event.content().sn
+        };
+
+
+        let signed_validation_req = Signed::from_parts(
+            validation_req,
+            validation.validation_req_signature.clone(),
+        );
+
+        if signed_validation_req.verify().is_err() {
+            todo!()
+        }
+
+        let hash_signed_val_req =
+            hash_borsh(&*hash.hasher(), &signed_validation_req)
+                .map_err(|e| todo!())?;
+
+        if hash_signed_val_req != validation.validation_req_hash {
+            todo!()
+        }
+
+        let modified_metadata_hash =
+            hash_borsh(&*hash.hasher(), &modified_subject_metadata)
+                .map_err(|e| todo!())?;
+
+        let validation_res = ValidationRes::Response {
+            vali_req_hash: hash_signed_val_req,
+            modified_metadata_hash
+        };
+
+        let role_data = get_validation_roles_register(
+                    ctx,
+                    &subject_metadata.governance_id.to_string(),
+                    SearchRole {
+                        schema_id: subject_metadata.schema_id,
+                        namespace: subject_metadata.namespace,
+                    },
+                    new_ledger_event.content().gov_version,
+                )
+                .await.map_err(|e| todo!())?;
+
+        if !check_quorum_signers(
+            &validation.validators_signatures
+                .iter()
+                .map(|x| x.signer.clone())
+                .collect::<HashSet<PublicKey>>(),
+            &role_data.quorum,
+            &role_data.workers,
+        ) {
+            todo!()
+        }
+        
+        for signature in validation.validators_signatures.iter()
+        {
+            let signed_res =
+                Signed::from_parts(validation_res.clone(), signature.clone());
+
+            if signed_res.verify().is_err() {
+                todo!()
             }
         }
+
+        Ok(new_ledger_event.content().protocols.is_success())
+    }
+
+    async fn verify_first_ledger_event(
+        ctx: &mut ActorContext<Self>,
+        ledger_event: &SignedLedger,
+        hash: &HashAlgorithm,
+        subject_metadata: Metadata,
+    ) -> Result<(), SubjectError> {
+        if ledger_event.verify().is_err() {
+            todo!()
+        }
+
+        if ledger_event.signature().signer != subject_metadata.owner {
+            todo!()
+        }
+
+        if ledger_event.content().event_request.verify().is_err() {
+            todo!()
+        }
+
+        if ledger_event.content().sn != 0 {
+            todo!()
+        }
+
+        if !ledger_event.content().prev_ledger_event_hash.is_empty() {
+            todo!()
+        }
+
+        let event_request_type = EventRequestType::from(
+            ledger_event.content().event_request.content(),
+        );
+
+        let validation =
+            match (event_request_type, &ledger_event.content().protocols) {
+                (
+                    EventRequestType::Create,
+                    Protocols::Create { validation },
+                ) => validation,
+                _ => todo!(),
+            };
+
+        let ValidationMetadata::Metadata(metadata) =
+            &validation.validation_metadata
+        else {
+            todo!()
+        };
+
+        let validation_req = ValidationReq::Create {
+            event_request: ledger_event.content().event_request.clone(),
+            gov_version: ledger_event.content().gov_version,
+        };
+
+        let signed_validation_req = Signed::from_parts(
+            validation_req,
+            validation.validation_req_signature.clone(),
+        );
+
+        if signed_validation_req.verify().is_err() {
+            todo!()
+        }
+
+        let hash_signed_val_req =
+            hash_borsh(&*hash.hasher(), &signed_validation_req)
+                .map_err(|e| todo!())?;
+
+        if hash_signed_val_req != validation.validation_req_hash {
+            todo!()
+        }
+
+        if metadata != &subject_metadata {
+            todo!()
+        }
+
+        let validation_res = ValidationRes::Create {
+            vali_req_hash: hash_signed_val_req,
+            subject_metadata,
+        };
+
+        let role_data = match metadata.schema_id {
+            SchemaType::Governance => RoleDataRegister {
+                workers: HashSet::from([metadata.owner.clone()]),
+                quorum: Quorum::Majority,
+            },
+            SchemaType::Type(_) => {
+                get_validation_roles_register(
+                    ctx,
+                    &metadata.governance_id.to_string(),
+                    SearchRole {
+                        schema_id: metadata.schema_id,
+                        namespace: metadata.namespace,
+                    },
+                    ledger_event.content().gov_version,
+                )
+                .await?
+            }
+            SchemaType::AllSchemas => todo!(),
+        };
+
+        if !check_quorum_signers(
+            &validation.validators_signatures
+                .iter()
+                .map(|x| x.signer.clone())
+                .collect::<HashSet<PublicKey>>(),
+            &role_data.quorum,
+            &role_data.workers,
+        ) {
+            todo!()
+        }
+        
+        for signature in validation.validators_signatures.iter()
+        {
+            let signed_res =
+                Signed::from_parts(validation_res.clone(), signature.clone());
+
+            if signed_res.verify().is_err() {
+                todo!()
+            }
+        }
+
+        Ok(())
     }
 
     async fn change_node_subject(
@@ -388,316 +630,6 @@ where
         Ok(())
     }
 
-    async fn verify_new_ledger_event(
-        verify_data: VerifyData,
-        last_ledger: &Signed<Ledger>,
-        new_ledger: &Signed<Ledger>,
-    ) -> Result<bool, Error> {
-        // Si no sigue activo
-        if !verify_data.active {
-            return Err(Error::Subject("Subject is not active".to_owned()));
-        }
-
-        if !new_ledger
-            .content
-            .event_request
-            .content
-            .check_ledger_signature(
-                &new_ledger.signature.signer,
-                &verify_data.owner,
-                &verify_data.new_owner,
-            )?
-        {
-            return Err(Error::Subject("Invalid ledger signer".to_owned()));
-        }
-
-        if !new_ledger
-            .content
-            .event_request
-            .content
-            .check_ledger_signature(
-                &new_ledger.content.event_request.signature.signer,
-                &verify_data.owner,
-                &verify_data.new_owner,
-            )?
-        {
-            return Err(Error::Subject("Invalid event signer".to_owned()));
-        }
-
-        if let Err(e) = new_ledger.verify() {
-            return Err(Error::Subject(format!(
-                "In new event, event signature: {}",
-                e
-            )));
-        }
-
-        if let Err(e) = new_ledger.content.event_request.verify() {
-            return Err(Error::Subject(format!(
-                "In new event request, request signature: {}",
-                e
-            )));
-        }
-
-        // Mirar que sea el siguiente sn
-        if last_ledger.content.sn + 1 != new_ledger.content.sn {
-            return Err(Error::Sn);
-        }
-
-        //Comprobar que el hash del actual event sea el mismo que el pre_event_hash,
-        let last_ledger_hash = hash_borsh(
-            &*new_ledger.content.hash_prev_event.algorithm().hasher(),
-            last_ledger,
-        )
-        .map_err(|e| {
-            Error::Subject(format!(
-                "Can not obtain previous event hash : {}",
-                e
-            ))
-        })?;
-
-        if last_ledger_hash != new_ledger.content.hash_prev_event {
-            return Err(Error::Subject("Last event hash is not the same that previous event hash in new event".to_owned()));
-        }
-
-        let valid_last_event = Self::verify_protocols_state(
-            EventRequestType::from(&last_ledger.content.event_request.content),
-            last_ledger.content.eval_success,
-            last_ledger.content.appr_success,
-            last_ledger.content.appr_required,
-            last_ledger.content.vali_success,
-            verify_data.is_gov,
-        )?;
-
-        if valid_last_event
-            && let EventRequest::EOL(..) =
-                last_ledger.content.event_request.content.clone()
-        {
-            return Err(Error::Subject(
-                "The last event was EOL, no more events can be received"
-                    .to_owned(),
-            ));
-        }
-
-        let valid_new_event = Self::verify_protocols_state(
-            EventRequestType::from(&new_ledger.content.event_request.content),
-            new_ledger.content.eval_success,
-            new_ledger.content.appr_success,
-            new_ledger.content.appr_required,
-            new_ledger.content.vali_success,
-            verify_data.is_gov,
-        )?;
-
-        // Si el nuevo evento a registrar fue correcto.
-        if valid_new_event {
-            match &new_ledger.content.event_request.content {
-                EventRequest::Create(_start_request) => {
-                    return Err(Error::Subject("A creation event is being logged when the subject has already been created previously".to_owned()));
-                }
-                EventRequest::Fact(_fact_request) => {
-                    if verify_data.new_owner.is_some() {
-                        return Err(Error::Subject("After a transfer event there must be a confirmation or a reject event.".to_owned()));
-                    }
-
-                    Self::check_patch(
-                        verify_data.properties.clone(),
-                        &new_ledger.content.value,
-                        &new_ledger.content.state_hash,
-                    )?;
-                }
-                EventRequest::Transfer(..) => {
-                    if verify_data.new_owner.is_some() {
-                        return Err(Error::Subject("After a transfer event there must be a confirmation or a reject event.".to_owned()));
-                    }
-                    let hash_without_patch = hash_borsh(
-                        &*new_ledger.content.state_hash.algorithm().hasher(),
-                        &verify_data.properties,
-                    )
-                    .map_err(|e| {
-                        Error::Subject(format!(
-                            "Can not obtain state hash : {}",
-                            e
-                        ))
-                    })?;
-
-                    if hash_without_patch != new_ledger.content.state_hash {
-                        return Err(Error::Subject("In Transfer event, the hash obtained without applying any patch is different from the state hash of the event".to_owned()));
-                    }
-                }
-                EventRequest::Confirm(..) => {
-                    if verify_data.new_owner.is_none() {
-                        return Err(Error::Subject("Before a confirm event there must be a transfer event.".to_owned()));
-                    }
-
-                    if verify_data.is_gov {
-                        Self::check_patch(
-                            verify_data.properties.clone(),
-                            &new_ledger.content.value,
-                            &new_ledger.content.state_hash,
-                        )?;
-                    } else {
-                        let hash_without_patch = hash_borsh(
-                            &*new_ledger
-                                .content
-                                .state_hash
-                                .algorithm()
-                                .hasher(),
-                            &verify_data.properties,
-                        )
-                        .map_err(|e| {
-                            Error::Subject(format!(
-                                "Can not obtain state hash : {}",
-                                e
-                            ))
-                        })?;
-
-                        if hash_without_patch != new_ledger.content.state_hash {
-                            return Err(Error::Subject("In Confirm event, the hash obtained without applying any patch is different from the state hash of the event".to_owned()));
-                        }
-                    }
-                }
-                EventRequest::Reject(..) => {
-                    if verify_data.new_owner.is_none() {
-                        return Err(Error::Subject("Before a reject event there must be a transfer event.".to_owned()));
-                    }
-
-                    let hash_without_patch = hash_borsh(
-                        &*new_ledger.content.state_hash.algorithm().hasher(),
-                        &verify_data.properties,
-                    )
-                    .map_err(|e| {
-                        Error::Subject(format!(
-                            "Can not obtain state hash : {}",
-                            e
-                        ))
-                    })?;
-
-                    if hash_without_patch != new_ledger.content.state_hash {
-                        return Err(Error::Subject("In Reject event, the hash obtained without applying any patch is different from the state hash of the event".to_owned()));
-                    }
-                }
-                EventRequest::EOL(..) => {
-                    if verify_data.new_owner.is_some() {
-                        return Err(Error::Subject("After a transfer event there must be a confirmation or a reject event.".to_owned()));
-                    }
-
-                    let hash_without_patch = hash_borsh(
-                        &*new_ledger.content.state_hash.algorithm().hasher(),
-                        &verify_data.properties,
-                    )
-                    .map_err(|e| {
-                        Error::Subject(format!(
-                            "Can not obtain state hash : {}",
-                            e
-                        ))
-                    })?;
-
-                    if hash_without_patch != new_ledger.content.state_hash {
-                        return Err(Error::Subject("In EOL event, the hash obtained without applying any patch is different from the state hash of the event".to_owned()));
-                    }
-                }
-            };
-        } else {
-            let hash_without_patch = hash_borsh(
-                &*new_ledger.content.state_hash.algorithm().hasher(),
-                &verify_data.properties,
-            )
-            .map_err(|e| {
-                Error::Subject(format!("Can not obtain state hash : {}", e))
-            })?;
-
-            if hash_without_patch != new_ledger.content.state_hash {
-                return Err(Error::Subject("The hash obtained without applying any patch is different from the state hash of the event".to_owned()));
-            }
-        }
-        Ok(valid_new_event)
-    }
-
-    async fn verify_first_ledger_event(
-        owner: PublicKey,
-        event: &SignedLedger,
-    ) -> Result<(), Error> {
-        let is_gov = if let EventRequest::Create(event_req) =
-            event.content.event_request.content.clone()
-        {
-            if let Some(name) = event_req.name
-                && (name.is_empty() || name.len() > 100)
-            {
-                return Err(Error::Subject("The subject name must be less than 100 characters or not be empty.".to_owned()));
-            }
-
-            if let Some(description) = event_req.description
-                && (description.is_empty() || description.len() > 200)
-            {
-                return Err(Error::Subject("The subject description must be less than 200 characters or not be empty.".to_owned()));
-            }
-
-            if event_req.schema_id.is_gov()
-                && (!event_req.governance_id.is_empty()
-                    || !event_req.namespace.is_empty()
-                        && event.content.gov_version != 0)
-            {
-                return Err(Error::Subject("In create event, governance_id must be empty, namespace must be empty and gov version must be 0".to_owned()));
-            }
-
-            event_req.schema_id.is_gov()
-        } else {
-            return Err(Error::Subject(
-                "First event is not a create event".to_owned(),
-            ));
-        };
-
-        if event.signature.signer != owner
-            || event.content.event_request.signature.signer != owner
-        {
-            return Err(Error::Subject(
-                "In create event, owner must sign request and event."
-                    .to_owned(),
-            ));
-        }
-
-        if let Err(e) = event.verify() {
-            return Err(Error::Subject(format!(
-                "In create event, event signature: {}",
-                e
-            )));
-        }
-
-        if let Err(e) = event.content.event_request.verify() {
-            return Err(Error::Subject(format!(
-                "In create event, request signature: {}",
-                e
-            )));
-        }
-
-        if event.content.sn != 0 {
-            return Err(Error::Subject(
-                "In create event, sn must be 0.".to_owned(),
-            ));
-        }
-
-        if !event.content.hash_prev_event.is_empty() {
-            return Err(Error::Subject(
-                "In create event, previous hash event must be empty."
-                    .to_owned(),
-            ));
-        }
-
-        if Self::verify_protocols_state(
-            EventRequestType::Create,
-            event.content.eval_success,
-            event.content.appr_success,
-            event.content.appr_required,
-            event.content.vali_success,
-            is_gov,
-        )? {
-            Ok(())
-        } else {
-            Err(Error::Subject(
-                "Create event fail in validation protocol".to_owned(),
-            ))
-        }
-    }
-
     async fn register(
         ctx: &mut ActorContext<Self>,
         message: RegisterMessage,
@@ -706,30 +638,6 @@ where
         let register: Option<ActorRef<Register>> =
             ctx.system().get_actor(&register_path).await;
         if let Some(register) = register {
-            /*
-                        let message = if self.governance_id.is_empty() {
-                RegisterMessage::RegisterGov {
-                    gov_id: self.subject_id.to_string(),
-                    data: RegisterDataGov {
-                        active,
-                        name: self.name.clone(),
-                        description: self.description.clone(),
-                    },
-                }
-            } else {
-                RegisterMessage::RegisterSubj {
-                    gov_id: self.governance_id.to_string(),
-                    data: RegisterDataSubj {
-                        subject_id: self.subject_id.to_string(),
-                        schema_id: self.schema_id.clone(),
-                        active,
-                        name: self.name.clone(),
-                        description: self.description.clone(),
-                    },
-                }
-            };
-             */
-
             register.tell(message).await?;
         } else {
             return Err(ActorError::NotFound(register_path));
@@ -792,23 +700,6 @@ where
         };
 
         Self::publish_sink(ctx, event_to_sink).await
-    }
-
-    async fn delet_node_subject(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &str,
-    ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
-
-        // We obtain the validator
-        let Some(node_actor) = node_actor else {
-            return Err(ActorError::NotFound(node_path));
-        };
-        node_actor
-            .tell(NodeMessage::DeleteSubject(subject_id.to_owned()))
-            .await
     }
 
     async fn transfer_register(
@@ -875,46 +766,7 @@ where
         }
     }
 
-    fn check_patch(
-        mut properties: ValueWrapper,
-        value: &LedgerValue,
-        state_hash: &DigestIdentifier,
-    ) -> Result<(), Error> {
-        let LedgerValue::Patch(json_patch) = value else {
-            return Err(Error::Subject("The event was successful but does not have a json patch to apply".to_owned()));
-        };
-
-        let patch_json = serde_json::from_value::<Patch>(json_patch.0.clone())
-            .map_err(|e| {
-                Error::Subject(format!("Failed to extract event patch: {}", e))
-            })?;
-        let Ok(()) = patch(&mut properties.0, &patch_json) else {
-            return Err(Error::Subject(
-                "Failed to apply event patch".to_owned(),
-            ));
-        };
-
-        let hash_state_after_patch =
-            hash_borsh(&*state_hash.algorithm().hasher(), &properties)
-                .map_err(|e| {
-                    Error::Subject(format!(
-                        "Can not obtain previous event hash : {}",
-                        e
-                    ))
-                })?;
-
-        if hash_state_after_patch != *state_hash {
-            return Err(Error::Subject("The new patch has been applied and we have obtained a different hash than the event after applying the patch".to_owned()));
-        }
-        Ok(())
-    }
-
-    async fn delete_subject(
-        &self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError>;
-
-    fn apply_patch(&mut self, value: LedgerValue) -> Result<(), ActorError>;
+    fn apply_patch(&mut self, json_patch: ValueWrapper) -> Result<(), ActorError>;
 
     async fn manager_new_ledger_events(
         &mut self,
@@ -922,11 +774,16 @@ where
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError>;
 
-    async fn get_ledger_data(
+    async fn get_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
         last_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError>;
+    ) -> Result<Vec<SignedLedger>, ActorError>;
+
+    async fn get_last_ledger(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<Option<SignedLedger>, ActorError>;
 }
 
 #[cfg(test)]
@@ -995,7 +852,7 @@ mod tests {
         let subject_actor = system
             .get_actor(&ActorPath::from(format!(
                 "user/node/{}",
-                signed_ledger.content.subject_id
+                signed_ledger.content().subject_id
             )))
             .await
             .unwrap();
@@ -1003,7 +860,7 @@ mod tests {
         let last_state_actor: ActorRef<LastState> = system
             .get_actor(&ActorPath::from(format!(
                 "user/node/{}/last_state",
-                signed_ledger.content.subject_id
+                signed_ledger.content().subject_id
             )))
             .await
             .unwrap();

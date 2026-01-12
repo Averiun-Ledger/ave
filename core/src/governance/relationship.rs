@@ -6,11 +6,11 @@ use ave_actors::{
     Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
-use crate::model::request::SchemaType;
 use crate::{
     db::Storable, governance::model::CreatorQuantity, model::common::emit_fail,
 };

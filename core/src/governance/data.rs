@@ -5,15 +5,13 @@ use crate::{
     governance::model::{
         CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes,
         Quorum, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas,
-        RolesGov, RolesSchema, Schema, SchemaKeyCreators, SignersType,
-        WitnessesData,
+        RolesGov, RolesSchema, Schema, SignersType, WitnessesData,
     },
-    model::{Namespace, request::SchemaType},
 };
 
 use ave_actors::ActorError;
 
-use ave_common::{ValueWrapper, identity::PublicKey};
+use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -22,7 +20,15 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub type MemberName = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct GovernanceData {
     pub version: u64,
     pub members: BTreeMap<MemberName, PublicKey>,
@@ -35,6 +41,49 @@ pub struct GovernanceData {
 }
 
 impl GovernanceData {
+    pub fn new(owner_key: PublicKey) -> Self {
+        let policies_gov = PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        };
+
+        let owner_users_gov: BTreeSet<MemberName> =
+            BTreeSet::from(["Owner".to_owned()]);
+
+        let roles_gov = RolesGov {
+            approver: owner_users_gov.clone(),
+            evaluator: owner_users_gov.clone(),
+            validator: owner_users_gov.clone(),
+            witness: BTreeSet::new(),
+            issuer: RoleGovIssuer {
+                any: false,
+                users: owner_users_gov.clone(),
+            },
+        };
+
+        let not_gov_role = RolesAllSchemas {
+            evaluator: BTreeSet::new(),
+            validator: BTreeSet::new(),
+            witness: BTreeSet::new(),
+            issuer: RoleSchemaIssuer {
+                users: BTreeSet::new(),
+                any: false,
+            },
+        };
+
+        Self {
+            version: 0,
+            members: BTreeMap::from([("Owner".to_owned(), owner_key)]),
+            roles_gov,
+            policies_gov,
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_all_schemas: not_gov_role,
+            policies_schema: BTreeMap::new(),
+        }
+    }
+    
     pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaType>) {
         for schema_id in remove_schemas {
             self.roles_schema.remove(&schema_id);
@@ -78,49 +127,6 @@ impl GovernanceData {
 
     pub fn check_basic_gov(&self) -> bool {
         self.roles_gov.check_basic_gov()
-    }
-
-    pub fn new(owner_key: PublicKey) -> Self {
-        let policies_gov = PolicyGov {
-            approve: Quorum::Majority,
-            evaluate: Quorum::Majority,
-            validate: Quorum::Majority,
-        };
-
-        let owner_users_gov: BTreeSet<MemberName> =
-            BTreeSet::from(["Owner".to_owned()]);
-
-        let roles_gov = RolesGov {
-            approver: owner_users_gov.clone(),
-            evaluator: owner_users_gov.clone(),
-            validator: owner_users_gov.clone(),
-            witness: BTreeSet::new(),
-            issuer: RoleGovIssuer {
-                any: false,
-                users: owner_users_gov.clone(),
-            },
-        };
-
-        let not_gov_role = RolesAllSchemas {
-            evaluator: BTreeSet::new(),
-            validator: BTreeSet::new(),
-            witness: BTreeSet::new(),
-            issuer: RoleSchemaIssuer {
-                users: BTreeSet::new(),
-                any: false,
-            },
-        };
-
-        Self {
-            version: 0,
-            members: BTreeMap::from([("Owner".to_owned(), owner_key)]),
-            roles_gov,
-            policies_gov,
-            schemas: BTreeMap::new(),
-            roles_schema: BTreeMap::new(),
-            roles_all_schemas: not_gov_role,
-            policies_schema: BTreeMap::new(),
-        }
     }
 
     /// Get the initial state for GovernanceData model
@@ -191,8 +197,7 @@ impl GovernanceData {
                     return true;
                 }
 
-                let Some(roles) = self.roles_schema.get(&schema_id)
-                else {
+                let Some(roles) = self.roles_schema.get(&schema_id) else {
                     return false;
                 };
 
@@ -214,8 +219,7 @@ impl GovernanceData {
                     return false;
                 };
 
-                let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id)
+                let Some(roles_schema) = self.roles_schema.get(&schema_id)
                 else {
                     return false;
                 };
@@ -297,13 +301,12 @@ impl GovernanceData {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_all_schemas
                 .get_signers(role.clone(), namespace.clone());
-            let (mut schema_signers, schema_any) = if let Some(roles) =
-                self.roles_schema.get(schema_id)
-            {
-                roles.get_signers(role, namespace)
-            } else {
-                (vec![], false)
-            };
+            let (mut schema_signers, schema_any) =
+                if let Some(roles) = self.roles_schema.get(schema_id) {
+                    roles.get_signers(role, namespace)
+                } else {
+                    (vec![], false)
+                };
 
             not_gov_signers.append(&mut schema_signers);
 
@@ -345,8 +348,7 @@ impl GovernanceData {
                     ));
                 };
 
-                let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id)
+                let Some(roles_schema) = self.roles_schema.get(&schema_id)
                 else {
                     return Err(ActorError::Functional("They are trying to obtain witnesses for a scheme that does not exist.".to_owned()));
                 };
@@ -434,6 +436,124 @@ impl GovernanceData {
         Ok((signers, quorum))
     }
 
+    pub fn schemas_name(
+        &self,
+        role: ProtocolTypes,
+        key: &PublicKey,
+    ) -> BTreeSet<SchemaType> {
+        let Some(name) = self
+            .members
+            .iter()
+            .find(|x| x.1 == key)
+            .map(|x| x.0)
+            .cloned()
+        else {
+            return BTreeSet::new();
+        };
+
+        if self
+            .roles_all_schemas
+            .hash_this_rol_not_namespace(role.clone(), &name)
+        {
+            return self.schemas.keys().cloned().collect();
+        }
+
+        let mut schemas: BTreeSet<SchemaType> = BTreeSet::new();
+
+        for (schema_id, roles) in self.roles_schema.iter() {
+            if roles.hash_this_rol_not_namespace(role.clone(), &name) {
+                schemas.insert(schema_id.clone());
+            }
+        }
+
+        schemas
+    }
+
+    pub fn schemas_namespace(
+        &self,
+        role: ProtocolTypes,
+        key: &PublicKey,
+    ) -> BTreeMap<SchemaType, Vec<Namespace>> {
+        let mut map = BTreeMap::new();
+
+        let Some(name) = self
+            .members
+            .iter()
+            .find(|x| x.1 == key)
+            .map(|x| x.0)
+            .cloned()
+        else {
+            return map;
+        };
+
+        let vec = self.roles_all_schemas.role_namespace(role.clone(), &name);
+
+        if !vec.is_empty() {
+            map.insert(SchemaType::AllSchemas, vec);
+        }
+
+        for (schema_id, roles) in self.roles_schema.iter() {
+            let vec = roles.role_namespace(role.clone(), &name);
+            if !vec.is_empty() {
+                map.insert(schema_id.clone(), vec);
+            }
+        }
+        map
+    }
+
+    pub fn schema_creators_namespace(
+        &self,
+        schema_namespaces: BTreeMap<SchemaType, Vec<Namespace>>,
+    ) -> BTreeMap<SchemaType, BTreeMap<PublicKey, BTreeSet<Namespace>>> {
+        let mut map: BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        > = BTreeMap::new();
+
+        for (schema_id, namespace) in schema_namespaces {
+            if schema_id == SchemaType::AllSchemas {
+                for (schema_id, roles) in self.roles_schema.iter() {
+                    let schema_entry =
+                        map.entry(schema_id.clone()).or_default();
+                    for ns in namespace.iter() {
+                        for user in roles.creator.iter() {
+                            if ns.is_ancestor_or_equal_of(&user.namespace) {
+                                if let Some(pub_key) =
+                                    self.members.get(&user.name)
+                                {
+                                    schema_entry
+                                        .entry(pub_key.clone())
+                                        .or_default()
+                                        .insert(user.namespace.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if let Some(roles) = self.roles_schema.get(&schema_id) {
+                    let schema_entry = map.entry(schema_id).or_default();
+                    for ns in namespace.iter() {
+                        for user in roles.creator.iter() {
+                            if ns.is_ancestor_or_equal_of(&user.namespace) {
+                                if let Some(pub_key) =
+                                    self.members.get(&user.name)
+                                {
+                                    schema_entry
+                                        .entry(pub_key.clone())
+                                        .or_default()
+                                        .insert(user.namespace.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        map
+    }
+
     pub fn schemas(
         &self,
         role: ProtocolTypes,
@@ -472,10 +592,11 @@ impl GovernanceData {
         copy_schemas
     }
 
-    pub fn subjects_schemas_rol_namespace(
+    pub fn schemas_init_value(
         &self,
+        role: ProtocolTypes,
         key: &PublicKey,
-    ) -> Vec<SchemaKeyCreators> {
+    ) -> BTreeMap<SchemaType, ValueWrapper> {
         let Some(name) = self
             .members
             .iter()
@@ -483,55 +604,37 @@ impl GovernanceData {
             .map(|x| x.0)
             .cloned()
         else {
-            return vec![];
+            return BTreeMap::new();
         };
 
-        let (not_gov_val, not_gov_eval) =
-            self.roles_all_schemas.roles_namespace(&name);
+        if self
+            .roles_all_schemas
+            .hash_this_rol_not_namespace(role.clone(), &name)
+        {
+            return self
+                .schemas
+                .iter()
+                .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+                .collect();
+        }
 
-        let mut schema_key_creators: Vec<SchemaKeyCreators> = vec![];
+        let mut not_schemas: Vec<SchemaType> = vec![];
 
         for (schema_id, roles) in self.roles_schema.iter() {
-            let schema_creators = roles.roles_creators(
-                &name,
-                not_gov_val.clone(),
-                not_gov_eval.clone(),
-            );
-
-            if !schema_creators.is_empty() {
-                let mut schema_key = SchemaKeyCreators {
-                    schema_id: schema_id.clone(),
-                    validation: None,
-                    evaluation: None,
-                };
-
-                if let Some(val_schema_creators) = schema_creators.validation {
-                    let mut hash_keys: HashSet<PublicKey> = HashSet::new();
-                    for name in val_schema_creators {
-                        let Some(key) = self.members.get(&name) else {
-                            return vec![];
-                        };
-                        hash_keys.insert(key.clone());
-                    }
-
-                    schema_key.validation = Some(hash_keys);
-                }
-
-                if let Some(eval_schema_creators) = schema_creators.evaluation {
-                    let mut hash_keys: HashSet<PublicKey> = HashSet::new();
-                    for name in eval_schema_creators {
-                        let Some(key) = self.members.get(&name) else {
-                            return vec![];
-                        };
-                        hash_keys.insert(key.clone());
-                    }
-                    schema_key.evaluation = Some(hash_keys);
-                }
-
-                schema_key_creators.push(schema_key);
+            if !roles.hash_this_rol_not_namespace(role.clone(), &name) {
+                not_schemas.push(schema_id.clone());
             }
         }
-        schema_key_creators
+
+        let mut copy_schemas = self.schemas.clone();
+        for schema_id in not_schemas {
+            copy_schemas.remove(&schema_id);
+        }
+
+        copy_schemas
+            .iter()
+            .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+            .collect()
     }
 
     /// Check if the key is a member.

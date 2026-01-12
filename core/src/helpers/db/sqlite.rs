@@ -34,56 +34,6 @@ pub struct SqliteLocal {
 
 #[async_trait]
 impl Querys for SqliteLocal {
-    async fn get_signatures(
-        &self,
-        subject_id: &str,
-    ) -> Result<SignaturesInfo, Error> {
-        let subject_id = subject_id.to_owned();
-
-        let signatures: SignaturesDB = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql = "SELECT * FROM signatures WHERE subject_id = ?1";
-
-                conn.query_row(sql, params![subject_id], |row| {
-                    Ok(SignaturesDB {
-                        subject_id: row.get(0)?,
-                        sn: row.get(1)?,
-                        signatures_eval: row.get(2)?,
-                        signatures_appr: row.get(3)?,
-                        signatures_vali: row.get(4)?,
-                    })
-                })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
-        };
-
-        let signatures_eval = if let Some(sig_eval) = signatures.signatures_eval
-        {
-            Some(serde_json::from_str(&sig_eval).map_err(|e| Error::ExtDB(format!("Can not convert signatures_eval into Option<HashSet<ProtocolsSignaturesInfo>>: {}", e)))?)
-        } else {
-            None
-        };
-
-        let signatures_appr = if let Some(sig_appr) = signatures.signatures_appr
-        {
-            Some(serde_json::from_str(&sig_appr).map_err(|e| Error::ExtDB(format!("Can not convert signatures_appr into Option<HashSet<ProtocolsSignaturesInfo>>: {}", e)))?)
-        } else {
-            None
-        };
-
-        Ok(SignaturesInfo {
-            subject_id: signatures.subject_id,
-            sn: signatures.sn,
-            signatures_eval,
-            signatures_appr,
-            signatures_vali: serde_json::from_str(&signatures.signatures_vali).map_err(|e| Error::ExtDB(format!("Can not convert signatures_vali into HashSet<ProtocolsSignaturesInfo>: {}", e)))?
-        })
-    }
-
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -365,50 +315,6 @@ impl Querys for SqliteLocal {
             ));
         }
     }
-
-    async fn get_approve_req(
-        &self,
-        subject_id: &str,
-    ) -> Result<ApproveInfo, Error> {
-        let subject_id = subject_id.to_owned();
-
-        let approve: (String, String) = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql =
-                    "SELECT data, state FROM approval WHERE subject_id = ?1";
-
-                conn.query_row(sql, params![subject_id], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
-        };
-
-        let approval_request: ApprovalReq = serde_json::from_str(&approve.0)
-            .map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert str to ApprovalReq {}",
-                    e
-                ))
-            })?;
-
-        let approval_request_info = ApprovalReqInfo::try_from(approval_request)
-            .map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert ApprovalReq to ApprovalReqInfo {}",
-                    e
-                ))
-            })?;
-
-        Ok(ApproveInfo {
-            state: approve.1,
-            request: approval_request_info,
-        })
-    }
 }
 
 impl SqliteLocal {
@@ -542,10 +448,10 @@ impl Subscriber<ApproverEvent> for SqliteLocal {
 #[async_trait]
 impl Subscriber<LastStateEvent> for SqliteLocal {
     async fn notify(&self, event: LastStateEvent) {
-        let sn = event.event.content.sn;
-        let subject_id = event.event.content.subject_id.to_string();
+        let sn = event.event.content().sn;
+        let subject_id = event.event.content().subject_id.to_string();
 
-        let sig_eval = if let Some(sig_eval) = event.event.content.evaluators {
+        let sig_eval = if let Some(sig_eval) = event.event.content().evaluators {
             let Ok(sig_eval) = serde_json::to_string(&sig_eval) else {
                 let e = Error::ExtDB(
                     "Can not Serialize evaluators as String".to_owned(),
@@ -567,7 +473,7 @@ impl Subscriber<LastStateEvent> for SqliteLocal {
             None
         };
 
-        let sig_appr = if let Some(sig_appr) = event.event.content.approvers {
+        let sig_appr = if let Some(sig_appr) = event.event.content().approvers {
             let Ok(sig_appr) = serde_json::to_string(&sig_appr) else {
                 let e = Error::ExtDB(
                     "Can not Serialize approvers as String".to_owned(),
@@ -590,7 +496,7 @@ impl Subscriber<LastStateEvent> for SqliteLocal {
         };
 
         let Ok(sig_vali) =
-            serde_json::to_string(&event.event.content.validators)
+            serde_json::to_string(&event.event.content().validators)
         else {
             let e = Error::ExtDB(
                 "Can not Serialize validators as String".to_owned(),
@@ -651,11 +557,11 @@ impl Subscriber<LastStateEvent> for SqliteLocal {
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
-        let subject_id = event.content.subject_id.to_string();
-        let sn = event.content.sn;
+        let subject_id = event.content().subject_id.to_string();
+        let sn = event.content().sn;
         let succes: i32;
         let Ok(event_req) =
-            serde_json::to_string(&json!(event.content.event_request.content))
+            serde_json::to_string(&json!(event.content().event_request.content))
         else {
             let e = Error::ExtDB(
                 "Can not Serialize protocols_error as String".to_owned(),
@@ -671,7 +577,7 @@ impl Subscriber<SignedLedger> for SqliteLocal {
             return;
         };
         let (patch, error): (Option<String>, Option<String>) =
-            match event.content.value.clone() {
+            match event.content().value.clone() {
                 LedgerValue::Patch(value_wrapper) => {
                     succes = 1;
                     (Some(value_wrapper.0.to_string()), None)

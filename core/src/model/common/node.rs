@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
@@ -6,13 +8,45 @@ use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
 use network::ComunicateInfo;
 
 use crate::{
-    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse, auth::{Auth, AuthMessage, WitnessesAuth}, helpers::network::service::HelperService, model::SignTypesNode, node::{
+    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
+    auth::{Auth, AuthMessage, WitnessesAuth},
+    helpers::network::service::NetworkSender,
+    model::{event::Ledger},
+    node::{
         SubjectData,
         transfer::{
             TransferRegister, TransferRegisterMessage, TransferRegisterResponse,
         },
-    }
+    },
 };
+
+use ave_common::request::EventRequest;
+
+use crate::{
+    approval::{
+        request::ApprovalReq,
+        response::{ApprovalRes},
+    },
+    evaluation::{request::EvaluationReq, response::EvaluationRes},
+    validation::{request::ValidationReq, response::ValidationRes},
+};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SignTypesNode {
+    ApprovalReq(ApprovalReq),
+    ApprovalRes(Box<ApprovalRes>),
+
+    EvaluationReq(EvaluationReq),
+    EvaluationRes(EvaluationRes),
+
+    ValidationReq(Box<ValidationReq>),
+    ValidationRes(ValidationRes),
+
+    EventRequest(EventRequest),
+    Ledger(Ledger),
+}
 
 pub async fn subject_owner<A>(
     ctx: &mut ActorContext<A>,
@@ -129,7 +163,6 @@ where
     }
 }
 
-
 pub async fn try_to_update<A>(
     ctx: &mut ActorContext<A>,
     subject_id: DigestIdentifier,
@@ -160,7 +193,6 @@ pub struct UpdateData {
     pub sn: u64,
     pub gov_version: u64,
     pub subject_id: DigestIdentifier,
-    pub our_node: PublicKey,
     pub other_node: PublicKey,
 }
 
@@ -185,9 +217,10 @@ where
         receiver_actor: format!("/user/node/distributor_{}", subject_string),
     };
 
-    let helper: Option<HelperService> = ctx.system().get_helper("network").await;
+    let helper: Option<Arc<NetworkSender>> =
+        ctx.system().get_helper("network").await;
 
-    let Some(mut helper) = helper else {
+    let Some(helper) = helper else {
         let e = ActorError::NotHelper("network".to_owned());
         return Err(e);
     };

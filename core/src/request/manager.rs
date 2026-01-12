@@ -3,55 +3,53 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
     Handler, Message,
 };
-use ave_actors::{
-    LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-};
+use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
-use ave_common::{RequestState, ValueWrapper};
+use ave_common::request::EventRequest;
+use ave_common::response::RequestState;
+use ave_common::{Namespace, SchemaType, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
+use crate::approval::request::ApprovalReq;
+use crate::approval::response::ApprovalRes;
+use crate::evaluation::request::EvaluateData;
+use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
+use crate::governance::model::{ProtocolTypes, Quorum};
 use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
-use crate::helpers::network::service::HelperService;
-use crate::model::common::node::get_sign;
-use crate::model::common::send_to_tracking;
+use crate::helpers::network::service::NetworkSender;
+use crate::model::common::node::{SignTypesNode, get_sign};
 use crate::model::common::subject::{
-    get_gov, get_last_state, get_metadata, update_last_state, update_ledger,
+    get_gov, get_metadata, update_ledger,
 };
-use crate::model::request::empty_request;
+use crate::model::common::{purge_storage, send_to_tracking};
+use crate::model::event::{
+    ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
+};
+use crate::model::request::EventRequestType;
 use crate::request::tracking::RequestTrackingMessage;
-use crate::subject::SignedLedger;
+use crate::subject::{Metadata, SignedLedger};
 use crate::system::ConfigHelper;
 use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
+use crate::validation::request::{ActualProtocols, ValidationReq};
 use crate::{
-    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Validation,
-    ValidationInfo, ValidationMessage,
+    ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
     auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
     db::Storable,
     distribution::{Distribution, DistributionMessage, DistributionType},
     error::Error,
-    evaluation::{
-        Evaluation, EvaluationMessage, request::EvaluationReq,
-        response::EvalLedgerResponse,
-    },
-    model::{
-        SignTypesNode,
-        common::emit_fail,
-        event::{
-            DataProofEvent, Ledger, LedgerValue, ProofEvent, ProtocolsError,
-            ProtocolsSignatures,
-        },
-    },
+    evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
+    model::common::emit_fail,
     node::{Node, NodeMessage},
     update::{Update, UpdateMessage, UpdateNew, UpdateRes, UpdateType},
-    validation::proof::{EventProof, ValidationProof},
 };
 
 const TARGET_MANAGER: &str = "Ave-Request-Manager";
@@ -59,35 +57,39 @@ const TARGET_MANAGER: &str = "Ave-Request-Manager";
 use super::{
     RequestHandler, RequestHandlerMessage,
     reboot::{Reboot, RebootMessage},
-    types::{ProtocolsResult, ReqManInitMessage, RequestManagerState},
+    types::{ReqManInitMessage, RequestManagerState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestManager {
     #[serde(skip)]
-    our_key: PublicKey,
+    helpers: Option<(HashAlgorithm, Arc<NetworkSender>)>,
+    #[serde(skip)]
+    our_key: Arc<PublicKey>,
     #[serde(skip)]
     id: String,
     #[serde(skip)]
     subject_id: String,
     command: ReqManInitMessage,
-    request: Signed<EventRequest>,
+    request: Option<Signed<EventRequest>>,
     state: RequestManagerState,
     version: u64,
 }
 
 pub enum InitRequestManager {
     Init {
-        our_key: PublicKey,
+        our_key: Arc<PublicKey>,
         id: String,
         subject_id: String,
         command: ReqManInitMessage,
         request: Box<Signed<EventRequest>>,
+        helpers: (HashAlgorithm, Arc<NetworkSender>),
     },
     Continue {
-        our_key: PublicKey,
+        our_key: Arc<PublicKey>,
         id: String,
         subject_id: String,
+        helpers: (HashAlgorithm, Arc<NetworkSender>),
     },
 }
 
@@ -113,13 +115,15 @@ impl BorshDeserialize for RequestManager {
         let command = ReqManInitMessage::deserialize_reader(reader)?;
         let state = RequestManagerState::deserialize_reader(reader)?;
         let version = u64::deserialize_reader(reader)?;
-        let request = Signed::<EventRequest>::deserialize_reader(reader)?;
+        let request =
+            Option::<Signed<EventRequest>>::deserialize_reader(reader)?;
 
-        let our_key = PublicKey::default();
+        let our_key = Arc::new(PublicKey::default());
         let subject_id = String::default();
         let id = String::default();
 
         Ok(Self {
+            helpers: None,
             our_key,
             id,
             subject_id,
@@ -132,221 +136,18 @@ impl BorshDeserialize for RequestManager {
 }
 
 impl RequestManager {
-    async fn send_validation(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-        val_info: ValidationInfo,
-        last_proof: Option<ValidationProof>,
-        last_vali_res: Vec<ProtocolsSignatures>,
-    ) -> Result<(), ActorError> {
-        info!(TARGET_MANAGER, "Init validation {}", self.id);
-        let validation_path = ActorPath::from(format!(
-            "/user/node/{}/validation",
-            self.subject_id
-        ));
-        let validation_actor: Option<ActorRef<Validation>> =
-            ctx.system().get_actor(&validation_path).await;
-
-        if let Some(validation_actor) = validation_actor {
-            validation_actor
-                .tell(ValidationMessage::Create {
-                    request_id: self.id.clone(),
-                    last_proof: Box::new(last_proof),
-                    last_vali_res,
-                    version: self.version,
-                    info: Box::new(val_info),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(validation_path));
-        }
-
-        Ok(())
-    }
-
-    async fn send_evaluation(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-    ) -> Result<(), ActorError> {
-        info!(TARGET_MANAGER, "Init evaluation {}", self.id);
-        let evaluation_path = ActorPath::from(format!(
-            "/user/node/{}/evaluation",
-            self.subject_id
-        ));
-        let evaluation_actor: Option<ActorRef<Evaluation>> =
-            ctx.system().get_actor(&evaluation_path).await;
-
-        if let Some(evaluation_actor) = evaluation_actor {
-            evaluation_actor
-                .tell(EvaluationMessage::Create {
-                    request_id: self.id.clone(),
-                    version: self.version,
-                    request: self.request.clone(),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(evaluation_path));
-        }
-
-        Ok(())
-    }
-
-    async fn send_approval(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-        eval_req: EvaluationReq,
-        eval_res: EvalLedgerResponse,
-    ) -> Result<(), ActorError> {
-        info!(TARGET_MANAGER, "Init approvation {}", self.id);
-        let approval_path =
-            ActorPath::from(format!("/user/node/{}/approval", self.subject_id));
-        let approval_actor: Option<ActorRef<Approval>> =
-            ctx.system().get_actor(&approval_path).await;
-
-        if let Some(approval_actor) = approval_actor {
-            approval_actor
-                .tell(ApprovalMessage::Create {
-                    request_id: self.id.clone(),
-                    version: self.version,
-                    eval_req: Box::new(eval_req),
-                    eval_res,
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(approval_path));
-        }
-
-        Ok(())
-    }
-
-    async fn validation(
-        &mut self,
-        ctx: &mut ActorContext<RequestManager>,
-        data: DataProofEvent,
-    ) -> Result<(), ActorError> {
-        let event_proof = EventProof::from(self.request.content.clone());
-
-        let event_proof = ProofEvent {
-            subject_id: data.metadata.subject_id.clone(),
-            event_proof,
-            sn: data.sn,
-            gov_version: data.gov_version,
-            value: data.value,
-            state_hash: data.state_hash,
-            eval_success: data.eval_success,
-            appr_required: data.appr_required,
-            appr_success: data.appr_success,
-            hash_prev_event: data.metadata.last_event_hash.clone(),
-            evaluators: data.eval_signatures,
-            approvers: data.appr_signatures,
-        };
-
-        let signature = get_sign(
-            ctx,
-            SignTypesNode::ValidationProofEvent(event_proof.clone()),
-        )
-        .await?;
-
-        let event_proof = Signed {
-            content: event_proof,
-            signature,
-        };
-
-        let val_info = ValidationInfo {
-            metadata: data.metadata,
-            event_proof,
-        };
-
-        let (last_proof, last_vali_res) =
-            match get_last_state(ctx, &self.subject_id).await {
-                Ok((_event, last_proof, last_vali_res)) => {
-                    (Some(*last_proof), last_vali_res)
-                }
-                Err(e) => {
-                    if let ActorError::Functional(_) = e {
-                        (None, vec![])
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-
-        self.on_event(
-            RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Validation {
-                    val_info: Box::new(val_info.clone()),
-                    last_proof: last_proof.clone(),
-                    last_vali_res: last_vali_res.clone(),
-                }),
-            },
-            ctx,
-        )
-        .await;
-
-            if let Err(e) = send_to_tracking(
-            ctx,
-            RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
-                state: RequestState::Validation,
-                error: None,
-            },
-        )
-        .await
-        {
-            error!(
-                TARGET_MANAGER,
-                "Validation, can not update tracking: {}", e
-            );
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        self.send_validation(ctx, val_info.clone(), last_proof, last_vali_res)
-            .await
-    }
-
-    async fn approval(
-        &mut self,
-        ctx: &mut ActorContext<RequestManager>,
-        eval_req: EvaluationReq,
-        eval_res: EvalLedgerResponse,
-        eval_signatures: HashSet<ProtocolsSignatures>,
-    ) -> Result<(), ActorError> {
-        self.on_event(
-            RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Approval {
-                    eval_req: Box::new(eval_req.clone()),
-                    eval_res: eval_res.clone(),
-                    eval_signatures,
-                }),
-            },
-            ctx,
-        )
-        .await;
-
-            if let Err(e) = send_to_tracking(
-            ctx,
-            RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
-                state: RequestState::Approval,
-                error: None,
-            },
-        )
-        .await
-        {
-            error!(
-                TARGET_MANAGER,
-                "Approval, can not update tracking: {}", e
-            );
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        self.send_approval(ctx, eval_req, eval_res).await
-    }
-
-    async fn evaluation(
+    //////// EVAL
+    ////////////////////////////////////////////////
+    async fn build_evaluation(
         &mut self,
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), ActorError> {
+        let Some(request) = self.request.clone() else {
+            return Err(ActorError::FunctionalFail(
+                "Request is None".to_string(),
+            ));
+        };
+
         self.on_event(
             RequestManagerEvent::UpdateState {
                 state: Box::new(RequestManagerState::Evaluation),
@@ -355,283 +156,657 @@ impl RequestManager {
         )
         .await;
 
-            if let Err(e) = send_to_tracking(
-            ctx,
-            RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
-                state: RequestState::Evaluation,
-                error: None,
-            },
-        )
-        .await
-        {
-            error!(
+        let metadata = Self::check_data_eval(ctx, &request).await?;
+
+        let (signed_evaluation_req, quorum, signers, init_state) =
+            self.build_request_eval(ctx, &metadata, &request).await?;
+
+        if signers.is_empty() {
+            warn!(
                 TARGET_MANAGER,
-                "Evaluation, can not update tracking: {}", e
+                "Create, There are no evaluators available for the {} scheme",
+                metadata.schema_id
             );
-            return Err(emit_fail(ctx, e).await);
+
+            todo!(
+                "No hay evaluadores, tenemos que hacer update de la governanza y reintentar"
+            );
         }
 
-        self.send_evaluation(ctx).await
-    }
-
-    fn create_last_state(
-        &self,
-        val_info: ValidationInfo,
-        signatures: Vec<ProtocolsSignatures>,
-        result: bool,
-        errors: &str,
-        hash: HashAlgorithm,
-    ) -> Result<(Ledger, AveEvent), Error> {
-        let (value, state_hash) = {
-            if result {
-                (
-                    val_info.event_proof.content.value,
-                    val_info.event_proof.content.state_hash,
-                )
-            } else if let LedgerValue::Error(mut e) =
-                val_info.event_proof.content.value
-            {
-                e.validation = if errors.is_empty() {
-                    None
-                } else {
-                    Some(errors.to_owned())
-                };
-
-                (
-                    LedgerValue::Error(e),
-                    val_info.event_proof.content.state_hash,
-                )
-            } else {
-                let e = ProtocolsError {
-                    evaluation: None,
-                    validation: Some(errors.to_owned()),
-                };
-                (
-                    LedgerValue::Error(e),
-                    hash_borsh(&*hash.hasher(), &val_info.metadata.properties)
-                        .map_err(|e| {
-                            Error::Hash(format!(
-                                "Error converting state to hash: {}",
-                                e
-                            ))
-                        })?,
-                )
-            }
-        };
-
-        let event = AveEvent {
-            subject_id: val_info.event_proof.content.subject_id,
-            event_request: self.request.clone(),
-            sn: val_info.event_proof.content.sn,
-            gov_version: val_info.event_proof.content.gov_version,
-            value,
-            state_hash,
-            eval_success: val_info.event_proof.content.eval_success,
-            appr_required: val_info.event_proof.content.appr_required,
-            appr_success: val_info.event_proof.content.appr_success,
-            vali_success: result,
-            hash_prev_event: val_info.event_proof.content.hash_prev_event,
-            evaluators: val_info.event_proof.content.evaluators,
-            approvers: val_info.event_proof.content.approvers,
-            validators: HashSet::from_iter(signatures.iter().cloned()),
-        };
-
-        Ok((Ledger::from(event.clone()), event))
-    }
-
-    pub async fn delete_subject(
-        ctx: &mut ActorContext<RequestManager>,
-        subject_id: &str,
-        is_gov: bool,
-    ) -> Result<(), ActorError> {
-        let path = ActorPath::from(format!("/user/node/{}", subject_id));
-
-        if is_gov {
-            let governance_actor: Option<ActorRef<Governance>> =
-                ctx.system().get_actor(&path).await;
-
-            let response = if let Some(governance_actor) = governance_actor {
-                governance_actor
-                    .ask(GovernanceMessage::DeleteGovernance)
-                    .await?
-            } else {
-                return Err(ActorError::NotFound(path));
-            };
-
-            match response {
-                GovernanceResponse::Ok => Ok(()),
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "GovernanceResponse::Ok".to_owned(),
-                )),
-            }
-        } else {
-            let tracker_actor: Option<ActorRef<Tracker>> =
-                ctx.system().get_actor(&path).await;
-
-            let response = if let Some(tracker_actor) = tracker_actor {
-                tracker_actor.ask(TrackerMessage::DeleteTracker).await?
-            } else {
-                return Err(ActorError::NotFound(path));
-            };
-
-            match response {
-                TrackerResponse::Ok => Ok(()),
-                _ => Err(ActorError::UnexpectedResponse(
-                    path,
-                    "TrackerResponse::Ok".to_owned(),
-                )),
-            }
-        }
-    }
-
-    async fn safe_last_state(
-        &mut self,
-        ctx: &mut ActorContext<RequestManager>,
-        event: AveEvent,
-        ledger: Ledger,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
-    ) -> Result<(SignedLedger, Signed<AveEvent>), ActorError> {
-        let signature_ledger =
-            get_sign(ctx, SignTypesNode::Ledger(ledger.clone())).await?;
-
-        let signed_ledger = SignedLedger(Signed {
-            content: ledger,
-            signature: signature_ledger,
-        });
-
-        let subject_id = event.subject_id.to_string();
-
-        match update_ledger(
+        self.run_evaluation(
             ctx,
-            &subject_id,
-            vec![signed_ledger.clone()],
-            last_proof.schema_id.is_gov(),
+            signed_evaluation_req.clone(),
+            quorum,
+            init_state,
+            signers,
         )
         .await
-        {
-            Ok((_, owner, _)) => {
-                Self::change_node_subject_state(
-                    ctx,
-                    &owner.to_string(),
-                    &subject_id,
+    }
+
+    async fn check_data_eval(
+        ctx: &mut ActorContext<RequestManager>,
+        request: &Signed<EventRequest>,
+    ) -> Result<Metadata, ActorError> {
+        let (subject_id, confirm) = match request.content().clone() {
+            EventRequest::Fact(event) => (event.subject_id, false),
+            EventRequest::Transfer(event) => (event.subject_id, false),
+            EventRequest::Confirm(event) => (event.subject_id, true),
+            _ => {
+                return Err(ActorError::FunctionalFail(
+                    "Only can evaluate Fact, Transfer and Confirm request"
+                        .to_owned(),
+                ));
+            }
+        };
+
+        let metadata = get_metadata(ctx, &subject_id.to_string()).await?;
+
+        if confirm && !metadata.schema_id.is_gov() {
+            return Err(ActorError::FunctionalFail(
+                "Confirm event in trazability subjects can not evaluate"
+                    .to_owned(),
+            ));
+        }
+
+        Ok(metadata)
+    }
+
+    async fn build_request_eval(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        metadata: &Metadata,
+        request: &Signed<EventRequest>,
+    ) -> Result<
+        (
+            Signed<EvaluationReq>,
+            Quorum,
+            HashSet<PublicKey>,
+            Option<ValueWrapper>,
+        ),
+        ActorError,
+    > {
+        let is_gov = metadata.schema_id.is_gov();
+
+        let request_type = EventRequestType::from(request.content());
+        let (evaluate_data, governance_data, init_state) = match (
+            is_gov,
+            request_type,
+        ) {
+            (true, EventRequestType::Fact) => {
+                let state = GovernanceData::try_from(
+                    metadata.properties.clone(),
                 )
+                .map_err(|e| {
+                    let e = format!(
+                        "can not convert GovernanceData from properties: {}",
+                        e
+                    );
+                    ActorError::FunctionalFail(e)
+                })?;
+
+                (
+                    EvaluateData::GovFact {
+                        state: state.clone(),
+                    },
+                    state,
+                    None,
+                )
+            }
+            (true, EventRequestType::Transfer) => {
+                let state = GovernanceData::try_from(
+                    metadata.properties.clone(),
+                )
+                .map_err(|e| {
+                    let e = format!(
+                        "can not convert GovernanceData from properties: {}",
+                        e
+                    );
+                    ActorError::FunctionalFail(e)
+                })?;
+
+                (
+                    EvaluateData::GovTransfer {
+                        state: state.clone(),
+                    },
+                    state,
+                    None,
+                )
+            }
+            (true, EventRequestType::Confirm) => {
+                let state = GovernanceData::try_from(
+                    metadata.properties.clone(),
+                )
+                .map_err(|e| {
+                    let e = format!(
+                        "can not convert GovernanceData from properties: {}",
+                        e
+                    );
+                    ActorError::FunctionalFail(e)
+                })?;
+
+                (
+                    EvaluateData::GovConfirm {
+                        state: state.clone(),
+                    },
+                    state,
+                    None,
+                )
+            }
+            (false, EventRequestType::Fact) => {
+                let governance_data =
+                    get_gov(ctx, &metadata.governance_id.to_string()).await?;
+
+                let init_state = governance_data
+                    .get_init_state(&metadata.schema_id)
+                    .map_err(|e| {
+                        let e = format!(
+                            "can not obtain schema {} from governance: {}",
+                            metadata.schema_id, e
+                        );
+                        ActorError::FunctionalFail(e)
+                    })?;
+
+                (
+                    EvaluateData::AllSchemasFact {
+                        contract: format!(
+                            "{}_{}",
+                            metadata.governance_id, metadata.schema_id
+                        ),
+                        state: metadata.properties.clone(),
+                    },
+                    governance_data,
+                    Some(init_state),
+                )
+            }
+            (false, EventRequestType::Transfer) => {
+                let governance_data =
+                    get_gov(ctx, &metadata.governance_id.to_string()).await?;
+                (
+                    EvaluateData::AllSchemasTransfer {
+                        governance_data: governance_data.clone(),
+                        namespace: metadata.namespace.clone(),
+                        schema_id: metadata.schema_id.clone(),
+                    },
+                    governance_data,
+                    None,
+                )
+            }
+            _ => unreachable!(
+                "It was previously verified that the matched cases are the only possible ones"
+            ),
+        };
+
+        let (signers, quorum) = governance_data.get_quorum_and_signers(
+            ProtocolTypes::Evaluation,
+            &metadata.schema_id,
+            metadata.namespace.clone(),
+        )?;
+
+        let governance_id = if is_gov {
+            metadata.subject_id.clone()
+        } else {
+            metadata.governance_id.clone()
+        };
+
+        let eval_req = self.create_req_eval(
+            request,
+            evaluate_data,
+            metadata.sn,
+            metadata.namespace.clone(),
+            metadata.schema_id.clone(),
+            governance_data.version,
+            governance_id.clone(),
+        );
+
+        let signature =
+            get_sign(ctx, SignTypesNode::EvaluationReq(eval_req.clone()))
                 .await?;
-            }
-            Err(e) => {
-                if let ActorError::Functional(_) = e {
-                    self.abort_request_manager(ctx, &e.to_string(), false)
-                        .await?;
-                }
-                return Err(e);
-            }
+
+        let signed_evaluation_req: Signed<EvaluationReq> =
+            Signed::from_parts(eval_req, signature);
+        Ok((signed_evaluation_req, quorum, signers, init_state))
+    }
+
+    fn create_req_eval(
+        &self,
+        event_request: &Signed<EventRequest>,
+        data: EvaluateData,
+        sn: u64,
+        namespace: Namespace,
+        schema_id: SchemaType,
+        gov_version: u64,
+        governance_id: DigestIdentifier,
+    ) -> EvaluationReq {
+        EvaluationReq {
+            event_request: event_request.clone(),
+            data,
+            sn: sn + 1,
+            gov_version,
+            namespace,
+            schema_id,
+            signer: (*self.our_key).clone(),
+            signer_is_owner: *self.our_key == event_request.signature().signer,
+            governance_id,
+        }
+    }
+
+    async fn run_evaluation(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        request: Signed<EvaluationReq>,
+        quorum: Quorum,
+        init_state: Option<ValueWrapper>,
+        signers: HashSet<PublicKey>,
+    ) -> Result<(), ActorError> {
+        info!(TARGET_MANAGER, "Init evaluation {}", self.id);
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalFail(
+                "Helpers is None".to_string(),
+            ));
         };
 
-        let signature_event =
-            get_sign(ctx, SignTypesNode::Event(event.clone())).await?;
-
-        let signed_event = Signed {
-            content: event,
-            signature: signature_event,
-        };
-
-        let update = update_last_state(
-            ctx,
-            signed_event.clone(),
-            last_proof.clone(),
-            last_vali_res.clone(),
-        )
-        .await?;
-        if !update {
-            self.abort_request_manager(
-                ctx,
-                "Our sn is biggest than event sn",
-                true,
+        let child = ctx
+            .create_child(
+                "evaluation",
+                Evaluation::new(
+                    self.our_key.clone(),
+                    request,
+                    quorum,
+                    init_state,
+                    hash,
+                    network,
+                ),
             )
             .await?;
-        }
+
+        child
+            .tell(EvaluationMessage::Create {
+                request_id: self.id.clone(),
+                version: self.version,
+                signers,
+            })
+            .await
+    }
+    //////// APPROVE
+    ////////////////////////////////////////////////
+    async fn build_request_appro(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        eval_req: EvaluationReq,
+        evaluator_res: EvaluatorResponse,
+    ) -> Result<Signed<ApprovalReq>, ActorError> {
+        let request = ApprovalReq {
+            event_request: eval_req.event_request,
+            sn: eval_req.sn,
+            gov_version: eval_req.gov_version,
+            patch: evaluator_res.patch,
+            properties_hash: evaluator_res.properties_hash,
+            signer: eval_req.signer,
+        };
+
+        let signature =
+            get_sign(ctx, SignTypesNode::ApprovalReq(request.clone())).await?;
+
+        let signed_approval_req: Signed<ApprovalReq> =
+            Signed::from_parts(request, signature);
+
+        Ok(signed_approval_req)
+    }
+
+    async fn build_approval(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        eval_req: EvaluationReq,
+        evaluator_res: EvaluatorResponse,
+    ) -> Result<(), ActorError> {
+        let request = self
+            .build_request_appro(ctx, eval_req, evaluator_res)
+            .await?;
+
+        let metadata = get_metadata(
+            ctx,
+            &request
+                .content()
+                .event_request
+                .content()
+                .get_subject_id()
+                .to_string(),
+        )
+        .await?;
+
+        let governance_data = GovernanceData::try_from(
+            metadata.properties.clone(),
+        )
+        .map_err(|e| {
+            let e = format!(
+                "can not convert GovernanceData from properties: {}",
+                e
+            );
+            ActorError::FunctionalFail(e)
+        })?;
+
+        let (signers, quorum) = governance_data.get_quorum_and_signers(
+            ProtocolTypes::Approval,
+            &metadata.schema_id,
+            metadata.namespace.clone(),
+        )?;
+
+        self.run_approval(ctx, request, quorum, signers).await
+    }
+
+    async fn run_approval(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        request: Signed<ApprovalReq>,
+        quorum: Quorum,
+        signers: HashSet<PublicKey>,
+    ) -> Result<(), ActorError> {
+        info!(TARGET_MANAGER, "Init approval {}", self.id);
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalFail(
+                "Helpers is None".to_string(),
+            ));
+        };
+
+        let child = ctx
+            .create_child(
+                "evaluation",
+                Approval::new(
+                    self.our_key.clone(),
+                    request,
+                    quorum,
+                    signers,
+                    hash,
+                    network,
+                ),
+            )
+            .await?;
+
+        child
+            .tell(ApprovalMessage::Create {
+                request_id: self.id.clone(),
+                version: self.version,
+            })
+            .await
+    }
+    //////// VALI
+    ////////////////////////////////////////////////
+    async fn build_validation_req(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+        eval: Option<(EvaluationReq, EvaluationData)>,
+        appro_data: Option<ApprovalData>,
+    ) -> Result<
+        (
+            Signed<ValidationReq>,
+            Quorum,
+            HashSet<PublicKey>,
+            Option<ValueWrapper>,
+        ),
+        ActorError,
+    > {
+        let (vali_req, quorum, signers, init_state) =
+            self.build_validation_data(ctx, eval, appro_data).await?;
+
+        let signature = get_sign(
+            ctx,
+            SignTypesNode::ValidationReq(Box::new(vali_req.clone())),
+        )
+        .await?;
+
+        let signed_validation_req: Signed<ValidationReq> =
+            Signed::from_parts(vali_req, signature);
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Distribution {
-                    event: Box::new(signed_event.clone()),
-                    ledger: Box::new(signed_ledger.clone()),
-                    last_proof: last_proof.clone(),
-                    last_vali_res: last_vali_res.clone(),
+                state: Box::new(RequestManagerState::Validation {
+                    request: signed_validation_req.clone(),
+                    quorum: quorum.clone(),
+                    init_state: init_state.clone(),
+                    signers: signers.clone(),
                 }),
             },
             ctx,
         )
         .await;
 
-        if let Err(e) = send_to_tracking(
-            ctx,
-            RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
-                state: RequestState::Distribution,
-                error: None,
-            },
-        )
-        .await
-        {
-            error!(
-                TARGET_MANAGER,
-                "Distribution, can not update tracking: {}", e
-            );
-            return Err(emit_fail(ctx, e).await);
-        }
-
-        Ok((signed_ledger, signed_event))
+        Ok((signed_validation_req, quorum, signers, init_state))
     }
 
-    async fn init_distribution(
+    async fn build_validation_data(
         &self,
         ctx: &mut ActorContext<RequestManager>,
-        event: Signed<AveEvent>,
-        ledger: SignedLedger,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
-    ) -> Result<(), ActorError> {
-        info!(TARGET_MANAGER, "Init distribution {}", self.id);
-        let distribution_path = ActorPath::from(format!(
-            "/user/node/{}/distribution",
-            event.content.subject_id
-        ));
-        let distribution_actor: Option<ActorRef<Distribution>> =
-            ctx.system().get_actor(&distribution_path).await;
+        eval: Option<(EvaluationReq, EvaluationData)>,
+        appro_data: Option<ApprovalData>,
+    ) -> Result<
+        (ValidationReq, Quorum, HashSet<PublicKey>, Option<ValueWrapper>),
+        ActorError,
+    > {
+        let Some(request) = self.request.clone() else {
+            return Err(ActorError::FunctionalFail(
+                "Request is None".to_string(),
+            ));
+        };
 
-        if let Some(distribution_actor) = distribution_actor {
-            distribution_actor
-                .tell(DistributionMessage::Create {
-                    request_id: self.id.clone(),
-                    event: Box::new(event),
-                    ledger: Box::new(ledger),
-                    last_proof: Box::new(last_proof),
-                    last_vali_res,
-                })
-                .await
+        if let EventRequest::Create(create) = request.content() {
+            if create.schema_id == SchemaType::Governance {
+                let governance_data = GovernanceData::new((*self.our_key).clone());
+                let (signers, quorum) = governance_data
+                    .get_quorum_and_signers(
+                        ProtocolTypes::Validation,
+                        &SchemaType::Governance,
+                        Namespace::new(),
+                    )?;
+
+                Ok((
+                    ValidationReq::Create {
+                        event_request: request.clone(),
+                        gov_version: 0,
+                    },
+                    quorum,
+                    signers,
+                    None,
+                ))
+            } else {
+                let governance_data =
+                    get_gov(ctx, &self.subject_id.to_string()).await?;
+                let (signers, quorum) = governance_data
+                    .get_quorum_and_signers(
+                        ProtocolTypes::Validation,
+                        &create.schema_id,
+                        create.namespace.clone(),
+                    )?;
+
+                let init_state = governance_data
+                    .get_init_state(&create.schema_id)
+                    .map_err(|e| {
+                        let e = format!(
+                            "can not obtain schema {} from governance: {}",
+                            create.schema_id, e
+                        );
+                        ActorError::FunctionalFail(e)
+                    })?;
+
+                Ok((
+                    ValidationReq::Create {
+                        event_request: request.clone(),
+                        gov_version: governance_data.version,
+                    },
+                    quorum,
+                    signers,
+                    Some(init_state),
+                ))
+            }
         } else {
-            // Crear distribution
-            let distribution = Distribution::new(
-                self.our_key.clone(),
-                DistributionType::Request,
-            );
-            let distribution_actor =
-                ctx.create_child("distribution", distribution).await?;
-            distribution_actor
-                .tell(DistributionMessage::Create {
-                    request_id: self.id.clone(),
-                    event: Box::new(event),
-                    ledger: Box::new(ledger),
-                    last_proof: Box::new(last_proof),
-                    last_vali_res,
-                })
-                .await
+            let governance_data =
+                get_gov(ctx, &self.subject_id.to_string()).await?;
+
+            let (actual_protocols, gov_version, sn) =
+                if let Some((eval_req, eval_data)) = eval {
+                    if let Some(approval_data) = appro_data {
+                        (
+                            ActualProtocols::EvalApprove {
+                                eval_data,
+                                approval_data,
+                            },
+                            eval_req.gov_version,
+                            Some(eval_req.sn),
+                        )
+                    } else {
+                        (
+                            ActualProtocols::Eval { eval_data },
+                            eval_req.gov_version,
+                            Some(eval_req.sn),
+                        )
+                    }
+                } else {
+                    (ActualProtocols::None, governance_data.version, None)
+                };
+
+            let metadata =
+                get_metadata(ctx, &self.subject_id.to_string()).await?;
+            let sn = if let Some(sn) = sn {
+                sn
+            } else {
+                metadata.sn + 1
+            };
+
+            let (signers, quorum) = governance_data.get_quorum_and_signers(
+                ProtocolTypes::Validation,
+                &metadata.schema_id,
+                metadata.namespace.clone(),
+            )?;
+
+            let init_state = governance_data
+                .get_init_state(&metadata.schema_id)
+                .map_err(|e| {
+                    let e = format!(
+                        "can not obtain schema {} from governance: {}",
+                        metadata.schema_id, e
+                    );
+                    ActorError::FunctionalFail(e)
+                })?;
+
+            Ok((
+                ValidationReq::Event {
+                    actual_protocols,
+                    event_request: request.clone(),
+                    metadata,
+                    last_data: todo!(),
+                    gov_version,
+                    ledger_hash: todo!(),
+                    sn,
+                },
+                quorum,
+                signers,
+                Some(init_state),
+            ))
         }
     }
 
+    async fn run_validation(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        request: Signed<ValidationReq>,
+        quorum: Quorum,
+        signers: HashSet<PublicKey>,
+        init_state: Option<ValueWrapper>,
+    ) -> Result<(), ActorError> {
+        info!(TARGET_MANAGER, "Init validation {}", self.id);
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalFail(
+                "Helpers is None".to_string(),
+            ));
+        };
+
+        let child = ctx
+            .create_child(
+                "validation",
+                Validation::new(
+                    self.our_key.clone(),
+                    request,
+                    init_state,
+                    quorum,
+                    hash,
+                    network,
+                ),
+            )
+            .await?;
+
+        child
+            .tell(ValidationMessage::Create {
+                request_id: self.id.clone(),
+                version: self.version,
+                signers,
+            })
+            .await
+    }
+    //////// Distribution
+    ////////////////////////////////////////////////
+    async fn build_ledger(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+        val_req: ValidationReq,
+        val_res: ValidationData,
+    ) -> Result<Signed<Ledger>, ActorError> {
+        let ledger = match val_req {
+            ValidationReq::Create {
+                event_request,
+                gov_version,
+            } => Ledger {
+                event_request,
+                gov_version,
+                sn: 0,
+                prev_ledger_event_hash: DigestIdentifier::default(),
+                protocols: Protocols::Create {
+                    validation: val_res,
+                },
+            },
+            ValidationReq::Event {
+                actual_protocols,
+                event_request,
+                metadata,
+                gov_version,
+                sn,
+                ledger_hash,
+                ..
+            } => Ledger {
+                gov_version,
+                sn,
+                prev_ledger_event_hash: ledger_hash,
+                protocols: Protocols::build(
+                    metadata.schema_id.is_gov(),
+                    EventRequestType::from(event_request.content()),
+                    actual_protocols,
+                    val_res,
+                )?,
+                event_request,
+            },
+        };
+
+        let signature =
+            get_sign(ctx, SignTypesNode::Ledger(ledger.clone()))
+                .await?;
+
+        let ledger = Signed::from_parts(ledger, signature);
+
+        self.on_event(
+            RequestManagerEvent::UpdateState {
+                state: Box::new(RequestManagerState::Distribution { ledger: ledger.clone() }),
+            },
+            ctx,
+        )
+        .await;
+
+        Ok(ledger)
+    }
+
+
+
+    
+    ////////////////////////////////////////////////
+    ////////////////////////////////////////////////
+    ////////////////////////////////////////////////
     pub async fn change_node_subject_state(
         ctx: &mut ActorContext<RequestManager>,
         owner: &str,
@@ -702,62 +877,6 @@ impl RequestManager {
         Ok(())
     }
 
-    async fn build_data_event_proof(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-        sn: Option<u64>,
-        value: LedgerValue,
-        state_hash: Option<DigestIdentifier>,
-        protocols_result: ProtocolsResult,
-    ) -> Result<DataProofEvent, ActorError> {
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
-        };
-
-        let gov = get_gov(ctx, &self.subject_id).await?;
-        let metadata = get_metadata(ctx, &self.subject_id).await?;
-
-        let state_hash = if let Some(state_hash) = state_hash {
-            state_hash
-        } else {
-            hash_borsh(&*hash.hasher(), &metadata.properties).map_err(|e| {
-                ActorError::FunctionalFail(format!(
-                    "Can not obtain hash id for metadata properties: {}",
-                    e
-                ))
-            })?
-        };
-
-        let sn = if let Some(sn) = sn {
-            sn
-        } else if metadata.sn == 0 {
-            if let EventRequest::Create(_) = self.request.content {
-                metadata.sn
-            } else {
-                metadata.sn + 1
-            }
-        } else {
-            metadata.sn + 1
-        };
-
-        Ok(DataProofEvent {
-            gov_version: gov.version,
-            metadata,
-            sn,
-            eval_success: protocols_result.eval_success,
-            appr_required: protocols_result.appr_required,
-            appr_success: protocols_result.appr_success,
-            value,
-            state_hash,
-            eval_signatures: protocols_result.eval_signatures,
-            appr_signatures: protocols_result.appr_signatures,
-        })
-    }
-
     async fn get_witnesses(
         ctx: &mut ActorContext<RequestManager>,
         governance_id: DigestIdentifier,
@@ -824,7 +943,7 @@ impl RequestManager {
                     )
                 };
 
-                let helper: Option<HelperService> =
+                let helper: Option<Arc<NetworkSender>> =
                     ctx.system().get_helper("network").await;
 
                 let Some(mut helper) = helper else {
@@ -874,31 +993,6 @@ impl RequestManager {
         Ok(())
     }
 
-    async fn patch_not_fact_event(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-    ) -> Result<LedgerValue, ActorError> {
-        if let EventRequest::Create(create_req) = self.request.content.clone() {
-            if create_req.schema_id.is_gov() {
-                Ok(LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                    "[]".to_owned(),
-                ))))
-            } else {
-                let governance =
-                    get_gov(ctx, &create_req.governance_id.to_string()).await?;
-
-                let value = governance
-                    .get_init_state(&create_req.schema_id)
-                    .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-                Ok(LedgerValue::Patch(value))
-            }
-        } else {
-            Ok(LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                "[]".to_owned(),
-            ))))
-        }
-    }
 
     async fn abort_request_manager(
         &self,
@@ -922,32 +1016,8 @@ impl RequestManager {
 
         self.abort_request(ctx, error).await?;
 
-        Self::purge_storage(ctx).await?;
+        purge_storage(ctx).await?;
         ctx.stop(None).await;
-
-        Ok(())
-    }
-
-    async fn purge_storage(
-        ctx: &mut ActorContext<RequestManager>,
-    ) -> Result<(), ActorError> {
-        let store: Option<ActorRef<Store<RequestManager>>> =
-            ctx.get_child("store").await;
-        let response = if let Some(store) = store {
-            store.ask(StoreCommand::Purge).await?
-        } else {
-            return Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/store",
-                ctx.path()
-            ))));
-        };
-
-        if let StoreResponse::Error(e) = response {
-            return Err(ActorError::Store(format!(
-                "Can not purge request: {}",
-                e
-            )));
-        };
 
         Ok(())
     }
@@ -957,26 +1027,21 @@ impl RequestManager {
 pub enum RequestManagerMessage {
     Run,
     FirstRun,
+    Abort,
     Reboot {
         governance_id: DigestIdentifier,
     },
     FinishReboot,
-    Evaluate,
-    Validate,
+    EvaluationRes {
+        eval_req: EvaluationReq,
+        eval_res: EvaluationData,
+    },
     ApprovalRes {
-        result: bool,
-        signatures: Vec<ProtocolsSignatures>,
+        appro_res: ApprovalData,
     },
     ValidationRes {
-        result: bool,
-        signatures: Vec<ProtocolsSignatures>,
-        last_proof: Box<ValidationProof>,
-        errors: String,
-    },
-    EvaluationRes {
-        request: Box<EvaluationReq>,
-        response: EvalLedgerResponse,
-        signatures: Vec<ProtocolsSignatures>,
+        val_req: ValidationReq,
+        val_res: ValidationData,
     },
     FinishRequest,
 }
@@ -995,7 +1060,7 @@ pub enum RequestManagerEvent {
     },
     SafeState {
         command: ReqManInitMessage,
-        request: Box<Signed<EventRequest>>,
+        request: Option<Signed<EventRequest>>,
         state: Box<RequestManagerState>,
         version: u64,
     },
@@ -1037,7 +1102,7 @@ impl Handler<RequestManager> for RequestManager {
                 info!(TARGET_MANAGER, "Init reboot {}", self.id);
                 if let RequestManagerState::Reboot = self.state.clone() {
                     let reboot_actor = match ctx
-                        .create_child("reboot", Reboot::new(governance_id))
+                        .create_child("reboot", Reboot::new(governance_id.to_string()))
                         .await
                     {
                         Ok(actor) => actor,
@@ -1150,7 +1215,7 @@ impl Handler<RequestManager> for RequestManager {
 
                 match self.command {
                     ReqManInitMessage::Evaluate => {
-                        if let Err(e) = self.evaluation(ctx).await {
+                        if let Err(e) = self.build_evaluation(ctx).await {
                             error!(
                                 TARGET_MANAGER,
                                 "FinishReboot, can not init evaluation: {}", e
@@ -1159,72 +1224,45 @@ impl Handler<RequestManager> for RequestManager {
                         };
                     }
                     ReqManInitMessage::Validate => {
-                        let value = match self.patch_not_fact_event(ctx).await {
-                            Ok(ledger_value) => ledger_value,
-                            Err(e) => {
-                                if let ActorError::Functional(_) = e {
-                                    if let Err(e) = self
-                                        .abort_request_manager(
-                                            ctx,
-                                            &e.to_string(),
-                                            true,
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            TARGET_MANAGER,
-                                            "FinishReboot, {}", e
-                                        );
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                                    return Ok(());
-                                } else {
-                                    error!(
-                                        TARGET_MANAGER,
-                                        "FinishReboot, {}", e
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                }
-                            }
-                        };
-
-                        let data = match self
-                            .build_data_event_proof(
-                                ctx,
-                                None,
-                                value,
-                                None,
-                                ProtocolsResult::default(),
-                            )
+                        let (request, quorum, signers, init_value) = match self
+                            .build_validation_req(ctx, None, None)
                             .await
                         {
                             Ok(data) => data,
                             Err(e) => {
                                 error!(
                                     TARGET_MANAGER,
-                                    "FinishReboot, can not build event proof: {}",
+                                    "FinishReboot, can not build validation data: {}",
                                     e
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             }
                         };
 
-                        if let Err(e) = self.validation(ctx, data).await {
+                        if let Err(e) = self
+                            .run_validation(
+                                ctx, request, quorum, signers, init_value,
+                            )
+                            .await
+                        {
                             error!(
                                 TARGET_MANAGER,
-                                "FinishReboot, can not init validation: {}", e
+                                "FinishReboot, can not run validation: {}", e
                             );
                             return Err(emit_fail(ctx, e).await);
                         };
                     }
                 };
             }
+            RequestManagerMessage::Abort => {
+                todo!("Abort")
+            }
             RequestManagerMessage::Run | RequestManagerMessage::FirstRun => {
                 if let RequestManagerMessage::FirstRun = msg {
                     self.on_event(
                         RequestManagerEvent::SafeState {
                             command: self.command.clone(),
-                            request: Box::new(self.request.clone()),
+                            request: self.request.clone(),
                             state: Box::new(self.state.clone()),
                             version: self.version,
                         },
@@ -1239,7 +1277,8 @@ impl Handler<RequestManager> for RequestManager {
                     | RequestManagerState::Reboot => {
                         match self.command {
                             ReqManInitMessage::Evaluate => {
-                                if let Err(e) = self.evaluation(ctx).await {
+                                if let Err(e) = self.build_evaluation(ctx).await
+                                {
                                     error!(
                                         TARGET_MANAGER,
                                         "Run, can not init evaluation: {}", e
@@ -1248,66 +1287,33 @@ impl Handler<RequestManager> for RequestManager {
                                 };
                             }
                             ReqManInitMessage::Validate => {
-                                let value = match self
-                                    .patch_not_fact_event(ctx)
-                                    .await
-                                {
-                                    Ok(ledger_value) => ledger_value,
-                                    Err(e) => {
-                                        if let ActorError::Functional(_) = e {
-                                            if let Err(e) = self
-                                                .abort_request_manager(
-                                                    ctx,
-                                                    &e.to_string(),
-                                                    true,
-                                                )
-                                                .await
-                                            {
-                                                error!(
-                                                    TARGET_MANAGER,
-                                                    "Run, {}", e
-                                                );
-                                                return Err(
-                                                    emit_fail(ctx, e).await
-                                                );
-                                            }
-                                            return Ok(());
-                                        } else {
+                                let (request, quorum, signers, init_state) =
+                                    match self
+                                        .build_validation_req(ctx, None, None)
+                                        .await
+                                    {
+                                        Ok(data) => data,
+                                        Err(e) => {
                                             error!(
                                                 TARGET_MANAGER,
-                                                "Run, {}", e
+                                                "FinishReboot, can not build validation data: {}",
+                                                e
                                             );
                                             return Err(emit_fail(ctx, e).await);
                                         }
-                                    }
-                                };
+                                    };
 
-                                let data = match self
-                                    .build_data_event_proof(
-                                        ctx,
-                                        None,
-                                        value,
-                                        None,
-                                        ProtocolsResult::default(),
+                                if let Err(e) = self
+                                    .run_validation(
+                                        ctx, request, quorum, signers,
+                                        init_state,
                                     )
                                     .await
                                 {
-                                    Ok(data) => data,
-                                    Err(e) => {
-                                        error!(
-                                            TARGET_MANAGER,
-                                            "Run, can not build event proof: {}",
-                                            e
-                                        );
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                                };
-
-                                if let Err(e) = self.validation(ctx, data).await
-                                {
                                     error!(
                                         TARGET_MANAGER,
-                                        "Run, can not init validation: {}", e
+                                        "FinishReboot, can not run validation: {}",
+                                        e
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 };
@@ -1315,7 +1321,7 @@ impl Handler<RequestManager> for RequestManager {
                         };
                     }
                     RequestManagerState::Evaluation => {
-                        if let Err(e) = self.send_evaluation(ctx).await {
+                        if let Err(e) = self.build_evaluation(ctx).await {
                             error!(
                                 TARGET_MANAGER,
                                 "Evaluation, can not init evaluation: {}", e
@@ -1323,180 +1329,132 @@ impl Handler<RequestManager> for RequestManager {
                             return Err(emit_fail(ctx, e).await);
                         }
                     }
-                    RequestManagerState::Approval {
+
+                    RequestManagerState::EvaluationRes {
                         eval_req,
                         eval_res,
-                        ..
                     } => {
-                        if let Err(e) =
-                            self.send_approval(ctx, *eval_req, eval_res).await
+                        if let Some(evaluator_res) = eval_res.evaluator_res()
+                            && evaluator_res.appr_required
                         {
-                            error!(
-                                TARGET_MANAGER,
-                                "Approval, can not init approval: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
+                            if let Err(e) = self
+                                .build_approval(ctx, eval_req, evaluator_res)
+                                .await
+                            {
+                                error!(
+                                    TARGET_MANAGER,
+                                    "Evaluation, can not init approval: {}", e
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        } else {
+                            let (request, quorum, signers, init_state) =
+                                match self
+                                    .build_validation_req(
+                                        ctx,
+                                        Some((eval_req, eval_res)),
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        error!(
+                                            TARGET_MANAGER,
+                                            "FinishReboot, can not build validation data: {}",
+                                            e
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    }
+                                };
+
+                            if let Err(e) = self
+                                .run_validation(
+                                    ctx, request, quorum, signers, init_state,
+                                )
+                                .await
+                            {
+                                error!(
+                                    TARGET_MANAGER,
+                                    "FinishReboot, can not run validation: {}",
+                                    e
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            };
                         }
                     }
                     RequestManagerState::Validation {
-                        val_info,
-                        last_proof,
-                        last_vali_res,
+                        request,
+                        quorum,
+                        init_state,
+                        signers,
                     } => {
                         if let Err(e) = self
-                            .send_validation(
-                                ctx,
-                                *val_info,
-                                last_proof,
-                                last_vali_res,
+                            .run_validation(
+                                ctx, request, quorum, signers, init_state,
                             )
                             .await
                         {
                             error!(
                                 TARGET_MANAGER,
-                                "Validation, can not init validation: {}", e
+                                "FinishReboot, can not run validation: {}", e
                             );
                             return Err(emit_fail(ctx, e).await);
-                        }
+                        };
                     }
-                    RequestManagerState::Distribution {
-                        event,
-                        ledger,
-                        last_proof,
-                        last_vali_res,
-                    } => {
-                        if let Err(e) = self
-                            .init_distribution(
-                                ctx,
-                                *event,
-                                *ledger,
-                                last_proof,
-                                last_vali_res,
-                            )
+                    RequestManagerState::ValidationRes { val_req, val_res } => {
+                        let signed_ledger = match self
+                            .build_ledger(ctx, val_req, val_res)
                             .await
                         {
-                            error!(
-                                TARGET_MANAGER,
-                                "Distribution, can not init distribution: {}",
-                                e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
+                            Ok(signed_ledger) => signed_ledger,
+                            Err(e) => {
+                                error!(
+                                    TARGET_MANAGER,
+                                    "ValidationRes, can not build signed ledger: {}",
+                                    e
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        };
+
+                        todo!("Realizar la distribución");
+                    }
+                    RequestManagerState::Distribution { ledger } => {
+                        todo!()
                     }
                 };
             }
-            RequestManagerMessage::ApprovalRes { result, signatures } => {
-                info!(TARGET_MANAGER, "Approval Response {}", self.id);
-                let (eval_req, eval_res, eval_signatures) =
-                    if let RequestManagerState::Approval {
-                        eval_req,
-                        eval_res,
-                        eval_signatures,
-                    } = self.state.clone()
-                    {
-                        (eval_req, eval_res, eval_signatures)
-                    } else {
-                        let e = ActorError::FunctionalFail(
-                            "Invalid request state".to_owned(),
-                        );
-                        error!(TARGET_MANAGER, "ApprovalRes, {}", e);
-                        return Err(emit_fail(ctx, e).await);
-                    };
+            RequestManagerMessage::EvaluationRes { eval_req, eval_res } => {
+                self.on_event(
+                    RequestManagerEvent::UpdateState {
+                        state: Box::new(RequestManagerState::EvaluationRes {
+                            eval_req,
+                            eval_res,
+                        }),
+                    },
+                    ctx,
+                )
+                .await;
 
-                let (state_hash, value) = if !result {
-                    (
-                        None,
-                        LedgerValue::Patch(ValueWrapper(
-                            serde_json::Value::Array(vec![]),
-                        )),
-                    )
-                } else {
-                    (Some(eval_res.state_hash), eval_res.value)
-                };
-
-                let data = match self
-                    .build_data_event_proof(
-                        ctx,
-                        Some(eval_req.sn),
-                        value,
-                        state_hash,
-                        ProtocolsResult {
-                            eval_success: Some(eval_res.eval_success),
-                            appr_required: eval_res.appr_required,
-                            appr_success: Some(result),
-                            eval_signatures: Some(eval_signatures),
-                            appr_signatures: Some(HashSet::from_iter(
-                                signatures.iter().cloned(),
-                            )),
-                        },
-                    )
-                    .await
+                if let Some(evaluator_res) = eval_res.evaluator_res()
+                    && evaluator_res.appr_required
                 {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "ApprovalRes, can not build event proof: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                if let Err(e) = self.validation(ctx, data).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "ApprovalRes, can not init validation: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::EvaluationRes {
-                request,
-                response,
-                signatures,
-            } => {
-                info!(TARGET_MANAGER, "Evaluation Response {}", self.id);
-                if let RequestManagerState::Evaluation = self.state.clone() {
-                } else {
-                    let e = ActorError::FunctionalFail(
-                        "Invalid request state".to_owned(),
-                    );
-                    error!(TARGET_MANAGER, "EvaluationRes, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if response.appr_required {
-                    if let Err(e) = self
-                        .approval(
-                            ctx,
-                            *request,
-                            response,
-                            HashSet::from_iter(signatures.iter().cloned()),
-                        )
-                        .await
+                    if let Err(e) =
+                        self.build_approval(ctx, eval_req, evaluator_res).await
                     {
                         error!(
                             TARGET_MANAGER,
-                            "EvaluationRes, can not init approval: {}", e
+                            "Evaluation, can not init evaluation: {}", e
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
                 } else {
-                    let data = match self
-                        .build_data_event_proof(
+                    let (request, quorum, signers, init_state) = match self
+                        .build_validation_req(
                             ctx,
-                            Some(request.sn),
-                            response.value,
-                            Some(response.state_hash),
-                            ProtocolsResult {
-                                eval_success: Some(response.eval_success),
-                                appr_required: response.appr_required,
-                                appr_success: None,
-                                eval_signatures: Some(HashSet::from_iter(
-                                    signatures.iter().cloned(),
-                                )),
-                                appr_signatures: None,
-                            },
+                            Some((eval_req, eval_res)),
+                            None,
                         )
                         .await
                     {
@@ -1504,21 +1462,87 @@ impl Handler<RequestManager> for RequestManager {
                         Err(e) => {
                             error!(
                                 TARGET_MANAGER,
-                                "EvaluationRes, can not build event proof: {}",
+                                "FinishReboot, can not build validation data: {}",
                                 e
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
                     };
 
-                    if let Err(e) = self.validation(ctx, data).await {
+                    if let Err(e) = self
+                        .run_validation(
+                            ctx, request, quorum, signers, init_state,
+                        )
+                        .await
+                    {
                         error!(
                             TARGET_MANAGER,
-                            "EvaluationRes, can not init validation: {}", e
+                            "FinishReboot, can not run validation: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    };
+                }
+            }
+            RequestManagerMessage::ApprovalRes { appro_res } => {
+                let (eval_req, eval_res) =
+                    if let RequestManagerState::EvaluationRes {
+                        eval_req,
+                        eval_res,
+                    } = self.state.clone()
+                    {
+                        (eval_req, eval_res)
+                    } else {
+                        let e = ActorError::FunctionalFail(
+                            "Invalid request state".to_owned(),
+                        );
+                        error!(TARGET_MANAGER, "ApprovalRes, {}", e);
+                        return Err(emit_fail(ctx, e).await);
+                    };
+                let (request, quorum, signers, init_state) = match self
+                    .build_validation_req(
+                        ctx,
+                        Some((eval_req, eval_res)),
+                        Some(appro_res),
+                    )
+                    .await
+                {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!(
+                            TARGET_MANAGER,
+                            "ApprovalRes, can not build validation data: {}", e
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                }
+                };
+
+                if let Err(e) = self
+                    .run_validation(ctx, request, quorum, signers, init_state)
+                    .await
+                {
+                    error!(
+                        TARGET_MANAGER,
+                        "ApprovalRes, can not run validation: {}", e
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                };
+            }
+            RequestManagerMessage::ValidationRes { val_res, val_req } => {
+                let signed_ledger = match self
+                    .build_ledger(ctx, val_req, val_res)
+                    .await
+                {
+                    Ok(signed_ledger) => signed_ledger,
+                    Err(e) => {
+                        error!(
+                            TARGET_MANAGER,
+                            "ValidationRes, can not build signed ledger: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+                };
+
+                todo!("Realizar la distribución");
             }
             RequestManagerMessage::FinishRequest => {
                 info!(TARGET_MANAGER, "Finish request {}", self.id);
@@ -1541,7 +1565,7 @@ impl Handler<RequestManager> for RequestManager {
                     return Err(emit_fail(ctx, e).await);
                 }
 
-                if let Err(e) = Self::purge_storage(ctx).await {
+                if let Err(e) = purge_storage(ctx).await {
                     error!(
                         TARGET_MANAGER,
                         "FinishRequest, can not purge storage: {}", e
@@ -1550,180 +1574,6 @@ impl Handler<RequestManager> for RequestManager {
                 }
 
                 ctx.stop(None).await;
-            }
-            RequestManagerMessage::ValidationRes {
-                result,
-                signatures,
-                errors,
-                last_proof,
-            } => {
-                info!(TARGET_MANAGER, "Validation response {}", self.id);
-                let val_info = if let RequestManagerState::Validation {
-                    val_info,
-                    ..
-                } = self.state.clone()
-                {
-                    val_info
-                } else {
-                    let e = ActorError::FunctionalFail(
-                        "Invalid request state".to_owned(),
-                    );
-                    error!(TARGET_MANAGER, "ValidationRes, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await
-                {
-                    config.hash_algorithm
-                } else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-                let (ledger, event) = match self.create_last_state(
-                    *val_info,
-                    signatures.clone(),
-                    result,
-                    &errors,
-                    hash,
-                ) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "ValidationRes, can not generate Ledger data: {}",
-                            e
-                        );
-                        return Err(emit_fail(
-                            ctx,
-                            ActorError::FunctionalFail(e.to_string()),
-                        )
-                        .await);
-                    }
-                };
-
-                let (signed_ledger, signed_event) = match self
-                    .safe_last_state(
-                        ctx,
-                        event,
-                        ledger.clone(),
-                        *last_proof.clone(),
-                        signatures.clone(),
-                    )
-                    .await
-                {
-                    Ok(signed_data) => signed_data,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "ValidationRes, Can not safe ledger or event: {}",
-                            e
-                        );
-                        if let ActorError::Functional(_) = e {
-                            return Err(e);
-                        } else {
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    }
-                };
-
-                if let Err(e) = self
-                    .init_distribution(
-                        ctx,
-                        signed_event,
-                        signed_ledger,
-                        *last_proof,
-                        signatures,
-                    )
-                    .await
-                {
-                    error!(
-                        TARGET_MANAGER,
-                        "ValidationRes, Can not init distribution: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::Evaluate => {
-                info!(TARGET_MANAGER, "Init Evaluate in event {}", self.id);
-                if let RequestManagerState::Starting = self.state {
-                } else {
-                    let e = ActorError::FunctionalFail(
-                        "Invalid request state".to_owned(),
-                    );
-                    error!(TARGET_MANAGER, "Evaluate, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if let Err(e) = self.evaluation(ctx).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "Evaluate, can not init evaluation: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-            }
-            RequestManagerMessage::Validate => {
-                info!(TARGET_MANAGER, "Init Validate in event {}", self.id);
-                if let RequestManagerState::Starting = self.state {
-                } else {
-                    let e = ActorError::FunctionalFail(
-                        "Invalid request state".to_owned(),
-                    );
-                    error!(TARGET_MANAGER, "Validate, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                let value = match self.patch_not_fact_event(ctx).await {
-                    Ok(ledger_value) => ledger_value,
-                    Err(e) => {
-                        if let ActorError::Functional(_) = e {
-                            if let Err(e) = self
-                                .abort_request_manager(
-                                    ctx,
-                                    &e.to_string(),
-                                    true,
-                                )
-                                .await
-                            {
-                                error!(TARGET_MANAGER, "Validate, {}", e);
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                            return Ok(());
-                        } else {
-                            error!(TARGET_MANAGER, "Validate, {}", e);
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    }
-                };
-
-                let data = match self
-                    .build_data_event_proof(
-                        ctx,
-                        None,
-                        value,
-                        None,
-                        ProtocolsResult::default(),
-                    )
-                    .await
-                {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "Validate, can not build event proof: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                if let Err(e) = self.validation(ctx, data).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "Validate, can not init validation: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
             }
         }
 
@@ -1775,27 +1625,31 @@ impl PersistentActor for RequestManager {
                 subject_id,
                 command,
                 request,
+                helpers,
             } => Self {
                 our_key,
                 id,
                 subject_id,
                 command,
-                request: *request,
+                request: Some(*request),
                 state: RequestManagerState::Starting,
                 version: 0,
+                helpers: Some(helpers),
             },
             InitRequestManager::Continue {
                 our_key,
                 id,
                 subject_id,
+                helpers,
             } => Self {
                 our_key,
                 id,
                 subject_id,
                 command: ReqManInitMessage::Evaluate,
-                request: empty_request(),
+                request: None,
                 state: RequestManagerState::Starting,
                 version: 0,
+                helpers: Some(helpers),
             },
         }
     }
@@ -1817,7 +1671,7 @@ impl PersistentActor for RequestManager {
             } => {
                 self.version = *version;
                 self.state = *state.clone();
-                self.request = *request.clone();
+                self.request = request.clone();
                 self.command = command.clone();
             }
         };

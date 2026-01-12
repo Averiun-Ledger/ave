@@ -1,8 +1,9 @@
-use crate::model::network::TimeOutResponse;
-use ave_common::identity::Signature;
-
+use ave_common::identity::DigestIdentifier;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::subject::Metadata;
 
 /// A Enum representing a validation response.
 #[derive(
@@ -17,8 +18,44 @@ use serde::{Deserialize, Serialize};
     BorshDeserialize,
 )]
 pub enum ValidationRes {
-    Signature(Signature),
-    TimeOut(TimeOutResponse),
-    Error(String),
+    Response {
+        vali_req_hash: DigestIdentifier,
+        modified_metadata_hash: DigestIdentifier
+    },
+    Create {
+        vali_req_hash: DigestIdentifier,
+        subject_metadata: Metadata
+    },
+    Abort(String),
+    TimeOut,
     Reboot,
+}
+
+#[derive(Debug, Error, Clone)]
+pub enum ValidatorError {
+    #[error("Can not verify {data} signature")]
+    InvalidSignature {
+        data: &'static str
+    },
+    #[error("The signer {signer} is not what was expected.")]
+    InvalidSigner {
+        signer: String
+    },
+    #[error("The value {value} does not match the expected value")]
+    InvalidData {
+        value: &'static str
+    },
+    #[error("An internal problem has occurred: {problem}")]
+    InternalError {
+        problem: String
+    },
+    #[error("The action could not be performed: {action}")]
+    InvalidOperation {
+        action: &'static str
+    },
+}
+
+pub enum ResponseSummary {
+    Reboot,
+    Ok,
 }

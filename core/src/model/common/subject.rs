@@ -5,24 +5,22 @@ use ave_actors::{
 };
 
 use ave_common::{
-    Namespace,
-    identity::{PublicKey, Signed},
+    Namespace, SchemaType,
+    identity::{PublicKey},
 };
 
 use crate::{
-    Event as AveEvent,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
-        model::{ProtocolTypes, Quorum}, relationship::{OwnerSchema, RelationShip, RelationShipMessage, RelationShipResponse},
+        model::{ProtocolTypes, Quorum},
+        relationship::{
+            OwnerSchema, RelationShip, RelationShipMessage,
+            RelationShipResponse,
+        },
     },
-    model::{event::ProtocolsSignatures, request::SchemaType},
-    subject::{
-        Metadata, SignedLedger,
-        laststate::{LastState, LastStateMessage, LastStateResponse},
-    },
+    subject::{Metadata, SignedLedger},
     tracker::{Tracker, TrackerMessage, TrackerResponse},
-    validation::proof::ValidationProof,
 };
 
 pub async fn get_gov<A>(
@@ -98,42 +96,39 @@ where
     }
 }
 
-pub async fn update_last_state<A>(
+pub async fn get_last_sn<A>(
     ctx: &mut ActorContext<A>,
-    event: Signed<AveEvent>,
-    proof: ValidationProof,
-    vali_res: Vec<ProtocolsSignatures>,
-) -> Result<bool, ActorError>
+    subject_id: &str,
+) -> Result<u64, ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let last_state_path = ActorPath::from(format!(
-        "/user/node/{}/last_state",
-        event.content.subject_id
-    ));
-    let last_state_actor: Option<ActorRef<LastState>> =
-        ctx.system().get_actor(&last_state_path).await;
+    let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-    let response = if let Some(last_state_actor) = last_state_actor {
-        last_state_actor
-            .ask(LastStateMessage::UpdateLastState {
-                proof: Box::new(proof),
-                event: Box::new(event),
-                vali_res,
-            })
-            .await?
+    if let Some(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await
+    {
+        let response = tracker_actor.ask(TrackerMessage::GetLastSn).await?;
+        match response {
+            TrackerResponse::Sn(sn) => Ok(sn),
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "TrackerResponse::Sn".to_owned(),
+            )),
+        }
+    } else if let Some(governance_actor) =
+        ctx.system().get_actor::<Governance>(&path).await
+    {
+        let response =
+            governance_actor.ask(GovernanceMessage::GetLastSn).await?;
+        match response {
+            GovernanceResponse::Sn(sn) => Ok(sn),
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "GovernanceResponse::Sn".to_owned(),
+            )),
+        }
     } else {
-        return Err(ActorError::NotFound(last_state_path));
-    };
-
-    match response {
-        LastStateResponse::Ok => Ok(true),
-        LastStateResponse::LessThanOurSn => Ok(false),
-        _ => Err(ActorError::UnexpectedResponse(
-            last_state_path,
-            "LastStateResponse::Ok |  LastStateResponse::LessThanOurSn"
-                .to_owned(),
-        )),
+        Err(ActorError::NotFound(path))
     }
 }
 
@@ -153,41 +148,44 @@ where
     Ok((signers, quorum, gov.version))
 }
 
-pub async fn get_last_state<A>(
+async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &str,
-) -> Result<
-    (
-        Box<Signed<AveEvent>>,
-        Box<ValidationProof>,
-        Vec<ProtocolsSignatures>,
-    ),
-    ActorError,
->
+) -> Result<Option<SignedLedger>, ActorError> 
 where
     A: Actor + Handler<A>,
 {
-    let last_state_path =
-        ActorPath::from(format!("/user/node/{}/last_state", subject_id));
-    let last_state_actor: Option<ActorRef<LastState>> =
-        ctx.system().get_actor(&last_state_path).await;
+    let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-    let response = if let Some(last_state_actor) = last_state_actor {
-        last_state_actor.ask(LastStateMessage::GetLastState).await?
+    if let Some(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await
+    {
+        let response = tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
+        match response {
+            TrackerResponse::LastLedger { ledger_event } => {
+                Ok(ledger_event)
+            }
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "TrackerResponse::LastLedger".to_owned(),
+            )),
+        }
+    } else if let Some(governance_actor) =
+        ctx.system().get_actor::<Governance>(&path).await
+    {
+        let response = governance_actor
+            .ask(GovernanceMessage::GetLastLedger)
+            .await?;
+        match response {
+            GovernanceResponse::LastLedger { ledger_event } => {
+                Ok(ledger_event)
+            }
+            _ => Err(ActorError::UnexpectedResponse(
+                path,
+                "GovernanceResponse::LastLedger".to_owned(),
+            )),
+        }
     } else {
-        return Err(ActorError::NotFound(last_state_path));
-    };
-
-    match response {
-        LastStateResponse::LastState {
-            proof,
-            event,
-            vali_res,
-        } => Ok((event, proof, vali_res)),
-        _ => Err(ActorError::UnexpectedResponse(
-            last_state_path,
-            "LedgerEventResponse::LastEvent".to_owned(),
-        )),
+        Err(ActorError::NotFound(path))
     }
 }
 

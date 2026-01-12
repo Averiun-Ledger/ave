@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use wasmtime::{Caller, Config, Engine, Linker};
 
-use crate::Error;
+use crate::{Error, evaluation::runner::error::{RunnerError, InvalidEventKind}};
 use tracing::error;
 
 const TARGET_CONTRACT: &str = "Ave-Model-Contract";
@@ -28,24 +28,35 @@ impl MemoryManager {
     pub fn alloc(&mut self, len: usize) -> Result<usize, Error> {
         // Security check: prevent excessive single allocations
         if len > MAX_SINGLE_ALLOC {
-            return Err(Error::Runner(format!(
-                "Allocation too large: {} bytes exceeds maximum of {} bytes",
-                len, MAX_SINGLE_ALLOC
-            )));
+            return Err(Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::alloc",
+                kind: InvalidEventKind::InvalidValue {
+                    field: "allocation size".to_owned(),
+                    reason: format!("{} bytes exceeds maximum of {} bytes", len, MAX_SINGLE_ALLOC),
+                },
+            }));
         }
 
         let current_len = self.memory.len();
 
         // Security check: prevent total memory exhaustion
         let new_len = current_len.checked_add(len).ok_or_else(|| {
-            Error::Runner("Memory allocation would overflow".to_owned())
+            Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::alloc",
+                kind: InvalidEventKind::Other {
+                    msg: "memory allocation would overflow".to_owned(),
+                },
+            })
         })?;
 
         if new_len > MAX_TOTAL_MEMORY {
-            return Err(Error::Runner(format!(
-                "Total memory limit exceeded: {} bytes exceeds maximum of {} bytes",
-                new_len, MAX_TOTAL_MEMORY
-            )));
+            return Err(Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::alloc",
+                kind: InvalidEventKind::InvalidValue {
+                    field: "total memory".to_owned(),
+                    reason: format!("{} bytes exceeds maximum of {} bytes", new_len, MAX_TOTAL_MEMORY),
+                },
+            }));
         }
 
         self.memory.resize(new_len, 0);
@@ -61,15 +72,24 @@ impl MemoryManager {
     ) -> Result<(), Error> {
         // Security check: validate pointer exists in allocation map
         let len = self.map.get(&start_ptr).ok_or_else(|| {
-            Error::Runner(format!("Invalid write pointer: {}", start_ptr))
+            Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::write_byte",
+                kind: InvalidEventKind::InvalidValue {
+                    field: "write pointer".to_owned(),
+                    reason: format!("invalid pointer: {}", start_ptr),
+                },
+            })
         })?;
 
         // Security check: validate write is within bounds
         if offset >= *len {
-            return Err(Error::Runner(format!(
-                "Write out of bounds: offset {} >= allocation size {}",
-                offset, len
-            )));
+            return Err(Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::write_byte",
+                kind: InvalidEventKind::InvalidValue {
+                    field: "write offset".to_owned(),
+                    reason: format!("offset {} >= allocation size {}", offset, len),
+                },
+            }));
         }
 
         self.memory[start_ptr + offset] = data;
@@ -84,7 +104,13 @@ impl MemoryManager {
         let len = self
             .map
             .get(&ptr)
-            .ok_or(Error::Runner("Invalid pointer provided".to_owned()))?;
+            .ok_or_else(|| Error::Runner(RunnerError::InvalidEvent {
+                location: "MemoryManager::read_data",
+                kind: InvalidEventKind::InvalidValue {
+                    field: "read pointer".to_owned(),
+                    reason: format!("invalid pointer: {}", ptr),
+                },
+            }))?;
         Ok(&self.memory[ptr..ptr + len])
     }
 
@@ -139,7 +165,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Compiler(format!("An error has occurred linking a function, module: env, name: pointer_len, {}", e))
+            Error::Runner(RunnerError::WasmError {
+                operation: "link function pointer_len",
+                details: e.to_string(),
+            })
         })?;
 
     linker
@@ -158,7 +187,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Compiler(format!("An error has occurred linking a function, module: env, name: alloc, {}", e))
+            Error::Runner(RunnerError::WasmError {
+                operation: "link function alloc",
+                details: e.to_string(),
+            })
         })?;
 
     linker
@@ -175,7 +207,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Compiler(format!("An error has occurred linking a function, module: env, name: write_byte, {}", e))
+            Error::Runner(RunnerError::WasmError {
+                operation: "link function write_byte",
+                details: e.to_string(),
+            })
         })?;
 
     linker
@@ -187,7 +222,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Compiler(format!("An error has occurred linking a function, module: env, name: read_byte, {}", e))
+            Error::Runner(RunnerError::WasmError {
+                operation: "link function read_byte",
+                details: e.to_string(),
+            })
         })?;
 
     Ok(linker)

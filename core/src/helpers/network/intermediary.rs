@@ -1,30 +1,37 @@
 use crate::{
     Error,
-    approval::approver::{Approver, ApproverMessage},
+    approval::{
+        light::{ApprLight, ApprLightMessage},
+        persist::{ApprPersist, ApprPersistMessage},
+    },
     distribution::distributor::{Distributor, DistributorMessage},
     evaluation::{
-        evaluator::{Evaluator, EvaluatorMessage},
+        coordinator::{EvalCoordinator, EvalCoordinatorMessage},
+        worker::{EvalWorker, EvalWorkerMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
     },
-    model::Namespace,
     update::updater::{Updater, UpdaterMessage},
     validation::{
         schema::{ValidationSchema, ValidationSchemaMessage},
-        validator::{Validator, ValidatorMessage},
+        coordinator::{ValiCoordinator, ValiCoordinatorMessage},
+        worker::{ValiWorker, ValiWorkerMessage},
     },
 };
 
 use super::ActorMessage;
-use super::{NetworkMessage, service::HelperService};
+use super::{NetworkMessage, service::NetworkSender};
 use ave_actors::{ActorPath, ActorRef, SystemRef};
-use ave_common::identity::{DSAlgorithm, PublicKey};
+use ave_common::{
+    Namespace,
+    identity::{DSAlgorithm, PublicKey},
+};
 use bytes::Bytes;
 use network::Command as NetworkCommand;
 use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
 use serde::Deserialize;
-use std::io::Cursor;
+use std::{io::Cursor, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -38,7 +45,7 @@ impl Intermediary {
         network_sender: mpsc::Sender<NetworkCommand>,
         system: SystemRef,
         token: CancellationToken,
-    ) -> HelperService {
+    ) -> Arc<NetworkSender> {
         let (command_sender, mut command_receiver) = mpsc::channel(10000);
 
         tokio::spawn(async move {
@@ -60,7 +67,7 @@ impl Intermediary {
             }
         });
 
-        HelperService::new(command_sender)
+        Arc::new(NetworkSender::new(command_sender))
     }
 
     async fn handle_command(
@@ -131,7 +138,10 @@ impl Intermediary {
 
                         if let Some(authorizer_actor) = authorizer_actor {
                             if let Err(e) = authorizer_actor
-                                .tell(UpdaterMessage::TransferResponse { res, sender})
+                                .tell(UpdaterMessage::TransferResponse {
+                                    res,
+                                    sender,
+                                })
                                 .await
                             {
                                 return Err(Error::NetworkHelper(format!(
@@ -158,7 +168,7 @@ impl Intermediary {
                                 .tell(DistributorMessage::Transfer {
                                     subject_id: subject_id.to_string(),
                                     info: message.info,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -186,7 +196,7 @@ impl Intermediary {
                                 .tell(DistributorMessage::GetLastSn {
                                     subject_id: subject_id.to_string(),
                                     info: message.info,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -211,7 +221,10 @@ impl Intermediary {
 
                         if let Some(authorizer_actor) = authorizer_actor {
                             if let Err(e) = authorizer_actor
-                                .tell(UpdaterMessage::NetworkResponse { sn, sender })
+                                .tell(UpdaterMessage::NetworkResponse {
+                                    sn,
+                                    sender,
+                                })
                                 .await
                             {
                                 return Err(Error::NetworkHelper(format!(
@@ -226,24 +239,32 @@ impl Intermediary {
                             )));
                         };
                     }
-                    ActorMessage::ValidationReq { req, schema_id } => {
+                    ActorMessage::ValidationReq { req } => {
                         // Validator path.
                         let validator_path = ActorPath::from(
                             message.info.receiver_actor.clone(),
                         );
+
+                        let Ok(schema_id) = req.content().get_schema_id()
+                        else {
+                            return Err(Error::NetworkHelper(
+                                "Can not get schema_id from validation request"
+                                    .to_string(),
+                            ));
+                        };
+
                         // Validator actor.
                         if schema_id.is_gov() {
-                            let validator_actor: Option<ActorRef<Validator>> =
+                            let validator_actor: Option<ActorRef<ValiWorker>> =
                                 system.get_actor(&validator_path).await;
 
                             // We obtain the validator
                             if let Some(validator_actor) = validator_actor {
                                 if let Err(e) = validator_actor
-                                    .tell(ValidatorMessage::NetworkRequest {
+                                    .tell(ValiWorkerMessage::NetworkRequest {
                                         validation_req: req,
                                         info: message.info,
                                         sender,
-                                        schema_id,
                                     })
                                     .await
                                 {
@@ -270,7 +291,6 @@ impl Intermediary {
                                         validation_req: req,
                                         info: message.info,
                                         sender,
-                                        schema_id
                                     })
                                     .await
                                     {
@@ -284,25 +304,24 @@ impl Intermediary {
                             };
                         }
                     }
-                    ActorMessage::EvaluationReq { req, schema_id } => {
+                    ActorMessage::EvaluationReq { req } => {
                         // Evaluator path.
                         let evaluator_path = ActorPath::from(
                             message.info.receiver_actor.clone(),
                         );
 
-                        if schema_id.is_gov() {
+                        if req.content().schema_id.is_gov() {
                             // Evaluator actor.
-                            let evaluator_actor: Option<ActorRef<Evaluator>> =
+                            let evaluator_actor: Option<ActorRef<EvalWorker>> =
                                 system.get_actor(&evaluator_path).await;
 
                             // We obtain the validator
                             if let Some(evaluator_actor) = evaluator_actor {
                                 if let Err(e) = evaluator_actor
-                                    .tell(EvaluatorMessage::NetworkRequest {
+                                    .tell(EvalWorkerMessage::NetworkRequest {
                                         evaluation_req: req,
                                         info: message.info,
-                                        schema_id,
-                                        sender
+                                        sender,
                                     })
                                     .await
                                 {
@@ -329,7 +348,6 @@ impl Intermediary {
                             .tell(EvaluationSchemaMessage::NetworkRequest {
                                 evaluation_req: Box::new(req),
                                 info: message.info,
-                                schema_id,
                                 sender
                             })
                             .await
@@ -350,16 +368,16 @@ impl Intermediary {
                         );
 
                         // Evaluator actor.
-                        let approver_actor: Option<ActorRef<Approver>> =
+                        let approver_actor: Option<ActorRef<ApprPersist>> =
                             system.get_actor(&approver_path).await;
 
                         // We obtain the validator
                         if let Some(approver_actor) = approver_actor {
                             if let Err(e) = approver_actor
-                                .tell(ApproverMessage::NetworkRequest {
+                                .tell(ApprPersistMessage::NetworkRequest {
                                     approval_req: req,
                                     info: message.info,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -420,7 +438,7 @@ impl Intermediary {
                                 info: message.info,
                                 last_proof: last_proof.clone(),
                                 last_vali_res,
-                                sender
+                                sender,
                             })
                             .await
                         {
@@ -450,7 +468,7 @@ impl Intermediary {
                                     actual_sn,
                                     subject_id: subject_id.to_string(),
                                     info: message.info,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -472,17 +490,17 @@ impl Intermediary {
                             message.info.receiver_actor.clone(),
                         );
                         // Validator actor.
-                        let validator_actor: Option<ActorRef<Validator>> =
+                        let validator_actor: Option<ActorRef<ValiCoordinator>> =
                             system.get_actor(&validator_path).await;
 
                         // We obtain the validator
                         if let Some(validator_actor) = validator_actor {
                             if let Err(e) = validator_actor
-                                .tell(ValidatorMessage::NetworkResponse {
+                                .tell(ValiCoordinatorMessage::NetworkResponse {
                                     validation_res: res,
                                     request_id: message.info.request_id,
                                     version: message.info.version,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -504,17 +522,17 @@ impl Intermediary {
                             message.info.receiver_actor.clone(),
                         );
                         // Validator actor.
-                        let evaluator_actor: Option<ActorRef<Evaluator>> =
+                        let evaluator_actor: Option<ActorRef<EvalCoordinator>> =
                             system.get_actor(&evaluator_path).await;
 
                         // We obtain the validator
                         if let Some(evaluator_actor) = evaluator_actor {
                             if let Err(e) = evaluator_actor
-                                .tell(EvaluatorMessage::NetworkResponse {
+                                .tell(EvalCoordinatorMessage::NetworkResponse {
                                     evaluation_res: res,
                                     request_id: message.info.request_id,
                                     version: message.info.version,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -536,17 +554,17 @@ impl Intermediary {
                             message.info.receiver_actor.clone(),
                         );
                         // Validator actor.
-                        let approver_actor: Option<ActorRef<Approver>> =
+                        let approver_actor: Option<ActorRef<ApprLight>> =
                             system.get_actor(&approver_path).await;
 
                         // We obtain the validator
                         if let Some(approver_actor) = approver_actor {
                             if let Err(e) = approver_actor
-                                .tell(ApproverMessage::NetworkResponse {
+                                .tell(ApprLightMessage::NetworkResponse {
                                     approval_res: *res,
                                     request_id: message.info.request_id,
                                     version: message.info.version,
-                                    sender
+                                    sender,
                                 })
                                 .await
                             {
@@ -611,7 +629,7 @@ impl Intermediary {
                                 schema_id,
                                 namespace,
                                 governance_id,
-                                sender
+                                sender,
                             })
                             .await
                         {

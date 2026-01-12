@@ -26,6 +26,7 @@ use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, Signed};
+use ave_common::request::EventRequest;
 use config::Config as AveBaseConfig;
 use error::Error;
 use helpers::db::common::{
@@ -54,7 +55,7 @@ use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use validation::{Validation, ValidationInfo, ValidationMessage};
+use validation::{Validation, ValidationMessage};
 
 
 use crate::config::SinkAuth;
@@ -314,10 +315,7 @@ impl Api {
             }
         };
 
-        let signed_event_req = Signed {
-            content: request,
-            signature,
-        };
+        let signed_event_req = Signed::from_parts(request, signature);
 
         let response = self
             .request

@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -6,11 +6,11 @@ use ave_actors::{
     FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::{Namespace, SchemaType, identity::{DigestIdentifier, PublicKey, Signed}, request::EventRequest};
 use network::ComunicateInfo;
 
 use crate::{
-    ActorMessage, Event as AveEvent, EventRequest, NetworkMessage, Node,
+    ActorMessage, NetworkMessage, Node,
     NodeMessage, NodeResponse,
     auth::WitnessesAuth,
     governance::{
@@ -18,24 +18,21 @@ use crate::{
         data::GovernanceData,
         model::{CreatorQuantity, HashThisRole, RoleTypes},
     },
-    helpers::network::service::HelperService,
+    helpers::network::service::NetworkSender,
     model::{
-        Namespace,
         common::{
             emit_fail,
             node::{get_node_subject_data, subject_old_owner, try_to_update},
             subject::{
-                get_gov, get_quantity, update_last_state, update_ledger,
+                get_gov, get_quantity, update_ledger,
             },
         },
-        event::{Ledger, ProtocolsSignatures},
+        event::{Ledger},
         network::RetryNetwork,
-        request::SchemaType,
     },
-    subject::{LastStateData, SignedLedger},
+    subject::{SignedLedger},
     tracker::{Tracker, TrackerMessage, TrackerResponse},
-    update::TransferResponse,
-    validation::proof::ValidationProof,
+    update::TransferResponse
 };
 
 use tracing::{error, warn};
@@ -53,6 +50,7 @@ pub struct AuthGovData {
 
 pub struct Distributor {
     pub node: PublicKey,
+    pub network: Arc<NetworkSender>
 }
 
 // TODO QUITAR TODOS LOS &self.
@@ -108,13 +106,13 @@ impl Distributor {
         ledger: SignedLedger,
     ) -> Result<(), ActorError> {
         if let EventRequest::Create(request) =
-            ledger.content.event_request.content.clone()
+            ledger.content().event_request.content().clone()
             && !request.schema_id.is_gov()
         {
             let gov = get_gov(ctx, &request.governance_id.to_string()).await?;
 
             if let Some(max_quantity) = gov.max_creations(
-                &ledger.signature.signer,
+                &ledger.signature().signer,
                 request.schema_id.clone(),
                 request.namespace.clone(),
             ) {
@@ -122,7 +120,7 @@ impl Distributor {
                     ctx,
                     request.governance_id.to_string(),
                     request.schema_id.clone(),
-                    ledger.signature.signer.to_string(),
+                    ledger.signature().signer.to_string(),
                     request.namespace.to_string(),
                 )
                 .await?;
@@ -277,7 +275,7 @@ impl Distributor {
                 Ok(())
             // está auth pero no tengo la copia
             } else if let EventRequest::Create(_) =
-                ledger.event_request.content.clone()
+                ledger.event_request.content().clone()
             {
                 Ok(())
             } else {
@@ -296,7 +294,7 @@ impl Distributor {
                         false,
                     )
                 } else if let EventRequest::Create(request) =
-                    ledger.event_request.content.clone()
+                    ledger.event_request.content().clone()
                 {
                     (
                         request.namespace,
@@ -339,7 +337,7 @@ impl Distributor {
 
             // Comparamos las govs, puede ser que ya no seamos testigo o que de repente seamos testigos.
             if let Some(gov_version) = auth_data.gov_version {
-                Self::cmp_govs(
+                self.cmp_govs(
                     ctx,
                     gov.clone(),
                     gov_version,
@@ -379,6 +377,7 @@ impl Distributor {
     }
 
     async fn cmp_govs(
+        &self,
         ctx: &mut ActorContext<Distributor>,
         gov: GovernanceData,
         gov_version: u64,
@@ -403,14 +402,8 @@ impl Distributor {
                     ),
                 };
 
-                let helper: Option<HelperService> =
-                    ctx.system().get_helper("network").await;
 
-                let Some(mut helper) = helper else {
-                    return Err(ActorError::NotHelper("network".to_owned()));
-                };
-
-                helper
+                self.network
                     .send_command(network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
@@ -524,7 +517,7 @@ impl Distributor {
             })?;
 
         if let Some(gov_version) = gov_version {
-            Self::cmp_govs(
+            self.cmp_govs(
                 ctx,
                 gov.clone(),
                 gov_version,
@@ -762,19 +755,7 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<HelperService> =
-                    ctx.system().get_helper("network").await;
-
-                let Some(mut helper) = helper else {
-                    let e = ActorError::NotHelper("network".to_owned());
-                    error!(
-                        TARGET_DISTRIBUTOR,
-                        "GetLastSn, Can not obtain network helper"
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if let Err(e) = helper
+                if let Err(e) = self.network
                     .send_command(network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
@@ -881,10 +862,10 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<HelperService> =
+                let helper: Option<Arc<NetworkSender>> =
                     ctx.system().get_helper("network").await;
 
-                let Some(mut helper) = helper else {
+                let Some(helper) = helper else {
                     let e = ActorError::NotHelper("network".to_owned());
                     error!(
                         TARGET_DISTRIBUTOR,
@@ -1000,18 +981,6 @@ impl Handler<Distributor> for Distributor {
                     ),
                 };
 
-                let helper: Option<HelperService> =
-                    ctx.system().get_helper("network").await;
-
-                let Some(mut helper) = helper else {
-                    let e = ActorError::NotHelper("network".to_owned());
-                    error!(
-                        TARGET_DISTRIBUTOR,
-                        "SendDistribution, Can not obtain network helper {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
                 let gov_id_digest = DigestIdentifier::from_str(&governance_id)
                     .map_err(|e| {
                         ActorError::FunctionalFail(format!(
@@ -1020,7 +989,7 @@ impl Handler<Distributor> for Distributor {
                         ))
                     })?;
 
-                if let Err(e) = helper
+                if let Err(e) = self.network
                     .send_command(network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
@@ -1053,7 +1022,7 @@ impl Handler<Distributor> for Distributor {
             } => {
                 let receiver_actor = format!(
                     "/user/node/distributor_{}",
-                    event.content.subject_id
+                    event.content().subject_id
                 );
 
                 let message = NetworkMessage {
@@ -1071,7 +1040,7 @@ impl Handler<Distributor> for Distributor {
                     },
                 };
 
-                let target = RetryNetwork::default();
+                let target = RetryNetwork::new(self.network.clone());
 
                 #[cfg(feature = "test")]
                 let strategy = Strategy::FixedInterval(
@@ -1173,7 +1142,7 @@ impl Handler<Distributor> for Distributor {
                 sender,
             } => {
                 let auth_data = AuthGovData {
-                    gov_version: Some(ledger.content.gov_version),
+                    gov_version: Some(ledger.content().gov_version),
                     schema_id: last_proof.schema_id.clone(),
                     namespace: last_proof.namespace.clone(),
                     governance_id: last_proof.governance_id.clone(),
@@ -1184,9 +1153,9 @@ impl Handler<Distributor> for Distributor {
                 if let Err(e) = self
                     .check_auth(
                         ctx,
-                        event.signature.signer.clone(),
+                        event.signature().signer.clone(),
                         info.clone(),
-                        ledger.content.clone(),
+                        ledger.content().clone(),
                         auth_data,
                         sender.clone(),
                     )
@@ -1209,7 +1178,7 @@ impl Handler<Distributor> for Distributor {
 
                 // Ahora hay que crear el sujeto si no existe sn = 0, o aplicar los eventos
                 // verificando los hashes y aplicando el patch.
-                let subject_id = &ledger.content.subject_id.to_string();
+                let subject_id = &ledger.content().subject_id.to_string();
                 let (owner, new_owner) = if ledger
                     .content
                     .event_request
@@ -1303,7 +1272,7 @@ impl Handler<Distributor> for Distributor {
 
                             // NO se aplicó el evento porque tendría un sn demasiado grande, no es el que toca o ya está aplicado.
                             // Si fue demasiado grande
-                            if last_sn < ledger.content.sn {
+                            if last_sn < ledger.content().sn {
                                 let gov = match get_gov(ctx, subject_id).await {
                                     Ok(gov) => gov,
                                     Err(e) => {
@@ -1328,28 +1297,15 @@ impl Handler<Distributor> for Distributor {
                                     ),
                                 };
 
-                                let helper: Option<HelperService> =
-                                    ctx.system().get_helper("network").await;
-
-                                let Some(mut helper) = helper else {
-                                    error!(
-                                        TARGET_DISTRIBUTOR,
-                                        "LastEventDistribution, can not obtain network helper"
-                                    );
-                                    let e = ActorError::NotHelper(
-                                        "network".to_owned(),
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                };
 
                                 // Pedimos copia del ledger.
-                                if let Err(e) = helper.send_command(network::CommandHelper::SendMessage {
+                                if let Err(e) = self.network.send_command(network::CommandHelper::SendMessage {
                                     message: NetworkMessage {
                                     info: new_info,
                                     message: ActorMessage::DistributionLedgerReq {
                                         gov_version: Some(our_gov_version),
                                         actual_sn: Some(last_sn),
-                                        subject_id: ledger.content.subject_id.clone(),
+                                        subject_id: ledger.content().subject_id.clone(),
                                     },
                                 },
                             }).await {
@@ -1421,7 +1377,7 @@ impl Handler<Distributor> for Distributor {
                     let objetive = if info.request_id.is_empty() {
                         format!(
                             "node/{}/distribution",
-                            event.content.subject_id
+                            event.content().subject_id
                         )
                     } else {
                         info.request_id.clone()
@@ -1438,19 +1394,8 @@ impl Handler<Distributor> for Distributor {
                         ),
                     };
 
-                    let helper: Option<HelperService> =
-                        ctx.system().get_helper("network").await;
 
-                    let Some(mut helper) = helper else {
-                        error!(
-                            TARGET_DISTRIBUTOR,
-                            "LastEventDistribution, can not obtain network helper"
-                        );
-                        let e = ActorError::NotHelper("network".to_owned());
-                        return Err(emit_fail(ctx, e).await);
-                    };
-
-                    if let Err(e) = helper
+                    if let Err(e) = self.network
                         .send_command(network::CommandHelper::SendMessage {
                             message: NetworkMessage {
                                 info: new_info,
@@ -1508,9 +1453,9 @@ impl Handler<Distributor> for Distributor {
                 if let Err(e) = self
                     .check_auth(
                         ctx,
-                        events[0].signature.signer.clone(),
+                        events[0].signature().signer.clone(),
                         info.clone(),
-                        events[0].content.clone(),
+                        events[0].content().clone(),
                         auth_data,
                         sender.clone(),
                     )
@@ -1527,7 +1472,7 @@ impl Handler<Distributor> for Distributor {
                     }
                 };
 
-                let subject_id_digest = events[0].content.subject_id.clone();
+                let subject_id_digest = events[0].content().subject_id.clone();
                 let subject_id = &subject_id_digest.to_string();
 
                 let (old_owner, old_new_owner, old_sn) = if events[0]
@@ -1615,7 +1560,7 @@ impl Handler<Distributor> for Distributor {
 
                 let (actual_sn, owner, new_owner) = if !events.is_empty() {
                     let last_ledger_sn =
-                        events.last().map(|x| x.content.sn).unwrap_or_default();
+                        events.last().map(|x| x.content().sn).unwrap_or_default();
                     if last_ledger_sn > old_sn {
                         match update_ledger(
                             ctx,
@@ -1661,7 +1606,7 @@ impl Handler<Distributor> for Distributor {
                         vali_res,
                     } = last_state;
 
-                    match actual_sn.cmp(&event.content.sn) {
+                    match actual_sn.cmp(&event.content().sn) {
                         std::cmp::Ordering::Less => {
                             // No quiero su Event.
                         }
@@ -1690,7 +1635,7 @@ impl Handler<Distributor> for Distributor {
                                     .tell(
                                         DistributorMessage::SendDistribution {
                                             gov_version: Some(
-                                                event.content.gov_version,
+                                                event.content().gov_version,
                                             ),
                                             actual_sn: Some(actual_sn),
                                             subject_id: subject_id.to_string(),
@@ -1709,13 +1654,7 @@ impl Handler<Distributor> for Distributor {
                         }
                     };
                 } else {
-                    let gov_id = if governance_id.is_empty() {
-                        subject_id.clone()
-                    } else {
-                        governance_id.to_string()
-                    };
-
-                    let gov_version = match get_gov(ctx, &gov_id.to_string())
+                    let gov_version = match get_gov(ctx, &governance_id.to_string())
                         .await
                     {
                         Ok(gov) => gov.version,
@@ -1739,19 +1678,7 @@ impl Handler<Distributor> for Distributor {
                         ),
                     };
 
-                    let helper: Option<HelperService> =
-                        ctx.system().get_helper("network").await;
-
-                    let Some(mut helper) = helper else {
-                        error!(
-                            TARGET_DISTRIBUTOR,
-                            "LedgerDistribution, can not obtain netowrk helper"
-                        );
-                        let e = ActorError::NotHelper("network".to_owned());
-                        return Err(emit_fail(ctx, e).await);
-                    };
-
-                    if let Err(e) = helper
+                    if let Err(e) = self.network
                         .send_command(network::CommandHelper::SendMessage {
                             message: NetworkMessage {
                                 info: new_info,

@@ -1,40 +1,40 @@
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
-use ave_common::identity::{PublicKey, Signed};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper,
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed},
+};
 use network::ComunicateInfo;
-use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     auth::WitnessesAuth,
-    model::{common::{emit_fail, node::try_to_update}, request::SchemaType},
+    evaluation::worker::{EvalWorker, EvalWorkerMessage},
+    helpers::network::service::NetworkSender,
+    model::common::{emit_fail, node::try_to_update},
 };
 
-use super::{
-    evaluator::{Evaluator, EvaluatorMessage},
-    request::EvaluationReq,
-};
+use super::request::EvaluationReq;
 
-const TARGET_SCHEMA: &str = "Ave-Evaluation-Schema";
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct EvaluationSchema {
-    gov_version: u64,
-    creators: HashSet<PublicKey>,
-}
-
-impl EvaluationSchema {
-    pub fn new(creators: HashSet<PublicKey>, gov_version: u64) -> Self {
-        EvaluationSchema {
-            creators,
-            gov_version,
-        }
-    }
+    pub our_key: Arc<PublicKey>,
+    pub governance_id: DigestIdentifier,
+    pub gov_version: u64,
+    pub schema_id: SchemaType,
+    pub sn: u64,
+    pub creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+    pub init_state: ValueWrapper,
+    pub hash: HashAlgorithm,
+    pub network: Arc<NetworkSender>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,9 +43,13 @@ pub enum EvaluationSchemaMessage {
         evaluation_req: Box<Signed<EvaluationReq>>,
         info: ComunicateInfo,
         sender: PublicKey,
-        schema_id: SchemaType,
     },
-    UpdateEvaluators(HashSet<PublicKey>, u64),
+    Update {
+        creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        sn: u64,
+        gov_version: u64,
+        init_state: ValueWrapper,
+    },
 }
 
 impl Message for EvaluationSchemaMessage {}
@@ -57,6 +61,14 @@ impl Actor for EvaluationSchema {
     type Event = ();
     type Message = EvaluationSchemaMessage;
     type Response = ();
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "EvaluationSchema", id = id)
+        } else {
+            info_span!("EvaluationSchema", id = id)
+        }
+    }
 }
 
 #[async_trait]
@@ -72,69 +84,104 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                 evaluation_req,
                 info,
                 sender,
-                schema_id,
             } => {
-                if self.gov_version < evaluation_req.content.gov_version
+                if sender != evaluation_req.signature().signer {
+                    warn!(
+                        msg_type = "NetworkRequest",
+                        sender = %sender,
+                        signer = %evaluation_req.signature().signer,
+                        "Signer and sender are not the same"
+                    );
+                    return Ok(());
+                }
+
+                if self.governance_id != evaluation_req.content().governance_id
+                {
+                    warn!(
+                        msg_type = "NetworkRequest",
+                        expected_governance_id = %self.governance_id,
+                        received_governance_id = %evaluation_req.content().governance_id,
+                        "Invalid governance_id"
+                    );
+                    return Ok(());
+                }
+
+                if self.schema_id != evaluation_req.content().schema_id {
+                    warn!(
+                        msg_type = "NetworkRequest",
+                        expected_schema_id = ?self.schema_id,
+                        received_schema_id = ?evaluation_req.content().schema_id,
+                        "Invalid schema_id"
+                    );
+                    return Ok(());
+                }
+
+                if let Some(ns) = self.creators.get(&sender) {
+                    if !ns.contains(&evaluation_req.content().namespace) {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            sender = %sender,
+                            namespace = ?evaluation_req.content().namespace,
+                            "Invalid sender namespace"
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    warn!(
+                        msg_type = "NetworkRequest",
+                        sender = %sender,
+                        "Sender is not a creator"
+                    );
+                    return Ok(());
+                }
+
+                if self.gov_version < evaluation_req.content().gov_version
                     && let Err(e) = try_to_update(
                         ctx,
-                        evaluation_req.content.context.governance_id.clone(),
+                        self.governance_id.clone(),
                         WitnessesAuth::Witnesses,
                     )
                     .await
                 {
                     error!(
-                        TARGET_SCHEMA,
-                        "NetworkRequest, can not update governance: {}", e
+                        msg_type = "NetworkRequest",
+                        error = %e,
+                        "Failed to update governance"
                     );
                     return Err(emit_fail(ctx, e).await);
                 }
 
-                let creator =
-                    self.creators.get(&evaluation_req.signature.signer);
-                if creator.is_none() {
-                    warn!(TARGET_SCHEMA, "NetworkRequest, is not a Creator");
-                    return Err(ActorError::Functional(
-                        "Sender is not a Creator".to_owned(),
-                    ));
-                };
-
-                if let Err(e) = evaluation_req.verify() {
-                    warn!(
-                        TARGET_SCHEMA,
-                        "NetworkRequest, can not verify evaliation req"
-                    );
-                    return Err(ActorError::Functional(format!(
-                        "Can not verify evaluation request: {}.",
-                        e
-                    )));
-                }
-
                 let child = ctx
                     .create_child(
-                        &format!("{}", evaluation_req.signature.signer),
-                        Evaluator::new(
-                            info.request_id.clone(),
-                            info.version,
-                            evaluation_req.signature.signer.clone(),
-                        ),
+                        &format!("{}", evaluation_req.signature().signer),
+                        EvalWorker {
+                            node_key: sender.clone(),
+                            our_key: self.our_key.clone(),
+                            init_state: Some(self.init_state.clone()),
+                            governance_id: self.governance_id.clone(),
+                            gov_version: self.gov_version,
+                            sn: self.sn,
+                            hash: self.hash.clone(),
+                            network: self.network.clone(),
+                        },
                     )
                     .await;
 
                 let evaluator_actor = match child {
                     Ok(child) => child,
                     Err(e) => {
-                        if let ActorError::Exists(_) = e {
+                        if let ActorError::Exists { .. } = e {
                             warn!(
-                                TARGET_SCHEMA,
-                                "NetworkRequest, can not create evaluator: {}",
-                                e
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Evaluator actor already exists"
                             );
                             return Ok(());
                         } else {
                             error!(
-                                TARGET_SCHEMA,
-                                "NetworkRequest, can not create evaluator: {}",
-                                e
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Failed to create evaluator actor"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
@@ -142,27 +189,43 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                 };
 
                 if let Err(e) = evaluator_actor
-                    .tell(EvaluatorMessage::NetworkRequest {
+                    .tell(EvalWorkerMessage::NetworkRequest {
                         evaluation_req: *evaluation_req,
                         info,
-                        sender,
-                        schema_id,
+                        sender: sender.clone(),
                     })
                     .await
                 {
                     warn!(
-                        TARGET_SCHEMA,
-                        "NetworkRequest, can not send request to evaluator: {}",
-                        e
+                        msg_type = "NetworkRequest",
+                        error = %e,
+                        "Failed to send request to evaluator"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "NetworkRequest",
+                        sender = %sender,
+                        "Evaluation request delegated to worker"
                     );
                 }
             }
-            EvaluationSchemaMessage::UpdateEvaluators(
+            EvaluationSchemaMessage::Update {
                 creators,
+                sn,
                 gov_version,
-            ) => {
+                init_state,
+            } => {
                 self.creators = creators;
                 self.gov_version = gov_version;
+                self.sn = sn;
+                self.init_state = init_state;
+
+                debug!(
+                    msg_type = "Update",
+                    sn = self.sn,
+                    gov_version = self.gov_version,
+                    "Schema updated successfully"
+                );
             }
         };
         Ok(())

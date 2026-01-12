@@ -7,7 +7,7 @@ use crate::{
     Event as AveEvent,
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
-    model::{event::ProtocolsSignatures, request::SchemaType},
+    model::{event::ProtocolsSignatures,},
     subject::{LastStateData, SignedLedger},
     update::TransferResponse,
     validation::{
@@ -21,15 +21,13 @@ pub mod service;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActorMessage {
     ValidationReq {
-        req: Box<Signed<ValidationReq>>,
-        schema_id: SchemaType,
+        req: Signed<ValidationReq>,
     },
     ValidationRes {
         res: Signed<ValidationRes>,
     },
     EvaluationReq {
         req: Signed<EvaluationReq>,
-        schema_id: SchemaType,
     },
     EvaluationRes {
         res: Signed<EvaluationRes>,

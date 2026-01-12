@@ -1,20 +1,15 @@
 use crate::{
-    approval::approver::ApproverEvent,
     error::Error,
     external_db::DBManager,
-    subject::{
-        SignedLedger, laststate::{LastStateEvent}, sinkdata::SinkDataEvent
-    },
+    subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 
 use crate::config::ExternalDbConfig;
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
-use common::{
-    ApproveInfo, EventInfo, PaginatorEvents, SignaturesInfo,
-    SubjectInfo,
-};
+
+use ave_common::response::{EventInfo, PaginatorEvents, SubjectInfo};
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
 use std::path::Path;
@@ -26,11 +21,6 @@ pub mod common;
 
 #[async_trait]
 pub trait Querys {
-    // approver
-    async fn get_approve_req(
-        &self,
-        subject_id: &str,
-    ) -> Result<ApproveInfo, Error>;
     // events
     async fn get_events(
         &self,
@@ -61,12 +51,6 @@ pub trait Querys {
         &self,
         subject_id: &str,
     ) -> Result<SubjectInfo, Error>;
-
-    // signatures
-    async fn get_signatures(
-        &self,
-        subject_id: &str,
-    ) -> Result<SignaturesInfo, Error>;
 }
 
 #[derive(Clone)]
@@ -95,20 +79,6 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_last_state(&self) -> impl Subscriber<LastStateEvent> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
-        }
-    }
-
-    pub fn get_approver(&self) -> impl Subscriber<ApproverEvent> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
-        }
-    }
-
     pub fn get_subject(&self) -> impl Subscriber<SignedLedger> {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -126,18 +96,6 @@ impl ExternalDB {
 
 #[async_trait]
 impl Querys for ExternalDB {
-    async fn get_signatures(
-        &self,
-        subject_id: &str,
-    ) -> Result<SignaturesInfo, Error> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_signatures(subject_id).await
-            }
-        }
-    }
-
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -195,18 +153,6 @@ impl Querys for ExternalDB {
                         subject_id, quantity, reverse, sucess,
                     )
                     .await
-            }
-        }
-    }
-
-    async fn get_approve_req(
-        &self,
-        subject_id: &str,
-    ) -> Result<ApproveInfo, Error> {
-        match self {
-            #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_approve_req(subject_id).await
             }
         }
     }

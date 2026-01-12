@@ -1,196 +1,132 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use approver::{Approver, ApproverMessage, VotationType};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
-use ave_actors::{ActorPath, ActorRef, Event};
-use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::identity::{PublicKey, Signed};
-use borsh::{BorshDeserialize, BorshSerialize};
+use ave_actors::{ActorPath, ActorRef};
+
+use ave_common::identity::{
+    CryptoError, DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
+    hash_borsh,
+};
+
 use request::ApprovalReq;
 use response::ApprovalRes;
-use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
 
-use crate::EventRequest;
-use crate::approval::approver::InitApprover;
-use crate::evaluation::response::EvalLedgerResponse;
-use crate::governance::model::{ProtocolTypes, Quorum};
-use crate::model::SignTypesNode;
+use tracing::{Span, debug, error, info_span, warn};
+
+use crate::approval::light::{ApprLight, ApprLightMessage};
+use crate::approval::persist::{ApprPersist, ApprPersistMessage};
+use crate::governance::model::Quorum;
+use crate::helpers::network::service::NetworkSender;
 use crate::model::common::emit_fail;
-use crate::model::common::node::get_sign;
-use crate::model::common::subject::{
-    get_metadata, get_signers_quorum_gov_version,
-};
-use crate::model::event::{LedgerValue, ProtocolsSignatures};
-use crate::request::manager::{RequestManager, RequestManagerMessage};
-use crate::{db::Storable, evaluation::request::EvaluationReq};
 
-pub mod approver;
+use crate::model::event::ApprovalData;
+use crate::model::network::TimeOut;
+
+use crate::request::manager::{RequestManager, RequestManagerMessage};
+
+pub mod light;
+pub mod persist;
 pub mod request;
 pub mod response;
+pub mod types;
 
-const TARGET_APPROVAL: &str = "Ave-Approval";
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    Default
-)]
+#[derive(Clone, Debug)]
 pub struct Approval {
-    #[serde(skip)]
-    our_key: PublicKey,
+    hash: HashAlgorithm,
+    network: Arc<NetworkSender>,
+    our_key: Arc<PublicKey>,
     quorum: Quorum,
     request_id: String,
     version: u64,
-    request: Option<Signed<ApprovalReq>>,
+    request: Signed<ApprovalReq>,
     approvers: HashSet<PublicKey>,
-    approvers_response: Vec<ProtocolsSignatures>,
+    approvers_timeout: Vec<TimeOut>,
+    approvers_agrees: Vec<Signature>,
+    approvers_disagrees: Vec<Signature>,
+    approval_req_hash: DigestIdentifier,
     approvers_quantity: u32,
 }
 
-impl BorshSerialize for Approval {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
-        BorshSerialize::serialize(&self.quorum, writer)?;
-        BorshSerialize::serialize(&self.request_id, writer)?;
-        BorshSerialize::serialize(&self.version, writer)?;
-        BorshSerialize::serialize(&self.request, writer)?;
-        BorshSerialize::serialize(&self.approvers, writer)?;
-        BorshSerialize::serialize(&self.approvers_response, writer)?;
-        BorshSerialize::serialize(&self.approvers_quantity, writer)?;
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for Approval {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        // Deserialize the persisted fields
-        let quorum = Quorum::deserialize_reader(reader)?;
-        let request_id = String::deserialize_reader(reader)?;
-        let version = u64::deserialize_reader(reader)?;
-        let request = Option::<Signed<ApprovalReq>>::deserialize_reader(reader)?;
-        let approvers = HashSet::<PublicKey>::deserialize_reader(reader)?;
-        let approvers_response = Vec::<ProtocolsSignatures>::deserialize_reader(reader)?;
-        let approvers_quantity = u32::deserialize_reader(reader)?;
-
-        let our_key = PublicKey::default();
-
-        Ok(Self {
+impl Approval {
+    pub fn new(
+        our_key: Arc<PublicKey>,
+        request: Signed<ApprovalReq>,
+        quorum: Quorum,
+        approvers: HashSet<PublicKey>,
+        hash: HashAlgorithm,
+        network: Arc<NetworkSender>,
+    ) -> Self {
+        Self {
+            hash,
+            network,
             our_key,
             quorum,
-            request_id,
-            version,
             request,
+            approvers_quantity: approvers.len() as u32,
             approvers,
-            approvers_response,
-            approvers_quantity,
-        })
-    }
-}
-
-impl Approval {
-    // generate the approval request
-    async fn create_approval_req(
-        &mut self,
-        ctx: &mut ActorContext<Approval>,
-        eval_req: EvaluationReq,
-        eval_res: EvalLedgerResponse,
-    ) -> Result<ApprovalReq, ActorError> {
-        let subject_id = if let EventRequest::Fact(event) =
-            eval_req.event_request.content.clone()
-        {
-            event.subject_id
-        } else {
-            return Err(ActorError::FunctionalFail("An attempt is being made to approvation an event that is not fact.".to_owned()));
-        };
-
-        let prev_hash = get_metadata(ctx, &subject_id.to_string())
-            .await?
-            .last_event_hash;
-
-        let LedgerValue::Patch(patch) = eval_res.value else {
-            return Err(ActorError::FunctionalFail(
-                "Approvation can not be possible if eval fail".to_owned(),
-            ));
-        };
-
-        Ok(ApprovalReq {
-            event_request: eval_req.event_request,
-            sn: eval_req.sn,
-            gov_version: eval_req.gov_version,
-            patch,
-            state_hash: eval_res.state_hash,
-            hash_prev_event: prev_hash,
-            subject_id,
-        })
+            request_id: String::default(),
+            version: 0,
+            approvers_timeout: vec![],
+            approvers_agrees: vec![],
+            approvers_disagrees: vec![],
+            approval_req_hash: DigestIdentifier::default(),
+        }
     }
 
     async fn create_approvers(
         &self,
         ctx: &mut ActorContext<Approval>,
-        request_id: &str,
-        version: u64,
-        approval_req: Signed<ApprovalReq>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
-        let our_key = self.our_key.clone();
+        let subject_id = self
+            .request
+            .content()
+            .event_request
+            .content()
+            .get_subject_id()
+            .to_string();
 
-        if signer == our_key {
-            let approver_path = ActorPath::from(format!(
-                "/user/node/{}/approver",
-                approval_req.content.subject_id
-            ));
-            let approver_actor: Option<ActorRef<Approver>> =
+        if signer == *self.our_key {
+            let approver_path =
+                ActorPath::from(format!("/user/node/{}/approver", subject_id));
+            let approver_actor: Option<ActorRef<ApprPersist>> =
                 ctx.system().get_actor(&approver_path).await;
             if let Some(approver_actor) = approver_actor {
                 approver_actor
-                    .tell(ApproverMessage::LocalApproval {
-                        request_id: request_id.to_owned(),
-                        version,
-                        approval_req: approval_req.content,
-                        our_key: signer,
+                    .tell(ApprPersistMessage::LocalApproval {
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                        approval_req: self.request.clone(),
                     })
                     .await?
             } else {
-                return Err(ActorError::NotFound(approver_path));
+                return Err(ActorError::NotFound {
+                    path: approver_path,
+                });
             }
         } else {
-            let init_approver = InitApprover {
-                request_id: request_id.to_owned(),
-                version,
-                node_key: signer.clone(),
-                subject_id: approval_req.content.subject_id.to_string(),
-                pass_votation: VotationType::Manual,
-            };
-
             // Create Approvers child
-            let Ok(child) = ctx
+            let child = ctx
                 .create_child(
                     &signer.to_string(),
-                    Approver::initial(init_approver),
+                    ApprLight::new(
+                        self.network.clone(),
+                        self.our_key.clone(),
+                        signer.clone(),
+                        self.request_id.clone(),
+                        self.version,
+                    ),
                 )
-                .await
-            else {
-                return Err(ActorError::Create(
-                    ctx.path().clone(),
-                    signer.to_string(),
-                ));
-            };
+                .await?;
 
             child
-                .tell(ApproverMessage::NetworkApproval {
-                    approval_req: approval_req.clone(),
-                    node_key: signer,
+                .tell(ApprLightMessage::NetworkApproval {
+                    approval_req: self.request.clone(),
                 })
                 .await?;
         }
@@ -214,15 +150,32 @@ impl Approval {
         if let Some(req_actor) = req_actor {
             req_actor
                 .tell(RequestManagerMessage::ApprovalRes {
-                    result: response,
-                    signatures: self.approvers_response.clone(),
+                    appro_res: ApprovalData {
+                        approval_req_signature: self
+                            .request
+                            .signature()
+                            .clone(),
+                        approval_req_hash: self.approval_req_hash.clone(),
+                        approvers_agrees_signatures: self
+                            .approvers_agrees
+                            .clone(),
+                        approvers_disagrees_signatures: self
+                            .approvers_disagrees
+                            .clone(),
+                        approvers_timeout: self.approvers_timeout.clone(),
+                        approved: response,
+                    },
                 })
                 .await?
         } else {
-            return Err(ActorError::NotFound(req_path));
+            return Err(ActorError::NotFound { path: req_path });
         };
 
         Ok(())
+    }
+
+    fn create_appro_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
+        hash_borsh(&*self.hash.hasher(), &self.request)
     }
 }
 
@@ -231,58 +184,28 @@ pub enum ApprovalMessage {
     Create {
         request_id: String,
         version: u64,
-        eval_req: Box<EvaluationReq>,
-        eval_res: EvalLedgerResponse,
     },
     Response {
         approval_res: ApprovalRes,
         sender: PublicKey,
+        signature: Option<Signature>,
     },
 }
 
 impl Message for ApprovalMessage {}
 
-//
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub enum ApprovalEvent {
-    SafeState {
-        request_id: String,
-        version: u64,
-        // Quorum
-        quorum: Quorum,
-        request: Box<Option<Signed<ApprovalReq>>>,
-        // approvers
-        approvers: HashSet<PublicKey>,
-        // Actual responses
-        approvers_response: Vec<ProtocolsSignatures>,
-        // approvers quantity
-        approvers_quantity: u32,
-    },
-    Response(Box<ProtocolsSignatures>),
-}
-
-impl Event for ApprovalEvent {}
-
 #[async_trait]
 impl Actor for Approval {
-    type Event = ApprovalEvent;
+    type Event = ();
     type Message = ApprovalMessage;
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let prefix = ctx.path().parent().key();
-        self.init_store("approval", Some(prefix), false, ctx).await
-    }
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Approval", id = id)
+        } else {
+            info_span!("Approval", id = id)
+        }
     }
 }
 
@@ -298,190 +221,143 @@ impl Handler<Approval> for Approval {
             ApprovalMessage::Create {
                 request_id,
                 version,
-                eval_req,
-                eval_res,
             } => {
-                if request_id == self.request_id && version == self.version {
-                    let Some(request) = self.request.clone() else {
-                        return Ok(());
-                    };
-
-                    for signer in self.approvers.clone() {
-                        if let Err(e) = self
-                            .create_approvers(
-                                ctx,
-                                &self.request_id,
-                                self.version,
-                                request.clone(),
-                                signer,
-                            )
-                            .await
-                        {
-                            error!(
-                                TARGET_APPROVAL,
-                                "Create, Can not create approver actor, {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    }
-                } else {
-                    // Creamos una petición de aprobación, miramos quorum y lanzamos approvers
-                    let approval_req = match self
-                        .create_approval_req(ctx, *eval_req.clone(), eval_res)
-                        .await
-                    {
-                        Ok(approval_req) => approval_req,
-                        Err(e) => {
-                            error!(
-                                TARGET_APPROVAL,
-                                "Create, Can not create approval request, {}",
-                                e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-                    // Get signers and quorum
-                    let (signers, quorum, _) =
-                        match get_signers_quorum_gov_version(
+                let approval_req_hash = match self.create_appro_req_hash() {
+                    Ok(digest) => digest,
+                    Err(e) => {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to create approval request hash"
+                        );
+                        return Err(emit_fail(
                             ctx,
-                            &eval_req.context.subject_id.to_string(),
-                            &eval_req.context.schema_id,
-                            eval_req.context.namespace,
-                            ProtocolTypes::Aprovation,
+                            ActorError::FunctionalCritical {
+                                description: format!("Cannot create approval request hash: {}", e)
+                            },
                         )
-                        .await
-                        {
-                            Ok(signers_quorum) => signers_quorum,
-                            Err(e) => {
-                                error!(
-                                    TARGET_APPROVAL,
-                                    "Create, Can not obtain signers quorum and gov version, {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        };
-
-                    let signature = match get_sign(
-                        ctx,
-                        SignTypesNode::ApprovalReq(approval_req.clone()),
-                    )
-                    .await
-                    {
-                        Ok(signature) => signature,
-                        Err(e) => {
-                            error!(
-                                TARGET_APPROVAL,
-                                "Create, Can not obtain sign approval request, {}",
-                                e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-
-                    let signed_approval_req: Signed<ApprovalReq> = Signed {
-                        content: approval_req,
-                        signature,
-                    };
-
-                    for signer in signers.clone() {
-                        if let Err(e) = self
-                            .create_approvers(
-                                ctx,
-                                &request_id,
-                                version,
-                                signed_approval_req.clone(),
-                                signer,
-                            )
-                            .await
-                        {
-                            error!(
-                                TARGET_APPROVAL,
-                                "Create, Can not create approver actor, {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
+                        .await);
                     }
+                };
 
-                    self.on_event(
-                        ApprovalEvent::SafeState {
-                            request_id: request_id.clone(),
-                            version,
-                            quorum: quorum.clone(),
-                            request: Box::new(Some(
-                                signed_approval_req.clone(),
-                            )),
-                            approvers: signers.clone(),
-                            approvers_response: vec![].clone(),
-                            approvers_quantity: signers.len() as u32,
-                        },
-                        ctx,
-                    )
-                    .await;
+                self.approval_req_hash = approval_req_hash;
+                self.request_id = request_id.to_string();
+                self.version = version;
+
+                for signer in self.approvers.clone() {
+                    if let Err(e) = self.create_approvers(ctx, signer.clone()).await {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            signer = %signer,
+                            "Failed to create approver actor"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
                 }
+
+                debug!(
+                    msg_type = "Create",
+                    request_id = %request_id,
+                    version = version,
+                    approvers_count = self.approvers_quantity,
+                    "Approval created and approvers initialized"
+                );
             }
             ApprovalMessage::Response {
                 approval_res,
                 sender,
+                signature,
             } => {
-                if self.check_approval(sender) {
+                if self.check_approval(sender.clone()) {
                     match approval_res.clone() {
-                        ApprovalRes::Response(sinature, response) => {
-                            if response {
-                                self.on_event(
-                                    ApprovalEvent::Response(Box::new(
-                                        ProtocolsSignatures::Signature(
-                                            sinature,
-                                        ),
-                                    )),
-                                    ctx,
-                                )
-                                .await;
+                        ApprovalRes::Response {
+                            approval_req_hash,
+                            agrees,
+                            ..
+                        } => {
+                            if approval_req_hash != self.approval_req_hash {
+                                error!(
+                                    msg_type = "Response",
+                                    expected_hash = %self.approval_req_hash,
+                                    received_hash = %approval_req_hash,
+                                    "Invalid approval request hash"
+                                );
+                                return Err(ActorError::Functional {
+                                    description: "Approval Response, Invalid approval request hash".to_owned(),
+                                });
+                            }
+
+                            let Some(signature) = signature else {
+                                error!(
+                                    msg_type = "Response",
+                                    sender = %sender,
+                                    "Approval response without signature"
+                                );
+                                return Err(ActorError::Functional {
+                                    description: "Approval Response solver without signature".to_owned(),
+                                });
+                            };
+
+                            if agrees {
+                                self.approvers_agrees.push(signature);
+                            } else {
+                                self.approvers_disagrees.push(signature);
                             }
                         }
                         ApprovalRes::TimeOut(approval_time_out) => {
-                            self.on_event(
-                                ApprovalEvent::Response(Box::new(
-                                    ProtocolsSignatures::TimeOut(
-                                        approval_time_out,
-                                    ),
-                                )),
-                                ctx,
-                            )
-                            .await;
+                            self.approvers_timeout.push(approval_time_out);
                         }
                     };
 
                     // si hemos llegado al quorum y hay suficientes aprobaciones aprobamos...
                     if self.quorum.check_quorum(
                         self.approvers_quantity,
-                        self.approvers_response.len() as u32,
+                        self.approvers_agrees.len() as u32
+                            + self.approvers_timeout.len() as u32,
                     ) {
                         if let Err(e) =
                             self.send_approval_to_req(ctx, true).await
                         {
                             error!(
-                                TARGET_APPROVAL,
-                                "Response, Can not send approval response to request actor, {}",
-                                e
+                                msg_type = "Response",
+                                error = %e,
+                                "Failed to send approval response to request actor"
                             );
                             return Err(emit_fail(ctx, e).await);
                         };
+
+                        debug!(
+                            msg_type = "Response",
+                            agrees = self.approvers_agrees.len(),
+                            disagrees = self.approvers_disagrees.len(),
+                            timeouts = self.approvers_timeout.len(),
+                            "Quorum reached, approval accepted"
+                        );
                     } else if self.approvers.is_empty()
                         && let Err(e) =
                             self.send_approval_to_req(ctx, false).await
                     {
                         error!(
-                            TARGET_APPROVAL,
-                            "Response, Can not send approval response to request actor, {}",
-                            e
+                            msg_type = "Response",
+                            error = %e,
+                            "Failed to send approval response to request actor"
                         );
                         return Err(emit_fail(ctx, e).await);
+                    } else if self.approvers.is_empty() {
+                        debug!(
+                            msg_type = "Response",
+                            agrees = self.approvers_agrees.len(),
+                            disagrees = self.approvers_disagrees.len(),
+                            timeouts = self.approvers_timeout.len(),
+                            "All approvers responded, approval rejected"
+                        );
                     }
                 } else {
                     warn!(
-                        TARGET_APPROVAL,
-                        "Response, A response has been received from someone we were not expecting."
+                        msg_type = "Response",
+                        sender = %sender,
+                        "Response from unexpected sender"
                     );
                 }
             }
@@ -489,79 +365,15 @@ impl Handler<Approval> for Approval {
         Ok(())
     }
 
-    async fn on_event(
-        &mut self,
-        event: ApprovalEvent,
-        ctx: &mut ActorContext<Approval>,
-    ) {
-        if let Err(e) = self.persist(&event, ctx).await {
-            error!(
-                TARGET_APPROVAL,
-                "OnEvent, can not persist information: {}", e
-            );
-            emit_fail(ctx, e).await;
-        };
-    }
-
     async fn on_child_fault(
         &mut self,
         error: ActorError,
         ctx: &mut ActorContext<Approval>,
     ) -> ChildAction {
+        error!(error = %error, "Child fault occurred");
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
 }
 
-// Debemos persistir quienes han aprobado y quienes no
-#[async_trait]
-impl PersistentActor for Approval {
-    type Persistence = LightPersistence;
-    type InitParams = PublicKey;
-
-    fn update(&mut self, state: Self) {
-        self.quorum = state.quorum; 
-        self.request_id = state.request_id; 
-        self.version = state.version; 
-        self.request = state.request; 
-        self.approvers = state.approvers; 
-        self.approvers_response = state.approvers_response; 
-        self.approvers_quantity = state.approvers_quantity; 
-    }
-
-    fn create_initial(params: Self::InitParams) -> Self {
-        Self {
-            our_key: params,
-            ..Default::default()
-        }
-    }
-
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match event {
-            ApprovalEvent::SafeState {
-                request_id,
-                version,
-                quorum,
-                request,
-                approvers,
-                approvers_response,
-                approvers_quantity,
-            } => {
-                self.version = *version;
-                self.request_id.clone_from(request_id);
-                self.quorum = quorum.clone();
-                self.request.clone_from(request);
-                self.approvers.clone_from(approvers);
-                self.approvers_response.clone_from(approvers_response);
-                self.approvers_quantity = *approvers_quantity;
-            }
-            ApprovalEvent::Response(response) => {
-                self.approvers_response.push(*response.clone());
-            }
-        };
-
-        Ok(())
-    }
-}
-
-impl Storable for Approval {}
+impl NotPersistentActor for Approval {}

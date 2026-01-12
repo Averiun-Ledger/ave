@@ -1,22 +1,22 @@
 use std::collections::{BTreeSet, HashSet};
 
-use ave_common::identity::PublicKey;
+use ave_common::{Namespace, SchemaType, identity::PublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    error::Error,
+    evaluation::runner::error::{self, RunnerError},
     governance::{
         data::GovernanceData,
         model::{Quorum, Role},
         roles_register::RolesRegisterUpdate,
     },
-    model::{Namespace, request::SchemaType},
 };
 
 use super::model::{
     CreatorQuantity, RoleCreator, RolesAllSchemas, RolesGov, RolesSchema,
 };
+
 pub type MemberName = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ impl GovernanceEvent {
         let mut validators: HashSet<SchemaType> = HashSet::new();
 
         if let Some(roles) = &self.roles {
-            //Gov
+            // Gov
             if let Some(governance) = &roles.governance {
                 if let Some(add) = &governance.add {
                     approvers = add.approver.is_some();
@@ -58,6 +58,7 @@ impl GovernanceEvent {
                     }
                 }
             }
+
             // all schemas
             if let Some(all_schemas) = &roles.all_schemas {
                 if let Some(add) = &all_schemas.add {
@@ -156,7 +157,6 @@ impl GovernanceEvent {
         let validators =
             (!validators.is_empty()).then(|| validators.into_iter().collect());
 
-        // (!set.is_empty()).then(|| set.into_iter().collect())
         if appr_quorum
             || approvers
             || eval_quorum.is_some()
@@ -250,12 +250,15 @@ impl GovRoleEvent {
         &self,
         governance: &GovernanceData,
         new_roles: &mut RolesGov,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RunnerError> {
         if let Some(add) = self.add.clone() {
             if add.is_empty() {
-                return Err(Error::Runner(
-                    "Add in GovRoleEvent can not be empty".to_owned(),
-                ));
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "GovRoleEvent add".to_owned(),
+                    },
+                });
             }
 
             let members: HashSet<String> =
@@ -264,32 +267,54 @@ impl GovRoleEvent {
             // Approvers
             if let Some(approvers) = add.approver {
                 if approvers.is_empty() {
-                    return Err(Error::Runner("Approvers vec in governance roles add can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "approvers vec".to_owned(),
+                        },
+                    });
                 }
 
                 for mut approver in approvers {
                     approver = approver.trim().to_owned();
 
                     if approver.is_empty() {
-                        return Err(Error::Runner(
-                            "Approver name in governance roles can not empty"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: "approver name".to_owned(),
+                            },
+                        });
                     }
 
                     if approver.len() > 100 {
-                        return Err(Error::Runner("Approver name len in governance roles must be less than or equal to 100".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: "approver name".to_owned(),
+                                actual: approver.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !members.contains(&approver) {
-                        return Err(Error::Runner("Approver name in governance roles is not a governance member".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: approver.clone(),
+                            },
+                        });
                     }
 
                     if !new_roles.approver.insert(approver.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a approver in governance roles",
-                            approver
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "governance approver".to_owned(),
+                                id: approver,
+                            },
+                        });
                     };
                 }
             }
@@ -297,32 +322,54 @@ impl GovRoleEvent {
             // Evaluators
             if let Some(evaluators) = add.evaluator {
                 if evaluators.is_empty() {
-                    return Err(Error::Runner("Evaluators vec in governance roles add can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "evaluators vec in governance roles add".to_owned(),
+                        },
+                    });
                 }
 
                 for mut evaluator in evaluators {
                     evaluator = evaluator.trim().to_owned();
 
                     if evaluator.is_empty() {
-                        return Err(Error::Runner(
-                            "Evaluator name in governance roles can not empty"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: "evaluator name".to_owned(),
+                            },
+                        });
                     }
 
                     if evaluator.len() > 100 {
-                        return Err(Error::Runner("Evaluator name len in governance roles must be less than or equal to 100".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: "evaluator name".to_owned(),
+                                actual: evaluator.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !members.contains(&evaluator) {
-                        return Err(Error::Runner("Evaluator name in governance roles is not a governance member".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: evaluator.clone(),
+                            },
+                        });
                     }
 
                     if !new_roles.evaluator.insert(evaluator.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a evaluator in governance roles",
-                            evaluator
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "governance evaluator".to_owned(),
+                                id: evaluator,
+                            },
+                        });
                     };
                 }
             }
@@ -330,32 +377,54 @@ impl GovRoleEvent {
             // Validators
             if let Some(validators) = add.validator {
                 if validators.is_empty() {
-                    return Err(Error::Runner("Validators vec in governance roles add can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "validators vec in governance roles add".to_owned(),
+                        },
+                    });
                 }
 
                 for mut validator in validators {
                     validator = validator.trim().to_owned();
 
                     if validator.is_empty() {
-                        return Err(Error::Runner(
-                            "Validator name in governance roles can not empty"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: "validator name".to_owned(),
+                            },
+                        });
                     }
 
                     if validator.len() > 100 {
-                        return Err(Error::Runner("Validator name len in governance roles must be less than or equal to 100".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: "validator name".to_owned(),
+                                actual: validator.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !members.contains(&validator) {
-                        return Err(Error::Runner("Validator name in governance roles is not a governance member".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: validator.clone(),
+                            },
+                        });
                     }
 
                     if !new_roles.validator.insert(validator.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a validator in governance roles",
-                            validator
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "governance validator".to_owned(),
+                                id: validator,
+                            },
+                        });
                     };
                 }
             }
@@ -363,32 +432,54 @@ impl GovRoleEvent {
             // Witnesses
             if let Some(witnesses) = add.witness {
                 if witnesses.is_empty() {
-                    return Err(Error::Runner("Witnesses vec in governance roles add can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "witnesses vec in governance roles add".to_owned(),
+                        },
+                    });
                 }
 
                 for mut witness in witnesses {
                     witness = witness.trim().to_owned();
 
                     if witness.is_empty() {
-                        return Err(Error::Runner(
-                            "Witness name in governance roles can not empty"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: "witness name".to_owned(),
+                            },
+                        });
                     }
 
                     if witness.len() > 100 {
-                        return Err(Error::Runner("Witness name len in governance roles must be less than or equal to 100".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: "witness name".to_owned(),
+                                actual: witness.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !members.contains(&witness) {
-                        return Err(Error::Runner("Witness name in governance roles is not a governance member".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: witness.clone(),
+                            },
+                        });
                     }
 
                     if !new_roles.witness.insert(witness.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a witness in governance roles",
-                            witness
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "governance witness".to_owned(),
+                                id: witness,
+                            },
+                        });
                     };
                 }
             }
@@ -396,36 +487,55 @@ impl GovRoleEvent {
             // Issuers
             if let Some(issuers) = add.issuer {
                 if issuers.is_empty() {
-                    return Err(Error::Runner(
-                        "Issuers vec in governance roles can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuers vec in governance roles add".to_owned(),
+                        },
+                    });
                 }
 
                 for mut issuer in issuers {
                     issuer = issuer.trim().to_owned();
 
                     if issuer.is_empty() {
-                        return Err(Error::Runner(
-                            "Issuer name in governance roles can not empty"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: "issuer name".to_owned(),
+                            },
+                        });
                     }
 
                     if issuer.len() > 100 {
-                        return Err(Error::Runner("Issuer name len in governance roles must be less than or equal to 100".to_owned()));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: "issuer name".to_owned(),
+                                actual: issuer.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if issuer != "Any" {
                         if !members.contains(&issuer) {
-                            return Err(Error::Runner("Issuer name in governance roles is not a governance member".to_owned()));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "GovRoleEvent::check_data",
+                                kind: error::InvalidEventKind::NotMember {
+                                    who: issuer.clone(),
+                                },
+                            });
                         }
 
                         if !new_roles.issuer.users.insert(issuer.clone()) {
-                            return Err(Error::Runner(format!(
-                                "{} there is already a issuer in governance roles",
-                                issuer
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "GovRoleEvent::check_data",
+                                kind: error::InvalidEventKind::AlreadyExists {
+                                    what: "governance issuer".to_owned(),
+                                    id: issuer,
+                                },
+                            });
                         };
                     } else {
                         new_roles.issuer.any = true;
@@ -436,23 +546,34 @@ impl GovRoleEvent {
 
         if let Some(remove) = self.remove.clone() {
             if remove.is_empty() {
-                return Err(Error::Runner(
-                    "Remove in GovRoleEvent can not be empty".to_owned(),
-                ));
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "GovRoleEvent remove".to_owned(),
+                    },
+                });
             }
 
             // Approvers
             if let Some(approvers) = remove.approver {
                 if approvers.is_empty() {
-                    return Err(Error::Runner("Approver vec in governance roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "approvers vec in governance roles remove".to_owned(),
+                        },
+                    });
                 }
 
                 for approver in approvers {
                     if !new_roles.approver.remove(&approver) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove approver {}, does not have this role",
-                            approver
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: format!("approver {}", approver),
+                                reason: "does not have this role".to_owned(),
+                            },
+                        });
                     }
                 }
             }
@@ -460,30 +581,46 @@ impl GovRoleEvent {
             // Evaluators
             if let Some(evaluators) = remove.evaluator {
                 if evaluators.is_empty() {
-                    return Err(Error::Runner("Evaluators vec in governance roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "evaluators vec in governance roles remove".to_owned(),
+                        },
+                    });
                 }
 
                 for evaluator in evaluators {
                     if !new_roles.evaluator.remove(&evaluator) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove evaluator {}, does not have this role",
-                            evaluator
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: format!("evaluator {}", evaluator),
+                                reason: "does not have this role".to_owned(),
+                            },
+                        });
                     }
                 }
             }
 
-            // Evaluators
+            // Validators
             if let Some(validators) = remove.validator {
                 if validators.is_empty() {
-                    return Err(Error::Runner("Validators vec in governance roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "validators vec in governance roles remove".to_owned(),
+                        },
+                    });
                 }
                 for validator in validators {
                     if !new_roles.validator.remove(&validator) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove validator {}, does not have this role",
-                            validator
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: format!("validator {}", validator),
+                                reason: "does not have this role".to_owned(),
+                            },
+                        });
                     }
                 }
             }
@@ -491,14 +628,22 @@ impl GovRoleEvent {
             // Witnesses
             if let Some(witnesses) = remove.witness {
                 if witnesses.is_empty() {
-                    return Err(Error::Runner("Witnesses vec in governance roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "witnesses vec in governance roles remove".to_owned(),
+                        },
+                    });
                 }
                 for witness in witnesses {
                     if !new_roles.witness.remove(&witness) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove witness {}, does not have this role",
-                            witness
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: format!("witness {}", witness),
+                                reason: "does not have this role".to_owned(),
+                            },
+                        });
                     };
                 }
             }
@@ -506,15 +651,23 @@ impl GovRoleEvent {
             // Issuers
             if let Some(issuers) = remove.issuer {
                 if issuers.is_empty() {
-                    return Err(Error::Runner("Issuers vec in governance roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuers vec in governance roles remove".to_owned(),
+                        },
+                    });
                 }
                 for issuer in issuers {
                     if issuer != "Any" {
                         if !new_roles.issuer.users.remove(&issuer) {
-                            return Err(Error::Runner(format!(
-                                "Can not remove issuer {}, does not have this role",
-                                issuer
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "GovRoleEvent::check_data",
+                                kind: error::InvalidEventKind::CannotRemove {
+                                    what: format!("issuer {}", issuer),
+                                    reason: "does not have this role".to_owned(),
+                                },
+                            });
                         };
                     } else {
                         new_roles.issuer.any = false;
@@ -548,7 +701,7 @@ impl AllSchemasRoleEvent {
         governance: &GovernanceData,
         roles_not_gov: RolesAllSchemas,
         schema_id: &SchemaType,
-    ) -> Result<RolesAllSchemas, Error> {
+    ) -> Result<RolesAllSchemas, RunnerError> {
         let schema_role = SchemaIdRole::from(self.clone());
 
         let mut roles_schema = RolesSchema::from(roles_not_gov);
@@ -582,278 +735,369 @@ impl SchemaIdRole {
         governance: &GovernanceData,
         roles_schema: &mut RolesSchema,
         schema_id: &SchemaType,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RunnerError> {
         let members: HashSet<String> =
             governance.members.keys().cloned().collect();
 
         if let Some(add) = self.add.clone() {
             if add.is_empty() {
-                return Err(Error::Runner(
-                    "Add in SchemaRolesEvent can not be empty".to_owned(),
-                ));
+                return Err(RunnerError::InvalidEvent {
+                    location: "SchemaIdRole::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "SchemaRolesEvent add".to_owned(),
+                    },
+                });
             }
 
             if let Some(evaluators) = add.evaluator {
                 if evaluators.is_empty() {
-                    return Err(Error::Runner(
-                        "Evaluators vec in schema roles add can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "evaluators vec in schema roles add".to_owned(),
+                        },
+                    });
                 }
 
                 for mut evaluator in evaluators {
                     evaluator.name = evaluator.name.trim().to_owned();
 
                     if evaluator.name.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Evaluator name in schema {} roles can not be empty",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: format!("evaluator name in schema {}", schema_id),
+                            },
+                        });
                     }
 
                     if evaluator.name.len() > 100 {
-                        return Err(Error::Runner(format!(
-                            "Evaluator name len in schema {} roles must be less than or equal to 100",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: format!("evaluator name in schema {}", schema_id),
+                                actual: evaluator.name.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !evaluator.namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Evaluator namespace in schema {} roles is invalid",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator namespace in schema {}", schema_id),
+                                reason: "namespace is invalid".to_owned(),
+                            },
+                        });
                     }
 
                     if !members.contains(&evaluator.name) {
-                        return Err(Error::Runner(format!(
-                            "Evaluator name in schema {} roles is not a governance member",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: evaluator.name.clone(),
+                            },
+                        });
                     }
 
                     if !roles_schema.evaluator.insert(evaluator.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a evaluator in schema {} roles",
-                            evaluator.name, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: format!("schema {} evaluator", schema_id),
+                                id: evaluator.name,
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(validators) = add.validator {
                 if validators.is_empty() {
-                    return Err(Error::Runner(
-                        "Validators vec in schema roles add can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "validators vec".to_owned(),
+                        },
+                    });
                 }
 
                 for mut validator in validators {
                     validator.name = validator.name.trim().to_owned();
 
                     if validator.name.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Validator name in schema {} roles can not be empty",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: format!("validator name in schema {}", schema_id),
+                            },
+                        });
                     }
 
                     if validator.name.len() > 100 {
-                        return Err(Error::Runner(format!(
-                            "Validator name len in schema {} roles must be less than or equal to 100",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: format!("validator name in schema {}", schema_id),
+                                actual: validator.name.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !validator.namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Validator namespace in schema {} roles is invalid",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !members.contains(&validator.name) {
-                        return Err(Error::Runner(format!(
-                            "Validator name in schema {} roles is not a governance member",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: validator.name.clone(),
+                            },
+                        });
                     }
 
                     if !roles_schema.validator.insert(validator.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a validator in schema {} roles",
-                            validator.name, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "validator".to_owned(),
+                                id: validator.name.clone(),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(witnesses) = add.witness {
                 if witnesses.is_empty() {
-                    return Err(Error::Runner(
-                        "Witnesses vec in schema roles add can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "witnesses vec".to_owned(),
+                        },
+                    });
                 }
 
                 for mut witness in witnesses {
                     witness.name = witness.name.trim().to_owned();
 
                     if witness.name.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Witness name in schema {} roles can not be empty",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: format!("witness name in schema {}", schema_id),
+                            },
+                        });
                     }
 
                     if witness.name.len() > 100 {
-                        return Err(Error::Runner(format!(
-                            "Witness name len in schema {} roles must be less than or equal to 100",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: format!("witness name in schema {}", schema_id),
+                                actual: witness.name.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !witness.namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Witness namespace in schema {} roles is invalid",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !members.contains(&witness.name) {
-                        return Err(Error::Runner(format!(
-                            "Witness name in schema {} roles is not a governance member",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: witness.name.clone(),
+                            },
+                        });
                     }
 
                     if !roles_schema.witness.insert(witness.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a witness in schema {} roles",
-                            witness.name, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "witness".to_owned(),
+                                id: witness.name.clone(),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(creators) = add.creator {
                 if creators.is_empty() {
-                    return Err(Error::Runner(
-                        "Creators vec in schema roles add can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "creators vec".to_owned(),
+                        },
+                    });
                 }
 
                 for mut creator in creators {
                     creator.name = creator.name.trim().to_owned();
 
                     if creator.name.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Creator name in schema {} roles can not be empty",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: format!("creator name in schema {}", schema_id),
+                            },
+                        });
                     }
 
                     if creator.name.len() > 100 {
-                        return Err(Error::Runner(format!(
-                            "Creator name len in schema {} roles must be less than or equal to 100",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: format!("creator name in schema {}", schema_id),
+                                actual: creator.name.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if !creator.quantity.check() {
-                        return Err(Error::Runner(
-                            "Creator quantity in schema roles can not be 0"
-                                .to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "creator quantity".to_owned(),
+                                reason: "cannot be 0".to_owned(),
+                            },
+                        });
                     }
 
                     if !creator.namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Creator namespace in schema {} roles is invalid",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !members.contains(&creator.name) {
-                        return Err(Error::Runner(format!(
-                            "Creator name in schema {} roles is not a governance member",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::NotMember {
+                                who: creator.name.clone(),
+                            },
+                        });
                     }
 
                     for witness in creator.witnesses.iter() {
                         if witness != "Witnesses" && !members.contains(witness)
                         {
-                            return Err(Error::Runner(format!(
-                                "Witness of Creator in schema {} roles is not a governance member",
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::NotMember {
+                                    who: witness.clone(),
+                                },
+                            });
                         }
                     }
 
                     if !roles_schema.creator.insert(creator.clone()) {
-                        return Err(Error::Runner(format!(
-                            "{} there is already a creator in schema {} roles",
-                            creator.name, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "creator".to_owned(),
+                                id: creator.name.clone(),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(issuers) = add.issuer {
                 if issuers.is_empty() {
-                    return Err(Error::Runner(
-                        "Issuers vec in schema roles add can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuers vec".to_owned(),
+                        },
+                    });
                 }
 
                 for mut issuer in issuers {
                     issuer.name = issuer.name.trim().to_owned();
 
                     if issuer.name.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Issuer name in schema {} roles can not be empty",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::Empty {
+                                what: format!("issuer name in schema {}", schema_id),
+                            },
+                        });
                     }
 
                     if issuer.name.len() > 100 {
-                        return Err(Error::Runner(format!(
-                            "Issuer name len in schema {} roles must be less than or equal to 100",
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidSize {
+                                field: format!("issuer name in schema {}", schema_id),
+                                actual: issuer.name.len(),
+                                max: 100,
+                            },
+                        });
                     }
 
                     if issuer.name != "Any" {
                         if !issuer.namespace.check() {
-                            return Err(Error::Runner(format!(
-                                "Issuer namespace in schema {} roles is invalid",
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("issuer namespace in schema {}", schema_id),
+                                    reason: "invalid namespace".to_owned(),
+                                },
+                            });
                         }
 
                         if !members.contains(&issuer.name) {
-                            return Err(Error::Runner(format!(
-                                "Issuer name in schema {} roles is not a governance member",
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::NotMember {
+                                    who: issuer.name.clone(),
+                                },
+                            });
                         }
 
                         if !roles_schema.issuer.users.insert(issuer.clone()) {
-                            return Err(Error::Runner(format!(
-                                "{} there is already a issuer in schema {} roles",
-                                issuer.name, schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::AlreadyExists {
+                                    what: "issuer".to_owned(),
+                                    id: issuer.name.clone(),
+                                },
+                            });
                         };
                     } else {
                         if !issuer.namespace.is_empty() {
-                            return Err(Error::Runner(format!(
-                                "Can not add issuer Any in schema {}, Namespace must be empty",
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("issuer 'Any' namespace in schema {}", schema_id),
+                                    reason: "namespace must be empty for 'Any' issuer".to_owned(),
+                                },
+                            });
                         }
 
                         roles_schema.issuer.any = true;
@@ -864,65 +1108,91 @@ impl SchemaIdRole {
 
         if let Some(remove) = self.remove.clone() {
             if remove.is_empty() {
-                return Err(Error::Runner(
-                    "Remove in SchemaRolesEvent can not be empty".to_owned(),
-                ));
+                return Err(RunnerError::InvalidEvent {
+                    location: "SchemaIdRole::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "SchemaRolesEvent remove".to_owned(),
+                    },
+                });
             }
 
             if let Some(evaluators) = remove.evaluator {
                 if evaluators.is_empty() {
-                    return Err(Error::Runner("Evaluators vec in schema roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "evaluators vec in remove".to_owned(),
+                        },
+                    });
                 }
 
                 for evaluator in evaluators {
                     if !roles_schema.evaluator.remove(&evaluator) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove evaluator {} {} from {} schema, does not have this role",
-                            evaluator.name, evaluator.namespace, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: "evaluator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", evaluator.name, evaluator.namespace, schema_id),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(validators) = remove.validator {
                 if validators.is_empty() {
-                    return Err(Error::Runner("Validators vec in schema roles remove can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "validators vec in remove".to_owned(),
+                        },
+                    });
                 }
 
                 for validator in validators {
                     if !roles_schema.validator.remove(&validator) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove validator {} {} from {} schema, does not have this role",
-                            validator.name, validator.namespace, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: "validator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", validator.name, validator.namespace, schema_id),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(witnesses) = remove.witness {
                 if witnesses.is_empty() {
-                    return Err(Error::Runner(
-                        "Witnesses vec in schema roles remove can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "witnesses vec in remove".to_owned(),
+                        },
+                    });
                 }
 
                 for witness in witnesses {
                     if !roles_schema.witness.remove(&witness) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove witness {} {} from {} schema, does not have this role",
-                            witness.name, witness.namespace, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: "witness".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", witness.name, witness.namespace, schema_id),
+                            },
+                        });
                     };
                 }
             }
 
             if let Some(creators) = remove.creator {
                 if creators.is_empty() {
-                    return Err(Error::Runner(
-                        "Creators vec in schema roles remove can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "creators vec in remove".to_owned(),
+                        },
+                    });
                 }
 
                 for creator in creators {
@@ -930,33 +1200,47 @@ impl SchemaIdRole {
                         &creator.name,
                         creator.namespace.clone(),
                     )) {
-                        return Err(Error::Runner(format!(
-                            "Can not remove creator {} {} from {} schema, does not have this role",
-                            creator.name, creator.namespace, schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotRemove {
+                                what: "creator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", creator.name, creator.namespace, schema_id),
+                            },
+                        });
                     }
                 }
             }
 
             if let Some(issuers) = remove.issuer {
                 if issuers.is_empty() {
-                    return Err(Error::Runner(
-                        "Issuers vec in schema roles remove can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuers vec in remove".to_owned(),
+                        },
+                    });
                 }
 
                 for issuer in issuers {
                     if issuer.name != "Any" {
                         if !roles_schema.issuer.users.remove(&issuer) {
-                            return Err(Error::Runner(format!(
-                                "Can not remove issuer {} {} from {} schema, does not have this role",
-                                issuer.name, issuer.namespace, schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::CannotRemove {
+                                    what: "issuer".to_owned(),
+                                    reason: format!("{} {} does not have this role in schema {}", issuer.name, issuer.namespace, schema_id),
+                                },
+                            });
                         }
                     } else {
                         if !issuer.namespace.is_empty() {
-                            return Err(Error::Runner("Can not remove issuer Any, Namespace must be empty".to_owned()));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: "issuer 'Any' namespace in remove".to_owned(),
+                                    reason: "namespace must be empty for 'Any' issuer".to_owned(),
+                                },
+                            });
                         }
                         roles_schema.issuer.any = false;
                     }
@@ -966,153 +1250,180 @@ impl SchemaIdRole {
 
         if let Some(change) = self.change.clone() {
             if change.is_empty() {
-                return Err(Error::Runner(
-                    "Change in SchemaRolesEvent can not be empty".to_owned(),
-                ));
+                return Err(RunnerError::InvalidEvent {
+                    location: "SchemaIdRole::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "SchemaRolesEvent change".to_owned(),
+                    },
+                });
             }
 
             if let Some(evaluators) = change.evaluator {
                 if evaluators.is_empty() {
-                    return Err(Error::Runner("Evaluators vec in schema roles change can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "evaluators vec in change".to_owned(),
+                        },
+                    });
                 }
 
                 for evaluator in evaluators {
                     if !evaluator.new_namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Can not change evaluator {} {} from {} schema, invalid new namespace",
-                            evaluator.actual_name,
-                            evaluator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator {} {} new namespace in schema {}", evaluator.actual_name, evaluator.actual_namespace, schema_id),
+                                reason: "invalid new namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !roles_schema.evaluator.remove(&Role {
                         name: evaluator.actual_name.clone(),
                         namespace: evaluator.actual_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change evaluator {} {} from {} schema, does not have this role",
-                            evaluator.actual_name,
-                            evaluator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotModify {
+                                what: "evaluator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", evaluator.actual_name, evaluator.actual_namespace, schema_id),
+                            },
+                        });
                     };
 
                     if !roles_schema.evaluator.insert(Role {
                         name: evaluator.actual_name.clone(),
                         namespace: evaluator.new_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change evaluator {} {} from {} schema, evaluator whith this namespace already exist",
-                            evaluator.actual_name,
-                            evaluator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "evaluator with new namespace".to_owned(),
+                                id: format!("{} {} in schema {}", evaluator.actual_name, evaluator.new_namespace, schema_id),
+                            },
+                        });
                     }
                 }
             }
 
             if let Some(validators) = change.validator {
                 if validators.is_empty() {
-                    return Err(Error::Runner("Validators vec in schema roles change can not be empty".to_owned()));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "validators vec in change".to_owned(),
+                        },
+                    });
                 }
 
                 for validator in validators {
                     if !validator.new_namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Can not change validator {} {} from {} schema, invalid new namespace",
-                            validator.actual_name,
-                            validator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator {} {} new namespace in schema {}", validator.actual_name, validator.actual_namespace, schema_id),
+                                reason: "invalid new namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !roles_schema.validator.remove(&Role {
                         name: validator.actual_name.clone(),
                         namespace: validator.actual_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change validator {} {} from {} schema, does not have this role",
-                            validator.actual_name,
-                            validator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotModify {
+                                what: "validator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", validator.actual_name, validator.actual_namespace, schema_id),
+                            },
+                        });
                     };
 
                     if !roles_schema.validator.insert(Role {
                         name: validator.actual_name.clone(),
                         namespace: validator.new_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change validator {} {} from {} schema, validator whith this namespace already exist",
-                            validator.actual_name,
-                            validator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "validator with new namespace".to_owned(),
+                                id: format!("{} {} in schema {}", validator.actual_name, validator.new_namespace, schema_id),
+                            },
+                        });
                     }
                 }
             }
 
             if let Some(witnesses) = change.witness {
                 if witnesses.is_empty() {
-                    return Err(Error::Runner(
-                        "Witnesses vec in schema roles change can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "witnesses vec in change".to_owned(),
+                        },
+                    });
                 }
 
                 for witness in witnesses {
                     if !witness.new_namespace.check() {
-                        return Err(Error::Runner(format!(
-                            "Can not change witness {} {} from {} schema, invalid new namespace",
-                            witness.actual_name,
-                            witness.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness {} {} new namespace in schema {}", witness.actual_name, witness.actual_namespace, schema_id),
+                                reason: "invalid new namespace".to_owned(),
+                            },
+                        });
                     }
 
                     if !roles_schema.witness.remove(&Role {
                         name: witness.actual_name.clone(),
                         namespace: witness.actual_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change witness {} {} from {} schema, does not have this role",
-                            witness.actual_name,
-                            witness.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotModify {
+                                what: "witness".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", witness.actual_name, witness.actual_namespace, schema_id),
+                            },
+                        });
                     };
 
                     if !roles_schema.witness.insert(Role {
                         name: witness.actual_name.clone(),
                         namespace: witness.new_namespace.clone(),
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change witness {} {} from {} schema, witness whith this namespace already exist",
-                            witness.actual_name,
-                            witness.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "witness with new namespace".to_owned(),
+                                id: format!("{} {} in schema {}", witness.actual_name, witness.new_namespace, schema_id),
+                            },
+                        });
                     }
                 }
             }
 
             if let Some(creators) = change.creator {
                 if creators.is_empty() {
-                    return Err(Error::Runner(
-                        "Creators vec in schema roles change can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "creators vec in change".to_owned(),
+                        },
+                    });
                 }
 
                 for creator in creators {
                     if creator.is_empty() {
-                        return Err(Error::Runner(format!(
-                            "Can not change creator {} {} from {} schema, has not new namespace or new quantity or new witnesses",
-                            creator.actual_name,
-                            creator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator {} {} change in schema {}", creator.actual_name, creator.actual_namespace, schema_id),
+                                reason: "must specify at least one of: new namespace, new quantity, or new witnesses".to_owned(),
+                            },
+                        });
                     }
 
                     let Some(old_creator) =
@@ -1121,42 +1432,48 @@ impl SchemaIdRole {
                             creator.actual_namespace.clone(),
                         ))
                     else {
-                        return Err(Error::Runner(format!(
-                            "Can not change creator {} {} from {} schema, does not have this role",
-                            creator.actual_name,
-                            creator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotModify {
+                                what: "creator".to_owned(),
+                                reason: format!("{} {} does not have this role in schema {}", creator.actual_name, creator.actual_namespace, schema_id),
+                            },
+                        });
                     };
 
                     let new_namespace = if let Some(new_namespace) =
                         creator.new_namespace
                     {
                         if !new_namespace.check() {
-                            return Err(Error::Runner(format!(
-                                "Can not change creator {} {} from {} schema, invalid new namespace",
-                                creator.actual_name,
-                                creator.actual_namespace,
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("creator {} {} new namespace in schema {}", creator.actual_name, creator.actual_namespace, schema_id),
+                                    reason: "invalid new namespace".to_owned(),
+                                },
+                            });
                         }
                         new_namespace
                     } else {
                         old_creator.namespace
                     };
 
-                    let new_quantity =
-                        if let Some(quantity) = creator.new_quantity {
-                            if !quantity.check() {
-                                return Err(Error::Runner(
-                                "Creator quantity in schema roles can not be 0"
-                                    .to_owned(),
-                            ));
-                            }
-                            quantity
-                        } else {
-                            old_creator.quantity
-                        };
+                    let new_quantity = if let Some(quantity) =
+                        creator.new_quantity
+                    {
+                        if !quantity.check() {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: "creator quantity".to_owned(),
+                                    reason: "cannot be 0".to_owned(),
+                                },
+                            });
+                        }
+                        quantity
+                    } else {
+                        old_creator.quantity
+                    };
 
                     let new_witnesses = if let Some(witnesses) =
                         creator.new_witnesses
@@ -1171,10 +1488,12 @@ impl SchemaIdRole {
                             if witness != "Witnesses"
                                 && !members.contains(witness)
                             {
-                                return Err(Error::Runner(format!(
-                                    "Witness of Creator in schema {} roles is not a governance member",
-                                    schema_id
-                                )));
+                                return Err(RunnerError::InvalidEvent {
+                                    location: "SchemaIdRole::check_data",
+                                    kind: error::InvalidEventKind::NotMember {
+                                        who: witness.clone(),
+                                    },
+                                });
                             }
                         }
 
@@ -1185,66 +1504,76 @@ impl SchemaIdRole {
 
                     if !roles_schema.creator.insert(RoleCreator {
                         name: creator.actual_name.clone(),
-                        namespace: new_namespace,
+                        namespace: new_namespace.clone(),
                         quantity: new_quantity,
                         witnesses: new_witnesses,
                     }) {
-                        return Err(Error::Runner(format!(
-                            "Can not change creator {} {} from {} schema, creator whith this namespace already exist",
-                            creator.actual_name,
-                            creator.actual_namespace,
-                            schema_id
-                        )));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::AlreadyExists {
+                                what: "creator with new namespace".to_owned(),
+                                id: format!("{} {} in schema {}", creator.actual_name, new_namespace, schema_id),
+                            },
+                        });
                     }
                 }
             }
 
             if let Some(issuers) = change.issuer {
                 if issuers.is_empty() {
-                    return Err(Error::Runner(
-                        "Issuers vec in schema roles change can not be empty"
-                            .to_owned(),
-                    ));
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuers vec in change".to_owned(),
+                        },
+                    });
                 }
 
                 for issuer in issuers {
                     if issuer.actual_name != "Any" {
                         if !issuer.new_namespace.check() {
-                            return Err(Error::Runner(format!(
-                                "Can not change issuer {} {} from {} schema, invalid new namespace",
-                                issuer.actual_name,
-                                issuer.actual_namespace,
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("issuer {} {} new namespace in schema {}", issuer.actual_name, issuer.actual_namespace, schema_id),
+                                    reason: "invalid new namespace".to_owned(),
+                                },
+                            });
                         }
 
                         if !roles_schema.issuer.users.remove(&Role {
                             name: issuer.actual_name.clone(),
                             namespace: issuer.actual_namespace.clone(),
                         }) {
-                            return Err(Error::Runner(format!(
-                                "Can not change issuer {} {} from {} schema, does not have this role",
-                                issuer.actual_name,
-                                issuer.actual_namespace,
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::CannotModify {
+                                    what: "issuer".to_owned(),
+                                    reason: format!("{} {} does not have this role in schema {}", issuer.actual_name, issuer.actual_namespace, schema_id),
+                                },
+                            });
                         };
 
                         if !roles_schema.issuer.users.insert(Role {
                             name: issuer.actual_name.clone(),
                             namespace: issuer.new_namespace.clone(),
                         }) {
-                            return Err(Error::Runner(format!(
-                                "Can not change issuer {} {} from {} schema, issuer whith this namespace already exist",
-                                issuer.actual_name,
-                                issuer.actual_namespace,
-                                schema_id
-                            )));
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::AlreadyExists {
+                                    what: "issuer with new namespace".to_owned(),
+                                    id: format!("{} {} in schema {}", issuer.actual_name, issuer.new_namespace, schema_id),
+                                },
+                            });
                         }
                     } else {
-                        return Err(Error::Runner(
-                            "Can not change issuer Any".to_owned(),
-                        ));
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::CannotModify {
+                                what: "issuer 'Any'".to_owned(),
+                                reason: "cannot change issuer 'Any'".to_owned(),
+                            },
+                        });
                     }
                 }
             }

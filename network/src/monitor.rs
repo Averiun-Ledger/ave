@@ -1,7 +1,8 @@
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
+use tracing::{Span, info_span};
 
 use crate::{Event as NetworkEvent, NetworkState};
 
@@ -71,18 +72,12 @@ impl Actor for Monitor {
     type Event = ();
     type Response = MonitorResponse;
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Monitor", id = id)   
+        } else {
+            info_span!("Monitor", id = id)   
+        }
     }
 }
 

@@ -5,11 +5,12 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     NotPersistentActor, Response,
 };
+use ave_common::SchemaType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::{model::{common::emit_fail, request::SchemaType}, subject::Metadata};
+use crate::{model::{common::emit_fail}, subject::Metadata};
 const TARGET_SINKDATA: &str = "Ave-Subject-Sinkdata";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
