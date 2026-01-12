@@ -256,7 +256,7 @@ impl Node {
         let our_key_string = our_key.to_string();
 
         for (subject, data) in self.owned_subjects.clone() {
-            if data.schema_id.is_gov() {
+            if !data.schema_id.is_gov() {
                 let tracker_actor =
                     ctx.create_child(&subject, Tracker::initial(None)).await?;
 
