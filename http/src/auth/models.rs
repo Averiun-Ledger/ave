@@ -290,6 +290,11 @@ pub struct AuditLogQuery {
     pub end_timestamp: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    // Exclusion filters (NOT conditions)
+    pub exclude_user_id: Option<i64>,
+    pub exclude_api_key_id: Option<String>,
+    pub exclude_ip_address: Option<String>,
+    pub exclude_endpoint: Option<String>,
 }
 
 // =============================================================================

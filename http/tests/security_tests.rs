@@ -371,7 +371,6 @@ mod tests {
     #[test]
     fn test_explicit_zero_ttl_overrides_default() {
         use tempfile::TempDir;
-        use std::path::PathBuf;
         use ave_bridge::auth::{ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig};
 
         // Create temp directory for isolated test
@@ -1008,7 +1007,7 @@ mod tests {
             session: SessionConfig {
                 audit_enable: true,
                 audit_retention_days: 90,
-                log_all_requests: false,
+            audit_max_entries: 1_000_000,
             },
         };
 
@@ -1414,7 +1413,7 @@ mod tests {
         let (db, _dirs) = common::create_test_db();
 
         // Create test users with different states
-        let active_user = db
+        let _active_user = db
             .create_user("active_user", "Password123!", None, None, Some(false))
             .unwrap();
 
@@ -1423,7 +1422,7 @@ mod tests {
             .unwrap();
         db.update_user(inactive_user.id, None, Some(false)).unwrap();
 
-        let locked_user = db
+        let _locked_user = db
             .create_user("locked_user", "Password123!", None, None, Some(false))
             .unwrap();
         // Lock the user by exceeding failed attempts
@@ -2575,8 +2574,8 @@ mod tests {
             .unwrap();
 
         // Verify both are considered admins
-        let actor_user = db.get_user_by_id(admin_actor.id).unwrap();
-        let target_user = db.get_user_by_id(admin_target.id).unwrap();
+        let _actor_user = db.get_user_by_id(admin_actor.id).unwrap();
+        let _target_user = db.get_user_by_id(admin_target.id).unwrap();
 
         // Build auth context for admin_actor
         let permissions = db.get_effective_permissions(admin_actor.id).unwrap();
@@ -3091,7 +3090,7 @@ mod tests {
         db.set_user_permission(user.id, "user_api_key", "delete", true, None).unwrap();
 
         // Create a MANAGEMENT key (simulating login)
-        let (management_key, management_info) = db
+        let (_management_key, management_info) = db
             .create_api_key(user.id, Some("management_session"), None, None, true)
             .unwrap();
 
@@ -3127,7 +3126,7 @@ mod tests {
         assert!(result.is_ok(), "Management key should be able to create service keys");
         let (status, Json(response)) = result.unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        let service_key = response.api_key;
+        let _service_key = response.api_key;
         let service_info = response.key_info;
 
         assert!(!service_info.is_management, "Created key should be a service key");

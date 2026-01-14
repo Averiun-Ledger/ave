@@ -43,7 +43,7 @@ mod tests {
             session: SessionConfig {
                 audit_enable: true,
                 audit_retention_days: 90,
-                log_all_requests: false,
+            audit_max_entries: 1_000_000,
             },
         };
 
@@ -941,7 +941,7 @@ mod tests {
         let session = SessionConfig {
             audit_enable: false,
             audit_retention_days: 90,
-            log_all_requests: true,
+            audit_max_entries: 1_000_000,
         };
 
         let dir =
@@ -1004,6 +1004,10 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
@@ -1020,7 +1024,6 @@ mod tests {
 
         config.enable = true;
         config.session.audit_enable = true;
-        config.session.log_all_requests = true;
         config.database_path = path;
 
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
@@ -1070,6 +1073,10 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
@@ -1079,7 +1086,9 @@ mod tests {
     }
 
     #[test]
-    fn test_log_api_request_disabled() {
+    fn test_log_api_request_always_enabled() {
+        // SECURITY: Audit logging is now ALWAYS enabled for full traceability
+        // This test verifies that all requests are logged regardless of config
         let mut config = AuthConfig::default();
 
         let dir =
@@ -1088,7 +1097,6 @@ mod tests {
 
         config.enable = true;
         config.session.audit_enable = true;
-        config.session.log_all_requests = false;
         config.database_path = path;
 
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
@@ -1124,7 +1132,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(log_id, 0);
+        // Verify log was created (log_id > 0 means it was logged)
+        assert!(log_id > 0, "Audit logging should always be active");
 
         let query = AuditLogQuery {
             user_id: Some(user.id),
@@ -1138,10 +1147,16 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
-        assert!(logs.is_empty());
+        assert_eq!(logs.len(), 1, "Should have logged exactly one request");
+        assert_eq!(logs[0].endpoint.as_deref(), Some("/api/test"));
+        assert_eq!(logs[0].http_method.as_deref(), Some("POST"));
     }
 
     // =============================================================================

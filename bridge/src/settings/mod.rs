@@ -136,7 +136,7 @@ cleanup_interval_seconds = 1800
 [auth.session]
 audit_enable = false
 audit_retention_days = 30
-log_all_requests = true
+audit_max_entries = 1000000
 
 [http]
 http_address = "127.0.0.1:4000"
@@ -230,7 +230,7 @@ auth:
   session:
     audit_enable: false
     audit_retention_days: 30
-    log_all_requests: true
+    audit_max_entries: 1000000
 http:
   http_address: 127.0.0.1:4000
   https_address: 127.0.0.1:4443
@@ -346,7 +346,7 @@ http:
     "session": {
       "audit_enable": false,
       "audit_retention_days": 30,
-      "log_all_requests": true
+      "audit_max_entries": 1000000
     }
   },
   "http": {
@@ -587,7 +587,7 @@ http:
         assert_eq!(auth.rate_limit.cleanup_interval_seconds, 1800);
         assert!(!auth.session.audit_enable);
         assert_eq!(auth.session.audit_retention_days, 30);
-        assert!(auth.session.log_all_requests);
+        assert_eq!(auth.session.audit_max_entries, 1_000_000);
 
         let http = &config.http;
         assert_eq!(http.http_address, "127.0.0.1:4000");

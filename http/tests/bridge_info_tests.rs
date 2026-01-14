@@ -1967,7 +1967,6 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.auth.rate_limit.cleanup_interval_seconds, 1800);
     assert!(config.auth.session.audit_enable);
     assert_eq!(config.auth.session.audit_retention_days, 30);
-    assert!(config.auth.session.log_all_requests);
 
     assert_eq!(config.http.http_address, "0.0.0.0:3000");
     assert!(config.http.https_address.is_none());

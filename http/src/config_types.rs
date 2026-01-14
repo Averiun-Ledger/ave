@@ -145,7 +145,7 @@ impl From<EndpointRateLimit> for EndpointRateLimitHttp {
 pub struct SessionConfigHttp {
     pub audit_enable: bool,
     pub audit_retention_days: u32,
-    pub log_all_requests: bool,
+    pub audit_max_entries: u32,
 }
 
 impl From<SessionConfig> for SessionConfigHttp {
@@ -153,7 +153,7 @@ impl From<SessionConfig> for SessionConfigHttp {
         Self {
             audit_enable: value.audit_enable,
             audit_retention_days: value.audit_retention_days,
-            log_all_requests: value.log_all_requests,
+            audit_max_entries: value.audit_max_entries,
         }
     }
 }

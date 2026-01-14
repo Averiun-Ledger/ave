@@ -58,7 +58,7 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
         session: SessionConfig {
             audit_enable: true,
             audit_retention_days: 90,
-            log_all_requests: false,
+            audit_max_entries: 1_000_000,
         },
     };
 
@@ -170,7 +170,7 @@ impl TestServer {
             "session": {{
                 "audit_enable": true,
                 "audit_retention_days": 30,
-                "log_all_requests": true
+                "audit_max_entries": 1000000
             }}
         }},
         "http": {{

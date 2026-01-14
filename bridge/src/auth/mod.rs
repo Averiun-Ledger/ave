@@ -172,8 +172,9 @@ pub struct SessionConfig {
     /// Audit log retention in days (0 = keep forever)
     pub audit_retention_days: u32,
 
-    /// Log all API calls
-    pub log_all_requests: bool,
+    /// Maximum number of audit logs to keep (0 = unlimited)
+    /// When exceeded, oldest logs are deleted (LRU cache behavior)
+    pub audit_max_entries: u32,
 }
 
 impl Default for SessionConfig {
@@ -181,7 +182,9 @@ impl Default for SessionConfig {
         Self {
             audit_enable: true,
             audit_retention_days: 90,
-            log_all_requests: false,
+            // Limit to 1 million entries (prevents unbounded growth)
+            // Approximately 11.5 days at 1 req/sec, or 1 day at 11.5 req/sec
+            audit_max_entries: 1_000_000,
         }
     }
 }

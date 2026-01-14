@@ -108,7 +108,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
 /// - Old audit logs
 /// - Expired rate limit entries
 pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
-    // Clean up old audit logs
+    // Clean up old audit logs by time
     if db.config.session.audit_retention_days > 0 {
         match db.cleanup_old_audit_logs(db.config.session.audit_retention_days)
         {
@@ -116,12 +116,31 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
                 if deleted > 0 {
                     info!(
                         TARGET,
-                        "Cleaned up {} old audit log entries", deleted
+                        "Cleaned up {} old audit log entries (by time)", deleted
                     );
                 }
             }
             Err(e) => {
-                error!(TARGET, "Failed to cleanup audit logs: {}", e);
+                error!(TARGET, "Failed to cleanup audit logs by time: {}", e);
+            }
+        }
+    }
+
+    // Clean up excess audit logs by count (LRU)
+    if db.config.session.audit_max_entries > 0 {
+        match db.cleanup_excess_audit_logs(db.config.session.audit_max_entries)
+        {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    info!(
+                        TARGET,
+                        "Cleaned up {} excess audit log entries (LRU, limit: {})",
+                        deleted, db.config.session.audit_max_entries
+                    );
+                }
+            }
+            Err(e) => {
+                error!(TARGET, "Failed to cleanup excess audit logs: {}", e);
             }
         }
     }

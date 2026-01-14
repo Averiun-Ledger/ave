@@ -102,10 +102,8 @@ impl AuthDatabase {
         ctx: &crate::auth::models::AuthContext,
         req_params: ApiRequestParams,
     ) -> Result<i64, DatabaseError> {
-        if !self.config.session.log_all_requests {
-            return Ok(0);
-        }
-
+        // SECURITY: Always log all API requests for full traceability
+        // LRU cleanup prevents unbounded growth (see cleanup_excess_audit_logs)
         self.create_audit_log(AuditLogParams {
             user_id: Some(ctx.user_id),
             api_key_id: Some(&ctx.api_key_id),
@@ -181,6 +179,27 @@ impl AuthDatabase {
         if let Some(end) = query.end_timestamp {
             sql.push_str(" AND timestamp <= ?");
             params_vec.push(Box::new(end));
+        }
+
+        // Exclusion filters (NOT conditions)
+        if let Some(exclude_uid) = query.exclude_user_id {
+            sql.push_str(" AND (user_id IS NULL OR user_id != ?)");
+            params_vec.push(Box::new(exclude_uid));
+        }
+
+        if let Some(ref exclude_api_key) = query.exclude_api_key_id {
+            sql.push_str(" AND (api_key_id IS NULL OR api_key_id != ?)");
+            params_vec.push(Box::new(exclude_api_key.as_str()));
+        }
+
+        if let Some(ref exclude_ip) = query.exclude_ip_address {
+            sql.push_str(" AND (ip_address IS NULL OR ip_address != ?)");
+            params_vec.push(Box::new(exclude_ip.clone()));
+        }
+
+        if let Some(ref exclude_endpoint) = query.exclude_endpoint {
+            sql.push_str(" AND (endpoint IS NULL OR endpoint != ?)");
+            params_vec.push(Box::new(exclude_endpoint.clone()));
         }
 
         sql.push_str(" ORDER BY timestamp DESC");
@@ -269,6 +288,41 @@ impl AuthDatabase {
             .execute(
                 "DELETE FROM audit_logs WHERE timestamp < ?1",
                 params![cutoff_timestamp],
+            )
+            .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+
+        Ok(deleted)
+    }
+
+    /// Delete oldest audit logs if count exceeds max_entries (LRU eviction)
+    pub fn cleanup_excess_audit_logs(
+        &self,
+        max_entries: u32,
+    ) -> Result<usize, DatabaseError> {
+        if max_entries == 0 {
+            return Ok(0); // Unlimited
+        }
+
+        let conn = self.lock_conn()?;
+
+        // Count current entries
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_logs", [], |row| row.get(0))
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        if count <= max_entries as i64 {
+            return Ok(0); // Under limit
+        }
+
+        // Delete oldest entries to bring count down to max_entries
+        let to_delete = count - max_entries as i64;
+
+        let deleted = conn
+            .execute(
+                "DELETE FROM audit_logs WHERE id IN (
+                    SELECT id FROM audit_logs ORDER BY timestamp ASC LIMIT ?1
+                )",
+                params![to_delete],
             )
             .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
 
@@ -535,6 +589,7 @@ impl AuthDatabase {
     }
 
     /// Get rate limit stats for a user
+    #[allow(dead_code)]
     pub fn get_rate_limit_stats(
         &self,
         api_key_id: Option<&str>,  // UUID
@@ -695,6 +750,39 @@ impl AuthDatabase {
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
+        // Get IP + Endpoint breakdown (what endpoint is each IP accessing)
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    rl.ip_address,
+                    rl.endpoint,
+                    SUM(rl.request_count) as total_requests,
+                    MAX(rl.last_request_at) as last_request,
+                    COUNT(DISTINCT rl.api_key_id) as unique_keys
+                 FROM rate_limits rl
+                 WHERE rl.window_start >= ?1
+                   AND rl.ip_address IS NOT NULL
+                   AND rl.endpoint IS NOT NULL
+                 GROUP BY rl.ip_address, rl.endpoint
+                 ORDER BY total_requests DESC
+                 LIMIT 100"
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        let by_ip_endpoint: Vec<serde_json::Value> = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(serde_json::json!({
+                    "ip_address": row.get::<_, Option<String>>(0)?,
+                    "endpoint": row.get::<_, Option<String>>(1)?,
+                    "total_requests": row.get::<_, i64>(2)?,
+                    "last_request_at": row.get::<_, Option<i64>>(3)?.map(format_ts),
+                    "unique_api_keys": row.get::<_, i64>(4)?,
+                }))
+            })
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
         // Get total requests in period
         let total_requests: i64 = conn
             .query_row(
@@ -711,6 +799,7 @@ impl AuthDatabase {
             "by_api_key": by_api_key,
             "by_ip": by_ip,
             "by_endpoint": by_endpoint,
+            "by_ip_endpoint": by_ip_endpoint,
         }))
     }
 }
