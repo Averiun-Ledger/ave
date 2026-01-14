@@ -49,7 +49,7 @@ pub struct AuthGovData {
 }
 
 pub struct Distributor {
-    pub node: PublicKey,
+    pub our_key: Arc<PublicKey>,
     pub network: Arc<NetworkSender>
 }
 

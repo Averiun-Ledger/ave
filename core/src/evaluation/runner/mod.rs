@@ -364,11 +364,7 @@ impl Runner {
                 details: e.to_string(),
             })?;
 
-        let linker =
-            generate_linker(&engine).map_err(|e| RunnerError::WasmError {
-                operation: "generate linker",
-                details: e.to_string(),
-            })?;
+        let linker = generate_linker(&engine)?;
 
         let instance =
             linker.instantiate(&mut store, &module).map_err(|e| {
@@ -1279,12 +1275,7 @@ impl Runner {
                 context: "serialize state",
                 details: e.to_string(),
             })?;
-        let state_ptr = context.add_data_raw(&state_bytes).map_err(|e| {
-            RunnerError::MemoryError {
-                operation: "add state bytes",
-                details: e.to_string(),
-            }
-        })?;
+        let state_ptr = context.add_data_raw(&state_bytes)?;
 
         let init_state_bytes = to_vec(&init_state).map_err(|e| {
             RunnerError::SerializationError {
@@ -1292,25 +1283,14 @@ impl Runner {
                 details: e.to_string(),
             }
         })?;
-        let init_state_ptr =
-            context.add_data_raw(&init_state_bytes).map_err(|e| {
-                RunnerError::MemoryError {
-                    operation: "add init_state bytes",
-                    details: e.to_string(),
-                }
-            })?;
+        let init_state_ptr = context.add_data_raw(&init_state_bytes)?;
 
         let event_bytes =
             to_vec(&event).map_err(|e| RunnerError::SerializationError {
                 context: "serialize event",
                 details: e.to_string(),
             })?;
-        let event_ptr = context.add_data_raw(&event_bytes).map_err(|e| {
-            RunnerError::MemoryError {
-                operation: "add event bytes",
-                details: e.to_string(),
-            }
-        })?;
+        let event_ptr = context.add_data_raw(&event_bytes)?;
 
         Ok((
             context,
@@ -1324,12 +1304,7 @@ impl Runner {
         store: &Store<MemoryManager>,
         pointer: u32,
     ) -> Result<ContractResult, RunnerError> {
-        let bytes = store.data().read_data(pointer as usize).map_err(|e| {
-            RunnerError::MemoryError {
-                operation: "read result data",
-                details: e.to_string(),
-            }
-        })?;
+        let bytes = store.data().read_data(pointer as usize)?;
 
         let contract_result: ContractResult =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {

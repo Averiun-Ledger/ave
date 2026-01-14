@@ -2,10 +2,35 @@ use std::collections::HashMap;
 
 use wasmtime::{Caller, Config, Engine, Linker};
 
-use crate::{Error, evaluation::runner::error::{RunnerError, InvalidEventKind}};
 use tracing::error;
 
 const TARGET_CONTRACT: &str = "Ave-Model-Contract";
+
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone)]
+pub enum ContractError {
+    #[error("memory allocation failed: {details}")]
+    MemoryAllocationFailed { details: String },
+
+    #[error("invalid pointer: {pointer}")]
+    InvalidPointer { pointer: usize },
+
+    #[error("write out of bounds: offset {offset} >= allocation size {size}")]
+    WriteOutOfBounds { offset: usize, size: usize },
+
+    #[error("allocation size {size} exceeds maximum of {max} bytes")]
+    AllocationTooLarge { size: usize, max: usize },
+
+    #[error("total memory {total} exceeds maximum of {max} bytes")]
+    TotalMemoryExceeded { total: usize, max: usize },
+
+    #[error("memory allocation would overflow")]
+    AllocationOverflow,
+
+    #[error("linker error [{function}]: {details}")]
+    LinkerError { function: &'static str, details: String },
+}
 
 
 #[derive(Debug, Default)]
@@ -25,38 +50,27 @@ pub const MAX_FUEL: u64 = 10_000_000;
 pub const MAX_FUEL_COMPILATION: u64 = 50_000_000;
 
 impl MemoryManager {
-    pub fn alloc(&mut self, len: usize) -> Result<usize, Error> {
+    pub fn alloc(&mut self, len: usize) -> Result<usize, ContractError> {
         // Security check: prevent excessive single allocations
         if len > MAX_SINGLE_ALLOC {
-            return Err(Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::alloc",
-                kind: InvalidEventKind::InvalidValue {
-                    field: "allocation size".to_owned(),
-                    reason: format!("{} bytes exceeds maximum of {} bytes", len, MAX_SINGLE_ALLOC),
-                },
-            }));
+            return Err(ContractError::AllocationTooLarge {
+                size: len,
+                max: MAX_SINGLE_ALLOC,
+            });
         }
 
         let current_len = self.memory.len();
 
         // Security check: prevent total memory exhaustion
         let new_len = current_len.checked_add(len).ok_or_else(|| {
-            Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::alloc",
-                kind: InvalidEventKind::Other {
-                    msg: "memory allocation would overflow".to_owned(),
-                },
-            })
+            ContractError::AllocationOverflow
         })?;
 
         if new_len > MAX_TOTAL_MEMORY {
-            return Err(Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::alloc",
-                kind: InvalidEventKind::InvalidValue {
-                    field: "total memory".to_owned(),
-                    reason: format!("{} bytes exceeds maximum of {} bytes", new_len, MAX_TOTAL_MEMORY),
-                },
-            }));
+            return Err(ContractError::TotalMemoryExceeded {
+                total: new_len,
+                max: MAX_TOTAL_MEMORY,
+            });
         }
 
         self.memory.resize(new_len, 0);
@@ -69,27 +83,18 @@ impl MemoryManager {
         start_ptr: usize,
         offset: usize,
         data: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ContractError> {
         // Security check: validate pointer exists in allocation map
         let len = self.map.get(&start_ptr).ok_or_else(|| {
-            Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::write_byte",
-                kind: InvalidEventKind::InvalidValue {
-                    field: "write pointer".to_owned(),
-                    reason: format!("invalid pointer: {}", start_ptr),
-                },
-            })
+            ContractError::InvalidPointer { pointer: start_ptr }
         })?;
 
         // Security check: validate write is within bounds
         if offset >= *len {
-            return Err(Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::write_byte",
-                kind: InvalidEventKind::InvalidValue {
-                    field: "write offset".to_owned(),
-                    reason: format!("offset {} >= allocation size {}", offset, len),
-                },
-            }));
+            return Err(ContractError::WriteOutOfBounds {
+                offset,
+                size: *len,
+            });
         }
 
         self.memory[start_ptr + offset] = data;
@@ -100,17 +105,11 @@ impl MemoryManager {
         self.memory[ptr]
     }
 
-    pub fn read_data(&self, ptr: usize) -> Result<&[u8], Error> {
+    pub fn read_data(&self, ptr: usize) -> Result<&[u8], ContractError> {
         let len = self
             .map
             .get(&ptr)
-            .ok_or_else(|| Error::Runner(RunnerError::InvalidEvent {
-                location: "MemoryManager::read_data",
-                kind: InvalidEventKind::InvalidValue {
-                    field: "read pointer".to_owned(),
-                    reason: format!("invalid pointer: {}", ptr),
-                },
-            }))?;
+            .ok_or_else(|| ContractError::InvalidPointer { pointer: ptr })?;
         Ok(&self.memory[ptr..ptr + len])
     }
 
@@ -121,7 +120,7 @@ impl MemoryManager {
         *result as isize
     }
 
-    pub fn add_data_raw(&mut self, bytes: &[u8]) -> Result<usize, Error> {
+    pub fn add_data_raw(&mut self, bytes: &[u8]) -> Result<usize, ContractError> {
         let ptr = self.alloc(bytes.len())?;
         for (index, byte) in bytes.iter().enumerate() {
             self.memory[ptr + index] = *byte;
@@ -151,7 +150,7 @@ pub fn create_secure_wasmtime_config() -> Config {
 
 pub fn generate_linker(
     engine: &Engine,
-) -> Result<Linker<MemoryManager>, Error> {
+) -> Result<Linker<MemoryManager>, ContractError> {
     let mut linker: Linker<MemoryManager> = Linker::new(engine);
 
     // functions are created for webasembly modules, the logic of which is programmed in Rust
@@ -165,10 +164,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Runner(RunnerError::WasmError {
-                operation: "link function pointer_len",
+            ContractError::LinkerError {
+                function: "pointer_len",
                 details: e.to_string(),
-            })
+            }
         })?;
 
     linker
@@ -187,10 +186,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Runner(RunnerError::WasmError {
-                operation: "link function alloc",
+            ContractError::LinkerError {
+                function: "alloc",
                 details: e.to_string(),
-            })
+            }
         })?;
 
     linker
@@ -207,10 +206,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Runner(RunnerError::WasmError {
-                operation: "link function write_byte",
+            ContractError::LinkerError {
+                function: "write_byte",
                 details: e.to_string(),
-            })
+            }
         })?;
 
     linker
@@ -222,10 +221,10 @@ pub fn generate_linker(
             },
         )
         .map_err(|e| {
-            Error::Runner(RunnerError::WasmError {
-                operation: "link function read_byte",
+            ContractError::LinkerError {
+                function: "read_byte",
                 details: e.to_string(),
-            })
+            }
         })?;
 
     Ok(linker)

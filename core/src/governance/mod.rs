@@ -1806,11 +1806,18 @@ impl Actor for Governance {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("governance", None, true, ctx).await?;
+        if let Err(e) = self.init_store("governance", None, true, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize governance store"
+            );
+            return Err(e);
+        }
 
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
         else {
+            error!("External database helper not found");
             return Err(ActorError::Helper {
                 name: "ext_db".to_owned(),
                 reason: "Not found".to_owned(),
@@ -1820,6 +1827,7 @@ impl Actor for Governance {
         let Some(ave_sink): Option<AveSink> =
             ctx.system().get_helper("sink").await
         else {
+            error!("Sink helper not found");
             return Err(ActorError::Helper {
                 name: "sink".to_owned(),
                 reason: "Not found".to_owned(),
@@ -1831,6 +1839,7 @@ impl Actor for Governance {
             .get_helper::<Arc<NetworkSender>>("network")
             .await
         else {
+            error!("Network helper not found");
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
                 reason: "Not found".to_owned(),
@@ -1842,6 +1851,7 @@ impl Actor for Governance {
         {
             config.hash_algorithm
         } else {
+            error!("Config helper not found");
             return Err(ActorError::Helper {
                 name: "config".to_owned(),
                 reason: "Not found".to_owned(),
@@ -1849,16 +1859,31 @@ impl Actor for Governance {
         };
 
         if self.subject_metadata.active {
-            self.build_childs(ctx, &hash, &network).await?;
+            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
+                error!(
+                    error = %e,
+                    "Failed to build governance child actors"
+                );
+                return Err(e);
+            }
 
-            let sink_actor = ctx
+            let sink_actor = match ctx
                 .create_child(
                     "sink_data",
                     SinkData {
                         controller_id: self.our_key.to_string(),
                     },
                 )
-                .await?;
+                .await {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create sink_data child"
+                    );
+                    return Err(e);
+                }
+            };
             let sink =
                 Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
             ctx.system().run_sink(sink).await;
@@ -1867,11 +1892,23 @@ impl Actor for Governance {
             ctx.system().run_sink(sink).await;
         }
 
-        ctx.create_child("relation_ship", RelationShip::initial(()))
-            .await?;
+        if let Err(e) = ctx.create_child("relation_ship", RelationShip::initial(()))
+            .await {
+            error!(
+                error = %e,
+                "Failed to create relation_ship child"
+            );
+            return Err(e);
+        }
 
-        ctx.create_child("roles_register", RolesRegister::initial(()))
-            .await?;
+        if let Err(e) = ctx.create_child("roles_register", RolesRegister::initial(()))
+            .await {
+            error!(
+                error = %e,
+                "Failed to create roles_register child"
+            );
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -1880,7 +1917,14 @@ impl Actor for Governance {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop governance store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 

@@ -8,11 +8,9 @@ use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span};
 
 use crate::{db::Storable, model::common::emit_fail};
-
-const TARGET_REGISTER: &str = "Ave-Node-Register";
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -136,18 +134,40 @@ impl Actor for Register {
     type Message = RegisterMessage;
     type Response = RegisterResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Register", id = id)
+        } else {
+            info_span!("Register", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("register", None, false, ctx).await
+        if let Err(e) = self.init_store("register", None, false, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -161,34 +181,37 @@ impl Handler<Register> for Register {
     ) -> Result<RegisterResponse, ActorError> {
         match msg {
             RegisterMessage::GetGovs { active } => {
-                if let Some(active) = active {
-                    return Ok(RegisterResponse::Govs {
-                        governances: self
-                            .register_gov
-                            .iter()
-                            .filter(|x| x.1.active == active)
-                            .map(|x| GovsData {
-                                active: x.1.active,
-                                governance_id: x.0.clone(),
-                                description: x.1.description.clone(),
-                                name: x.1.name.clone(),
-                            })
-                            .collect(),
-                    });
+                let governances = if let Some(active) = active {
+                    self.register_gov
+                        .iter()
+                        .filter(|x| x.1.active == active)
+                        .map(|x| GovsData {
+                            active: x.1.active,
+                            governance_id: x.0.clone(),
+                            description: x.1.description.clone(),
+                            name: x.1.name.clone(),
+                        })
+                        .collect::<Vec<GovsData>>()
                 } else {
-                    return Ok(RegisterResponse::Govs {
-                        governances: self
-                            .register_gov
-                            .iter()
-                            .map(|x| GovsData {
-                                active: x.1.active,
-                                governance_id: x.0.clone(),
-                                description: x.1.description.clone(),
-                                name: x.1.name.clone(),
-                            })
-                            .collect(),
-                    });
-                }
+                    self.register_gov
+                        .iter()
+                        .map(|x| GovsData {
+                            active: x.1.active,
+                            governance_id: x.0.clone(),
+                            description: x.1.description.clone(),
+                            name: x.1.name.clone(),
+                        })
+                        .collect::<Vec<GovsData>>()
+                };
+
+                debug!(
+                    msg_type = "GetGovs",
+                    active = ?active,
+                    count = governances.len(),
+                    "Retrieved governances"
+                );
+
+                return Ok(RegisterResponse::Govs { governances });
             }
             RegisterMessage::GetSubj {
                 gov_id,
@@ -220,11 +243,25 @@ impl Handler<Register> for Register {
                         });
                     }
 
+                    debug!(
+                        msg_type = "GetSubj",
+                        gov_id = %gov_id,
+                        active = ?active,
+                        schema_id = ?schema_id,
+                        count = subj.len(),
+                        "Retrieved subjects"
+                    );
+
                     return Ok(RegisterResponse::Subjs { subjects: subj });
                 } else {
-                    let e = "Governance id is not registered";
-                    warn!(TARGET_REGISTER, "GetSubj, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    error!(
+                        msg_type = "GetSubj",
+                        gov_id = %gov_id,
+                        "Governance id is not registered"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Governance id is not registered".to_owned(),
+                    });
                 }
             }
             RegisterMessage::RegisterGov {
@@ -234,7 +271,7 @@ impl Handler<Register> for Register {
             } => {
                 self.on_event(
                     RegisterEvent::RegisterGov {
-                        gov_id,
+                        gov_id: gov_id.clone(),
                         data: RegisterDataGov {
                             active: true,
                             name,
@@ -243,10 +280,22 @@ impl Handler<Register> for Register {
                     },
                     ctx,
                 )
-                .await
+                .await;
+
+                debug!(
+                    msg_type = "RegisterGov",
+                    gov_id = %gov_id,
+                    "Governance registered successfully"
+                );
             }
             RegisterMessage::EOLGov { gov_id } => {
-                self.on_event(RegisterEvent::EOLGov { gov_id }, ctx).await
+                self.on_event(RegisterEvent::EOLGov { gov_id: gov_id.clone() }, ctx).await;
+
+                debug!(
+                    msg_type = "EOLGov",
+                    gov_id = %gov_id,
+                    "Governance marked as EOL"
+                );
             }
             RegisterMessage::RegisterSubj {
                 gov_id,
@@ -257,10 +306,10 @@ impl Handler<Register> for Register {
             } => {
                 self.on_event(
                     RegisterEvent::RegisterSubj {
-                        gov_id,
-                        subject_id,
+                        gov_id: gov_id.clone(),
+                        subject_id: subject_id.clone(),
                         data: RegisterDataSubj {
-                            schema_id,
+                            schema_id: schema_id.clone(),
                             active: true,
                             name,
                             description,
@@ -268,11 +317,26 @@ impl Handler<Register> for Register {
                     },
                     ctx,
                 )
-                .await
+                .await;
+
+                debug!(
+                    msg_type = "RegisterSubj",
+                    gov_id = %gov_id,
+                    subject_id = %subject_id,
+                    schema_id = %schema_id,
+                    "Subject registered successfully"
+                );
             }
             RegisterMessage::EOLSubj { gov_id, subj_id } => {
-                self.on_event(RegisterEvent::EOLSubj { gov_id, subj_id }, ctx)
-                    .await
+                self.on_event(RegisterEvent::EOLSubj { gov_id: gov_id.clone(), subj_id: subj_id.clone() }, ctx)
+                    .await;
+
+                debug!(
+                    msg_type = "EOLSubj",
+                    gov_id = %gov_id,
+                    subj_id = %subj_id,
+                    "Subject marked as EOL"
+                );
             }
         }
         Ok(RegisterResponse::None)
@@ -285,11 +349,13 @@ impl Handler<Register> for Register {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_REGISTER,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                "Failed to persist register event"
             );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!("Register event persisted successfully");
+        }
     }
 }
 
@@ -308,16 +374,32 @@ impl PersistentActor for Register {
             RegisterEvent::EOLGov { gov_id } => {
                 if let Some(gov) = self.register_gov.get_mut(gov_id) {
                     gov.active = false;
+                    debug!(
+                        event_type = "EOLGov",
+                        gov_id = %gov_id,
+                        "Applied governance EOL"
+                    );
                 };
             }
             RegisterEvent::EOLSubj { gov_id, subj_id } => {
                 self.register_subj
                     .get_mut(gov_id)
                     .map(|x| x.get_mut(subj_id).map(|x| x.active = false));
+                debug!(
+                    event_type = "EOLSubj",
+                    gov_id = %gov_id,
+                    subj_id = %subj_id,
+                    "Applied subject EOL"
+                );
             }
             RegisterEvent::RegisterGov { gov_id, data } => {
                 self.register_gov.insert(gov_id.clone(), data.clone());
                 self.register_subj.insert(gov_id.clone(), HashMap::new());
+                debug!(
+                    event_type = "RegisterGov",
+                    gov_id = %gov_id,
+                    "Applied governance registration"
+                );
             }
             RegisterEvent::RegisterSubj {
                 gov_id,
@@ -328,6 +410,12 @@ impl PersistentActor for Register {
                     .entry(gov_id.clone())
                     .or_default()
                     .insert(subject_id.clone(), data.clone());
+                debug!(
+                    event_type = "RegisterSubj",
+                    gov_id = %gov_id,
+                    subject_id = %subject_id,
+                    "Applied subject registration"
+                );
             }
         };
 

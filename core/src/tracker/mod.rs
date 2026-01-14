@@ -73,6 +73,18 @@ pub struct TrackerInit {
     pub properties: ValueWrapper,
 }
 
+impl From<&Metadata> for TrackerInit {
+    fn from(value: &Metadata) -> Self {
+        Self {
+            subject_metadata: SubjectMetadata::new(&value),
+            governance_id: value.governance_id.clone(),
+            namespace: value.namespace.clone(),
+            genesis_gov_version: value.genesis_gov_version.clone(),
+            properties: value.properties.clone(),
+        }
+    }
+}
+
 impl BorshSerialize for Tracker {
     fn serialize<W: std::io::Write>(
         &self,
@@ -622,7 +634,13 @@ impl Actor for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("tracker", None, true, ctx).await?;
+        if let Err(e) = self.init_store("tracker", None, true, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize tracker store"
+            );
+            return Err(e);
+        }
 
         let our_key = self.our_key.clone();
 
@@ -630,6 +648,7 @@ impl Actor for Tracker {
             let Some(ext_db): Option<ExternalDB> =
                 ctx.system().get_helper("ext_db").await
             else {
+                error!("External database helper not found");
                 return Err(ActorError::Helper {
                     name: "ext_db".to_owned(),
                     reason: "Not found".to_owned(),
@@ -639,20 +658,30 @@ impl Actor for Tracker {
             let Some(ave_sink): Option<AveSink> =
                 ctx.system().get_helper("sink").await
             else {
+                error!("Sink helper not found");
                 return Err(ActorError::Helper {
                     name: "sink".to_owned(),
                     reason: "Not found".to_owned(),
                 });
             };
 
-            let sink_actor = ctx
+            let sink_actor = match ctx
                 .create_child(
                     "sink_data",
                     SinkData {
                         controller_id: our_key.to_string(),
                     },
                 )
-                .await?;
+                .await {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create sink_data child"
+                    );
+                    return Err(e);
+                }
+            };
             let sink =
                 Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
             ctx.system().run_sink(sink).await;
@@ -668,7 +697,14 @@ impl Actor for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop tracker store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 

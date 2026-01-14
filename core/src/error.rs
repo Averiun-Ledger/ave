@@ -5,7 +5,6 @@
 /// Error type.
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
-    
     /// Sink error.
     #[error("Sink error: {0}")]
     Sink(String),

@@ -1,4 +1,5 @@
 use thiserror::Error;
+use crate::model::common::contract::ContractError;
 
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
@@ -83,6 +84,46 @@ impl std::fmt::Display for InvalidModuleKind {
                     "module is missing SDK imports: {}",
                     missing.join(", ")
                 )
+            }
+        }
+    }
+}
+
+impl From<ContractError> for CompilerError {
+    fn from(error: ContractError) -> Self {
+        match error {
+            ContractError::MemoryAllocationFailed { details } => {
+                CompilerError::MemoryAllocationFailed { details }
+            }
+            ContractError::InvalidPointer { pointer } => {
+                CompilerError::MemoryAllocationFailed {
+                    details: format!("invalid pointer: {}", pointer),
+                }
+            }
+            ContractError::WriteOutOfBounds { offset, size } => {
+                CompilerError::MemoryAllocationFailed {
+                    details: format!("write out of bounds: offset {} >= size {}", offset, size),
+                }
+            }
+            ContractError::AllocationTooLarge { size, max } => {
+                CompilerError::MemoryAllocationFailed {
+                    details: format!("allocation size {} exceeds maximum of {} bytes", size, max),
+                }
+            }
+            ContractError::TotalMemoryExceeded { total, max } => {
+                CompilerError::MemoryAllocationFailed {
+                    details: format!("total memory {} exceeds maximum of {} bytes", total, max),
+                }
+            }
+            ContractError::AllocationOverflow => {
+                CompilerError::MemoryAllocationFailed {
+                    details: "memory allocation would overflow".to_string(),
+                }
+            }
+            ContractError::LinkerError { function, details } => {
+                CompilerError::InstantiationFailed {
+                    details: format!("linker error [{}]: {}", function, details),
+                }
             }
         }
     }

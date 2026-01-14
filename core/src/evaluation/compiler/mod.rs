@@ -24,7 +24,6 @@ use tracing::{Span, debug, error, info_span};
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    Error,
     model::common::contract::{
         MAX_FUEL_COMPILATION, MemoryManager, generate_linker,
     },
@@ -75,7 +74,7 @@ impl Compiler {
     async fn compile_contract(
         contract: &str,
         contract_path: &Path,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CompilerError> {
         // Write contract.
         let decode_base64 = BASE64_STANDARD.decode(contract).map_err(|e| {
             CompilerError::Base64DecodeFailed {
@@ -141,7 +140,7 @@ impl Compiler {
         ctx: &mut ActorContext<Compiler>,
         contract_path: &Path,
         state: ValueWrapper,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Vec<u8>, CompilerError> {
         // Use the same secure configuration as the runner to ensure consistency
         let Some(engine) =
             ctx.system().get_helper::<Arc<Engine>>("engine").await
@@ -277,7 +276,7 @@ impl Compiler {
     fn check_result(
         store: &Store<MemoryManager>,
         pointer: u32,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CompilerError> {
         let bytes = store.data().read_data(pointer as usize)?;
         let contract_result: ContractResult =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
@@ -299,18 +298,14 @@ impl Compiler {
 
     fn generate_context(
         state: ValueWrapper,
-    ) -> Result<(MemoryManager, u32), Error> {
+    ) -> Result<(MemoryManager, u32), CompilerError> {
         let mut context = MemoryManager::default();
         let state_bytes =
             to_vec(&state).map_err(|e| CompilerError::SerializationError {
                 context: "state serialization",
                 details: e.to_string(),
             })?;
-        let state_ptr = context.add_data_raw(&state_bytes).map_err(|e| {
-            CompilerError::MemoryAllocationFailed {
-                details: e.to_string(),
-            }
-        })?;
+        let state_ptr = context.add_data_raw(&state_bytes)?;
         Ok((context, state_ptr as u32))
     }
 

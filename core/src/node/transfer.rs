@@ -10,11 +10,9 @@ use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::PublicKey;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, debug, error, info_span};
 
 use crate::db::Storable;
-
-const TARGET_TRANSFER: &str = "Ave-Node-TransferRegister";
 
 #[derive(
     Debug,
@@ -70,18 +68,40 @@ impl Actor for TransferRegister {
     type Message = TransferRegisterMessage;
     type Response = TransferRegisterResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "TransferRegister", id = id)
+        } else {
+            info_span!("TransferRegister", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("transfer_register", None, true, ctx).await
+        if let Err(e) = self.init_store("transfer_register", None, true, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize transfer register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop transfer register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -101,22 +121,38 @@ impl Handler<TransferRegister> for TransferRegister {
             } => {
                 self.on_event(
                     TransferRegisterEvent::RegisterNewOldOwner {
-                        old,
-                        new,
-                        subject_id,
+                        old: old.clone(),
+                        new: new.clone(),
+                        subject_id: subject_id.clone(),
                     },
                     ctx,
                 )
-                .await
+                .await;
+
+                debug!(
+                    msg_type = "RegisterNewOldOwner",
+                    subject_id = %subject_id,
+                    old = %old,
+                    new = %new,
+                    "Registered new old owner"
+                );
             }
             TransferRegisterMessage::IsOldOwner { subject_id, old } => {
-                return Ok(TransferRegisterResponse::IsOwner(
-                    if let Some(old_owners) = self.old_owners.get(&subject_id) {
-                        old_owners.contains(&old)
-                    } else {
-                        false
-                    },
-                ));
+                let is_old_owner = if let Some(old_owners) = self.old_owners.get(&subject_id) {
+                    old_owners.contains(&old)
+                } else {
+                    false
+                };
+
+                debug!(
+                    msg_type = "IsOldOwner",
+                    subject_id = %subject_id,
+                    old = %old,
+                    is_old_owner = is_old_owner,
+                    "Checked old owner status"
+                );
+
+                return Ok(TransferRegisterResponse::IsOwner(is_old_owner));
             }
         };
 
@@ -130,11 +166,13 @@ impl Handler<TransferRegister> for TransferRegister {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_TRANSFER,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                "Failed to persist transfer register event"
             );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!("Transfer register event persisted successfully");
+        }
     }
 }
 
@@ -163,6 +201,14 @@ impl PersistentActor for TransferRegister {
                         HashSet::from([old.clone()]),
                     );
                 };
+
+                debug!(
+                    event_type = "RegisterNewOldOwner",
+                    subject_id = %subject_id,
+                    old = %old,
+                    new = %new,
+                    "Applied old owner registration"
+                );
             }
         };
 

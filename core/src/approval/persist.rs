@@ -324,10 +324,16 @@ impl Actor for ApprPersist {
     ) -> Result<(), ActorError> {
         if ctx.parent::<Governance>().await.is_some() {
             let prefix = ctx.path().parent().key();
-            self.init_store("approver", Some(prefix), false, ctx).await
-        } else {
-            Ok(())
+            if let Err(e) = self.init_store("approver", Some(prefix), false, ctx).await {
+                error!(
+                    error = %e,
+                    prefix = prefix,
+                    "Failed to initialize approver store"
+                );
+                return Err(e);
+            }
         }
+        Ok(())
     }
 
     async fn pre_stop(
@@ -335,10 +341,15 @@ impl Actor for ApprPersist {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if ctx.parent::<Governance>().await.is_some() {
-            self.stop_store(ctx).await
-        } else {
-            Ok(())
+            if let Err(e) = self.stop_store(ctx).await {
+                error!(
+                    error = %e,
+                    "Failed to stop approver store"
+                );
+                return Err(e);
+            }
         }
+        Ok(())
     }
 }
 
