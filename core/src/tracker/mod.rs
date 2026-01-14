@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    Error, EventRequestType,
     auth::WitnessesAuth,
     db::Storable,
-    distribution::{Distribution, DistributionType},
-    evaluation::Evaluation,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
@@ -19,16 +16,16 @@ use crate::{
     model::{
         common::{
             emit_fail, get_last_event, get_n_events, node::try_to_update,
-            purge_storage, subject::get_gov,
+            subject::get_gov,
         },
         event::{Protocols, ValidationMetadata},
     },
     node::register::RegisterMessage,
     subject::{
         DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
+        error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
     },
-    system::ConfigHelper,
     update::TransferResponse,
     validation::request::LastData,
 };
@@ -48,14 +45,14 @@ use ave_actors::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
-
-const TARGET_TRACKER: &str = "Ave-Tracker";
+use tracing::{Span, debug, error, info_span, warn};
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Tracker {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
+    #[serde(skip)]
+    pub hash: Option<HashAlgorithm>,
 
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
@@ -106,8 +103,10 @@ impl BorshDeserialize for Tracker {
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
         let our_key = Arc::new(PublicKey::default());
+        let hash = None;
 
         Ok(Self {
+            hash,
             our_key,
             subject_metadata,
             governance_id,
@@ -139,20 +138,39 @@ impl Subject for Tracker {
         &mut self,
         json_patch: ValueWrapper,
     ) -> Result<(), ActorError> {
-        let patch_json = match serde_json::from_value::<Patch>(json_patch.0) {
-            Ok(patch) => patch,
-            Err(e) => {
-                let error = format!("Apply, can not obtain json patch: {}", e);
-                error!(TARGET_TRACKER, error);
-                return Err(ActorError::Functional(error));
-            }
-        };
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
 
-        if let Err(e) = patch(&mut self.properties.0, &patch_json) {
-            let error = format!("Apply, can not apply json patch: {}", e);
-            error!(TARGET_TRACKER, error);
-            return Err(ActorError::Functional(error));
-        };
+        patch(&mut self.properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -162,27 +180,35 @@ impl Subject for Tracker {
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Can not obtain Hash".to_string(),
+            });
         };
 
         let current_sn = self.subject_metadata.sn;
 
         if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
         {
-            if let ActorError::Functional(error) = e.clone() {
-                warn!(TARGET_TRACKER, "Error verifying new events: {}", error);
+            if let ActorError::Functional { description } = e.clone() {
+                warn!(
+                    error = %description,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Error verifying new ledger events"
+                );
 
                 // Falló en la creación
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
             } else {
-                error!(TARGET_TRACKER, "Error verifying new events {}", e);
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Critical error verifying new ledger events"
+                );
                 return Err(e);
             }
         };
@@ -224,15 +250,17 @@ impl Tracker {
                 .ask(GovernanceMessage::GetGovernance)
                 .await?
         } else {
-            return Err(ActorError::NotFound(governance_path));
+            return Err(ActorError::NotFound {
+                path: governance_path,
+            });
         };
 
         match response {
             GovernanceResponse::Governance(gov) => Ok(*gov),
-            _ => Err(ActorError::UnexpectedResponse(
-                governance_path,
-                "TrackerResponse::Governance".to_owned(),
-            )),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: governance_path,
+                expected: "GovernanceResponse::Governance".to_owned(),
+            }),
         }
     }
 
@@ -256,10 +284,10 @@ impl Tracker {
             self.subject_metadata.schema_id.clone(),
             self.namespace.clone(),
         ) else {
-            return Err(ActorError::Functional(
-                "The number of subjects that can be created has not been found"
-                    .to_owned(),
-            ));
+            let error = SubjectError::MaxSubjectCreationNotFound;
+            return Err(ActorError::Functional {
+                description: error.to_string(),
+            });
         };
 
         let mut pending = Vec::new();
@@ -283,7 +311,9 @@ impl Tracker {
             )
             .await
             {
-                return Err(ActorError::Functional(e.to_string()));
+                return Err(ActorError::Functional {
+                    description: e.to_string(),
+                });
             }
 
             self.on_event(first.clone(), ctx).await;
@@ -325,8 +355,15 @@ impl Tracker {
         pending.extend(iter);
 
         for event in pending {
-            let actual_ledger_hash = hash_borsh(&*hash.hasher(), &last_ledger.0)
-                .map_err(|e| todo!())?;
+            let actual_ledger_hash =
+                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not creacte actual ledger event hash: {}",
+                            e
+                        ),
+                    }
+                })?;
             let last_data = LastData {
                 gov_version: last_ledger.content().gov_version,
                 vali_data: last_ledger
@@ -337,7 +374,7 @@ impl Tracker {
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
-                event,
+                &event,
                 Metadata::from(self.clone()),
                 actual_ledger_hash,
                 last_data,
@@ -347,11 +384,14 @@ impl Tracker {
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
-                    if let Error::Sn = e {
+                    // Check if it's a sequence number error
+                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
                         // El evento que estamos aplicando no es el siguiente.
                         continue;
                     } else {
-                        return Err(ActorError::Functional(e.to_string()));
+                        return Err(ActorError::Functional {
+                            description: e.to_string(),
+                        });
                     }
                 }
             };
@@ -477,15 +517,17 @@ impl Tracker {
                 })
                 .await?
         } else {
-            return Err(ActorError::NotFound(relation_path));
+            return Err(ActorError::NotFound {
+                path: relation_path,
+            });
         };
 
         match response {
             RelationShipResponse::None => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse(
-                relation_path,
-                "RelationShipResponse::None".to_owned(),
-            )),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "RelationShipResponse::None".to_owned(),
+                path: relation_path,
+            }),
         }
     }
 
@@ -512,16 +554,17 @@ impl Tracker {
                 })
                 .await?
         } else {
-            return Err(ActorError::NotFound(relation_path));
+            return Err(ActorError::NotFound {
+                path: relation_path,
+            });
         };
 
-        if let RelationShipResponse::None = response {
-            Ok(())
-        } else {
-            Err(ActorError::UnexpectedResponse(
-                relation_path,
-                "RelationShipResponse::None".to_owned(),
-            ))
+        match response {
+            RelationShipResponse::None => Ok(()),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "RelationShipResponse::None".to_owned(),
+                path: relation_path,
+            }),
         }
     }
 }
@@ -567,6 +610,14 @@ impl Actor for Tracker {
     type Message = TrackerMessage;
     type Response = TrackerResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Tracker", id = id)
+        } else {
+            info_span!("Tracker", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -579,13 +630,19 @@ impl Actor for Tracker {
             let Some(ext_db): Option<ExternalDB> =
                 ctx.system().get_helper("ext_db").await
             else {
-                return Err(ActorError::NotHelper("ext_db".to_owned()));
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
             };
 
             let Some(ave_sink): Option<AveSink> =
                 ctx.system().get_helper("sink").await
             else {
-                return Err(ActorError::NotHelper("sink".to_owned()));
+                return Err(ActorError::Helper {
+                    name: "sink".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
             };
 
             let sink_actor = ctx
@@ -625,6 +682,11 @@ impl Handler<Tracker> for Tracker {
     ) -> Result<TrackerResponse, ActorError> {
         match msg {
             TrackerMessage::GetLastSn => {
+                debug!(
+                    msg_type = "GetLastSn",
+                    sn = self.subject_metadata.sn,
+                    "Returning last sequence number"
+                );
                 Ok(TrackerResponse::Sn(self.subject_metadata.sn))
             }
             TrackerMessage::UpdateTransfer(res) => {
@@ -633,9 +695,16 @@ impl Handler<Tracker> for Tracker {
                         let Some(new_owner) =
                             self.subject_metadata.new_owner.clone()
                         else {
-                            let e = "Can not obtain new_owner";
-                            error!(TARGET_TRACKER, "Confirm, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            error!(
+                                msg_type = "UpdateTransfer",
+                                transfer_action = "Confirm",
+                                subject_id = %self.subject_metadata.subject_id,
+                                "Failed to obtain new_owner"
+                            );
+                            return Err(ActorError::Functional {
+                                description: "Can not obtain new_owner"
+                                    .to_owned(),
+                            });
                         };
 
                         Tracker::change_node_subject(
@@ -647,6 +716,14 @@ impl Handler<Tracker> for Tracker {
                         .await?;
 
                         self.delete_relation(ctx).await?;
+
+                        debug!(
+                            msg_type = "UpdateTransfer",
+                            transfer_action = "Confirm",
+                            subject_id = %self.subject_metadata.subject_id,
+                            new_owner = %new_owner,
+                            "Transfer confirmed successfully"
+                        );
                     }
                     TransferResponse::Reject => {
                         Tracker::reject_transfer_subject(
@@ -660,6 +737,13 @@ impl Handler<Tracker> for Tracker {
                             WitnessesAuth::None,
                         )
                         .await?;
+
+                        debug!(
+                            msg_type = "UpdateTransfer",
+                            transfer_action = "Reject",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Transfer rejected successfully"
+                        );
                     }
                 }
 
@@ -677,15 +761,28 @@ impl Handler<Tracker> for Tracker {
                 Box::new(Metadata::from(self.clone())),
             )),
             TrackerMessage::UpdateLedger { events } => {
+                let events_count = events.len();
                 if let Err(e) =
                     self.manager_new_ledger_events(ctx, events).await
                 {
                     warn!(
-                        TARGET_TRACKER,
-                        "UpdateLedger, can not verify new events: {}", e
+                        msg_type = "UpdateLedger",
+                        error = %e,
+                        subject_id = %self.subject_metadata.subject_id,
+                        events_count = events_count,
+                        "Failed to verify new ledger events"
                     );
                     return Err(e);
                 };
+
+                debug!(
+                    msg_type = "UpdateLedger",
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    events_count = events_count,
+                    "Ledger updated successfully"
+                );
+
                 Ok(TrackerResponse::UpdateResult(
                     self.subject_metadata.sn,
                     self.subject_metadata.owner.clone(),
@@ -707,18 +804,28 @@ impl Handler<Tracker> for Tracker {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_TRACKER,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to persist event"
             );
             emit_fail(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_event(event).await {
+        if let Err(e) = ctx.publish_event(event.clone()).await {
             error!(
-                TARGET_TRACKER,
-                "PublishEvent, can not publish event: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to publish event"
             );
             emit_fail(ctx, e).await;
+        } else {
+            debug!(
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Event persisted and published successfully"
+            );
         }
     }
 
@@ -727,7 +834,11 @@ impl Handler<Tracker> for Tracker {
         error: ActorError,
         ctx: &mut ActorContext<Tracker>,
     ) -> ChildAction {
-        error!(TARGET_TRACKER, "OnChildFault, {}", error);
+        error!(
+            error = %error,
+            subject_id = %self.subject_metadata.subject_id,
+            "Child fault occurred"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
@@ -736,7 +847,7 @@ impl Handler<Tracker> for Tracker {
 #[async_trait]
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
-    type InitParams = (Option<TrackerInit>, PublicKey);
+    type InitParams = (Option<TrackerInit>, Arc<PublicKey>, HashAlgorithm);
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
@@ -750,6 +861,7 @@ impl PersistentActor for Tracker {
         let init = params.0.unwrap_or_default();
 
         Self {
+            hash: Some(params.2),
             our_key: params.1,
             subject_metadata: init.subject_metadata,
             properties: init.properties,
@@ -770,8 +882,19 @@ impl PersistentActor for Tracker {
                 {
                     self.subject_metadata = SubjectMetadata::new(metadata);
                     self.properties = metadata.properties.clone();
+
+                    debug!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        sn = self.subject_metadata.sn,
+                        "Applied create event"
+                    );
                 } else {
-                    todo!()
+                    error!(
+                        event_type = "Create",
+                        "Validation metadata must be Metadata type"
+                    );
+                    return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
                 return Ok(());
@@ -782,6 +905,11 @@ impl PersistentActor for Tracker {
             ) => {
                 if let Some(eval_res) = evaluation.evaluator_res() {
                     self.apply_patch(eval_res.patch)?;
+                    debug!(
+                        event_type = "Fact",
+                        subject_id = %self.subject_metadata.subject_id,
+                        "Applied fact event with patch"
+                    );
                 }
             }
             (
@@ -791,23 +919,63 @@ impl PersistentActor for Tracker {
                 if evaluation.evaluator_res().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
+                    debug!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        new_owner = %transfer_request.new_owner,
+                        "Applied transfer event"
+                    );
                 }
             }
             (EventRequest::Confirm(..), Protocols::TrackerConfirm { .. }) => {
                 if let Some(new_owner) = self.subject_metadata.new_owner.take()
                 {
-                    self.subject_metadata.owner = new_owner;
+                    self.subject_metadata.owner = new_owner.clone();
+                    debug!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        new_owner = %new_owner,
+                        "Applied confirm event"
+                    );
                 } else {
-                    todo!()
+                    error!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        "New owner is None in confirm event"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In confirm event, new owner is None"
+                            .to_owned(),
+                    });
                 }
             }
             (EventRequest::Reject(..), Protocols::Reject { .. }) => {
                 self.subject_metadata.new_owner = None;
+                debug!(
+                    event_type = "Reject",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied reject event"
+                );
             }
             (EventRequest::EOL(..), Protocols::EOL { .. }) => {
-                self.subject_metadata.active = false
+                self.subject_metadata.active = false;
+                debug!(
+                    event_type = "EOL",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied EOL event"
+                );
             }
-            _ => todo!("gov events es un tracker esto"),
+            _ => {
+                error!(
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Invalid protocol data for Tracker"
+                );
+                return Err(ActorError::Functional {
+                    description:
+                        "Protocols data is for Governance and this is a Tracker"
+                            .to_owned(),
+                });
+            }
         }
 
         self.subject_metadata.sn += 1;

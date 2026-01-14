@@ -325,7 +325,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "evaluators vec in governance roles add".to_owned(),
+                            what: "evaluators vec in governance roles add"
+                                .to_owned(),
                         },
                     });
                 }
@@ -380,7 +381,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "validators vec in governance roles add".to_owned(),
+                            what: "validators vec in governance roles add"
+                                .to_owned(),
                         },
                     });
                 }
@@ -435,7 +437,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "witnesses vec in governance roles add".to_owned(),
+                            what: "witnesses vec in governance roles add"
+                                .to_owned(),
                         },
                     });
                 }
@@ -490,7 +493,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "issuers vec in governance roles add".to_owned(),
+                            what: "issuers vec in governance roles add"
+                                .to_owned(),
                         },
                     });
                 }
@@ -560,7 +564,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "approvers vec in governance roles remove".to_owned(),
+                            what: "approvers vec in governance roles remove"
+                                .to_owned(),
                         },
                     });
                 }
@@ -584,7 +589,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "evaluators vec in governance roles remove".to_owned(),
+                            what: "evaluators vec in governance roles remove"
+                                .to_owned(),
                         },
                     });
                 }
@@ -608,7 +614,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "validators vec in governance roles remove".to_owned(),
+                            what: "validators vec in governance roles remove"
+                                .to_owned(),
                         },
                     });
                 }
@@ -631,7 +638,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "witnesses vec in governance roles remove".to_owned(),
+                            what: "witnesses vec in governance roles remove"
+                                .to_owned(),
                         },
                     });
                 }
@@ -654,7 +662,8 @@ impl GovRoleEvent {
                     return Err(RunnerError::InvalidEvent {
                         location: "GovRoleEvent::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "issuers vec in governance roles remove".to_owned(),
+                            what: "issuers vec in governance roles remove"
+                                .to_owned(),
                         },
                     });
                 }
@@ -665,7 +674,8 @@ impl GovRoleEvent {
                                 location: "GovRoleEvent::check_data",
                                 kind: error::InvalidEventKind::CannotRemove {
                                     what: format!("issuer {}", issuer),
-                                    reason: "does not have this role".to_owned(),
+                                    reason: "does not have this role"
+                                        .to_owned(),
                                 },
                             });
                         };
@@ -754,7 +764,8 @@ impl SchemaIdRole {
                     return Err(RunnerError::InvalidEvent {
                         location: "SchemaIdRole::check_data",
                         kind: error::InvalidEventKind::Empty {
-                            what: "evaluators vec in schema roles add".to_owned(),
+                            what: "evaluators vec in schema roles add"
+                                .to_owned(),
                         },
                     });
                 }
@@ -766,7 +777,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::Empty {
-                                what: format!("evaluator name in schema {}", schema_id),
+                                what: format!(
+                                    "evaluator name in schema {}",
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -775,7 +789,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidSize {
-                                field: format!("evaluator name in schema {}", schema_id),
+                                field: format!(
+                                    "evaluator name in schema {}",
+                                    schema_id
+                                ),
                                 actual: evaluator.name.len(),
                                 max: 100,
                             },
@@ -786,7 +803,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("evaluator namespace in schema {}", schema_id),
+                                field: format!(
+                                    "evaluator namespace in schema {}",
+                                    schema_id
+                                ),
                                 reason: "namespace is invalid".to_owned(),
                             },
                         });
@@ -830,7 +850,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::Empty {
-                                what: format!("validator name in schema {}", schema_id),
+                                what: format!(
+                                    "validator name in schema {}",
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -839,7 +862,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidSize {
-                                field: format!("validator name in schema {}", schema_id),
+                                field: format!(
+                                    "validator name in schema {}",
+                                    schema_id
+                                ),
                                 actual: validator.name.len(),
                                 max: 100,
                             },
@@ -850,7 +876,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("validator namespace in schema {}", schema_id),
+                                field: format!(
+                                    "validator namespace in schema {}",
+                                    schema_id
+                                ),
                                 reason: "invalid namespace".to_owned(),
                             },
                         });
@@ -894,7 +923,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::Empty {
-                                what: format!("witness name in schema {}", schema_id),
+                                what: format!(
+                                    "witness name in schema {}",
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -903,7 +935,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidSize {
-                                field: format!("witness name in schema {}", schema_id),
+                                field: format!(
+                                    "witness name in schema {}",
+                                    schema_id
+                                ),
                                 actual: witness.name.len(),
                                 max: 100,
                             },
@@ -914,7 +949,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("witness namespace in schema {}", schema_id),
+                                field: format!(
+                                    "witness namespace in schema {}",
+                                    schema_id
+                                ),
                                 reason: "invalid namespace".to_owned(),
                             },
                         });
@@ -958,7 +996,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::Empty {
-                                what: format!("creator name in schema {}", schema_id),
+                                what: format!(
+                                    "creator name in schema {}",
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -967,7 +1008,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidSize {
-                                field: format!("creator name in schema {}", schema_id),
+                                field: format!(
+                                    "creator name in schema {}",
+                                    schema_id
+                                ),
                                 actual: creator.name.len(),
                                 max: 100,
                             },
@@ -988,7 +1032,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("creator namespace in schema {}", schema_id),
+                                field: format!(
+                                    "creator namespace in schema {}",
+                                    schema_id
+                                ),
                                 reason: "invalid namespace".to_owned(),
                             },
                         });
@@ -1044,7 +1091,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::Empty {
-                                what: format!("issuer name in schema {}", schema_id),
+                                what: format!(
+                                    "issuer name in schema {}",
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -1053,7 +1103,10 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidSize {
-                                field: format!("issuer name in schema {}", schema_id),
+                                field: format!(
+                                    "issuer name in schema {}",
+                                    schema_id
+                                ),
                                 actual: issuer.name.len(),
                                 max: 100,
                             },
@@ -1065,7 +1118,10 @@ impl SchemaIdRole {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::InvalidValue {
-                                    field: format!("issuer namespace in schema {}", schema_id),
+                                    field: format!(
+                                        "issuer namespace in schema {}",
+                                        schema_id
+                                    ),
                                     reason: "invalid namespace".to_owned(),
                                 },
                             });
@@ -1132,7 +1188,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotRemove {
                                 what: "evaluator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", evaluator.name, evaluator.namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    evaluator.name,
+                                    evaluator.namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1155,7 +1216,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotRemove {
                                 what: "validator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", validator.name, validator.namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    validator.name,
+                                    validator.namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1178,7 +1244,10 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotRemove {
                                 what: "witness".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", witness.name, witness.namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    witness.name, witness.namespace, schema_id
+                                ),
                             },
                         });
                     };
@@ -1204,7 +1273,10 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotRemove {
                                 what: "creator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", creator.name, creator.namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    creator.name, creator.namespace, schema_id
+                                ),
                             },
                         });
                     }
@@ -1228,7 +1300,12 @@ impl SchemaIdRole {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::CannotRemove {
                                     what: "issuer".to_owned(),
-                                    reason: format!("{} {} does not have this role in schema {}", issuer.name, issuer.namespace, schema_id),
+                                    reason: format!(
+                                        "{} {} does not have this role in schema {}",
+                                        issuer.name,
+                                        issuer.namespace,
+                                        schema_id
+                                    ),
                                 },
                             });
                         }
@@ -1273,7 +1350,12 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("evaluator {} {} new namespace in schema {}", evaluator.actual_name, evaluator.actual_namespace, schema_id),
+                                field: format!(
+                                    "evaluator {} {} new namespace in schema {}",
+                                    evaluator.actual_name,
+                                    evaluator.actual_namespace,
+                                    schema_id
+                                ),
                                 reason: "invalid new namespace".to_owned(),
                             },
                         });
@@ -1287,7 +1369,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotModify {
                                 what: "evaluator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", evaluator.actual_name, evaluator.actual_namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    evaluator.actual_name,
+                                    evaluator.actual_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1300,7 +1387,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "evaluator with new namespace".to_owned(),
-                                id: format!("{} {} in schema {}", evaluator.actual_name, evaluator.new_namespace, schema_id),
+                                id: format!(
+                                    "{} {} in schema {}",
+                                    evaluator.actual_name,
+                                    evaluator.new_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -1322,7 +1414,12 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("validator {} {} new namespace in schema {}", validator.actual_name, validator.actual_namespace, schema_id),
+                                field: format!(
+                                    "validator {} {} new namespace in schema {}",
+                                    validator.actual_name,
+                                    validator.actual_namespace,
+                                    schema_id
+                                ),
                                 reason: "invalid new namespace".to_owned(),
                             },
                         });
@@ -1336,7 +1433,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotModify {
                                 what: "validator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", validator.actual_name, validator.actual_namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    validator.actual_name,
+                                    validator.actual_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1349,7 +1451,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "validator with new namespace".to_owned(),
-                                id: format!("{} {} in schema {}", validator.actual_name, validator.new_namespace, schema_id),
+                                id: format!(
+                                    "{} {} in schema {}",
+                                    validator.actual_name,
+                                    validator.new_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -1371,7 +1478,12 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::InvalidValue {
-                                field: format!("witness {} {} new namespace in schema {}", witness.actual_name, witness.actual_namespace, schema_id),
+                                field: format!(
+                                    "witness {} {} new namespace in schema {}",
+                                    witness.actual_name,
+                                    witness.actual_namespace,
+                                    schema_id
+                                ),
                                 reason: "invalid new namespace".to_owned(),
                             },
                         });
@@ -1385,7 +1497,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotModify {
                                 what: "witness".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", witness.actual_name, witness.actual_namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    witness.actual_name,
+                                    witness.actual_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1398,7 +1515,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "witness with new namespace".to_owned(),
-                                id: format!("{} {} in schema {}", witness.actual_name, witness.new_namespace, schema_id),
+                                id: format!(
+                                    "{} {} in schema {}",
+                                    witness.actual_name,
+                                    witness.new_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -1436,7 +1558,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotModify {
                                 what: "creator".to_owned(),
-                                reason: format!("{} {} does not have this role in schema {}", creator.actual_name, creator.actual_namespace, schema_id),
+                                reason: format!(
+                                    "{} {} does not have this role in schema {}",
+                                    creator.actual_name,
+                                    creator.actual_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     };
@@ -1448,7 +1575,12 @@ impl SchemaIdRole {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::InvalidValue {
-                                    field: format!("creator {} {} new namespace in schema {}", creator.actual_name, creator.actual_namespace, schema_id),
+                                    field: format!(
+                                        "creator {} {} new namespace in schema {}",
+                                        creator.actual_name,
+                                        creator.actual_namespace,
+                                        schema_id
+                                    ),
                                     reason: "invalid new namespace".to_owned(),
                                 },
                             });
@@ -1512,7 +1644,12 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "creator with new namespace".to_owned(),
-                                id: format!("{} {} in schema {}", creator.actual_name, new_namespace, schema_id),
+                                id: format!(
+                                    "{} {} in schema {}",
+                                    creator.actual_name,
+                                    new_namespace,
+                                    schema_id
+                                ),
                             },
                         });
                     }
@@ -1535,7 +1672,12 @@ impl SchemaIdRole {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::InvalidValue {
-                                    field: format!("issuer {} {} new namespace in schema {}", issuer.actual_name, issuer.actual_namespace, schema_id),
+                                    field: format!(
+                                        "issuer {} {} new namespace in schema {}",
+                                        issuer.actual_name,
+                                        issuer.actual_namespace,
+                                        schema_id
+                                    ),
                                     reason: "invalid new namespace".to_owned(),
                                 },
                             });
@@ -1549,7 +1691,12 @@ impl SchemaIdRole {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::CannotModify {
                                     what: "issuer".to_owned(),
-                                    reason: format!("{} {} does not have this role in schema {}", issuer.actual_name, issuer.actual_namespace, schema_id),
+                                    reason: format!(
+                                        "{} {} does not have this role in schema {}",
+                                        issuer.actual_name,
+                                        issuer.actual_namespace,
+                                        schema_id
+                                    ),
                                 },
                             });
                         };
@@ -1561,8 +1708,14 @@ impl SchemaIdRole {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::AlreadyExists {
-                                    what: "issuer with new namespace".to_owned(),
-                                    id: format!("{} {} in schema {}", issuer.actual_name, issuer.new_namespace, schema_id),
+                                    what: "issuer with new namespace"
+                                        .to_owned(),
+                                    id: format!(
+                                        "{} {} in schema {}",
+                                        issuer.actual_name,
+                                        issuer.new_namespace,
+                                        schema_id
+                                    ),
                                 },
                             });
                         }

@@ -10,7 +10,7 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{collections::HashMap, vec};
-use tracing::{error, warn};
+use tracing::{Span, error, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{get_node_subject_data, subject_old};
@@ -206,6 +206,14 @@ impl Actor for Auth {
     type Event = AuthEvent;
     type Message = AuthMessage;
     type Response = AuthResponse;
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Auth", id = id)
+        } else {
+            info_span!("Auth", id = id)
+        }
+    }
 
     async fn pre_start(
         &mut self,

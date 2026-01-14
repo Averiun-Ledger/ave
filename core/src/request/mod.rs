@@ -4,12 +4,12 @@ use ave_actors::{
     Handler, Message, Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::{Namespace, SchemaType};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
 use ave_common::request::{CreateRequest, EventRequest};
 use ave_common::response::RequestState;
+use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
@@ -28,8 +28,7 @@ use crate::request::manager::InitRequestManager;
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use crate::system::ConfigHelper;
 use crate::{
-    Node, NodeMessage, NodeResponse,
-    db::Storable,
+    Node, NodeMessage, NodeResponse, db::Storable,
     governance::model::CreatorQuantity,
 };
 
@@ -51,7 +50,7 @@ pub struct RequestHandler {
     #[serde(skip)]
     helpers: Option<(HashAlgorithm, Arc<NetworkSender>)>,
     #[serde(skip)]
-    node_key: PublicKey,
+    node_key: Arc<PublicKey>,
     handling: HashMap<String, String>,
     in_queue: HashMap<String, VecDeque<Signed<EventRequest>>>,
 }
@@ -77,7 +76,7 @@ impl BorshDeserialize for RequestHandler {
         let in_queue =
              HashMap::<String, VecDeque<Signed<EventRequest>>>::deserialize_reader(reader)?;
 
-        let node_key = PublicKey::default();
+        let node_key = Arc::new(PublicKey::default());
 
         Ok(Self {
             helpers: None,
@@ -104,7 +103,7 @@ impl RequestHandler {
                 })
                 .await?
         } else {
-            return Err(ActorError::NotFound(request_path));
+            return Err(ActorError::NotFound{ path:request_path});
         }
         Ok(())
     }
@@ -283,7 +282,7 @@ impl RequestHandler {
             let e = "The Scheme does not exist or does not have permissions for the creation of subjects, it needs to be assigned the creator role.";
             error!(TARGET_REQUEST, "{}, {}", message, e);
 
-            Err(ActorError::Functional(e.to_owned()))
+            Err(ActorError::Functional{description: e.to_owned()})
         }
     }
 
@@ -420,17 +419,17 @@ impl Actor for RequestHandler {
         {
             config.tracking_size
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper{name: "config".to_owned(), reason: "Not found".to_string()});
         };
 
         ctx.create_child("tracking", RequestTracking::new(tracking_size))
             .await?;
 
-        let Some((hash,network)) = self.helpers.clone() else {
+        let Some((hash, network)) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
 
             ctx.system().stop_system();
-            return Err(ActorError::FunctionalFail(e));
+            return Err(ActorError::FunctionalCritical { description: e });
         };
 
         for (subject_id, request_id) in self.handling.clone() {
@@ -569,13 +568,13 @@ impl Handler<RequestHandler> for RequestHandler {
                 {
                     let e = "An event is being sent to a subject that does not belong to us or its creation is pending completion, and the subject is not pending event confirmation.";
                     error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    return Err(ActorError::Functional{description: e.to_owned()});
                 }
 
                 if is_owner && is_pending {
                     let e = "We are the owner of the subject but this subject is pending transfer";
                     error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    return Err(ActorError::Functional{description: e.to_owned()});
                 }
 
                 let metadata = match request.content().clone() {
@@ -585,7 +584,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         {
                             let e = "The subject name must be less than 100 characters or not be empty.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         if let Some(description) =
@@ -595,39 +594,33 @@ impl Handler<RequestHandler> for RequestHandler {
                         {
                             let e = "The subject description must be less than 200 characters or not be empty.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         // verificar que el firmante sea el nodo.
                         if request.signature().signer != self.node_key {
                             let e = "Only the node can sign creation events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         if create_request.schema_id.is_gov() {
                             if !create_request.namespace.is_empty() {
                                 let e = "The creation event is for a governance, the namespace must be empty.";
                                 error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
+                                return Err(ActorError::Functional{description: e.to_owned()});
                             }
 
                             if !create_request.governance_id.is_empty() {
                                 let e = "The creation event is for a governance, the governance_id must be empty.";
                                 error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
+                                return Err(ActorError::Functional{description: e.to_owned()});
                             }
                         } else {
                             if create_request.governance_id.is_empty() {
                                 let e = "The creation event is for a traceability subject, the governance_id cannot be empty.";
                                 error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
+                                return Err(ActorError::Functional{description: e.to_owned()});
                             }
 
                             let gov = match get_gov(
@@ -749,7 +742,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if metadata.new_owner.is_some() {
                             let e = "After Transfer event only can emit Confirm or Reject event";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         metadata
@@ -758,7 +751,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if request.signature().signer != self.node_key {
                             let e = "Only the node can sign transfer events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         let metadata = get_metadata(
@@ -770,7 +763,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if metadata.new_owner.is_some() {
                             let e = "After Transfer event only can emit Confirm or Reject event";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         metadata
@@ -779,7 +772,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if request.signature().signer != self.node_key {
                             let e = "Only the node can sign Confirm events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
                         let metadata = get_metadata(
                             ctx,
@@ -790,13 +783,13 @@ impl Handler<RequestHandler> for RequestHandler {
                         let Some(new_owner) = metadata.new_owner.clone() else {
                             let e = "Confirm event need Transfer event before";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         };
 
                         if new_owner != self.node_key {
                             let e = "You are not new owner";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         if !metadata.schema_id.is_gov() {
@@ -839,7 +832,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if request.signature().signer != self.node_key {
                             let e = "Only the node can sign reject events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
                         let metadata = get_metadata(
                             ctx,
@@ -850,13 +843,13 @@ impl Handler<RequestHandler> for RequestHandler {
                         let Some(new_owner) = metadata.new_owner.clone() else {
                             let e = "Reject event need Transfer event before";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         };
 
                         if new_owner != self.node_key {
                             let e = "You are not new owner";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         metadata
@@ -865,7 +858,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if request.signature().signer != self.node_key {
                             let e = "Only the node can sign eol events.";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         let metadata = get_metadata(
@@ -877,7 +870,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         if metadata.new_owner.is_some() {
                             let e = "After Transfer event only can emit Confirm or Reject event";
                             error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            return Err(ActorError::Functional{description: e.to_owned()});
                         }
 
                         metadata
@@ -887,7 +880,7 @@ impl Handler<RequestHandler> for RequestHandler {
                 if !metadata.active {
                     let e = "The subject is no longer active.";
                     error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    return Err(ActorError::Functional{description: e.to_owned()});
                 }
 
                 let request_id = hash_borsh(&*hash.hasher(), &request)

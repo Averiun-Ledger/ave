@@ -21,8 +21,13 @@ use crate::{
         transfer::{TransferRegister, TransferRegisterMessage},
     },
     tracker::Tracker,
-    validation::{request::{ActualProtocols, LastData, ValidationReq}, response::ValidationRes},
+    validation::{
+        request::{ActualProtocols, LastData, ValidationReq},
+        response::ValidationRes,
+    },
 };
+
+use error::SubjectError;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event,
@@ -33,7 +38,7 @@ use ave_common::{
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
-    request::{CreateRequest, EventRequest},
+    request::EventRequest,
 };
 
 use async_trait::async_trait;
@@ -41,11 +46,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use sinkdata::{SinkData, SinkDataMessage};
+use tracing::{debug, error};
 
 pub mod error;
 pub mod sinkdata;
-
-use error::*;
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
@@ -224,35 +228,39 @@ where
     <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
     Self: PersistentActor,
 {
-    fn apply_patch_verify(subject_properties: &mut ValueWrapper, json_patch: ValueWrapper) -> Result<(), SubjectError> {
-        let json_patch = match serde_json::from_value::<Patch>(json_patch.0) {
-            Ok(patch) => patch,
-            Err(e) => {
-                todo!()
-            }
-        };
+    fn apply_patch_verify(
+        subject_properties: &mut ValueWrapper,
+        json_patch: ValueWrapper,
+    ) -> Result<(), SubjectError> {
+        let json_patch = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| SubjectError::PatchConversionFailed {
+                details: e.to_string(),
+            })?;
 
-        if let Err(e) = patch(&mut subject_properties.0, &json_patch) {
-            todo!()
-        };
+        patch(&mut subject_properties.0, &json_patch)
+            .map_err(|e| SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            })?;
 
         Ok(())
     }
 
     async fn verify_new_ledger_event(
         ctx: &mut ActorContext<Self>,
-        new_ledger_event: SignedLedger,
+        new_ledger_event: &SignedLedger,
         subject_metadata: Metadata,
         actual_ledger_event_hash: DigestIdentifier,
         last_data: LastData,
         hash: &HashAlgorithm,
     ) -> Result<bool, SubjectError> {
         if !subject_metadata.active {
-            todo!()
+            return Err(SubjectError::SubjectInactive);
         }
 
         if new_ledger_event.verify().is_err() {
-            todo!()
+            return Err(SubjectError::SignatureVerificationFailed {
+                context: "new ledger event signature verification failed".to_string(),
+            });
         }
 
         let signer = if let Some(new_owner) = &subject_metadata.new_owner {
@@ -262,123 +270,213 @@ where
         };
 
         if new_ledger_event.signature().signer != signer {
-            todo!()
+            return Err(SubjectError::IncorrectSigner {
+                expected: signer.to_string(),
+                actual: new_ledger_event.signature().signer.to_string(),
+            });
         }
 
         if new_ledger_event.content().event_request.verify().is_err() {
-            todo!()
+            return Err(SubjectError::SignatureVerificationFailed {
+                context: "event request signature verification failed".to_string(),
+            });
         }
 
         if new_ledger_event.content().sn == subject_metadata.sn + 1 {
-            todo!()
+            return Err(SubjectError::InvalidSequenceNumber {
+                expected: subject_metadata.sn + 1,
+                actual: new_ledger_event.content().sn,
+            });
         }
 
-        if actual_ledger_event_hash != new_ledger_event.content().prev_ledger_event_hash {
-            todo!()
+        if actual_ledger_event_hash
+            != new_ledger_event.content().prev_ledger_event_hash
+        {
+            return Err(SubjectError::PreviousHashMismatch);
         }
 
         let mut modified_subject_metadata = subject_metadata.clone();
         modified_subject_metadata.sn += 1;
 
-        let (validation, new_actual_protocols) =
-            match (new_ledger_event.content().event_request.content(), &new_ledger_event.content().protocols, subject_metadata.schema_id.is_gov()) {
-                (EventRequest::Fact(..), Protocols::TrackerFact { evaluation, validation }, false) => {
-                    if modified_subject_metadata.new_owner.is_some() {
-                        todo!()
-                    }
-
-                    if let Some(eval) = evaluation.evaluator_res() {
-                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
-                    }
-                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
+        let (validation, new_actual_protocols) = match (
+            new_ledger_event.content().event_request.content(),
+            &new_ledger_event.content().protocols,
+            subject_metadata.schema_id.is_gov(),
+        ) {
+            (
+                EventRequest::Fact(..),
+                Protocols::TrackerFact {
+                    evaluation,
+                    validation,
                 },
-                (EventRequest::Fact(..), Protocols::GovFact { evaluation, approval, validation }, true) => {
-                    if modified_subject_metadata.new_owner.is_some() {
-                        todo!()
-                    }
+                false,
+            ) => {
+                if modified_subject_metadata.new_owner.is_some() {
+                    return Err(SubjectError::UnexpectedFactEvent);
+                }
 
-                    let actual_protocols = if let Some(eval) = evaluation.evaluator_res() {
-                        if let Some(appr) = approval {
-                            if appr.approved {
-                                Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;  
-                            } 
+                if let Some(eval) = evaluation.evaluator_res() {
+                    Self::apply_patch_verify(
+                        &mut modified_subject_metadata.properties,
+                        eval.patch,
+                    )?;
+                }
+                (
+                    validation,
+                    ActualProtocols::Eval {
+                        eval_data: evaluation.clone(),
+                    },
+                )
+            }
+            (
+                EventRequest::Fact(..),
+                Protocols::GovFact {
+                    evaluation,
+                    approval,
+                    validation,
+                },
+                true,
+            ) => {
+                if modified_subject_metadata.new_owner.is_some() {
+                    return Err(SubjectError::UnexpectedFactEvent);
+                }
 
-                            ActualProtocols::EvalApprove { eval_data: evaluation.clone(), approval_data: appr.clone() }
-                        } else {
-                            todo!("error")
+                let actual_protocols = if let Some(eval) =
+                    evaluation.evaluator_res()
+                {
+                    if let Some(appr) = approval {
+                        if appr.approved {
+                            Self::apply_patch_verify(
+                                &mut modified_subject_metadata.properties,
+                                eval.patch,
+                            )?;
+                        }
+
+                        ActualProtocols::EvalApprove {
+                            eval_data: evaluation.clone(),
+                            approval_data: appr.clone(),
                         }
                     } else {
-                        if approval.is_some() {
-                            todo!("Error")
-                        } else {
-                            ActualProtocols::Eval { eval_data: evaluation.clone() }
+                        return Err(SubjectError::MissingApprovalAfterEvaluation);
+                    }
+                } else {
+                    if approval.is_some() {
+                        return Err(SubjectError::UnexpectedApprovalAfterFailedEvaluation);
+                    } else {
+                        ActualProtocols::Eval {
+                            eval_data: evaluation.clone(),
                         }
-                    };
-
-                    (validation, actual_protocols)
-                },
-                (EventRequest::Transfer(transfer), Protocols::Transfer { evaluation, validation }, ..) => {
-                    if modified_subject_metadata.new_owner.is_some() {
-                        todo!()
                     }
+                };
 
-                    if let Some(eval) = evaluation.evaluator_res() {
-                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
-                        modified_subject_metadata.new_owner = Some(transfer.new_owner.clone());
-                    }
-
-                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
+                (validation, actual_protocols)
+            }
+            (
+                EventRequest::Transfer(transfer),
+                Protocols::Transfer {
+                    evaluation,
+                    validation,
                 },
-                (EventRequest::Confirm( .. ), Protocols::TrackerConfirm { validation }, false) => {
-                    if let Some(new_owner) = &modified_subject_metadata.new_owner.take() {
+                ..,
+            ) => {
+                if modified_subject_metadata.new_owner.is_some() {
+                    return Err(SubjectError::UnexpectedTransferEvent);
+                }
+
+                if let Some(eval) = evaluation.evaluator_res() {
+                    Self::apply_patch_verify(
+                        &mut modified_subject_metadata.properties,
+                        eval.patch,
+                    )?;
+                    modified_subject_metadata.new_owner =
+                        Some(transfer.new_owner.clone());
+                }
+
+                (
+                    validation,
+                    ActualProtocols::Eval {
+                        eval_data: evaluation.clone(),
+                    },
+                )
+            }
+            (
+                EventRequest::Confirm(..),
+                Protocols::TrackerConfirm { validation },
+                false,
+            ) => {
+                if let Some(new_owner) =
+                    &modified_subject_metadata.new_owner.take()
+                {
+                    modified_subject_metadata.owner = new_owner.clone();
+                } else {
+                    return Err(SubjectError::ConfirmWithoutNewOwner);
+                }
+
+                (validation, ActualProtocols::None)
+            }
+            (
+                EventRequest::Confirm(..),
+                Protocols::GovConfirm {
+                    evaluation,
+                    validation,
+                },
+                true,
+            ) => {
+                if let Some(eval) = evaluation.evaluator_res() {
+                    Self::apply_patch_verify(
+                        &mut modified_subject_metadata.properties,
+                        eval.patch,
+                    )?;
+
+                    if let Some(new_owner) =
+                        &modified_subject_metadata.new_owner.take()
+                    {
                         modified_subject_metadata.owner = new_owner.clone();
                     } else {
-                        todo!()
+                        return Err(SubjectError::ConfirmWithoutNewOwner);
                     }
+                }
 
-                    (validation, ActualProtocols::None)
-                },
-                (EventRequest::Confirm( .. ), Protocols::GovConfirm { evaluation, validation }, true) => {
-                    if let Some(eval) = evaluation.evaluator_res() {
-                        Self::apply_patch_verify(&mut modified_subject_metadata.properties, eval.patch)?;
+                (
+                    validation,
+                    ActualProtocols::Eval {
+                        eval_data: evaluation.clone(),
+                    },
+                )
+            }
+            (
+                EventRequest::Reject(..),
+                Protocols::Reject { validation },
+                ..,
+            ) => {
+                if modified_subject_metadata.new_owner.take().is_none() {
+                    return Err(SubjectError::RejectWithoutNewOwner);
+                }
 
-                        if let Some(new_owner) = &modified_subject_metadata.new_owner.take() {
-                            modified_subject_metadata.owner = new_owner.clone();
-                        } else {
-                            todo!()
-                        }
-                    }
+                (validation, ActualProtocols::None)
+            }
+            (EventRequest::EOL(..), Protocols::EOL { validation }, ..) => {
+                if modified_subject_metadata.new_owner.is_some() {
+                    return Err(SubjectError::UnexpectedEOLEvent);
+                }
 
-                    (validation, ActualProtocols::Eval { eval_data: evaluation.clone() })
-                },
-                (EventRequest::Reject( .. ), Protocols::Reject { validation }, ..) => {
-                    if modified_subject_metadata.new_owner.take().is_none() {
-                        todo!()
-                    }
+                modified_subject_metadata.active = false;
+                (validation, ActualProtocols::None)
+            }
+            _ => {
+                return Err(SubjectError::EventProtocolMismatch);
+            }
+        };
 
-                    (validation, ActualProtocols::None)
-                },
-                (EventRequest::EOL( .. ), Protocols::EOL { validation }, .. ) => {
-                    if modified_subject_metadata.new_owner.is_some() {
-                        todo!()
-                    }
-
-                    modified_subject_metadata.active = false;
-                    (validation, ActualProtocols::None)
-                },
-                _ => todo!()
-            };
-
-        let validation_req = ValidationReq::Event { 
+        let validation_req = ValidationReq::Event {
             actual_protocols: new_actual_protocols,
             event_request: new_ledger_event.content().event_request.clone(),
             ledger_hash: actual_ledger_event_hash,
             metadata: subject_metadata.clone(),
             last_data,
             gov_version: new_ledger_event.content().gov_version,
-            sn: new_ledger_event.content().sn
+            sn: new_ledger_event.content().sn,
         };
-
 
         let signed_validation_req = Signed::from_parts(
             validation_req,
@@ -386,55 +484,66 @@ where
         );
 
         if signed_validation_req.verify().is_err() {
-            todo!()
+            return Err(SubjectError::InvalidValidationRequestSignature);
         }
 
-        let hash_signed_val_req =
-            hash_borsh(&*hash.hasher(), &signed_validation_req)
-                .map_err(|e| todo!())?;
+        let hash_signed_val_req = hash_borsh(
+            &*hash.hasher(),
+            &signed_validation_req,
+        )
+        .map_err(|e| SubjectError::ValidationRequestHashFailed {
+            details: e.to_string(),
+        })?;
 
         if hash_signed_val_req != validation.validation_req_hash {
-            todo!()
+            return Err(SubjectError::ValidationRequestHashMismatch);
         }
 
-        let modified_metadata_hash =
-            hash_borsh(&*hash.hasher(), &modified_subject_metadata)
-                .map_err(|e| todo!())?;
+        let modified_metadata_hash = hash_borsh(
+            &*hash.hasher(),
+            &modified_subject_metadata,
+        )
+        .map_err(|e| SubjectError::ModifiedMetadataHashFailed {
+            details: e.to_string(),
+        })?;
 
         let validation_res = ValidationRes::Response {
             vali_req_hash: hash_signed_val_req,
-            modified_metadata_hash
+            modified_metadata_hash,
         };
 
         let role_data = get_validation_roles_register(
-                    ctx,
-                    &subject_metadata.governance_id.to_string(),
-                    SearchRole {
-                        schema_id: subject_metadata.schema_id,
-                        namespace: subject_metadata.namespace,
-                    },
-                    new_ledger_event.content().gov_version,
-                )
-                .await.map_err(|e| todo!())?;
+            ctx,
+            &subject_metadata.governance_id.to_string(),
+            SearchRole {
+                schema_id: subject_metadata.schema_id,
+                namespace: subject_metadata.namespace,
+            },
+            new_ledger_event.content().gov_version,
+        )
+        .await
+        .map_err(|e| SubjectError::ValidatorsRetrievalFailed {
+            details: e.to_string(),
+        })?;
 
         if !check_quorum_signers(
-            &validation.validators_signatures
+            &validation
+                .validators_signatures
                 .iter()
                 .map(|x| x.signer.clone())
                 .collect::<HashSet<PublicKey>>(),
             &role_data.quorum,
             &role_data.workers,
         ) {
-            todo!()
+            return Err(SubjectError::InvalidQuorum);
         }
-        
-        for signature in validation.validators_signatures.iter()
-        {
+
+        for signature in validation.validators_signatures.iter() {
             let signed_res =
                 Signed::from_parts(validation_res.clone(), signature.clone());
 
             if signed_res.verify().is_err() {
-                todo!()
+                return Err(SubjectError::InvalidValidatorSignature);
             }
         }
 
@@ -448,23 +557,30 @@ where
         subject_metadata: Metadata,
     ) -> Result<(), SubjectError> {
         if ledger_event.verify().is_err() {
-            todo!()
+            return Err(SubjectError::SignatureVerificationFailed {
+                context: "first ledger event signature verification failed".to_string(),
+            });
         }
 
         if ledger_event.signature().signer != subject_metadata.owner {
-            todo!()
+            return Err(SubjectError::IncorrectSigner {
+                expected: subject_metadata.owner.to_string(),
+                actual: ledger_event.signature().signer.to_string(),
+            });
         }
 
         if ledger_event.content().event_request.verify().is_err() {
-            todo!()
+            return Err(SubjectError::SignatureVerificationFailed {
+                context: "event request signature verification failed".to_string(),
+            });
         }
 
         if ledger_event.content().sn != 0 {
-            todo!()
+            return Err(SubjectError::InvalidCreationSequenceNumber);
         }
 
         if !ledger_event.content().prev_ledger_event_hash.is_empty() {
-            todo!()
+            return Err(SubjectError::NonEmptyPreviousHashInCreation);
         }
 
         let event_request_type = EventRequestType::from(
@@ -477,13 +593,15 @@ where
                     EventRequestType::Create,
                     Protocols::Create { validation },
                 ) => validation,
-                _ => todo!(),
+                _ => {
+                    return Err(SubjectError::EventProtocolMismatch);
+                }
             };
 
         let ValidationMetadata::Metadata(metadata) =
             &validation.validation_metadata
         else {
-            todo!()
+            return Err(SubjectError::InvalidValidationMetadata);
         };
 
         let validation_req = ValidationReq::Create {
@@ -497,19 +615,32 @@ where
         );
 
         if signed_validation_req.verify().is_err() {
-            todo!()
+            return Err(SubjectError::InvalidValidationRequestSignature);
         }
 
-        let hash_signed_val_req =
-            hash_borsh(&*hash.hasher(), &signed_validation_req)
-                .map_err(|e| todo!())?;
+        let hash_signed_val_req = hash_borsh(
+            &*hash.hasher(),
+            &signed_validation_req,
+        )
+        .map_err(|e| SubjectError::ValidationRequestHashFailed {
+            details: e.to_string(),
+        })?;
 
         if hash_signed_val_req != validation.validation_req_hash {
-            todo!()
+            return Err(SubjectError::ValidationRequestHashMismatch);
         }
 
         if metadata != &subject_metadata {
-            todo!()
+            return Err(SubjectError::MetadataMismatch);
+        }
+
+        if let SchemaType::Governance = metadata.schema_id {
+            serde_json::from_value::<GovernanceData>(
+                        metadata.properties.0.clone(),
+                    )
+                    .map_err(|e| SubjectError::GovernancePropertiesConversionFailed {
+                        details: e.to_string(),
+                    })?;
         }
 
         let validation_res = ValidationRes::Create {
@@ -522,39 +653,42 @@ where
                 workers: HashSet::from([metadata.owner.clone()]),
                 quorum: Quorum::Majority,
             },
-            SchemaType::Type(_) => {
-                get_validation_roles_register(
-                    ctx,
-                    &metadata.governance_id.to_string(),
-                    SearchRole {
-                        schema_id: metadata.schema_id,
-                        namespace: metadata.namespace,
-                    },
-                    ledger_event.content().gov_version,
-                )
-                .await?
+            SchemaType::Type(_) => get_validation_roles_register(
+                ctx,
+                &metadata.governance_id.to_string(),
+                SearchRole {
+                    schema_id: metadata.schema_id.clone(),
+                    namespace: metadata.namespace.clone(),
+                },
+                ledger_event.content().gov_version,
+            )
+            .await
+            .map_err(|e| SubjectError::ValidatorsRetrievalFailed {
+                details: e.to_string(),
+            })?,
+            SchemaType::AllSchemas => {
+                return Err(SubjectError::InvalidSchemaId);
             }
-            SchemaType::AllSchemas => todo!(),
         };
 
         if !check_quorum_signers(
-            &validation.validators_signatures
+            &validation
+                .validators_signatures
                 .iter()
                 .map(|x| x.signer.clone())
                 .collect::<HashSet<PublicKey>>(),
             &role_data.quorum,
             &role_data.workers,
         ) {
-            todo!()
+            return Err(SubjectError::InvalidQuorum);
         }
-        
-        for signature in validation.validators_signatures.iter()
-        {
+
+        for signature in validation.validators_signatures.iter() {
             let signed_res =
                 Signed::from_parts(validation_res.clone(), signature.clone());
 
             if signed_res.verify().is_err() {
-                todo!()
+                return Err(SubjectError::InvalidValidatorSignature);
             }
         }
 
@@ -573,14 +707,26 @@ where
 
         if let Some(node_actor) = node_actor {
             node_actor
-                .ask(NodeMessage::ChangeSubjectOwner {
+                .tell(NodeMessage::ChangeSubjectOwner {
                     new_owner: new_owner.to_owned(),
                     old_owner: old_owner.to_owned(),
                     subject_id: subject_id.to_owned(),
                 })
                 .await?;
+
+            debug!(
+                subject_id = subject_id,
+                new_owner = new_owner,
+                old_owner = old_owner,
+                "Subject owner changed successfully"
+            );
         } else {
-            return Err(ActorError::NotFound(node_path));
+            error!(
+                path = %node_path,
+                subject_id = subject_id,
+                "Node actor not found"
+            );
+            return Err(ActorError::NotFound { path: node_path });
         }
 
         Ok(())
@@ -606,8 +752,20 @@ where
                     actual_owner: actual_owner.to_owned(),
                 }))
                 .await?;
+
+            debug!(
+                subject_id = subject_id,
+                new_owner = new_owner,
+                actual_owner = actual_owner,
+                "Transfer subject initiated successfully"
+            );
         } else {
-            return Err(ActorError::NotFound(node_path));
+            error!(
+                path = %node_path,
+                subject_id = subject_id,
+                "Node actor not found"
+            );
+            return Err(ActorError::NotFound { path: node_path });
         }
         Ok(())
     }
@@ -624,8 +782,18 @@ where
             node_actor
                 .tell(NodeMessage::RejectTransfer(subject_id.to_owned()))
                 .await?;
+
+            debug!(
+                subject_id = subject_id,
+                "Transfer rejected successfully"
+            );
         } else {
-            return Err(ActorError::NotFound(node_path));
+            error!(
+                path = %node_path,
+                subject_id = subject_id,
+                "Node actor not found"
+            );
+            return Err(ActorError::NotFound { path: node_path });
         }
         Ok(())
     }
@@ -639,8 +807,14 @@ where
             ctx.system().get_actor(&register_path).await;
         if let Some(register) = register {
             register.tell(message).await?;
+
+            debug!("Register message sent successfully");
         } else {
-            return Err(ActorError::NotFound(register_path));
+            error!(
+                path = %register_path,
+                "Register actor not found"
+            );
+            return Err(ActorError::NotFound{path: register_path});
         }
 
         Ok(())
@@ -715,7 +889,12 @@ where
         > = ctx.system().get_actor(&tranfer_register_path).await;
 
         let Some(transfer_register_actor) = transfer_register_actor else {
-            return Err(ActorError::NotFound(tranfer_register_path));
+            error!(
+                path = %tranfer_register_path,
+                subject_id = subject_id,
+                "Transfer register actor not found"
+            );
+            return Err(ActorError::NotFound{path: tranfer_register_path});
         };
 
         transfer_register_actor
@@ -725,6 +904,11 @@ where
                 subject_id: subject_id.to_owned(),
             })
             .await?;
+
+        debug!(
+            subject_id = subject_id,
+            "Transfer registration completed successfully"
+        );
 
         Ok(())
     }
@@ -736,12 +920,17 @@ where
         let sink_data: Option<ActorRef<SinkData>> =
             ctx.get_child("sink_data").await;
         if let Some(sink_data) = sink_data {
-            sink_data.tell(message).await
+            sink_data.tell(message).await?;
+
+            debug!("Message published to sink successfully");
+            Ok(())
         } else {
-            Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/sink_data",
-                ctx.path()
-            ))))
+            let path = ctx.path().clone() / "sink_data";
+            error!(
+                path = %path,
+                "Sink data actor not found"
+            );
+            Err(ActorError::NotFound{ path })
         }
     }
 
@@ -760,13 +949,28 @@ where
                     subject_id: subject_id.to_owned(),
                     sn,
                 })
-                .await
+                .await?;
+
+            debug!(
+                subject_id = subject_id,
+                sn = sn,
+                "Subject node updated successfully"
+            );
+            Ok(())
         } else {
-            Err(ActorError::NotFound(node_path))
+            error!(
+                path = %node_path,
+                subject_id = subject_id,
+                "Node actor not found"
+            );
+            Err(ActorError::NotFound {path: node_path})
         }
     }
 
-    fn apply_patch(&mut self, json_patch: ValueWrapper) -> Result<(), ActorError>;
+    fn apply_patch(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError>;
 
     async fn manager_new_ledger_events(
         &mut self,
@@ -826,17 +1030,11 @@ mod tests {
         let ledger = Ledger::from(event.clone());
         let signature_ledger =
             Signature::new(&ledger, &node_keys.clone()).unwrap();
-        let signed_ledger = Signed {
-            content: ledger,
-            signature: signature_ledger,
-        };
+        let signed_ledger = Signed::from_parts(ledger, signature);
 
         let signature_event = Signature::new(&event, &node_keys).unwrap();
 
-        let signed_event = Signed {
-            content: event,
-            signature: signature_event,
-        };
+        let signed_event = Signed::from_parts(event, signature_event);
 
         let response = node_actor
             .ask(NodeMessage::CreateNewSubjectLedger(SignedLedger(

@@ -1,15 +1,13 @@
 //! # GovernanceData module.
 //!
-use crate::{
-    Error,
-    governance::model::{
+use crate::governance::{
+    error::GovernanceError,
+    model::{
         CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes,
         Quorum, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas,
         RolesGov, RolesSchema, Schema, SignersType, WitnessesData,
     },
 };
-
-use ave_actors::ActorError;
 
 use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
 
@@ -83,7 +81,7 @@ impl GovernanceData {
             policies_schema: BTreeMap::new(),
         }
     }
-    
+
     pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaType>) {
         for schema_id in remove_schemas {
             self.roles_schema.remove(&schema_id);
@@ -135,13 +133,13 @@ impl GovernanceData {
     /// # Returns
     /// * [`ValueWrapper`] - The initial state.
     /// # Errors
-    /// * `Error` - If the schema is not found.
+    /// * `GovernanceError` - If the schema is not found.
     pub fn get_init_state(
         &self,
         schema_id: &SchemaType,
-    ) -> Result<ValueWrapper, Error> {
+    ) -> Result<ValueWrapper, GovernanceError> {
         let Some(schema) = self.schemas.get(schema_id) else {
-            return Err(Error::Governance("Schema not found.".to_owned()));
+            return Err(GovernanceError::SchemaNotFound);
         };
 
         Ok(schema.initial_value.clone())
@@ -326,7 +324,7 @@ impl GovernanceData {
     pub fn get_witnesses(
         &self,
         data: WitnessesData,
-    ) -> Result<HashSet<PublicKey>, ActorError> {
+    ) -> Result<HashSet<PublicKey>, GovernanceError> {
         let names = match data {
             WitnessesData::Gov => {
                 self.roles_gov.get_signers(RoleTypes::Witness).0
@@ -343,14 +341,12 @@ impl GovernanceData {
                     .map(|x| x.0)
                     .cloned()
                 else {
-                    return Err(ActorError::Functional(
-                        "Creator must be a GovernanceData member".to_owned(),
-                    ));
+                    return Err(GovernanceError::CreatorNotMember);
                 };
 
                 let Some(roles_schema) = self.roles_schema.get(&schema_id)
                 else {
-                    return Err(ActorError::Functional("They are trying to obtain witnesses for a scheme that does not exist.".to_owned()));
+                    return Err(GovernanceError::WitnessesForNonexistentSchema);
                 };
                 let witnesses_creator =
                     roles_schema.creator_witnesses(&creator, namespace.clone());
@@ -419,7 +415,7 @@ impl GovernanceData {
         role: ProtocolTypes,
         schema_id: &SchemaType,
         namespace: Namespace,
-    ) -> Result<(HashSet<PublicKey>, Quorum), ActorError> {
+    ) -> Result<(HashSet<PublicKey>, Quorum), GovernanceError> {
         let (signers, _not_members) = self.get_signers(
             SignersType::from(role.clone()),
             schema_id,
@@ -427,10 +423,10 @@ impl GovernanceData {
         );
 
         let Some(quorum) = self.get_quorum(role.clone(), schema_id) else {
-            return Err(ActorError::Functional(format!(
-                "No quorum found for role {} and schema {}",
-                role, schema_id
-            )));
+            return Err(GovernanceError::QuorumNotFound {
+                role: role.to_string(),
+                schema_id: schema_id.to_string(),
+            });
         };
 
         Ok((signers, quorum))
@@ -644,15 +640,12 @@ impl GovernanceData {
 }
 
 impl TryFrom<ValueWrapper> for GovernanceData {
-    type Error = Error;
+    type Error = GovernanceError;
 
     fn try_from(value: ValueWrapper) -> Result<Self, Self::Error> {
         let governance: GovernanceData = serde_json::from_value(value.0)
-            .map_err(|e| {
-                Error::Governance(format!(
-                    "Can not convert Value into GovernanceData: {}",
-                    e
-                ))
+            .map_err(|e| GovernanceError::ConversionFailed {
+                details: e.to_string(),
             })?;
         Ok(governance)
     }

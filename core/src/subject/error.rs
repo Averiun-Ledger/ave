@@ -2,221 +2,156 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum SubjectError {
-    #[error("subject is not active")]
-    SubjectNotActive,
+    // Subject state errors
+    #[error("subject is no longer active")]
+    SubjectInactive,
 
-    #[error("invalid ledger signer")]
-    InvalidLedgerSigner,
+    #[error("subject schema id is invalid")]
+    InvalidSchemaId,
 
-    #[error("invalid event signer")]
-    InvalidEventSigner,
+    // Signature and verification errors
+    #[error("signature verification failed: {context}")]
+    SignatureVerificationFailed { context: String },
 
-    #[error("signature verification failed [{context}]: {details}")]
-    SignatureVerificationFailed {
-        context: &'static str,
-        details: String,
-    },
+    #[error("incorrect signer: expected {expected}, got {actual}")]
+    IncorrectSigner { expected: String, actual: String },
 
-    #[error("hash computation failed [{context}]: {details}")]
-    HashComputationFailed {
-        context: &'static str,
-        details: String,
-    },
+    #[error("validation request signature is invalid")]
+    InvalidValidationRequestSignature,
 
-    #[error("hash mismatch: {kind}")]
-    HashMismatch { kind: HashMismatchKind },
+    #[error("validator signature could not be verified")]
+    InvalidValidatorSignature,
 
-    #[error("event sequence error: {kind}")]
-    EventSequenceError { kind: EventSequenceKind },
-
-    #[error("invalid event: {kind}")]
-    InvalidEvent { kind: InvalidEventKind },
-
-    #[error("create event validation: {kind}")]
-    CreateEventError { kind: CreateEventErrorKind },
-
-    #[error("patch error: {kind}")]
-    PatchError { kind: PatchErrorKind },
-}
-
-#[derive(Debug, Clone)]
-pub enum HashMismatchKind {
-    PreviousEventHash {
-        message: &'static str,
-    },
-    StateHashWithoutPatch {
-        event_type: &'static str,
-    },
-    StateHashAfterPatch,
-}
-
-impl std::fmt::Display for HashMismatchKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PreviousEventHash { message } => write!(f, "{}", message),
-            Self::StateHashWithoutPatch { event_type } => {
-                write!(
-                    f,
-                    "in {} event, the hash obtained without applying any patch is different from the state hash of the event",
-                    event_type
-                )
-            }
-            Self::StateHashAfterPatch => {
-                write!(
-                    f,
-                    "the new patch has been applied and we have obtained a different hash than the event after applying the patch"
-                )
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum EventSequenceKind {
-    CreateAfterCreation,
-    FactAfterTransfer,
-    TransferAfterTransfer,
-    ConfirmWithoutTransfer,
-    RejectWithoutTransfer,
-    EolAfterTransfer,
-    EventAfterEol,
-}
-
-impl std::fmt::Display for EventSequenceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CreateAfterCreation => {
-                write!(
-                    f,
-                    "a creation event is being logged when the subject has already been created previously"
-                )
-            }
-            Self::FactAfterTransfer => {
-                write!(
-                    f,
-                    "after a transfer event there must be a confirmation or a reject event"
-                )
-            }
-            Self::TransferAfterTransfer => {
-                write!(
-                    f,
-                    "after a transfer event there must be a confirmation or a reject event"
-                )
-            }
-            Self::ConfirmWithoutTransfer => {
-                write!(f, "before a confirm event there must be a transfer event")
-            }
-            Self::RejectWithoutTransfer => {
-                write!(f, "before a reject event there must be a transfer event")
-            }
-            Self::EolAfterTransfer => {
-                write!(
-                    f,
-                    "after a transfer event there must be a confirmation or a reject event"
-                )
-            }
-            Self::EventAfterEol => {
-                write!(f, "the last event was EOL, no more events can be received")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum InvalidEventKind {
-    NameLength { length: usize },
-    DescriptionLength { length: usize },
+    // Event and ledger errors
+    #[error("event is not the next one to be applied: expected sn {expected}, got {actual}")]
     InvalidSequenceNumber { expected: u64, actual: u64 },
-    InvalidPreviousHash,
-    InvalidSigner { context: &'static str },
-    NotCreateEvent,
+
+    #[error("previous ledger event hash does not match")]
+    PreviousHashMismatch,
+
+    #[error("ledger event hash mismatch: expected {expected}, got {actual}")]
+    LedgerHashMismatch { expected: String, actual: String },
+
+    #[error("event type does not match protocols")]
+    EventProtocolMismatch,
+
+    #[error("event should be {expected} but got {actual}")]
+    UnexpectedEventType { expected: String, actual: String },
+
+    // Protocol-specific errors
+    #[error("fact event received but should be confirm or reject event")]
+    UnexpectedFactEvent,
+
+    #[error("transfer event received but should be confirm or reject event")]
+    UnexpectedTransferEvent,
+
+    #[error("EOL event received but should be confirm or reject event")]
+    UnexpectedEOLEvent,
+
+    #[error("confirm event received but new_owner is None")]
+    ConfirmWithoutNewOwner,
+
+    #[error("reject event received but new_owner is None")]
+    RejectWithoutNewOwner,
+
+    // Validation errors
+    #[error("quorum is not valid")]
+    InvalidQuorum,
+
+    #[error("validation request hash does not match")]
+    ValidationRequestHashMismatch,
+
+    #[error("validators and quorum could not be obtained: {details}")]
+    ValidatorsRetrievalFailed { details: String },
+
+    // Metadata errors
+    #[error("event metadata does not match subject metadata")]
+    MetadataMismatch,
+
+    #[error("validation metadata must be of type Metadata in creation event")]
+    InvalidValidationMetadata,
+
+    #[error("in creation event, sequence number must be 0")]
+    InvalidCreationSequenceNumber,
+
+    #[error("previous ledger event hash must be empty in creation event")]
+    NonEmptyPreviousHashInCreation,
+
+    // Patch and state errors
+    #[error("failed to apply patch: {details}")]
+    PatchApplicationFailed { details: String },
+
+    #[error("failed to convert ValueWrapper into Patch: {details}")]
+    PatchConversionFailed { details: String },
+
+    #[error("evaluation was satisfactory but there was no approval")]
+    MissingApprovalAfterEvaluation,
+
+    #[error("evaluation was not satisfactory but there is approval")]
+    UnexpectedApprovalAfterFailedEvaluation,
+
+    // Governance-specific errors
+    #[error("failed to convert properties into GovernanceData: {details}")]
+    GovernanceDataConversionFailed { details: String },
+
+    #[error("schema_id is Governance, but cannot convert properties: {details}")]
+    GovernancePropertiesConversionFailed { details: String },
+
+    #[error("{what} '{who}' is not a member")]
+    NotAMember { what: String, who: String },
+
+    #[error("schema '{schema_id}' has no policies")]
+    SchemaNoPolicies { schema_id: String },
+
+    #[error("schema '{schema_id}' is not a schema")]
+    InvalidSchema { schema_id: String },
+
+    // Tracker-specific errors
+    #[error("number of subjects that can be created has not been found")]
+    MaxSubjectCreationNotFound,
+
+    #[error("protocols data is for Governance but this is a Tracker")]
+    GovernanceProtocolsInTracker,
+
+    #[error("protocols data is for Tracker but this is a Governance")]
+    TrackerProtocolsInGovernance,
+
+    // Hash errors
+    #[error("failed to create hash: {details}")]
+    HashCreationFailed { details: String },
+
+    #[error("validation request hash could not be obtained: {details}")]
+    ValidationRequestHashFailed { details: String },
+
+    #[error("modified metadata hash could not be obtained: {details}")]
+    ModifiedMetadataHashFailed { details: String },
+
+    // Actor and system errors
+    #[error("actor not found: {path}")]
+    ActorNotFound { path: String },
+
+    #[error("unexpected response from {path}: expected {expected}")]
+    UnexpectedResponse { path: String, expected: String },
+
+    #[error("helper not found: {helper}")]
+    HelperNotFound { helper: String },
+
+    #[error("cannot obtain {what}")]
+    CannotObtain { what: String },
+
+    // General errors
+    #[error("{0}")]
+    Generic(String),
 }
 
-impl std::fmt::Display for InvalidEventKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NameLength { length } => {
-                write!(
-                    f,
-                    "the subject name must be less than 100 characters or not be empty (got {} characters)",
-                    length
-                )
-            }
-            Self::DescriptionLength { length } => {
-                write!(
-                    f,
-                    "the subject description must be less than 200 characters or not be empty (got {} characters)",
-                    length
-                )
-            }
-            Self::InvalidSequenceNumber { expected, actual } => {
-                write!(
-                    f,
-                    "invalid sequence number (expected: {}, got: {})",
-                    expected, actual
-                )
-            }
-            Self::InvalidPreviousHash => {
-                write!(f, "in create event, previous hash event must be empty")
-            }
-            Self::InvalidSigner { context } => {
-                write!(f, "in create event, owner must sign request and event: {}", context)
-            }
-            Self::NotCreateEvent => {
-                write!(f, "first event is not a create event")
-            }
-        }
+impl From<String> for SubjectError {
+    fn from(s: String) -> Self {
+        SubjectError::Generic(s)
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum CreateEventErrorKind {
-    InvalidGovernanceMetadata,
-    SequenceNumberNotZero { sn: u64 },
-    ValidationProtocolFailed,
-}
-
-impl std::fmt::Display for CreateEventErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidGovernanceMetadata => {
-                write!(
-                    f,
-                    "in create event, governance_id must be empty, namespace must be empty and gov version must be 0"
-                )
-            }
-            Self::SequenceNumberNotZero { sn } => {
-                write!(f, "in create event, sn must be 0 (got: {})", sn)
-            }
-            Self::ValidationProtocolFailed => {
-                write!(f, "create event fail in validation protocol")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum PatchErrorKind {
-    MissingPatch,
-    InvalidPatchFormat { details: String },
-    PatchApplicationFailed,
-}
-
-impl std::fmt::Display for PatchErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingPatch => {
-                write!(
-                    f,
-                    "the event was successful but does not have a json patch to apply"
-                )
-            }
-            Self::InvalidPatchFormat { details } => {
-                write!(f, "failed to extract event patch: {}", details)
-            }
-            Self::PatchApplicationFailed => {
-                write!(f, "failed to apply event patch")
-            }
-        }
+impl From<&str> for SubjectError {
+    fn from(s: &str) -> Self {
+        SubjectError::Generic(s.to_string())
     }
 }

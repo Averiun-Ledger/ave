@@ -8,10 +8,9 @@ use ave_actors::{
 use ave_common::SchemaType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::error;
+use tracing::{Span, debug, error, info_span};
 
 use crate::{model::{common::emit_fail}, subject::Metadata};
-const TARGET_SINKDATA: &str = "Ave-Subject-Sinkdata";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
@@ -190,18 +189,12 @@ impl Actor for SinkData {
     type Message = SinkDataMessage;
     type Response = SinkDataResponse;
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "SinkData", id = id)
+        } else {
+            info_span!("SinkData", id = id)
+        }
     }
 }
 
@@ -213,6 +206,17 @@ impl Handler<SinkData> for SinkData {
         msg: SinkDataMessage,
         ctx: &mut ave_actors::ActorContext<SinkData>,
     ) -> Result<SinkDataResponse, ActorError> {
+        let (subject_id, schema_id) = msg.get_subject_schema();
+        let msg_type = match &msg {
+            SinkDataMessage::UpdateState(..) => "UpdateState",
+            SinkDataMessage::Create { .. } => "Create",
+            SinkDataMessage::Fact { .. } => "Fact",
+            SinkDataMessage::Transfer { .. } => "Transfer",
+            SinkDataMessage::Confirm { .. } => "Confirm",
+            SinkDataMessage::Reject { .. } => "Reject",
+            SinkDataMessage::EOL { .. } => "EOL",
+        };
+
         self.on_event(
             SinkDataEvent {
                 event: msg,
@@ -222,6 +226,14 @@ impl Handler<SinkData> for SinkData {
         )
         .await;
 
+        debug!(
+            msg_type = msg_type,
+            subject_id = %subject_id,
+            schema_id = %schema_id,
+            controller_id = %self.controller_id,
+            "Sink data event processed"
+        );
+
         Ok(SinkDataResponse::None)
     }
 
@@ -230,9 +242,24 @@ impl Handler<SinkData> for SinkData {
         event: SinkDataEvent,
         ctx: &mut ActorContext<SinkData>,
     ) {
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(TARGET_SINKDATA, "OnEvent, can not publish event: {}", e);
+        let (subject_id, schema_id) = event.event.get_subject_schema();
+
+        if let Err(e) = ctx.publish_event(event.clone()).await {
+            error!(
+                error = %e,
+                subject_id = %subject_id,
+                schema_id = %schema_id,
+                controller_id = %self.controller_id,
+                "Failed to publish sink data event"
+            );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!(
+                subject_id = %subject_id,
+                schema_id = %schema_id,
+                controller_id = %event.controller_id,
+                "Sink data event published successfully"
+            );
+        }
     }
 }

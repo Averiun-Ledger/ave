@@ -9,13 +9,11 @@ use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     db::Storable, governance::model::CreatorQuantity, model::common::emit_fail,
 };
-
-const TARGET_RELATIONSHIP: &str = "Ave-Node-RelationShip";
 
 #[derive(
     Clone,
@@ -98,6 +96,14 @@ impl Actor for RelationShip {
     type Event = RelationShipEvent;
     type Response = RelationShipResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RelationShip", id = id)
+        } else {
+            info_span!("RelationShip", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ave_actors::ActorContext<Self>,
@@ -124,11 +130,22 @@ impl Handler<RelationShip> for RelationShip {
     ) -> Result<RelationShipResponse, ActorError> {
         match msg {
             RelationShipMessage::GetSubjectsCount(owner_schema) => {
-                if let Some(vec) = self.subjects.get(&owner_schema) {
-                    Ok(RelationShipResponse::Count(vec.len()))
+                let count = if let Some(vec) = self.subjects.get(&owner_schema) {
+                    vec.len()
                 } else {
-                    Ok(RelationShipResponse::Count(0))
-                }
+                    0
+                };
+
+                debug!(
+                    msg_type = "GetSubjectsCount",
+                    owner = %owner_schema.owner,
+                    schema_id = %owner_schema.schema_id,
+                    namespace = %owner_schema.namespace,
+                    count = count,
+                    "Returning subjects count"
+                );
+
+                Ok(RelationShipResponse::Count(count))
             }
             RelationShipMessage::RegisterNewSubject {
                 data,
@@ -145,24 +162,51 @@ impl Handler<RelationShip> for RelationShip {
                 if let CreatorQuantity::Quantity(max_quantity) = max_quantity
                     && quantity >= max_quantity as usize
                 {
-                    let e = "Maximum number of subjects reached";
-                    warn!(TARGET_RELATIONSHIP, "RegisterNewSubject, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    warn!(
+                        msg_type = "RegisterNewSubject",
+                        owner = %data.owner,
+                        schema_id = %data.schema_id,
+                        namespace = %data.namespace,
+                        current_quantity = quantity,
+                        max_quantity = max_quantity,
+                        "Maximum number of subjects reached"
+                    );
+                    return Err(ActorError::Functional {description: "Maximum number of subjects reached".to_owned()});
                 }
 
                 self.on_event(
-                    RelationShipEvent::NewRegister { data, subject_id },
+                    RelationShipEvent::NewRegister { data: data.clone(), subject_id: subject_id.clone() },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "RegisterNewSubject",
+                    owner = %data.owner,
+                    schema_id = %data.schema_id,
+                    namespace = %data.namespace,
+                    subject_id = %subject_id,
+                    "New subject registered successfully"
+                );
+
                 Ok(RelationShipResponse::None)
             }
             RelationShipMessage::DeleteSubject { data, subject_id } => {
                 self.on_event(
-                    RelationShipEvent::DeleteSubject { data, subject_id },
+                    RelationShipEvent::DeleteSubject { data: data.clone(), subject_id: subject_id.clone() },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    owner = %data.owner,
+                    schema_id = %data.schema_id,
+                    namespace = %data.namespace,
+                    subject_id = %subject_id,
+                    "Subject deleted successfully"
+                );
+
                 Ok(RelationShipResponse::None)
             }
         }
@@ -175,11 +219,13 @@ impl Handler<RelationShip> for RelationShip {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_RELATIONSHIP,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                "Failed to persist event"
             );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!("Event persisted successfully");
+        }
     }
 }
 
@@ -200,6 +246,15 @@ impl PersistentActor for RelationShip {
                     .entry(data.clone())
                     .or_default()
                     .push(subject_id.clone());
+
+                debug!(
+                    event_type = "NewRegister",
+                    owner = %data.owner,
+                    schema_id = %data.schema_id,
+                    namespace = %data.namespace,
+                    subject_id = %subject_id,
+                    "Applied new register event"
+                );
             }
             RelationShipEvent::DeleteSubject { data, subject_id } => {
                 self.subjects.entry(data.clone()).and_modify(|vec| {
@@ -207,8 +262,23 @@ impl PersistentActor for RelationShip {
                         vec.iter().position(|x| x.clone() == subject_id.clone())
                     {
                         vec.remove(pos);
+                        debug!(
+                            event_type = "DeleteSubject",
+                            owner = %data.owner,
+                            schema_id = %data.schema_id,
+                            namespace = %data.namespace,
+                            subject_id = %subject_id,
+                            "Applied delete subject event"
+                        );
                     } else {
-                        error!(TARGET_RELATIONSHIP, "An attempt was made to delete a subject that was not registered");
+                        error!(
+                            event_type = "DeleteSubject",
+                            owner = %data.owner,
+                            schema_id = %data.schema_id,
+                            namespace = %data.namespace,
+                            subject_id = %subject_id,
+                            "Attempt to delete unregistered subject"
+                        );
                     };
                 });
             }

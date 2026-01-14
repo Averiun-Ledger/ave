@@ -26,9 +26,7 @@ use crate::governance::model::{ProtocolTypes, Quorum};
 use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign};
-use crate::model::common::subject::{
-    get_gov, get_metadata, update_ledger,
-};
+use crate::model::common::subject::{get_gov, get_metadata, update_ledger};
 use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -143,9 +141,9 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), ActorError> {
         let Some(request) = self.request.clone() else {
-            return Err(ActorError::FunctionalFail(
-                "Request is None".to_string(),
-            ));
+            return Err(ActorError::FunctionalCritical {
+                description: "Request is None".to_string(),
+            });
         };
 
         self.on_event(
@@ -192,20 +190,22 @@ impl RequestManager {
             EventRequest::Transfer(event) => (event.subject_id, false),
             EventRequest::Confirm(event) => (event.subject_id, true),
             _ => {
-                return Err(ActorError::FunctionalFail(
-                    "Only can evaluate Fact, Transfer and Confirm request"
-                        .to_owned(),
-                ));
+                return Err(ActorError::FunctionalCritical {
+                    description:
+                        "Only can evaluate Fact, Transfer and Confirm request"
+                            .to_owned(),
+                });
             }
         };
 
         let metadata = get_metadata(ctx, &subject_id.to_string()).await?;
 
         if confirm && !metadata.schema_id.is_gov() {
-            return Err(ActorError::FunctionalFail(
-                "Confirm event in trazability subjects can not evaluate"
-                    .to_owned(),
-            ));
+            return Err(ActorError::FunctionalCritical {
+                description:
+                    "Confirm event in trazability subjects can not evaluate"
+                        .to_owned(),
+            });
         }
 
         Ok(metadata)
@@ -241,7 +241,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalFail(e)
+                    ActorError::FunctionalCritical {description: e}
                 })?;
 
                 (
@@ -261,7 +261,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalFail(e)
+                    ActorError::FunctionalCritical {description: e}
                 })?;
 
                 (
@@ -281,7 +281,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalFail(e)
+                    ActorError::FunctionalCritical {description: e}
                 })?;
 
                 (
@@ -303,7 +303,7 @@ impl RequestManager {
                             "can not obtain schema {} from governance: {}",
                             metadata.schema_id, e
                         );
-                        ActorError::FunctionalFail(e)
+                        ActorError::FunctionalCritical {description: e}
                     })?;
 
                 (
@@ -400,9 +400,7 @@ impl RequestManager {
     ) -> Result<(), ActorError> {
         info!(TARGET_MANAGER, "Init evaluation {}", self.id);
         let Some((hash, network)) = self.helpers.clone() else {
-            return Err(ActorError::FunctionalFail(
-                "Helpers is None".to_string(),
-            ));
+            return Err(ActorError::FunctionalCritical {description:"Helpers is None".to_string()});
         };
 
         let child = ctx
@@ -482,7 +480,7 @@ impl RequestManager {
                 "can not convert GovernanceData from properties: {}",
                 e
             );
-            ActorError::FunctionalFail(e)
+            ActorError::FunctionalCritical {description: e}
         })?;
 
         let (signers, quorum) = governance_data.get_quorum_and_signers(
@@ -579,7 +577,12 @@ impl RequestManager {
         eval: Option<(EvaluationReq, EvaluationData)>,
         appro_data: Option<ApprovalData>,
     ) -> Result<
-        (ValidationReq, Quorum, HashSet<PublicKey>, Option<ValueWrapper>),
+        (
+            ValidationReq,
+            Quorum,
+            HashSet<PublicKey>,
+            Option<ValueWrapper>,
+        ),
         ActorError,
     > {
         let Some(request) = self.request.clone() else {
@@ -590,7 +593,8 @@ impl RequestManager {
 
         if let EventRequest::Create(create) = request.content() {
             if create.schema_id == SchemaType::Governance {
-                let governance_data = GovernanceData::new((*self.our_key).clone());
+                let governance_data =
+                    GovernanceData::new((*self.our_key).clone());
                 let (signers, quorum) = governance_data
                     .get_quorum_and_signers(
                         ProtocolTypes::Validation,
@@ -624,7 +628,7 @@ impl RequestManager {
                             "can not obtain schema {} from governance: {}",
                             create.schema_id, e
                         );
-                        ActorError::FunctionalFail(e)
+                        ActorError::FunctionalCritical {description: e}
                     })?;
 
                 Ok((
@@ -684,7 +688,7 @@ impl RequestManager {
                         "can not obtain schema {} from governance: {}",
                         metadata.schema_id, e
                     );
-                    ActorError::FunctionalFail(e)
+                    ActorError::FunctionalCritical {description: e}
                 })?;
 
             Ok((
@@ -785,14 +789,15 @@ impl RequestManager {
         };
 
         let signature =
-            get_sign(ctx, SignTypesNode::Ledger(ledger.clone()))
-                .await?;
+            get_sign(ctx, SignTypesNode::Ledger(ledger.clone())).await?;
 
         let ledger = Signed::from_parts(ledger, signature);
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Distribution { ledger: ledger.clone() }),
+                state: Box::new(RequestManagerState::Distribution {
+                    ledger: ledger.clone(),
+                }),
             },
             ctx,
         )
@@ -801,9 +806,6 @@ impl RequestManager {
         Ok(ledger)
     }
 
-
-
-    
     ////////////////////////////////////////////////
     ////////////////////////////////////////////////
     ////////////////////////////////////////////////
@@ -920,7 +922,7 @@ impl RequestManager {
                     "can not convert governance from properties: {}",
                     e
                 );
-                return Err(ActorError::FunctionalFail(e));
+                return Err(ActorError::FunctionalCritical {description: e});
             }
         };
 
@@ -992,7 +994,6 @@ impl RequestManager {
 
         Ok(())
     }
-
 
     async fn abort_request_manager(
         &self,
@@ -1102,7 +1103,10 @@ impl Handler<RequestManager> for RequestManager {
                 info!(TARGET_MANAGER, "Init reboot {}", self.id);
                 if let RequestManagerState::Reboot = self.state.clone() {
                     let reboot_actor = match ctx
-                        .create_child("reboot", Reboot::new(governance_id.to_string()))
+                        .create_child(
+                            "reboot",
+                            Reboot::new(governance_id.to_string()),
+                        )
                         .await
                     {
                         Ok(actor) => actor,

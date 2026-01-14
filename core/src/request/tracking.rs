@@ -2,13 +2,13 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
 use ave_common::response::{RequestInfo, RequestState};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 
 const TARGET_TRACKING: &str = "Ave-Request-RequestTracking";
 
@@ -60,18 +60,12 @@ impl Actor for RequestTracking {
     type Event = ();
     type Response = RequestTrackingResponse;
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RequestTracking", id = id)
+        } else {
+            info_span!("RequestTracking", id = id)
+        }
     }
 }
 

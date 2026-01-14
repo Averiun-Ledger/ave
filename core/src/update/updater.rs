@@ -324,6 +324,8 @@ impl Handler<Updater> for Updater {
         Ok(())
     }
 
+
+    // TODO ver si en los child_error quitamos el emit_fail
     async fn on_child_error(
         &mut self,
         error: ActorError,

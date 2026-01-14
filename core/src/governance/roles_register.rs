@@ -18,11 +18,9 @@ use ave_actors::{
 use ave_common::{Namespace, SchemaType, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, debug, error, info_span};
 
 use crate::db::Storable;
-
-const TARGET_ROLES: &str = "Kore-Subject-Roles";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct SearchRole {
@@ -177,6 +175,14 @@ impl Actor for RolesRegister {
     type Message = RolesRegisterMessage;
     type Response = RolesRegisterResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RolesRegister", id = id)
+        } else {
+            info_span!("RolesRegister", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -209,6 +215,14 @@ impl Handler<RolesRegister> for RolesRegister {
                 approval,
             } => {
                 if version > self.version {
+                    debug!(
+                        msg_type = "SearchActualRoles",
+                        version = version,
+                        current_version = self.version,
+                        schema_id = %evaluation.schema_id,
+                        namespace = %evaluation.namespace,
+                        "Request version exceeds current version"
+                    );
                     return Ok(RolesRegisterResponse::OutOfVersion);
                 }
 
@@ -312,13 +326,38 @@ impl Handler<RolesRegister> for RolesRegister {
                     evaluators.append(&mut schema_eval);
                     evaluators.append(&mut all_eval);
 
+                    debug!(
+                        msg_type = "SearchActualRoles",
+                        version = version,
+                        schema_id = %evaluation.schema_id,
+                        namespace = %evaluation.namespace,
+                        evaluators_count = evaluators.len(),
+                        has_approvers = approvers.is_some(),
+                        "Found actual roles successfully"
+                    );
+
                     return Ok(RolesRegisterResponse::ActualRoles { evaluation: RoleDataRegister { workers: evaluators.iter().cloned().collect(), quorum }, approval: approvers } );
                 }
 
+                debug!(
+                    msg_type = "SearchActualRoles",
+                    version = version,
+                    schema_id = %evaluation.schema_id,
+                    namespace = %evaluation.namespace,
+                    "Missing role data for version"
+                );
                 Ok(RolesRegisterResponse::MissingData)
             }
             RolesRegisterMessage::SearchValidators { search, version } => {
                 if version > self.version {
+                    debug!(
+                        msg_type = "SearchValidators",
+                        version = version,
+                        current_version = self.version,
+                        schema_id = %search.schema_id,
+                        namespace = %search.namespace,
+                        "Request version exceeds current version"
+                    );
                     return Ok(RolesRegisterResponse::OutOfVersion);
                 }
 
@@ -395,12 +434,28 @@ impl Handler<RolesRegister> for RolesRegister {
                     validators.append(&mut schema_val);
                     validators.append(&mut all_val);
 
+                    debug!(
+                        msg_type = "SearchValidators",
+                        version = version,
+                        schema_id = %search.schema_id,
+                        namespace = %search.namespace,
+                        validators_count = validators.len(),
+                        "Found validators successfully"
+                    );
+
                     return Ok(RolesRegisterResponse::Validation(RoleDataRegister {
                         workers: validators.iter().cloned().collect(),
                         quorum
                     }));
                 }
 
+                debug!(
+                    msg_type = "SearchValidators",
+                    version = version,
+                    schema_id = %search.schema_id,
+                    namespace = %search.namespace,
+                    "Missing validator data for version"
+                );
                 Ok(RolesRegisterResponse::MissingData)
             }
             RolesRegisterMessage::Update {
@@ -422,7 +477,20 @@ impl Handler<RolesRegister> for RolesRegister {
                         evaluators,
                         approvers,
                     })
-                    .await?
+                    .await?;
+
+                    debug!(
+                        msg_type = "Update",
+                        version = version,
+                        "Roles register updated successfully"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "Update",
+                        version = version,
+                        current_version = self.version,
+                        "Update skipped, version not greater than current"
+                    );
                 }
 
                 Ok(RolesRegisterResponse::Ok)
@@ -436,9 +504,14 @@ impl Handler<RolesRegister> for RolesRegister {
         ctx: &mut ActorContext<RolesRegister>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
-            error!(TARGET_ROLES, "OnEvent, can not persist information: {}", e);
+            error!(
+                error = %e,
+                "Failed to persist roles register event"
+            );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!("Roles register event persisted successfully");
+        }
     }
 }
 
@@ -471,6 +544,12 @@ impl PersistentActor for RolesRegister {
                             .or_default()
                             .insert(*version, quorum.quorum);
                     }
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        quorum_count = vali_quorum.len(),
+                        "Applied validator quorum update"
+                    );
                 }
 
                 if let Some(eval_quorum) = eval_quorum {
@@ -480,10 +559,21 @@ impl PersistentActor for RolesRegister {
                             .or_default()
                             .insert(*version, quorum.quorum);
                     }
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        quorum_count = eval_quorum.len(),
+                        "Applied evaluator quorum update"
+                    );
                 }
 
                 if let Some(appr_quorum) = appr_quorum {
                     self.appr_quorum.insert(*version, appr_quorum.clone());
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        "Applied approver quorum update"
+                    );
                 }
 
                 if let Some(validators) = validators {
@@ -493,6 +583,12 @@ impl PersistentActor for RolesRegister {
                             .or_default()
                             .insert(*version, role.role);
                     }
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        role_count = validators.len(),
+                        "Applied validator roles update"
+                    );
                 }
 
                 if let Some(evaluators) = evaluators {
@@ -502,13 +598,31 @@ impl PersistentActor for RolesRegister {
                             .or_default()
                             .insert(*version, role.role);
                     }
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        role_count = evaluators.len(),
+                        "Applied evaluator roles update"
+                    );
                 }
 
                 if let Some(approvers) = approvers
                     && !approvers.is_empty()
                 {
                     self.approvers.insert(*version, approvers.clone());
+                    debug!(
+                        event_type = "Update",
+                        version = version,
+                        approver_count = approvers.len(),
+                        "Applied approver roles update"
+                    );
                 }
+
+                debug!(
+                    event_type = "Update",
+                    version = version,
+                    "Roles register update applied successfully"
+                );
             }
         }
         Ok(())

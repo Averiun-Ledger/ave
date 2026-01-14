@@ -9,11 +9,16 @@ use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, error, info_span};
+use tracing::{Span, debug, error, info_span};
 use updater::{Updater, UpdaterMessage};
 
 use crate::{
-    ActorMessage, NetworkMessage, governance::{Governance, GovernanceMessage}, helpers::network::service::NetworkSender, model::common::emit_fail, request::manager::{RequestManager, RequestManagerMessage}, tracker::{Tracker, TrackerMessage}
+    ActorMessage, NetworkMessage,
+    governance::{Governance, GovernanceMessage},
+    helpers::network::service::NetworkSender,
+    model::common::emit_fail,
+    request::manager::{RequestManager, RequestManagerMessage},
+    tracker::{Tracker, TrackerMessage},
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,8 +26,6 @@ pub enum TransferResponse {
     Confirm,
     Reject,
 }
-
-const TARGET_UPDATE: &str = "Ave-Update";
 
 pub mod updater;
 
@@ -40,7 +43,7 @@ pub struct UpdateNew {
     pub witnesses: HashSet<PublicKey>,
     pub request: Option<ActorMessage>,
     pub update_type: UpdateType,
-    pub network: Arc<NetworkSender>
+    pub network: Arc<NetworkSender>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,10 +61,23 @@ pub struct Update {
     better: Option<PublicKey>,
     request: Option<ActorMessage>,
     update_type: UpdateType,
-    network: Arc<NetworkSender>
+    network: Arc<NetworkSender>,
 }
 
 impl Update {
+    pub fn new(data: UpdateNew) -> Self {
+        Self {
+            network: data.network,
+            subject_id: data.subject_id,
+            our_key: data.our_key,
+            response: data.response,
+            witnesses: data.witnesses,
+            better: None,
+            request: data.request,
+            update_type: data.update_type,
+        }
+    }
+
     pub async fn update_subject(
         ctx: &mut ActorContext<Update>,
         subject_id: &str,
@@ -82,7 +98,7 @@ impl Update {
                 .tell(TrackerMessage::UpdateTransfer(res))
                 .await
         } else {
-            Err(ActorError::NotFound {path})
+            Err(ActorError::NotFound { path })
         }
     }
 
@@ -101,8 +117,11 @@ impl Update {
                         }
                         Some(UpdateRes::Sn(_)) => {} // No actualizar si update_sn <= sn
                         Some(_) => {
-                            return Err(ActorError::Functional {description: "self response must be UpdateRes::Sn"
-                                    .to_owned(),});
+                            return Err(ActorError::Functional {
+                                description:
+                                    "self response must be UpdateRes::Sn"
+                                        .to_owned(),
+                            });
                         }
                         None => {
                             self.response = Some(update);
@@ -110,9 +129,9 @@ impl Update {
                         }
                     }
                 } else {
-                    return Err(ActorError::Functional(
-                        "update must be UpdateRes::Sn".to_owned(),
-                    ));
+                    return Err(ActorError::Functional {
+                        description: "update must be UpdateRes::Sn".to_owned(),
+                    });
                 }
             }
             _ => {}
@@ -121,27 +140,39 @@ impl Update {
         Ok(())
     }
 
-    pub fn new(data: UpdateNew) -> Self {
-        Self {
-            network: data.network,
-            subject_id: data.subject_id,
-            our_key: data.our_key,
-            response: data.response,
-            witnesses: data.witnesses,
-            better: None,
-            request: data.request,
-            update_type: data.update_type,
-        }
-    }
     fn check_witness(&mut self, witness: PublicKey) -> bool {
         self.witnesses.remove(&witness)
+    }
+
+    async fn create_updates(
+        &self,
+        ctx: &mut ActorContext<Update>,
+    ) -> Result<(), ActorError> {
+        for witness in self.witnesses.clone() {
+            let updater = Updater::new(witness.clone(), self.network.clone());
+            let child = ctx.create_child(&witness.to_string(), updater).await?;
+            let message = match self.update_type {
+                UpdateType::Auth | UpdateType::Request { .. } => {
+                    UpdaterMessage::NetworkLastSn {
+                        subject_id: self.subject_id.clone(),
+                        node_key: witness,
+                    }
+                }
+                UpdateType::Transfer => UpdaterMessage::Transfer {
+                    subject_id: self.subject_id.clone(),
+                    node_key: witness,
+                },
+            };
+
+            child.tell(message).await?;
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum UpdateMessage {
-    Transfer,
-    Create,
+    Run,
     TransferRes {
         sender: PublicKey,
         res: TransferResponse,
@@ -180,68 +211,20 @@ impl Handler<Update> for Update {
         ctx: &mut ActorContext<Update>,
     ) -> Result<(), ActorError> {
         match msg {
-            UpdateMessage::Transfer => {
-                for witness in self.witnesses.clone() {
-                    let updater = Updater::new(witness.clone(), self.network.clone());
-                    let child = match ctx
-                        .create_child(&witness.to_string(), updater)
-                        .await
-                    {
-                        Ok(child) => child,
-                        Err(e) => {
-                            error!(
-                                TARGET_UPDATE,
-                                "Create, can not create Retry actor: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-
-                    if let Err(e) = child
-                        .tell(UpdaterMessage::Transfer {
-                            subject_id: self.subject_id.clone(),
-                            node_key: witness,
-                        })
-                        .await
-                    {
-                        error!(
-                            TARGET_UPDATE,
-                            "Create, can not send retry to Retry actor: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                }
-            }
-            UpdateMessage::Create => {
-                for witness in self.witnesses.clone() {
-                    let updater = Updater::new(witness.clone());
-                    let child = match ctx
-                        .create_child(&witness.to_string(), updater)
-                        .await
-                    {
-                        Ok(child) => child,
-                        Err(e) => {
-                            error!(
-                                TARGET_UPDATE,
-                                "Create, can not create Retry actor: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-
-                    if let Err(e) = child
-                        .tell(UpdaterMessage::NetworkLastSn {
-                            subject_id: self.subject_id.clone(),
-                            node_key: witness,
-                        })
-                        .await
-                    {
-                        error!(
-                            TARGET_UPDATE,
-                            "Create, can not send retry to Retry actor: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
+            UpdateMessage::Run => {
+                if let Err(e) = self.create_updates(ctx).await {
+                    error!(
+                        msg_type = "Run",
+                        error = %e,
+                        "Failed to create updates"
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                } else {
+                    debug!(
+                        msg_type = "Run",
+                        witnesses_count = self.witnesses.len(),
+                        "Updates created successfully"
+                    );
                 }
             }
             UpdateMessage::TransferRes { sender, res } => {
@@ -252,15 +235,25 @@ impl Handler<Update> for Update {
                     if let Err(e) = Update::update_subject(
                         ctx,
                         &self.subject_id.to_string(),
-                        res,
+                        res.clone(),
                     )
                     .await
                     {
                         error!(
-                            TARGET_UPDATE,
-                            "TransferRes, can update subject: {}", e
+                            msg_type = "TransferRes",
+                            error = %e,
+                            subject_id = %self.subject_id,
+                            "Failed to update subject"
                         );
-                    };
+                    } else {
+                        debug!(
+                            msg_type = "TransferRes",
+                            subject_id = %self.subject_id,
+                            sender = %sender,
+                            response = ?res,
+                            "Transfer response processed successfully"
+                        );
+                    }
 
                     ctx.stop(None).await;
                 }
@@ -268,18 +261,21 @@ impl Handler<Update> for Update {
             UpdateMessage::Response { sender, sn } => {
                 if self.check_witness(sender.clone()) {
                     if let Err(e) =
-                        self.update_response(UpdateRes::Sn(sn), sender)
+                        self.update_response(UpdateRes::Sn(sn), sender.clone())
                     {
                         error!(
-                            TARGET_UPDATE,
-                            "TransferRes, can not update response: {}", e
+                            msg_type = "Response",
+                            error = %e,
+                            sender = %sender,
+                            sn = sn,
+                            "Failed to update response"
                         );
                     }
 
                     if self.witnesses.is_empty() {
                         if let Some(node) = self.better.clone() {
                             let info = ComunicateInfo {
-                                receiver: node,
+                                receiver: node.clone(),
                                 request_id: String::default(),
                                 version: 0,
                                 receiver_actor: format!(
@@ -288,25 +284,13 @@ impl Handler<Update> for Update {
                                 ),
                             };
 
-                            let helper: Option<Arc<NetworkSender>> =
-                                ctx.system().get_helper("network").await;
-
-                            let Some(mut helper) = helper else {
-                                let e =
-                                    ActorError::NotHelper("network".to_owned());
-                                error!(
-                                    TARGET_UPDATE,
-                                    "Response, can not obtain network helper"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            };
-
                             if let Some(request) = self.request.clone() {
-                                if let Err(e) = helper
+                                if let Err(e) = self
+                                    .network
                                     .send_command(
                                         network::CommandHelper::SendMessage {
                                             message: NetworkMessage {
-                                                info,
+                                                info: info.clone(),
                                                 message: request,
                                             },
                                         },
@@ -314,16 +298,24 @@ impl Handler<Update> for Update {
                                     .await
                                 {
                                     error!(
-                                        TARGET_UPDATE,
-                                        "Response, can not send response to network: {}",
-                                        e
+                                        msg_type = "Response",
+                                        error = %e,
+                                        node = %node,
+                                        "Failed to send request to network"
                                     );
                                     return Err(emit_fail(ctx, e).await);
-                                };
+                                } else {
+                                    debug!(
+                                        msg_type = "Response",
+                                        node = %info.receiver,
+                                        subject_id = %self.subject_id,
+                                        "Request sent to better node"
+                                    );
+                                }
                             } else {
                                 error!(
-                                    TARGET_UPDATE,
-                                    "Response, request can not be None"
+                                    msg_type = "Response",
+                                    "Request cannot be None"
                                 );
                             }
                         }
@@ -350,22 +342,32 @@ impl Handler<Update> for Update {
                                     request_actor.tell(request).await
                                 {
                                     error!(
-                                        TARGET_UPDATE,
-                                        "Response, can not send response to Request actor: {}",
-                                        e
+                                        msg_type = "Response",
+                                        error = %e,
+                                        request_id = %id,
+                                        "Failed to send response to request actor"
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
                             } else {
-                                let e = ActorError::NotFound(request_path);
+                                let e =
+                                    ActorError::NotFound { path: request_path.clone() };
                                 error!(
-                                    TARGET_UPDATE,
-                                    "Response, can not obtain Request actor: {}",
-                                    e
+                                    msg_type = "Response",
+                                    path = %request_path,
+                                    request_id = %id,
+                                    "Request actor not found"
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             }
                         };
+
+                        debug!(
+                            msg_type = "Response",
+                            subject_id = %self.subject_id,
+                            has_better = self.better.is_some(),
+                            "All witnesses responded, update complete"
+                        );
 
                         ctx.stop(None).await;
                     }
@@ -381,7 +383,7 @@ impl Handler<Update> for Update {
         error: ActorError,
         ctx: &mut ActorContext<Update>,
     ) -> ChildAction {
-        error!(TARGET_UPDATE, "OnChildFault, {}", error);
+        error!(error = %error, "Child fault occurred");
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

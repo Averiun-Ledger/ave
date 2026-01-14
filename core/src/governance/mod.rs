@@ -2,7 +2,6 @@
 //!
 
 use crate::{
-    Error,
     approval::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
@@ -11,8 +10,8 @@ use crate::{
     db::Storable,
     evaluation::{
         compiler::{Compiler, CompilerMessage},
-        worker::EvalWorker,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
+        worker::EvalWorker,
     },
     governance::{
         data::GovernanceData,
@@ -28,13 +27,13 @@ use crate::{
     model::{
         common::{
             emit_fail, get_last_event, get_n_events, node::try_to_update,
-            purge_storage,
         },
         event::{Protocols, ValidationMetadata},
     },
     node::register::RegisterMessage,
     subject::{
         DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
+        error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
     },
     system::ConfigHelper,
@@ -61,7 +60,7 @@ use ave_actors::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -69,17 +68,18 @@ use std::{
 };
 
 pub mod data;
+pub mod error;
 pub mod events;
 pub mod model;
 pub mod relationship;
 pub mod roles_register;
 
-const TARGET_GOVERNANCE: &str = "Ave-Governance";
-
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Governance {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
+    #[serde(skip)]
+    pub hash: Option<HashAlgorithm>,
 
     pub subject_metadata: SubjectMetadata,
     /// The current status of the subject.
@@ -110,8 +110,10 @@ impl BorshDeserialize for Governance {
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
         let our_key = Arc::new(PublicKey::default());
+        let hash = None;
 
         Ok(Self {
+            hash,
             our_key,
             subject_metadata,
             properties,
@@ -140,31 +142,58 @@ impl Subject for Governance {
         &mut self,
         json_patch: ValueWrapper,
     ) -> Result<(), ActorError> {
-        let patch_json = match serde_json::from_value::<Patch>(json_patch.0) {
-            Ok(patch) => patch,
-            Err(e) => {
-                let error = format!("Apply, can not obtain json patch: {}", e);
-                error!(TARGET_GOVERNANCE, error);
-                return Err(ActorError::Functional(error));
-            }
-        };
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
+                );
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
+
         let mut properties = self.properties.to_value_wrapper();
 
-        if let Err(e) = patch(&mut properties.0, &patch_json) {
-            let error = format!("Apply, can not apply json patch: {}", e);
-            error!(TARGET_GOVERNANCE, error);
-            return Err(ActorError::Functional(error));
-        };
+        patch(&mut properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
+        })?;
 
         self.properties = serde_json::from_value::<GovernanceData>(
             properties.0,
         )
         .map_err(|e| {
-            let error =
-                format!("Can not convert value into GovernanceData: {}", e);
-            error!(TARGET_GOVERNANCE, error);
-            ActorError::Functional(error)
+            let error = SubjectError::GovernanceDataConversionFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to convert properties to GovernanceData"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
+            }
         })?;
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -179,7 +208,10 @@ impl Subject for Governance {
             .get_helper::<Arc<NetworkSender>>("network")
             .await
         else {
-            return Err(ActorError::NotHelper("network".to_owned()));
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let hash = if let Some(config) =
@@ -187,7 +219,10 @@ impl Subject for Governance {
         {
             config.hash_algorithm
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let current_sn = self.subject_metadata.sn;
@@ -200,10 +235,12 @@ impl Subject for Governance {
 
         if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
         {
-            if let ActorError::Functional(error) = e.clone() {
+            if let ActorError::Functional { description } = e.clone() {
                 warn!(
-                    TARGET_GOVERNANCE,
-                    "Error verifying new events: {}", error
+                    error = %description,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Error verifying new ledger events"
                 );
 
                 // Falló en la creación
@@ -211,7 +248,12 @@ impl Subject for Governance {
                     return Err(e);
                 }
             } else {
-                error!(TARGET_GOVERNANCE, "Error verifying new events {}", e);
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Critical error verifying new ledger events"
+                );
                 return Err(e);
             }
         };
@@ -222,12 +264,8 @@ impl Subject for Governance {
                 if current_owner == *self.our_key {
                     Self::down_owner(ctx).await?;
                 } else {
-                    Self::down_not_owner(
-                        ctx,
-                        &old_gov,
-                        self.our_key.clone(),
-                    )
-                    .await?;
+                    Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
+                        .await?;
                 }
 
                 let old_schemas_eval = old_gov
@@ -288,12 +326,8 @@ impl Subject for Governance {
                     Self::down_owner(ctx).await?;
                     self.up_not_owner(ctx, &hash, &network).await?;
                 } else if up_owner {
-                    Self::down_not_owner(
-                        ctx,
-                        &old_gov,
-                        self.our_key.clone(),
-                    )
-                    .await?;
+                    Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
+                        .await?;
                     self.up_not_owner(ctx, &hash, &network).await?;
                 }
 
@@ -364,11 +398,10 @@ impl Governance {
                     })
                     .await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_evaluation",
-                    ctx.path(),
-                    schema_id
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone()
+                        / &format!("{}_evaluation", schema_id),
+                });
             }
         }
 
@@ -389,11 +422,10 @@ impl Governance {
                     })
                     .await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_validation",
-                    ctx.path(),
-                    schema_id
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone()
+                        / &format!("{}_validation", schema_id),
+                });
             }
         }
 
@@ -405,17 +437,16 @@ impl Governance {
         old_schemas_eval: &BTreeSet<SchemaType>,
         old_schemas_val: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
-        for schema in old_schemas_eval {
+        for schema_id in old_schemas_eval {
             let actor: Option<ActorRef<EvaluationSchema>> =
-                ctx.get_child(&format!("{}_evaluation", schema)).await;
+                ctx.get_child(&format!("{}_evaluation", schema_id)).await;
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_evaluation",
-                    ctx.path(),
-                    schema
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone()
+                        / &format!("{}_evaluation", schema_id),
+                });
             }
         }
 
@@ -425,11 +456,10 @@ impl Governance {
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_validation",
-                    ctx.path(),
-                    schema_id
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone()
+                        / &format!("{}_validation", schema_id),
+                });
             }
         }
 
@@ -505,14 +535,20 @@ impl Governance {
             .get_helper::<Arc<NetworkSender>>("network")
             .await
         else {
-            return Err(ActorError::NotHelper("network".to_owned()));
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
         let hash = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
         {
             config.hash_algorithm
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let (old_schemas_eval, new_schemas_eval) = {
@@ -687,8 +723,9 @@ impl Governance {
         }
 
         let new_schemas_eval = {
-            let schemas =
-                self.properties.schemas(ProtocolTypes::Evaluation, &self.our_key);
+            let schemas = self
+                .properties
+                .schemas(ProtocolTypes::Evaluation, &self.our_key);
             Self::up_compilers_schemas(
                 ctx,
                 &schemas,
@@ -792,7 +829,10 @@ impl Governance {
             {
                 config.always_accept
             } else {
-                return Err(ActorError::NotHelper("config".to_owned()));
+                return Err(ActorError::Helper {
+                    name: "config".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
             };
 
             let pass_votation = if always_accept {
@@ -809,11 +849,8 @@ impl Governance {
                 helpers: (hash.clone(), network.clone()),
             };
 
-            ctx.create_child(
-                "approver",
-                ApprPersist::initial(init_approver),
-            )
-            .await?;
+            ctx.create_child("approver", ApprPersist::initial(init_approver))
+                .await?;
         }
 
         Ok(())
@@ -850,9 +887,9 @@ impl Governance {
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
                 } else {
-                    return Err(ActorError::NotFound(ActorPath::from(
-                        format!("{}/validator", ctx.path()),
-                    )));
+                    return Err(ActorError::NotFound {
+                        path: ctx.path().clone() / "validator",
+                    });
                 }
             }
             (false, true) => {
@@ -889,9 +926,9 @@ impl Governance {
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
                 } else {
-                    return Err(ActorError::NotFound(ActorPath::from(
-                        format!("{}/evaluator", ctx.path()),
-                    )));
+                    return Err(ActorError::NotFound {
+                        path: ctx.path().clone() / "evaluator",
+                    });
                 }
             }
             (false, true) => {
@@ -927,9 +964,9 @@ impl Governance {
                 if let Some(actor) = actor {
                     actor.ask_stop().await?;
                 } else {
-                    return Err(ActorError::NotFound(ActorPath::from(
-                        format!("{}/approver", ctx.path()),
-                    )));
+                    return Err(ActorError::NotFound {
+                        path: ctx.path().clone() / "approver",
+                    });
                 }
             }
             (false, true) => {
@@ -938,7 +975,10 @@ impl Governance {
                 {
                     config.always_accept
                 } else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
+                    return Err(ActorError::Helper {
+                        name: "config".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
                 };
 
                 let pass_votation = if always_accept {
@@ -970,10 +1010,10 @@ impl Governance {
     async fn down_not_owner(
         ctx: &mut ActorContext<Self>,
         gov: &GovernanceData,
-        our_key: PublicKey,
+        our_key: Arc<PublicKey>,
     ) -> Result<(), ActorError> {
         if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*our_key).clone(),
             role: RoleTypes::Validator,
         }) {
             let actor: Option<ActorRef<ValiWorker>> =
@@ -981,15 +1021,14 @@ impl Governance {
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/validator",
-                    ctx.path()
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / "validator",
+                });
             }
         }
 
         if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
             let actor: Option<ActorRef<ValiWorker>> =
@@ -997,15 +1036,14 @@ impl Governance {
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/evaluator",
-                    ctx.path()
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / "evaluator",
+                });
             }
         }
 
         if gov.has_this_role(HashThisRole::Gov {
-            who: our_key.clone(),
+            who: (*our_key).clone(),
             role: RoleTypes::Approver,
         }) {
             let actor: Option<ActorRef<ApprPersist>> =
@@ -1013,10 +1051,9 @@ impl Governance {
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/approver",
-                    ctx.path()
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / "approver",
+                });
             }
         }
 
@@ -1034,7 +1071,10 @@ impl Governance {
         {
             config.always_accept
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
         };
         let pass_votation = if always_accept {
             VotationType::AlwaysAccept
@@ -1064,10 +1104,9 @@ impl Governance {
         if let Some(actor) = actor {
             actor.ask_stop().await?;
         } else {
-            let e = ActorError::NotFound(ActorPath::from(format!(
-                "{}/approver",
-                ctx.path()
-            )));
+            let e = ActorError::NotFound {
+                path: ctx.path().clone() / "approver",
+            };
             return Err(emit_fail(ctx, e).await);
         }
 
@@ -1084,7 +1123,10 @@ impl Governance {
         {
             config.contracts_path
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
         };
 
         for (id, schema) in schemas {
@@ -1121,17 +1163,16 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
-        for schema in schemas.iter() {
+        for schema_id in schemas.iter() {
             let actor: Option<ActorRef<Compiler>> =
-                ctx.get_child(&format!("{}_compiler", schema)).await;
+                ctx.get_child(&format!("{}_compiler", schema_id)).await;
             if let Some(actor) = actor {
                 actor.ask_stop().await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_compiler",
-                    ctx.path(),
-                    schema
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone()
+                        / &format!("{}_compiler", schema_id),
+                });
             }
         }
 
@@ -1148,7 +1189,10 @@ impl Governance {
         {
             config.contracts_path
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         for (id, schema) in schemas {
@@ -1166,11 +1210,9 @@ impl Governance {
                     })
                     .await?;
             } else {
-                return Err(ActorError::NotFound(ActorPath::from(format!(
-                    "{}/{}_compiler",
-                    ctx.path(),
-                    id
-                ))));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / &format!("{}_compiler", id),
+                });
             }
         }
 
@@ -1180,7 +1222,7 @@ impl Governance {
     fn create_roles_register_message(
         &self,
         update: &RolesRegisterUpdate,
-    ) -> Result<RolesRegisterMessage, ActorError> {
+    ) -> Result<RolesRegisterMessage, SubjectError> {
         let appr_quorum = (update.appr_quorum)
             .then(|| self.properties.policies_gov.approve.clone());
 
@@ -1189,10 +1231,11 @@ impl Governance {
             for approver in &self.properties.roles_gov.approver {
                 let Some(approver_key) = self.properties.members.get(approver)
                 else {
-                    return Err(ActorError::FunctionalFail(format!(
-                        "Approver {} is not a member",
-                        approver
-                    )));
+                    let error = SubjectError::NotAMember {
+                        what: "Approver".to_string(),
+                        who: approver.clone(),
+                    };
+                    return Err(error);
                 };
 
                 approvers_set.insert(approver_key.clone());
@@ -1215,10 +1258,10 @@ impl Governance {
                         let Some(policies) =
                             self.properties.policies_schema.get(schema_id)
                         else {
-                            return Err(ActorError::FunctionalFail(format!(
-                                "Schema {} has no policies",
-                                schema_id
-                            )));
+                            let error = SubjectError::SchemaNoPolicies {
+                                schema_id: schema_id.to_string(),
+                            };
+                            return Err(error);
                         };
 
                         policies.evaluate.clone()
@@ -1245,12 +1288,11 @@ impl Governance {
                         for name in &self.properties.roles_gov.evaluator {
                             let Some(key) = self.properties.members.get(name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Evaluator {} is not a member",
-                                        name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Evaluator".to_string(),
+                                    who: name.clone(),
+                                };
+                                return Err(error);
                             };
 
                             evaluators.insert(RoleData {
@@ -1265,12 +1307,11 @@ impl Governance {
                             let Some(key) =
                                 self.properties.members.get(&role.name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Evaluator {} is not a member",
-                                        role.name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Evaluator".to_string(),
+                                    who: role.name.clone(),
+                                };
+                                return Err(error);
                             };
                             evaluators.insert(RoleData {
                                 key: key.clone(),
@@ -1282,22 +1323,21 @@ impl Governance {
                         let Some(schema) =
                             self.properties.roles_schema.get(schema_id)
                         else {
-                            return Err(ActorError::FunctionalFail(format!(
-                                "Schema {} is not a schema",
-                                schema_id
-                            )));
+                            let error = SubjectError::InvalidSchema {
+                                schema_id: schema_id.to_string(),
+                            };
+                            return Err(error);
                         };
 
                         for role in &schema.evaluator {
                             let Some(key) =
                                 self.properties.members.get(&role.name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Evaluator {} is not a member",
-                                        role.name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Evaluator".to_string(),
+                                    who: role.name.clone(),
+                                };
+                                return Err(error);
                             };
                             evaluators.insert(RoleData {
                                 key: key.clone(),
@@ -1330,10 +1370,10 @@ impl Governance {
                         let Some(policies) =
                             self.properties.policies_schema.get(schema_id)
                         else {
-                            return Err(ActorError::FunctionalFail(format!(
-                                "Schema {} have not got a policies",
-                                schema_id
-                            )));
+                            let error = SubjectError::SchemaNoPolicies {
+                                schema_id: schema_id.to_string(),
+                            };
+                            return Err(error);
                         };
 
                         policies.validate.clone()
@@ -1360,12 +1400,11 @@ impl Governance {
                         for name in &self.properties.roles_gov.validator {
                             let Some(key) = self.properties.members.get(name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Validator {} is not a member",
-                                        name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Validator".to_string(),
+                                    who: name.clone(),
+                                };
+                                return Err(error);
                             };
 
                             validators.insert(RoleData {
@@ -1380,12 +1419,11 @@ impl Governance {
                             let Some(key) =
                                 self.properties.members.get(&role.name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Validator {} is not a member",
-                                        role.name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Validator".to_string(),
+                                    who: role.name.clone(),
+                                };
+                                return Err(error);
                             };
                             validators.insert(RoleData {
                                 key: key.clone(),
@@ -1397,22 +1435,21 @@ impl Governance {
                         let Some(schema) =
                             self.properties.roles_schema.get(schema_id)
                         else {
-                            return Err(ActorError::FunctionalFail(format!(
-                                "Schema {} is not a schema",
-                                schema_id
-                            )));
+                            let error = SubjectError::InvalidSchema {
+                                schema_id: schema_id.to_string(),
+                            };
+                            return Err(error);
                         };
 
                         for role in &schema.validator {
                             let Some(key) =
                                 self.properties.members.get(&role.name)
                             else {
-                                return Err(ActorError::FunctionalFail(
-                                    format!(
-                                        "Validator {} is not a member",
-                                        role.name
-                                    ),
-                                ));
+                                let error = SubjectError::NotAMember {
+                                    what: "Validator".to_string(),
+                                    who: role.name.clone(),
+                                };
+                                return Err(error);
                             };
                             validators.insert(RoleData {
                                 key: key.clone(),
@@ -1452,16 +1489,19 @@ impl Governance {
         let actor: Option<ActorRef<RolesRegister>> =
             ctx.get_child("roles_register").await;
 
-        let message = self.create_roles_register_message(update)?;
+        let message =
+            self.create_roles_register_message(update).map_err(|e| {
+                ActorError::FunctionalCritical {
+                    description: e.to_string(),
+                }
+            })?;
 
         if let Some(actor) = actor {
             actor.tell(message).await
         } else {
-            Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/{}",
-                ctx.path(),
-                "roles_register"
-            ))))
+            Err(ActorError::NotFound {
+                path: ctx.path().clone() / "roles_register",
+            })
         }
     }
 
@@ -1488,7 +1528,9 @@ impl Governance {
             )
             .await
             {
-                return Err(ActorError::Functional(e.to_string()));
+                return Err(ActorError::Functional {
+                    description: e.to_string(),
+                });
             }
 
             self.on_event(first.clone(), ctx).await;
@@ -1539,8 +1581,15 @@ impl Governance {
         };
 
         for event in iter {
-            let actual_ledger_hash = hash_borsh(&*hash.hasher(), &last_ledger.0)
-                .map_err(|e| todo!())?;
+            let actual_ledger_hash =
+                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not creacte actual ledger event hash: {}",
+                            e
+                        ),
+                    }
+                })?;
             let last_data = LastData {
                 gov_version: last_ledger.content().gov_version,
                 vali_data: last_ledger
@@ -1551,7 +1600,7 @@ impl Governance {
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
-                event,
+                &event,
                 Metadata::from(self.clone()),
                 actual_ledger_hash,
                 last_data,
@@ -1561,11 +1610,14 @@ impl Governance {
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
-                    if let Error::Sn = e {
+                    // Check if it's a sequence number error
+                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
                         // El evento que estamos aplicando no es el siguiente.
                         continue;
                     } else {
-                        return Err(ActorError::Functional(e.to_string()));
+                        return Err(ActorError::Functional {
+                            description: e.to_string(),
+                        });
                     }
                 }
             };
@@ -1624,7 +1676,7 @@ impl Governance {
                     }
                     EventRequest::Fact(fact_request) => {
                         let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0).map_err(|e| {
-                            ActorError::FunctionalFail(format!("Can not convert payload into governance event in governance fact event: {}", e))
+                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
                         })?;
 
                         governance_event.roles_update()
@@ -1742,6 +1794,14 @@ impl Actor for Governance {
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Governance", id = id)
+        } else {
+            info_span!("Governance", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -1751,13 +1811,19 @@ impl Actor for Governance {
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
         else {
-            return Err(ActorError::NotHelper("ext_db".to_owned()));
+            return Err(ActorError::Helper {
+                name: "ext_db".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let Some(ave_sink): Option<AveSink> =
             ctx.system().get_helper("sink").await
         else {
-            return Err(ActorError::NotHelper("sink".to_owned()));
+            return Err(ActorError::Helper {
+                name: "sink".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let Some(network) = ctx
@@ -1765,7 +1831,10 @@ impl Actor for Governance {
             .get_helper::<Arc<NetworkSender>>("network")
             .await
         else {
-            return Err(ActorError::NotHelper("network".to_owned()));
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         let hash = if let Some(config) =
@@ -1773,12 +1842,14 @@ impl Actor for Governance {
         {
             config.hash_algorithm
         } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
         };
 
         if self.subject_metadata.active {
-            self.build_childs(ctx, &hash, &network)
-                .await?;
+            self.build_childs(ctx, &hash, &network).await?;
 
             let sink_actor = ctx
                 .create_child(
@@ -1823,17 +1894,28 @@ impl Handler<Governance> for Governance {
     ) -> Result<GovernanceResponse, ActorError> {
         match msg {
             GovernanceMessage::GetLastSn => {
+                debug!(
+                    msg_type = "GetLastSn",
+                    sn = self.subject_metadata.sn,
+                    "Returning last sequence number"
+                );
                 Ok(GovernanceResponse::Sn(self.subject_metadata.sn))
-            },
+            }
             GovernanceMessage::UpdateTransfer(res) => {
                 match res {
                     TransferResponse::Confirm => {
                         let Some(new_owner) =
                             self.subject_metadata.new_owner.clone()
                         else {
-                            let e = "Can not obtain new_owner";
-                            error!(TARGET_GOVERNANCE, "Confirm, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            error!(
+                                msg_type = "UpdateTransfer",
+                                transfer_action = "Confirm",
+                                subject_id = %self.subject_metadata.subject_id,
+                                "Failed to obtain new_owner"
+                            );
+                            return Err(ActorError::Functional {
+                                description: "Can not obtain new_owner".to_owned(),
+                            });
                         };
 
                         Governance::change_node_subject(
@@ -1843,6 +1925,14 @@ impl Handler<Governance> for Governance {
                             &self.subject_metadata.owner.to_string(),
                         )
                         .await?;
+
+                        debug!(
+                            msg_type = "UpdateTransfer",
+                            transfer_action = "Confirm",
+                            subject_id = %self.subject_metadata.subject_id,
+                            new_owner = %new_owner,
+                            "Transfer confirmed successfully"
+                        );
                     }
                     TransferResponse::Reject => {
                         Governance::reject_transfer_subject(
@@ -1856,6 +1946,13 @@ impl Handler<Governance> for Governance {
                             WitnessesAuth::None,
                         )
                         .await?;
+
+                        debug!(
+                            msg_type = "UpdateTransfer",
+                            transfer_action = "Reject",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Transfer rejected successfully"
+                        );
                     }
                 }
 
@@ -1867,13 +1964,19 @@ impl Handler<Governance> for Governance {
                         Ok(new_compilers) => new_compilers,
                         Err(e) => {
                             warn!(
-                                TARGET_GOVERNANCE,
-                                "CreateCompilers, can not create compilers: {}",
-                                e
+                                msg_type = "CreateCompilers",
+                                error = %e,
+                                "Failed to create compilers"
                             );
                             return Err(e);
                         }
                     };
+
+                debug!(
+                    msg_type = "CreateCompilers",
+                    new_compilers_count = new_compilers.len(),
+                    "Compilers created successfully"
+                );
                 Ok(GovernanceResponse::NewCompilers(new_compilers))
             }
             GovernanceMessage::GetLedger { last_sn } => {
@@ -1888,15 +1991,28 @@ impl Handler<Governance> for Governance {
                 Box::new(Metadata::from(self.clone())),
             )),
             GovernanceMessage::UpdateLedger { events } => {
+                let events_count = events.len();
                 if let Err(e) =
                     self.manager_new_ledger_events(ctx, events).await
                 {
                     warn!(
-                        TARGET_GOVERNANCE,
-                        "UpdateLedger, can not verify new events: {}", e
+                        msg_type = "UpdateLedger",
+                        error = %e,
+                        subject_id = %self.subject_metadata.subject_id,
+                        events_count = events_count,
+                        "Failed to verify new ledger events"
                     );
                     return Err(e);
                 };
+
+                debug!(
+                    msg_type = "UpdateLedger",
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    events_count = events_count,
+                    "Ledger updated successfully"
+                );
+
                 Ok(GovernanceResponse::UpdateResult(
                     self.subject_metadata.sn,
                     self.subject_metadata.owner.clone(),
@@ -1918,18 +2034,28 @@ impl Handler<Governance> for Governance {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_GOVERNANCE,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to persist event"
             );
             emit_fail(ctx, e).await;
         };
 
         if let Err(e) = ctx.publish_event(event).await {
             error!(
-                TARGET_GOVERNANCE,
-                "PublishEvent, can not publish event: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to publish event"
             );
             emit_fail(ctx, e).await;
+        } else {
+            debug!(
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Event persisted and published successfully"
+            );
         }
     }
 
@@ -1938,7 +2064,11 @@ impl Handler<Governance> for Governance {
         error: ActorError,
         ctx: &mut ActorContext<Governance>,
     ) -> ChildAction {
-        error!(TARGET_GOVERNANCE, "OnChildFault, {}", error);
+        error!(
+            error = %error,
+            subject_id = %self.subject_metadata.subject_id,
+            "Child fault occurred"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
@@ -1947,8 +2077,11 @@ impl Handler<Governance> for Governance {
 #[async_trait]
 impl PersistentActor for Governance {
     type Persistence = FullPersistence;
-    type InitParams =
-        (Option<(SubjectMetadata, GovernanceData)>, Arc<PublicKey>);
+    type InitParams = (
+        Option<(SubjectMetadata, GovernanceData)>,
+        Arc<PublicKey>,
+        HashAlgorithm,
+    );
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
@@ -1963,6 +2096,7 @@ impl PersistentActor for Governance {
                 Default::default()
             };
         Self {
+            hash: Some(params.2),
             our_key: params.1,
             subject_metadata,
             properties,
@@ -1982,9 +2116,28 @@ impl PersistentActor for Governance {
                     self.properties = serde_json::from_value::<GovernanceData>(
                         metadata.properties.0.clone(),
                     )
-                    .map_err(|e| todo!())?;
+                    .map_err(|e| {
+                        error!(
+                            event_type = "Create",
+                            subject_id = %self.subject_metadata.subject_id,
+                            error = %e,
+                            "Failed to convert properties into GovernanceData"
+                        );
+                        ActorError::Functional { description: format!("In create event, can not convert properties into GovernanceData: {e}")}
+                    })?;
+
+                    debug!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        sn = self.subject_metadata.sn,
+                        "Applied create event"
+                    );
                 } else {
-                    todo!()
+                    error!(
+                        event_type = "Create",
+                        "Validation metadata must be Metadata type"
+                    );
+                    return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
                 }
 
                 return Ok(());
@@ -2001,9 +2154,27 @@ impl PersistentActor for Governance {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
                             self.apply_patch(eval_res.patch)?;
+                            debug!(
+                                event_type = "Fact",
+                                subject_id = %self.subject_metadata.subject_id,
+                                approved = true,
+                                "Applied fact event with patch"
+                            );
+                        } else {
+                            debug!(
+                                event_type = "Fact",
+                                subject_id = %self.subject_metadata.subject_id,
+                                approved = false,
+                                "Fact event not approved, patch not applied"
+                            );
                         }
                     } else {
-                        todo!()
+                        error!(
+                            event_type = "Fact",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Evaluation successful but no approval present"
+                        );
+                        return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval.".to_owned() });
                     }
                 }
             }
@@ -2014,6 +2185,12 @@ impl PersistentActor for Governance {
                 if evaluation.evaluator_res().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
+                    debug!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        new_owner = %transfer_request.new_owner,
+                        "Applied transfer event"
+                    );
                 }
             }
             (
@@ -2024,21 +2201,52 @@ impl PersistentActor for Governance {
                     if let Some(new_owner) =
                         self.subject_metadata.new_owner.take()
                     {
-                        self.subject_metadata.owner = new_owner;
+                        self.subject_metadata.owner = new_owner.clone();
+                        self.apply_patch(eval_res.patch)?;
+                        debug!(
+                            event_type = "Confirm",
+                            subject_id = %self.subject_metadata.subject_id,
+                            new_owner = %new_owner,
+                            "Applied confirm event with patch"
+                        );
                     } else {
-                        todo!()
+                        error!(
+                            event_type = "Confirm",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "New owner is None in confirm event"
+                        );
+                        return Err(ActorError::Functional {
+                            description: "In confirm event, new owner is None"
+                                .to_owned(),
+                        });
                     }
-
-                    self.apply_patch(eval_res.patch)?;
                 }
             }
             (EventRequest::Reject(..), Protocols::Reject { .. }) => {
                 self.subject_metadata.new_owner = None;
+                debug!(
+                    event_type = "Reject",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied reject event"
+                );
             }
             (EventRequest::EOL(..), Protocols::EOL { .. }) => {
-                self.subject_metadata.active = false
+                self.subject_metadata.active = false;
+                debug!(
+                    event_type = "EOL",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied EOL event"
+                );
             }
-            _ => todo!("Tackers events es una gov esto"),
+            _ => {
+                error!(
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Invalid protocol data for Governance"
+                );
+                return Err(ActorError::Functional {
+                    description: "Invalid protocol data for Governance".to_owned(),
+                });
+            }
         }
 
         if event.content().protocols.is_success() {
