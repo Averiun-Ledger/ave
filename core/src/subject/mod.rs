@@ -30,8 +30,7 @@ use crate::{
 use error::SubjectError;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Event,
-    PersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, Event, PersistentActor,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -237,10 +236,11 @@ where
                 details: e.to_string(),
             })?;
 
-        patch(&mut subject_properties.0, &json_patch)
-            .map_err(|e| SubjectError::PatchApplicationFailed {
+        patch(&mut subject_properties.0, &json_patch).map_err(|e| {
+            SubjectError::PatchApplicationFailed {
                 details: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
@@ -259,7 +259,8 @@ where
 
         if new_ledger_event.verify().is_err() {
             return Err(SubjectError::SignatureVerificationFailed {
-                context: "new ledger event signature verification failed".to_string(),
+                context: "new ledger event signature verification failed"
+                    .to_string(),
             });
         }
 
@@ -278,7 +279,8 @@ where
 
         if new_ledger_event.content().event_request.verify().is_err() {
             return Err(SubjectError::SignatureVerificationFailed {
-                context: "event request signature verification failed".to_string(),
+                context: "event request signature verification failed"
+                    .to_string(),
             });
         }
 
@@ -357,7 +359,9 @@ where
                             approval_data: appr.clone(),
                         }
                     } else {
-                        return Err(SubjectError::MissingApprovalAfterEvaluation);
+                        return Err(
+                            SubjectError::MissingApprovalAfterEvaluation,
+                        );
                     }
                 } else {
                     if approval.is_some() {
@@ -487,25 +491,23 @@ where
             return Err(SubjectError::InvalidValidationRequestSignature);
         }
 
-        let hash_signed_val_req = hash_borsh(
-            &*hash.hasher(),
-            &signed_validation_req,
-        )
-        .map_err(|e| SubjectError::ValidationRequestHashFailed {
-            details: e.to_string(),
-        })?;
+        let hash_signed_val_req =
+            hash_borsh(&*hash.hasher(), &signed_validation_req).map_err(
+                |e| SubjectError::ValidationRequestHashFailed {
+                    details: e.to_string(),
+                },
+            )?;
 
         if hash_signed_val_req != validation.validation_req_hash {
             return Err(SubjectError::ValidationRequestHashMismatch);
         }
 
-        let modified_metadata_hash = hash_borsh(
-            &*hash.hasher(),
-            &modified_subject_metadata,
-        )
-        .map_err(|e| SubjectError::ModifiedMetadataHashFailed {
-            details: e.to_string(),
-        })?;
+        let modified_metadata_hash =
+            hash_borsh(&*hash.hasher(), &modified_subject_metadata).map_err(
+                |e| SubjectError::ModifiedMetadataHashFailed {
+                    details: e.to_string(),
+                },
+            )?;
 
         let validation_res = ValidationRes::Response {
             vali_req_hash: hash_signed_val_req,
@@ -558,7 +560,8 @@ where
     ) -> Result<(), SubjectError> {
         if ledger_event.verify().is_err() {
             return Err(SubjectError::SignatureVerificationFailed {
-                context: "first ledger event signature verification failed".to_string(),
+                context: "first ledger event signature verification failed"
+                    .to_string(),
             });
         }
 
@@ -571,7 +574,8 @@ where
 
         if ledger_event.content().event_request.verify().is_err() {
             return Err(SubjectError::SignatureVerificationFailed {
-                context: "event request signature verification failed".to_string(),
+                context: "event request signature verification failed"
+                    .to_string(),
             });
         }
 
@@ -618,13 +622,12 @@ where
             return Err(SubjectError::InvalidValidationRequestSignature);
         }
 
-        let hash_signed_val_req = hash_borsh(
-            &*hash.hasher(),
-            &signed_validation_req,
-        )
-        .map_err(|e| SubjectError::ValidationRequestHashFailed {
-            details: e.to_string(),
-        })?;
+        let hash_signed_val_req =
+            hash_borsh(&*hash.hasher(), &signed_validation_req).map_err(
+                |e| SubjectError::ValidationRequestHashFailed {
+                    details: e.to_string(),
+                },
+            )?;
 
         if hash_signed_val_req != validation.validation_req_hash {
             return Err(SubjectError::ValidationRequestHashMismatch);
@@ -636,11 +639,13 @@ where
 
         if let SchemaType::Governance = metadata.schema_id {
             serde_json::from_value::<GovernanceData>(
-                        metadata.properties.0.clone(),
-                    )
-                    .map_err(|e| SubjectError::GovernancePropertiesConversionFailed {
-                        details: e.to_string(),
-                    })?;
+                metadata.properties.0.clone(),
+            )
+            .map_err(|e| {
+                SubjectError::GovernancePropertiesConversionFailed {
+                    details: e.to_string(),
+                }
+            })?;
         }
 
         let validation_res = ValidationRes::Create {
@@ -663,8 +668,10 @@ where
                 ledger_event.content().gov_version,
             )
             .await
-            .map_err(|e| SubjectError::ValidatorsRetrievalFailed {
-                details: e.to_string(),
+            .map_err(|e| {
+                SubjectError::ValidatorsRetrievalFailed {
+                    details: e.to_string(),
+                }
             })?,
             SchemaType::AllSchemas => {
                 return Err(SubjectError::InvalidSchemaId);
@@ -701,32 +708,31 @@ where
         new_owner: &str,
         old_owner: &str,
     ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
+        match ctx.get_parent::<Node>().await {
+            Ok(node_actor) => {
+                node_actor
+                    .tell(NodeMessage::ChangeSubjectOwner {
+                        new_owner: new_owner.to_owned(),
+                        old_owner: old_owner.to_owned(),
+                        subject_id: subject_id.to_owned(),
+                    })
+                    .await?;
 
-        if let Some(node_actor) = node_actor {
-            node_actor
-                .tell(NodeMessage::ChangeSubjectOwner {
-                    new_owner: new_owner.to_owned(),
-                    old_owner: old_owner.to_owned(),
-                    subject_id: subject_id.to_owned(),
-                })
-                .await?;
-
-            debug!(
-                subject_id = subject_id,
-                new_owner = new_owner,
-                old_owner = old_owner,
-                "Subject owner changed successfully"
-            );
-        } else {
-            error!(
-                path = %node_path,
-                subject_id = subject_id,
-                "Node actor not found"
-            );
-            return Err(ActorError::NotFound { path: node_path });
+                debug!(
+                    subject_id = subject_id,
+                    new_owner = new_owner,
+                    old_owner = old_owner,
+                    "Subject owner changed successfully"
+                );
+            }
+            Err(e) => {
+                error!(
+                    path = %ctx.path().parent(),
+                    subject_id = subject_id,
+                    "Node actor not found"
+                );
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -739,33 +745,32 @@ where
         new_owner: &str,
         actual_owner: &str,
     ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
+        match ctx.get_parent::<Node>().await {
+            Ok(node_actor) => {
+                node_actor
+                    .tell(NodeMessage::TransferSubject(TransferSubject {
+                        name: name.unwrap_or_default(),
+                        subject_id: subject_id.to_owned(),
+                        new_owner: new_owner.to_owned(),
+                        actual_owner: actual_owner.to_owned(),
+                    }))
+                    .await?;
 
-        if let Some(node_actor) = node_actor {
-            node_actor
-                .tell(NodeMessage::TransferSubject(TransferSubject {
-                    name: name.unwrap_or_default(),
-                    subject_id: subject_id.to_owned(),
-                    new_owner: new_owner.to_owned(),
-                    actual_owner: actual_owner.to_owned(),
-                }))
-                .await?;
-
-            debug!(
-                subject_id = subject_id,
-                new_owner = new_owner,
-                actual_owner = actual_owner,
-                "Transfer subject initiated successfully"
-            );
-        } else {
-            error!(
-                path = %node_path,
-                subject_id = subject_id,
-                "Node actor not found"
-            );
-            return Err(ActorError::NotFound { path: node_path });
+                debug!(
+                    subject_id = subject_id,
+                    new_owner = new_owner,
+                    actual_owner = actual_owner,
+                    "Transfer subject initiated successfully"
+                );
+            }
+            Err(e) => {
+                error!(
+                    path = %ctx.path().parent(),
+                    subject_id = subject_id,
+                    "Node actor not found"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -774,26 +779,25 @@ where
         ctx: &mut ActorContext<Self>,
         subject_id: &str,
     ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
+        match ctx.get_parent::<Node>().await {
+            Ok(node_actor) => {
+                node_actor
+                    .tell(NodeMessage::RejectTransfer(subject_id.to_owned()))
+                    .await?;
 
-        if let Some(node_actor) = node_actor {
-            node_actor
-                .tell(NodeMessage::RejectTransfer(subject_id.to_owned()))
-                .await?;
-
-            debug!(
-                subject_id = subject_id,
-                "Transfer rejected successfully"
-            );
-        } else {
-            error!(
-                path = %node_path,
-                subject_id = subject_id,
-                "Node actor not found"
-            );
-            return Err(ActorError::NotFound { path: node_path });
+                debug!(
+                    subject_id = subject_id,
+                    "Transfer rejected successfully"
+                );
+            }
+            Err(e) => {
+                error!(
+                    path = %ctx.path().parent(),
+                    subject_id = subject_id,
+                    "Node actor not found"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -803,19 +807,20 @@ where
         message: RegisterMessage,
     ) -> Result<(), ActorError> {
         let register_path = ActorPath::from("/user/node/register");
-        let register: Option<ActorRef<Register>> =
-            ctx.system().get_actor(&register_path).await;
-        if let Some(register) = register {
-            register.tell(message).await?;
+        match ctx.system().get_actor::<Register>(&register_path).await {
+            Ok(register) => {
+                register.tell(message).await?;
 
-            debug!("Register message sent successfully");
-        } else {
-            error!(
-                path = %register_path,
-                "Register actor not found"
-            );
-            return Err(ActorError::NotFound{path: register_path});
-        }
+                debug!("Register message sent successfully");
+            }
+            Err(e) => {
+                error!(
+                    path = %register_path,
+                    "Register actor not found"
+                );
+                return Err(e);
+            }
+        };
 
         Ok(())
     }
@@ -878,37 +883,35 @@ where
 
     async fn transfer_register(
         ctx: &mut ActorContext<Self>,
-        subject_id: &str,
-        new: PublicKey,
-        old: PublicKey,
+        msg: TransferRegisterMessage
     ) -> Result<(), ActorError> {
         let tranfer_register_path =
             ActorPath::from("/user/node/transfer_register");
-        let transfer_register_actor: Option<
-            ave_actors::ActorRef<TransferRegister>,
-        > = ctx.system().get_actor(&tranfer_register_path).await;
 
-        let Some(transfer_register_actor) = transfer_register_actor else {
-            error!(
-                path = %tranfer_register_path,
-                subject_id = subject_id,
-                "Transfer register actor not found"
-            );
-            return Err(ActorError::NotFound{path: tranfer_register_path});
-        };
+        match ctx
+            .system()
+            .get_actor::<TransferRegister>(&tranfer_register_path)
+            .await
+        {
+            Ok(transfer_register_actor) => {
+                transfer_register_actor
+                    .tell(msg.clone())
+                    .await?;
 
-        transfer_register_actor
-            .tell(TransferRegisterMessage::RegisterNewOldOwner {
-                old,
-                new,
-                subject_id: subject_id.to_owned(),
-            })
-            .await?;
-
-        debug!(
-            subject_id = subject_id,
-            "Transfer registration completed successfully"
-        );
+                debug!(
+                    msg = ?msg,
+                    "Transfer registration completed successfully"
+                );
+            }
+            Err(e) => {
+                error!(
+                    path = %tranfer_register_path,
+                    msg = ?msg,
+                    "Transfer register actor not found"
+                );
+                return Err(e);
+            }
+        }
 
         Ok(())
     }
@@ -917,21 +920,12 @@ where
         ctx: &mut ActorContext<Self>,
         message: SinkDataMessage,
     ) -> Result<(), ActorError> {
-        let sink_data: Option<ActorRef<SinkData>> =
-            ctx.get_child("sink_data").await;
-        if let Some(sink_data) = sink_data {
-            sink_data.tell(message).await?;
+        let sink_data = ctx.get_child::<SinkData>("sink_data").await?;
 
-            debug!("Message published to sink successfully");
-            Ok(())
-        } else {
-            let path = ctx.path().clone() / "sink_data";
-            error!(
-                path = %path,
-                "Sink data actor not found"
-            );
-            Err(ActorError::NotFound{ path })
-        }
+        sink_data.tell(message).await?;
+        debug!("Message published to sink successfully");
+
+        Ok(())
     }
 
     async fn update_subject_node(
@@ -939,31 +933,30 @@ where
         subject_id: &str,
         sn: u64,
     ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
+        match ctx.get_parent::<Node>().await {
+            Ok(node_actor) => {
+                node_actor
+                    .tell(NodeMessage::UpdateSubject {
+                        subject_id: subject_id.to_owned(),
+                        sn,
+                    })
+                    .await?;
 
-        if let Some(node_actor) = node_actor {
-            node_actor
-                .tell(NodeMessage::UpdateSubject {
-                    subject_id: subject_id.to_owned(),
-                    sn,
-                })
-                .await?;
-
-            debug!(
-                subject_id = subject_id,
-                sn = sn,
-                "Subject node updated successfully"
-            );
-            Ok(())
-        } else {
-            error!(
-                path = %node_path,
-                subject_id = subject_id,
-                "Node actor not found"
-            );
-            Err(ActorError::NotFound {path: node_path})
+                debug!(
+                    subject_id = subject_id,
+                    sn = sn,
+                    "Subject node updated successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    path = %ctx.path().parent(),
+                    subject_id = subject_id,
+                    "Node actor not found"
+                );
+                Err(e)
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
     Message, NotPersistentActor,
 };
 
@@ -85,13 +85,13 @@ impl Update {
     ) -> Result<(), ActorError> {
         let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-        if let Some(governance_actor) =
+        if let Ok(governance_actor) =
             ctx.system().get_actor::<Governance>(&path).await
         {
             governance_actor
                 .tell(GovernanceMessage::UpdateTransfer(res))
                 .await
-        } else if let Some(tracker_actor) =
+        } else if let Ok(tracker_actor) =
             ctx.system().get_actor::<Tracker>(&path).await
         {
             tracker_actor
@@ -325,41 +325,44 @@ impl Handler<Update> for Update {
                                 "/user/request/{}",
                                 id
                             ));
-                            let request_actor: Option<
-                                ActorRef<RequestManager>,
-                            > = ctx.system().get_actor(&request_path).await;
+                            match ctx
+                                .system()
+                                .get_actor::<RequestManager>(&request_path)
+                                .await
+                            {
+                                Ok(request_actor) => {
+                                    let request = if self.better.is_none() {
+                                        RequestManagerMessage::FinishReboot
+                                    } else {
+                                        RequestManagerMessage::Reboot {
+                                            governance_id: self
+                                                .subject_id
+                                                .clone(),
+                                        }
+                                    };
 
-                            if let Some(request_actor) = request_actor {
-                                let request = if self.better.is_none() {
-                                    RequestManagerMessage::FinishReboot
-                                } else {
-                                    RequestManagerMessage::Reboot {
-                                        governance_id: self.subject_id.clone(),
+                                    if let Err(e) =
+                                        request_actor.tell(request).await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            request_id = %id,
+                                            "Failed to send response to request actor"
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
                                     }
-                                };
-
-                                if let Err(e) =
-                                    request_actor.tell(request).await
-                                {
+                                }
+                                Err(e) => {
                                     error!(
                                         msg_type = "Response",
-                                        error = %e,
+                                        path = %request_path,
                                         request_id = %id,
-                                        "Failed to send response to request actor"
+                                        "Request actor not found"
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                            } else {
-                                let e =
-                                    ActorError::NotFound { path: request_path.clone() };
-                                error!(
-                                    msg_type = "Response",
-                                    path = %request_path,
-                                    request_id = %id,
-                                    "Request actor not found"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
+                            };
                         };
 
                         debug!(

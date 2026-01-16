@@ -20,7 +20,7 @@ use crate::{
         },
         event::{Protocols, ValidationMetadata},
     },
-    node::register::RegisterMessage,
+    node::{register::RegisterMessage, transfer::TransferRegisterMessage},
     subject::{
         DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
         error::SubjectError,
@@ -31,8 +31,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Response, Sink,
 };
 use ave_common::{
     Namespace, ValueWrapper,
@@ -254,18 +254,14 @@ impl Tracker {
         let governance_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
 
-        let governance_actor: Option<ActorRef<Governance>> =
-            ctx.system().get_actor(&governance_path).await;
+        let governance_actor = ctx
+            .system()
+            .get_actor::<Governance>(&governance_path)
+            .await?;
 
-        let response = if let Some(governance_actor) = governance_actor {
-            governance_actor
-                .ask(GovernanceMessage::GetGovernance)
-                .await?
-        } else {
-            return Err(ActorError::NotFound {
-                path: governance_path,
-            });
-        };
+        let response = governance_actor
+            .ask(GovernanceMessage::GetGovernance)
+            .await?;
 
         match response {
             GovernanceResponse::Governance(gov) => Ok(*gov),
@@ -329,6 +325,7 @@ impl Tracker {
             }
 
             self.on_event(first.clone(), ctx).await;
+
             Self::register(
                 ctx,
                 RegisterMessage::RegisterSubj {
@@ -358,6 +355,15 @@ impl Tracker {
                         .to_string(),
                 },
                 &first.content().event_request.content(),
+            )
+            .await?;
+
+            Tracker::transfer_register(
+                ctx,
+                TransferRegisterMessage::Create {
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    owner: self.subject_metadata.owner.clone(),
+                },
             )
             .await?;
 
@@ -419,11 +425,35 @@ impl Tracker {
                             &self.subject_metadata.owner.to_string(),
                         )
                         .await?;
+
+                        Tracker::transfer_register(
+                            ctx,
+                            TransferRegisterMessage::Transfer {
+                                subject_id: self
+                                    .subject_metadata
+                                    .subject_id
+                                    .to_string(),
+                                new_owner: transfer_request.new_owner,
+                            },
+                        )
+                        .await?;
                     }
                     EventRequest::Reject(reject_request) => {
                         Tracker::reject_transfer_subject(
                             ctx,
                             &reject_request.subject_id.to_string(),
+                        )
+                        .await?;
+
+                        Tracker::transfer_register(
+                            ctx,
+                            TransferRegisterMessage::Reject {
+                                subject_id: self
+                                    .subject_metadata
+                                    .subject_id
+                                    .to_string(),
+                                sn: event.content().sn,
+                            },
                         )
                         .await?;
                     }
@@ -447,9 +477,13 @@ impl Tracker {
 
                         Tracker::transfer_register(
                             ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                            event.signature().signer.clone(),
-                            self.subject_metadata.owner.clone(),
+                            TransferRegisterMessage::Confirm {
+                                subject_id: self
+                                    .subject_metadata
+                                    .subject_id
+                                    .to_string(),
+                                sn: event.content().sn,
+                            },
                         )
                         .await?;
                     }
@@ -513,26 +547,22 @@ impl Tracker {
             "/user/node/{}/relation_ship",
             self.governance_id
         ));
-        let relation_actor: Option<ActorRef<RelationShip>> =
-            ctx.system().get_actor(&relation_path).await;
+        let relation_actor = ctx
+            .system()
+            .get_actor::<RelationShip>(&relation_path)
+            .await?;
 
-        let response = if let Some(relation_actor) = relation_actor {
-            relation_actor
-                .ask(RelationShipMessage::RegisterNewSubject {
-                    data: OwnerSchema {
-                        owner,
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        namespace: self.namespace.to_string(),
-                    },
-                    subject_id: self.subject_metadata.subject_id.to_string(),
-                    max_quantity,
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound {
-                path: relation_path,
-            });
-        };
+        let response = relation_actor
+            .ask(RelationShipMessage::RegisterNewSubject {
+                data: OwnerSchema {
+                    owner,
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
+                },
+                subject_id: self.subject_metadata.subject_id.to_string(),
+                max_quantity,
+            })
+            .await?;
 
         match response {
             RelationShipResponse::None => Ok(()),
@@ -551,25 +581,20 @@ impl Tracker {
             "/user/node/{}/relation_ship",
             self.governance_id
         ));
-        let relation_actor: Option<ActorRef<RelationShip>> =
-            ctx.system().get_actor(&relation_path).await;
-
-        let response = if let Some(relation_actor) = relation_actor {
-            relation_actor
-                .ask(RelationShipMessage::DeleteSubject {
-                    data: OwnerSchema {
-                        owner: self.subject_metadata.owner.to_string(),
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        namespace: self.namespace.to_string(),
-                    },
-                    subject_id: self.subject_metadata.subject_id.to_string(),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound {
-                path: relation_path,
-            });
-        };
+        let relation_actor = ctx
+            .system()
+            .get_actor::<RelationShip>(&relation_path)
+            .await?;
+        let response = relation_actor
+            .ask(RelationShipMessage::DeleteSubject {
+                data: OwnerSchema {
+                    owner: self.subject_metadata.owner.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
+                },
+                subject_id: self.subject_metadata.subject_id.to_string(),
+            })
+            .await?;
 
         match response {
             RelationShipResponse::None => Ok(()),
@@ -672,7 +697,8 @@ impl Actor for Tracker {
                         controller_id: our_key.to_string(),
                     },
                 )
-                .await {
+                .await
+            {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(

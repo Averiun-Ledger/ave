@@ -13,7 +13,7 @@ use ave_common::identity::{PublicKey, Signed};
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction,
     FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
@@ -198,45 +198,48 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                             "Failed to verify validation response signature"
                         );
                         return Err(ActorError::Functional {
-                            description: format!("Can not verify signature: {}", e)
+                            description: format!(
+                                "Can not verify signature: {}",
+                                e
+                            ),
                         });
                     }
 
-                    // Validation path.
-                    let validation_path = ctx.path().parent();
-
-                    // Validation actor.
-                    let validation_actor: Option<ActorRef<Validation>> =
-                        ctx.system().get_actor(&validation_path).await;
-
-                    if let Some(validation_actor) = validation_actor {
-                        if let Err(e) = validation_actor
-                            .tell(ValidationMessage::Response {
-                                validation_res: validation_res.content().clone(),
-                                sender: self.node_key.clone(),
-                                signature: Some(validation_res.signature().clone()),
-                            })
-                            .await
-                        {
+                    match ctx.get_parent::<Validation>().await {
+                        Ok(validation_actor) => {
+                            if let Err(e) = validation_actor
+                                .tell(ValidationMessage::Response {
+                                    validation_res: validation_res
+                                        .content()
+                                        .clone(),
+                                    sender: self.node_key.clone(),
+                                    signature: Some(
+                                        validation_res.signature().clone(),
+                                    ),
+                                })
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkResponse",
+                                    error = %e,
+                                    "Failed to send response to validation actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
+                        Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
-                                error = %e,
-                                "Failed to send response to validation actor"
+                                path = %ctx.path().parent(),
+                                "Validation actor not found"
                             );
+
                             return Err(emit_fail(ctx, e).await);
                         }
-                    } else {
-                        error!(
-                            msg_type = "NetworkResponse",
-                            path = %validation_path,
-                            "Validation actor not found"
-                        );
-                        let e = ActorError::NotFound { path: validation_path };
-                        return Err(emit_fail(ctx, e).await);
-                    }
+                    };
 
                     'retry: {
-                        let Some(retry) = ctx
+                        let Ok(retry) = ctx
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
@@ -287,41 +290,38 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
     ) {
         match error {
             ActorError::Retry => {
-                let validation_path = ctx.path().parent();
-
-                // Validation actor.
-                let validation_actor: Option<ActorRef<Validation>> =
-                    ctx.system().get_actor(&validation_path).await;
-
-                if let Some(validation_actor) = validation_actor {
-                    if let Err(e) = validation_actor
-                        .tell(ValidationMessage::Response {
-                            validation_res: ValidationRes::TimeOut,
-                            signature: None,
-                            sender: self.node_key.clone(),
-                        })
-                        .await
-                    {
+                match ctx.get_parent::<Validation>().await {
+                    Ok(validation_actor) => {
+                        if let Err(e) = validation_actor
+                            .tell(ValidationMessage::Response {
+                                validation_res: ValidationRes::TimeOut,
+                                signature: None,
+                                sender: self.node_key.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to validation actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                request_id = %self.request_id,
+                                version = self.version,
+                                "Timeout response sent to validation actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         error!(
-                            error = %e,
-                            "Failed to send timeout response to validation actor"
+                            path = %ctx.path().parent(),
+                            "Validation actor not found"
                         );
                         emit_fail(ctx, e).await;
-                    } else {
-                        debug!(
-                            request_id = %self.request_id,
-                            version = self.version,
-                            "Timeout response sent to validation actor"
-                        );
                     }
-                } else {
-                    let e = ActorError::NotFound {path: validation_path.clone()};
-                    error!(
-                        path = %validation_path,
-                        "Validation actor not found"
-                    );
-                    emit_fail(ctx, e).await;
                 }
+
                 ctx.stop(None).await;
             }
             _ => {

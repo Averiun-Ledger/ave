@@ -4,7 +4,7 @@ use crate::{
     ActorMessage, NetworkMessage,
     approval::types::{ApprovalState, ApprovalStateRes, VotationType},
     db::Storable,
-    governance::{Governance, data::GovernanceData},
+    governance::{data::GovernanceData},
     helpers::network::service::NetworkSender,
     model::common::{
         emit_fail,
@@ -15,7 +15,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
     Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
@@ -211,26 +211,17 @@ impl ApprPersist {
         let subject_id =
             request.content().event_request.content().get_subject_id();
         if self.node_key == *self.our_key {
-            // Approval Path
-            let approval_path =
-                ActorPath::from(format!("/user/node/{}/approval", subject_id));
             // Approval actor.
-            let approval_actor: Option<ActorRef<Approval>> =
-                ctx.system().get_actor(&approval_path).await;
+            let approval_actor = ctx.get_parent::<Approval>().await?;
+
             // Send response of validation to parent
-            if let Some(approval_actor) = approval_actor {
-                approval_actor
-                    .tell(ApprovalMessage::Response {
-                        approval_res: res,
-                        sender: (*self.our_key).clone(),
-                        signature: Some(signature),
-                    })
-                    .await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: approval_path,
-                });
-            };
+            approval_actor
+                .tell(ApprovalMessage::Response {
+                    approval_res: res,
+                    sender: (*self.our_key).clone(),
+                    signature: Some(signature),
+                })
+                .await?;
         } else {
             let signed_response: Signed<ApprovalRes> =
                 Signed::from_parts(res, signature);
@@ -322,16 +313,16 @@ impl Actor for ApprPersist {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if ctx.parent::<Governance>().await.is_some() {
-            let prefix = ctx.path().parent().key();
-            if let Err(e) = self.init_store("approver", Some(prefix), false, ctx).await {
-                error!(
-                    error = %e,
-                    prefix = prefix,
-                    "Failed to initialize approver store"
-                );
-                return Err(e);
-            }
+        let prefix = ctx.path().parent().key();
+        if let Err(e) = self
+            .init_store("approver", Some(prefix.clone()), false, ctx)
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to initialize approver store"
+            );
+            return Err(e);
         }
         Ok(())
     }
@@ -340,7 +331,6 @@ impl Actor for ApprPersist {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if ctx.parent::<Governance>().await.is_some() {
             if let Err(e) = self.stop_store(ctx).await {
                 error!(
                     error = %e,
@@ -348,7 +338,6 @@ impl Actor for ApprPersist {
                 );
                 return Err(e);
             }
-        }
         Ok(())
     }
 }

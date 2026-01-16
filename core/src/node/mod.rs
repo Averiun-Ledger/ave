@@ -67,9 +67,7 @@ pub struct TransferData {
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct SubjectData {
-    pub owner: String,
-    pub governance_id: Option<String>,
-    pub sn: u64,
+    pub governance_id: Option<DigestIdentifier>,
     pub schema_id: SchemaType,
     pub namespace: Namespace,
 }
@@ -148,42 +146,33 @@ impl Node {
         );
     }
 
-    pub fn update_subject(&mut self, subject_id: String, sn: u64) {
-        if let Some(mut data) = self.owned_subjects.get(&subject_id).cloned() {
-            data.sn = sn;
-            self.owned_subjects.insert(subject_id, data.clone());
-        } else if let Some(mut data) =
-            self.known_subjects.get(&subject_id).cloned()
-        {
-            data.sn = sn;
-            self.known_subjects.insert(subject_id, data.clone());
-        }
-    }
-
     pub fn delete_transfer(&mut self, subject_id: String) {
         self.transfer_subjects.remove(&subject_id);
     }
 
-    pub fn change_subject_owner(
+    pub fn confirm_transfer_owner(
         &mut self,
         subject_id: String,
-        new_owner: Option<String>,
     ) {
-        self.transfer_subjects.remove(&subject_id);
+        let our_key = self.our_key.to_string();
 
-        if let Some(new_owner) = new_owner {
-            if let Some(mut data) = self.owned_subjects.remove(&subject_id) {
-                data.owner = new_owner;
-                self.known_subjects.insert(subject_id, data);
-            };
-        } else if let Some(mut data) = self.known_subjects.remove(&subject_id) {
-            data.owner = self.owner.public_key().to_string();
-            self.owned_subjects.insert(subject_id, data);
+        if let Some(data) = self.transfer_subjects.remove(&subject_id) {
+            if data.actual_owner == our_key {
+                if let Some(data) = self.owned_subjects.remove(&subject_id) {
+                    self.known_subjects.insert(subject_id, data);
+                }
+            } else if data.new_owner == our_key {
+                if let Some(data) = self.known_subjects.remove(&subject_id) {
+                    self.owned_subjects.insert(subject_id, data);
+                };
+            }
         };
+
+
     }
 
-    pub fn register_subject(&mut self, subject_id: String, data: SubjectData) {
-        if self.owner.public_key().to_string() == data.owner {
+    pub fn register_subject(&mut self, subject_id: String, owner: String, data: SubjectData) {
+        if self.owner.public_key().to_string() == owner {
             self.owned_subjects.insert(subject_id, data);
         } else {
             self.known_subjects.insert(subject_id, data);
@@ -235,6 +224,7 @@ impl Node {
         let Some(ext_db): Option<ExternalDB> =
             ctx.system().get_helper("ext_db").await
         else {
+            error!("External database helper not found");
             return Err(ActorError::Helper {
                 name: "ext_db".to_string(),
                 reason: "Not found".to_string(),
@@ -242,6 +232,7 @@ impl Node {
         };
 
         let Some(hash) = self.hash else {
+            error!("Hash is None during subject creation");
             return Err(ActorError::FunctionalCritical {
                 description: "Hash is None".to_string(),
             });
@@ -359,27 +350,19 @@ impl Node {
 /// Node message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeMessage {
-    // API
     SignRequest(SignTypesNode),
     PendingTransfers,
-    // System actor
-    UpSubject(String, bool),
-    GetSubjectData(String),
-    UpdateSubject {
-        subject_id: String,
-        sn: u64,
+    UpSubject {
+        subject_id: String, 
+        light: bool
     },
-    RejectTransfer(String),
-    TransferSubject(TransferSubject),
+    GetSubjectData(String),
     CreateNewSubject(SignedLedger),
     OwnerPendingSubject(String),
-    OldSubject(String),
-    IsAuthorized(String),
-    ChangeSubjectOwner {
-        subject_id: String,
-        old_owner: String,
-        new_owner: String,
-    },
+    AuthData(String),
+    TransferSubject(TransferSubject),
+    RejectTransfer(String),
+    ConfirmTransfer(String),
 }
 
 impl Message for NodeMessage {}
@@ -392,20 +375,13 @@ pub enum NodeResponse {
         new_owner: Option<String>,
     },
     PendingTransfers(Vec<TransferSubject>),
-    RequestIdentifier(DigestIdentifier),
     SignRequest(Signature),
-    SonWasCreated,
-    OwnerIdentifier(PublicKey),
     IOwnerPending((bool, bool)),
-    IOld(bool),
-    Contract(Vec<u8>),
-    IsAuthorized {
-        owned: bool,
+    AuthData {
         auth: bool,
-        know: bool,
+        subject_data: Option<SubjectData>,
     },
-    KnowSubject(bool),
-    None,
+    Ok,
 }
 
 impl Response for NodeResponse {}
@@ -415,21 +391,14 @@ impl Response for NodeResponse {}
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub enum NodeEvent {
-    UpdateSubject {
-        subject_id: String,
-        sn: u64,
-    },
-    RejectTransfer(String),
     RegisterSubject {
+        owner: String,
         subject_id: String,
         data: SubjectData,
     },
-    ChangeSubjectOwner {
-        new_owner: Option<String>,
-        subject_id: String,
-    },
-    ConfirmTransfer(String),
     TransferSubject(TransferSubject),
+    RejectTransfer(String),
+    ConfirmTransfer(String),
 }
 
 impl Event for NodeEvent {}
@@ -512,7 +481,10 @@ impl Actor for Node {
         }
 
         if let Err(e) = ctx
-            .create_child("auth", Auth::initial(self.our_key.clone()))
+            .create_child(
+                "auth",
+                Auth::initial((self.our_key.clone(), network.clone())),
+            )
             .await
         {
             error!(
@@ -577,7 +549,7 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
-            NodeMessage::UpSubject(subject_id, light) => {
+            NodeMessage::UpSubject {subject_id, light} => {
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
                 else {
@@ -624,7 +596,7 @@ impl Handler<Node> for Node {
                     "Subject brought up successfully"
                 );
 
-                Ok(NodeResponse::None)
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::GetSubjectData(subject_id) => {
                 let data = if let Some(data) =
@@ -640,7 +612,7 @@ impl Handler<Node> for Node {
                         subject_id = %subject_id,
                         "Subject not found"
                     );
-                    return Ok(NodeResponse::None);
+                    return Ok(NodeResponse::Ok);
                 };
 
                 let new_owner = self
@@ -656,25 +628,6 @@ impl Handler<Node> for Node {
                 );
 
                 Ok(NodeResponse::SubjectData { data, new_owner })
-            }
-            NodeMessage::UpdateSubject { subject_id, sn } => {
-                self.on_event(
-                    NodeEvent::UpdateSubject {
-                        subject_id: subject_id.clone(),
-                        sn,
-                    },
-                    ctx,
-                )
-                .await;
-
-                debug!(
-                    msg_type = "UpdateSubject",
-                    subject_id = %subject_id,
-                    sn = sn,
-                    "Subject updated successfully"
-                );
-
-                Ok(NodeResponse::None)
             }
             NodeMessage::PendingTransfers => {
                 let transfers: Vec<TransferSubject> = self
@@ -709,7 +662,7 @@ impl Handler<Node> for Node {
                     "Transfer rejected successfully"
                 );
 
-                Ok(NodeResponse::None)
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::TransferSubject(data) => {
                 let subject_id = data.subject_id.clone();
@@ -721,60 +674,22 @@ impl Handler<Node> for Node {
                     "Subject transfer registered successfully"
                 );
 
-                Ok(NodeResponse::None)
+                Ok(NodeResponse::Ok)
             }
-            NodeMessage::ChangeSubjectOwner {
-                subject_id,
-                old_owner,
-                new_owner,
-            } => {
-                let our_key = self.owner.public_key().to_string();
-                if old_owner == our_key {
-                    self.on_event(
-                        NodeEvent::ChangeSubjectOwner {
-                            subject_id: subject_id.clone(),
-                            new_owner: Some(new_owner.clone()),
-                        },
-                        ctx,
-                    )
-                    .await;
+            NodeMessage::ConfirmTransfer(subject_id) => {
+                self.on_event(
+                    NodeEvent::ConfirmTransfer(subject_id.clone()),
+                    ctx,
+                )
+                .await;
 
-                    debug!(
-                        msg_type = "ChangeSubjectOwner",
-                        subject_id = %subject_id,
-                        new_owner = %new_owner,
-                        "Subject ownership transferred to new owner"
-                    );
-                } else if new_owner == our_key {
-                    self.on_event(
-                        NodeEvent::ChangeSubjectOwner {
-                            new_owner: None,
-                            subject_id: subject_id.clone(),
-                        },
-                        ctx,
-                    )
-                    .await;
+                debug!(
+                    msg_type = "ConfirmTransfer",
+                    subject_id = %subject_id,
+                    "Transfer confirmed between other parties"
+                );
 
-                    debug!(
-                        msg_type = "ChangeSubjectOwner",
-                        subject_id = %subject_id,
-                        "Subject ownership acquired"
-                    );
-                } else {
-                    self.on_event(
-                        NodeEvent::ConfirmTransfer(subject_id.clone()),
-                        ctx,
-                    )
-                    .await;
-
-                    debug!(
-                        msg_type = "ChangeSubjectOwner",
-                        subject_id = %subject_id,
-                        "Transfer confirmed between other parties"
-                    );
-                }
-
-                Ok(NodeResponse::None)
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::CreateNewSubject(ledger) => {
                 let Some(ext_db): Option<ExternalDB> =
@@ -933,16 +848,15 @@ impl Handler<Node> for Node {
                         "Tracker subject created successfully"
                     );
 
-                    Some(metadata.governance_id.to_string())
+                    Some(metadata.governance_id)
                 };
 
                 self.on_event(
                     NodeEvent::RegisterSubject {
                         subject_id: subject_id.clone(),
+                        owner: metadata.owner.to_string(),
                         data: SubjectData {
-                            owner: metadata.owner.to_string(),
                             governance_id,
-                            sn: 0,
                             schema_id: metadata.schema_id,
                             namespace: metadata.namespace,
                         },
@@ -966,7 +880,7 @@ impl Handler<Node> for Node {
                     "New subject and distributor created successfully"
                 );
 
-                Ok(NodeResponse::SonWasCreated)
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::SignRequest(content) => {
                 let content_type = match &content {
@@ -1047,90 +961,70 @@ impl Handler<Node> for Node {
 
                 Ok(NodeResponse::IOwnerPending((is_owner, is_pending)))
             }
-            NodeMessage::OldSubject(subject_id) => {
-                let our_key = self.owner.public_key().to_string();
-
-                let is_old = if let Some(data) =
-                    self.transfer_subjects.get(&subject_id)
+            NodeMessage::AuthData(subject_id) => {
+                let authorized_subjects = match ctx
+                    .get_child::<Auth>("auth")
+                    .await
                 {
-                    data.actual_owner == our_key
-                } else {
-                    false
-                };
-
-                debug!(
-                    msg_type = "OldSubject",
-                    subject_id = %subject_id,
-                    is_old = is_old,
-                    "Checked old subject status"
-                );
-
-                Ok(NodeResponse::IOld(is_old))
-            }
-            NodeMessage::IsAuthorized(subject_id) => {
-                let auth: Option<ave_actors::ActorRef<Auth>> =
-                    ctx.get_child("auth").await;
-                let authorized_subjects = if let Some(auth) = auth {
-                    let res = match auth.ask(AuthMessage::GetAuths).await {
-                        Ok(res) => res,
-                        Err(e) => {
+                    Ok(auth) => {
+                        let res = match auth.ask(AuthMessage::GetAuths).await {
+                            Ok(res) => res,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "AuthData",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to get authorizations from auth actor"
+                                );
+                                ctx.system().stop_system();
+                                return Err(e);
+                            }
+                        };
+                        let AuthResponse::Auths { subjects } = res else {
                             error!(
-                                msg_type = "IsAuthorized",
+                                msg_type = "AuthData",
                                 subject_id = %subject_id,
-                                error = %e,
-                                "Failed to get authorizations from auth actor"
+                                "Unexpected response from auth actor"
                             );
                             ctx.system().stop_system();
-                            return Err(e);
-                        }
-                    };
-                    let AuthResponse::Auths { subjects } = res else {
+                            return Err(ActorError::UnexpectedResponse {
+                                expected: "AuthResponse::Auths".to_owned(),
+                                path: ctx.path().clone() / "auth",
+                            });
+                        };
+                        subjects
+                    }
+                    Err(e) => {
                         error!(
-                            msg_type = "IsAuthorized",
+                            msg_type = "AuthData",
                             subject_id = %subject_id,
-                            "Unexpected response from auth actor"
+                            "Auth actor not found"
                         );
                         ctx.system().stop_system();
-                        return Err(ActorError::UnexpectedResponse {
-                            expected: "AuthResponse::Auths".to_owned(),
-                            path: ctx.path().clone() / "auth",
-                        });
-                    };
-                    subjects
-                } else {
-                    error!(
-                        msg_type = "IsAuthorized",
-                        subject_id = %subject_id,
-                        "Auth actor not found"
-                    );
-                    ctx.system().stop_system();
-                    return Err(ActorError::NotFound {
-                        path: ctx.path().clone() / "auth",
-                    });
+                        return Err(e);
+                    }
                 };
 
                 let auth_subj =
                     authorized_subjects.iter().any(|x| x.clone() == subject_id);
 
-                let owned_subj =
-                    self.owned_subjects.keys().any(|x| x.clone() == subject_id);
-
-                let know_subj =
-                    self.known_subjects.keys().any(|x| x.clone() == subject_id);
+                let subj_data = self
+                    .known_subjects
+                    .get(&subject_id)
+                    .or_else(|| self.owned_subjects.get(&subject_id))
+                    .cloned();
 
                 debug!(
-                    msg_type = "IsAuthorized",
+                    msg_type = "AuthData",
                     subject_id = %subject_id,
                     authorized = auth_subj,
-                    owned = owned_subj,
-                    known = know_subj,
+                    subject_data = ?subj_data,
                     "Checked subject authorization status"
                 );
 
-                Ok(NodeResponse::IsAuthorized {
+                Ok(NodeResponse::AuthData {
                     auth: auth_subj,
-                    owned: owned_subj,
-                    know: know_subj,
+                    subject_data: subj_data,
                 })
             }
         }
@@ -1156,12 +1050,11 @@ impl Handler<Node> for Node {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
+                event = ?event,
                 error = %e,
                 "Failed to persist node event"
             );
             ctx.system().stop_system();
-        } else {
-            debug!("Node event persisted successfully");
         }
     }
 }
@@ -1191,29 +1084,20 @@ impl PersistentActor for Node {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            NodeEvent::UpdateSubject { subject_id, sn } => {
-                self.update_subject(subject_id.clone(), *sn);
-                debug!(
-                    event_type = "UpdateSubject",
-                    subject_id = %subject_id,
-                    sn = sn,
-                    "Applied subject update"
-                );
-            }
             NodeEvent::ConfirmTransfer(subject_id) => {
-                self.delete_transfer(subject_id.clone());
+                self.confirm_transfer_owner(subject_id.clone());
                 debug!(
                     event_type = "ConfirmTransfer",
                     subject_id = %subject_id,
                     "Applied transfer confirmation"
                 );
             }
-            NodeEvent::RegisterSubject { subject_id, data } => {
-                self.register_subject(subject_id.clone(), data.clone());
+            NodeEvent::RegisterSubject { subject_id, data, owner } => {
+                self.register_subject(subject_id.clone(), owner.clone(), data.clone());
                 debug!(
                     event_type = "RegisterSubject",
                     subject_id = %subject_id,
-                    owner = %data.owner,
+                    owner = %owner,
                     "Applied subject registration"
                 );
             }
@@ -1232,21 +1116,6 @@ impl PersistentActor for Node {
                     subject_id = %transfer.subject_id,
                     new_owner = %transfer.new_owner,
                     "Applied subject transfer"
-                );
-            }
-            NodeEvent::ChangeSubjectOwner {
-                new_owner,
-                subject_id,
-            } => {
-                self.change_subject_owner(
-                    subject_id.clone(),
-                    new_owner.clone(),
-                );
-                debug!(
-                    event_type = "ChangeSubjectOwner",
-                    subject_id = %subject_id,
-                    has_new_owner = new_owner.is_some(),
-                    "Applied subject owner change"
                 );
             }
         };

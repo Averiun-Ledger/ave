@@ -46,8 +46,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Response, Sink,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -382,51 +382,45 @@ impl Governance {
         update_vali: &BTreeMap<SchemaType, ValueWrapper>,
     ) -> Result<(), ActorError> {
         for (schema_id, init_state) in update_eval.iter() {
-            let actor: Option<ActorRef<EvaluationSchema>> =
-                ctx.get_child(&format!("{}_evaluation", schema_id)).await;
+            let actor = ctx
+                .get_child::<EvaluationSchema>(&format!(
+                    "{}_evaluation",
+                    schema_id
+                ))
+                .await?;
 
-            if let Some(actor) = actor {
-                actor
-                    .tell(EvaluationSchemaMessage::Update {
-                        creators: schema_creators_eval
-                            .get(schema_id)
-                            .cloned()
-                            .unwrap_or_default(),
-                        sn: self.subject_metadata.sn,
-                        gov_version: self.properties.version,
-                        init_state: init_state.clone(),
-                    })
-                    .await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone()
-                        / &format!("{}_evaluation", schema_id),
-                });
-            }
+            actor
+                .tell(EvaluationSchemaMessage::Update {
+                    creators: schema_creators_eval
+                        .get(schema_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    sn: self.subject_metadata.sn,
+                    gov_version: self.properties.version,
+                    init_state: init_state.clone(),
+                })
+                .await?;
         }
 
         for (schema_id, init_state) in update_vali.iter() {
-            let actor: Option<ActorRef<ValidationSchema>> =
-                ctx.get_child(&format!("{}_validation", schema_id)).await;
+            let actor = ctx
+                .get_child::<ValidationSchema>(&format!(
+                    "{}_validation",
+                    schema_id
+                ))
+                .await?;
 
-            if let Some(actor) = actor {
-                actor
-                    .tell(ValidationSchemaMessage::Update {
-                        creators: schema_creators_vali
-                            .get(schema_id)
-                            .cloned()
-                            .unwrap_or_default(),
-                        sn: self.subject_metadata.sn,
-                        gov_version: self.properties.version,
-                        init_state: init_state.clone(),
-                    })
-                    .await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone()
-                        / &format!("{}_validation", schema_id),
-                });
-            }
+            actor
+                .tell(ValidationSchemaMessage::Update {
+                    creators: schema_creators_vali
+                        .get(schema_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    sn: self.subject_metadata.sn,
+                    gov_version: self.properties.version,
+                    init_state: init_state.clone(),
+                })
+                .await?;
         }
 
         Ok(())
@@ -438,29 +432,23 @@ impl Governance {
         old_schemas_val: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
         for schema_id in old_schemas_eval {
-            let actor: Option<ActorRef<EvaluationSchema>> =
-                ctx.get_child(&format!("{}_evaluation", schema_id)).await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone()
-                        / &format!("{}_evaluation", schema_id),
-                });
-            }
+            let actor = ctx
+                .get_child::<EvaluationSchema>(&format!(
+                    "{}_evaluation",
+                    schema_id
+                ))
+                .await?;
+            actor.ask_stop().await?;
         }
 
         for schema_id in old_schemas_val {
-            let actor: Option<ActorRef<ValidationSchema>> =
-                ctx.get_child(&format!("{}_validation", schema_id)).await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone()
-                        / &format!("{}_validation", schema_id),
-                });
-            }
+            let actor = ctx
+                .get_child::<ValidationSchema>(&format!(
+                    "{}_validation",
+                    schema_id
+                ))
+                .await?;
+            actor.ask_stop().await?;
         }
 
         Ok(())
@@ -882,15 +870,8 @@ impl Governance {
 
         match (old_val, new_val) {
             (true, false) => {
-                let actor: Option<ActorRef<ValiWorker>> =
-                    ctx.get_child("validator").await;
-                if let Some(actor) = actor {
-                    actor.ask_stop().await?;
-                } else {
-                    return Err(ActorError::NotFound {
-                        path: ctx.path().clone() / "validator",
-                    });
-                }
+                let actor = ctx.get_child::<ValiWorker>("validator").await?;
+                actor.ask_stop().await?;
             }
             (false, true) => {
                 // If we are a validator
@@ -921,15 +902,9 @@ impl Governance {
 
         match (old_eval, new_eval) {
             (true, false) => {
-                let actor: Option<ActorRef<EvalWorker>> =
-                    ctx.get_child("evaluator").await;
-                if let Some(actor) = actor {
-                    actor.ask_stop().await?;
-                } else {
-                    return Err(ActorError::NotFound {
-                        path: ctx.path().clone() / "evaluator",
-                    });
-                }
+                let actor = ctx.get_child::<EvalWorker>("evaluator").await?;
+
+                actor.ask_stop().await?;
             }
             (false, true) => {
                 let evaluator = EvalWorker {
@@ -959,15 +934,9 @@ impl Governance {
 
         match (old_appr, new_appr) {
             (true, false) => {
-                let actor: Option<ActorRef<ApprPersist>> =
-                    ctx.get_child("approver").await;
-                if let Some(actor) = actor {
-                    actor.ask_stop().await?;
-                } else {
-                    return Err(ActorError::NotFound {
-                        path: ctx.path().clone() / "approver",
-                    });
-                }
+                let actor = ctx.get_child::<ApprPersist>("approver").await?;
+
+                actor.ask_stop().await?;
             }
             (false, true) => {
                 let always_accept = if let Some(config) =
@@ -1016,45 +985,27 @@ impl Governance {
             who: (*our_key).clone(),
             role: RoleTypes::Validator,
         }) {
-            let actor: Option<ActorRef<ValiWorker>> =
-                ctx.get_child("validator").await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / "validator",
-                });
-            }
+            let actor = ctx.get_child::<ValiWorker>("validator").await?;
+
+            actor.ask_stop().await?;
         }
 
         if gov.has_this_role(HashThisRole::Gov {
             who: (*our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
-            let actor: Option<ActorRef<ValiWorker>> =
-                ctx.get_child("evaluator").await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / "evaluator",
-                });
-            }
+            let actor = ctx.get_child::<ValiWorker>("evaluator").await?;
+
+            actor.ask_stop().await?;
         }
 
         if gov.has_this_role(HashThisRole::Gov {
             who: (*our_key).clone(),
             role: RoleTypes::Approver,
         }) {
-            let actor: Option<ActorRef<ApprPersist>> =
-                ctx.get_child("approver").await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / "approver",
-                });
-            }
+            let actor = ctx.get_child::<ApprPersist>("approver").await?;
+
+            actor.ask_stop().await?;
         }
 
         Ok(())
@@ -1099,16 +1050,8 @@ impl Governance {
     async fn down_owner(
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let actor: Option<ActorRef<ApprPersist>> =
-            ctx.get_child("approver").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            let e = ActorError::NotFound {
-                path: ctx.path().clone() / "approver",
-            };
-            return Err(emit_fail(ctx, e).await);
-        }
+        let actor = ctx.get_child::<ApprPersist>("approver").await?;
+        actor.ask_stop().await?;
 
         Ok(())
     }
@@ -1133,7 +1076,7 @@ impl Governance {
             let actor_name = format!("{}_compiler", id);
 
             let compiler =
-                if let Some(compiler) = ctx.get_child(&actor_name).await {
+                if let Ok(compiler) = ctx.get_child(&actor_name).await {
                     compiler
                 } else {
                     ctx.create_child(&actor_name, Compiler::default()).await?
@@ -1164,16 +1107,11 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
         for schema_id in schemas.iter() {
-            let actor: Option<ActorRef<Compiler>> =
-                ctx.get_child(&format!("{}_compiler", schema_id)).await;
-            if let Some(actor) = actor {
-                actor.ask_stop().await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone()
-                        / &format!("{}_compiler", schema_id),
-                });
-            }
+            let actor = ctx
+                .get_child::<Compiler>(&format!("{}_compiler", schema_id))
+                .await?;
+
+            actor.ask_stop().await?;
         }
 
         Ok(())
@@ -1196,24 +1134,20 @@ impl Governance {
         };
 
         for (id, schema) in schemas {
-            let actor: Option<ActorRef<Compiler>> =
-                ctx.get_child(&format!("{}_compiler", id)).await;
-            if let Some(actor) = actor {
-                actor
-                    .tell(CompilerMessage::Compile {
-                        contract_name: format!("{}_{}", subject_id, id),
-                        contract: schema.contract.clone(),
-                        initial_value: schema.initial_value.0.clone(),
-                        contract_path: contracts_path
-                            .join("contracts")
-                            .join(format!("{}_{}", subject_id, id)),
-                    })
-                    .await?;
-            } else {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / &format!("{}_compiler", id),
-                });
-            }
+            let actor = ctx
+                .get_child::<Compiler>(&format!("{}_compiler", id))
+                .await?;
+
+            actor
+                .tell(CompilerMessage::Compile {
+                    contract_name: format!("{}_{}", subject_id, id),
+                    contract: schema.contract.clone(),
+                    initial_value: schema.initial_value.0.clone(),
+                    contract_path: contracts_path
+                        .join("contracts")
+                        .join(format!("{}_{}", subject_id, id)),
+                })
+                .await?;
         }
 
         Ok(())
@@ -1486,8 +1420,7 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         update: &RolesRegisterUpdate,
     ) -> Result<(), ActorError> {
-        let actor: Option<ActorRef<RolesRegister>> =
-            ctx.get_child("roles_register").await;
+        let actor = ctx.get_child::<RolesRegister>("roles_register").await?;
 
         let message =
             self.create_roles_register_message(update).map_err(|e| {
@@ -1496,13 +1429,7 @@ impl Governance {
                 }
             })?;
 
-        if let Some(actor) = actor {
-            actor.tell(message).await
-        } else {
-            Err(ActorError::NotFound {
-                path: ctx.path().clone() / "roles_register",
-            })
-        }
+        actor.tell(message).await
     }
 
     async fn verify_new_ledger_events(
@@ -1733,9 +1660,11 @@ impl Governance {
         let mut new_compilers = vec![];
 
         for compiler in compilers {
-            let child: Option<ActorRef<Compiler>> =
-                ctx.get_child(&format!("{}_compiler", compiler)).await;
-            if child.is_none() {
+            if ctx
+                .get_child::<Compiler>(&format!("{}_compiler", compiler))
+                .await
+                .is_err()
+            {
                 new_compilers.push(compiler.clone());
 
                 ctx.create_child(
@@ -1874,7 +1803,8 @@ impl Actor for Governance {
                         controller_id: self.our_key.to_string(),
                     },
                 )
-                .await {
+                .await
+            {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(
@@ -1892,8 +1822,10 @@ impl Actor for Governance {
             ctx.system().run_sink(sink).await;
         }
 
-        if let Err(e) = ctx.create_child("relation_ship", RelationShip::initial(()))
-            .await {
+        if let Err(e) = ctx
+            .create_child("relation_ship", RelationShip::initial(()))
+            .await
+        {
             error!(
                 error = %e,
                 "Failed to create relation_ship child"
@@ -1901,8 +1833,10 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        if let Err(e) = ctx.create_child("roles_register", RolesRegister::initial(()))
-            .await {
+        if let Err(e) = ctx
+            .create_child("roles_register", RolesRegister::initial(()))
+            .await
+        {
             error!(
                 error = %e,
                 "Failed to create roles_register child"
@@ -1958,7 +1892,8 @@ impl Handler<Governance> for Governance {
                                 "Failed to obtain new_owner"
                             );
                             return Err(ActorError::Functional {
-                                description: "Can not obtain new_owner".to_owned(),
+                                description: "Can not obtain new_owner"
+                                    .to_owned(),
                             });
                         };
 
@@ -2288,7 +2223,8 @@ impl PersistentActor for Governance {
                     "Invalid protocol data for Governance"
                 );
                 return Err(ActorError::Functional {
-                    description: "Invalid protocol data for Governance".to_owned(),
+                    description: "Invalid protocol data for Governance"
+                        .to_owned(),
                 });
             }
         }

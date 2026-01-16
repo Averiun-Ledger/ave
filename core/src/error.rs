@@ -45,9 +45,6 @@ pub enum Error {
     Governance(String),
     /// Subject error.
 
-    /// Tracker error.
-    #[error("Tracker error: {0}")]
-    Tracker(String),
     /// Bridge error.
     #[error("Subject error: {0}")]
     Bridge(String),

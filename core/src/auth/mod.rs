@@ -10,20 +10,19 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{collections::HashMap, vec};
-use tracing::{Span, error, info_span, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{get_node_subject_data, subject_old};
 use crate::model::common::subject::get_gov;
+use crate::update::UpdateType;
 use crate::{
     ActorMessage, NetworkMessage,
     db::Storable,
     governance::model::WitnessesData,
-    model::common::{emit_fail},
+    model::common::emit_fail,
     update::{Update, UpdateMessage, UpdateNew, UpdateRes},
 };
-
-const TARGET_AUTH: &str = "Ave-Auth";
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -68,12 +67,13 @@ fn merge_options(
     }
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Auth {
     #[serde(skip)]
     our_key: Arc<PublicKey>,
+    #[serde(skip)]
+    network: Option<Arc<NetworkSender>>,
+
     auth: HashMap<String, AuthWitness>,
 }
 
@@ -97,8 +97,10 @@ impl BorshDeserialize for Auth {
         let auth = HashMap::<String, AuthWitness>::deserialize_reader(reader)?;
 
         let our_key = Arc::new(PublicKey::default());
+        let network = None;
 
         Ok(Self {
+            network,
             our_key,
             auth,
         })
@@ -219,14 +221,28 @@ impl Actor for Auth {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("auth", None, false, ctx).await
+        if let Err(e) = self.init_store("auth", None, false, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize auth store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop auth store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -245,17 +261,38 @@ impl Handler<Auth> for Auth {
                     &subject_id.to_string(),
                 )
                 .await.map_err(|e| {
-                    error!(TARGET_AUTH, "CheckTransfer, Could not determine if the node is the owner of the subject: {}", e);
-                    ActorError::Functional(format!(
+                    error!(
+                        msg_type = "CheckTransfer",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Could not determine if the node is the owner of the subject"
+                    );
+                    ActorError::Functional { description: format!(
                         "An error has occurred: {}",
                         e
-                    ))
+                    )}
                 })?;
 
+                let Some(network) = self.network.clone() else {
+                    error!(
+                        msg_type = "CheckTransfer",
+                        subject_id = %subject_id,
+                        "Network is none"
+                    );
+                    return Err(ActorError::FunctionalCritical {
+                        description: "network is none".to_string(),
+                    });
+                };
+
                 if !is_pending {
-                    let e = "A Check transfer is being sent for a subject that is not pending to confirm or reject event";
-                    error!(TARGET_AUTH, "CheckTransfer, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    error!(
+                        msg_type = "CheckTransfer",
+                        subject_id = %subject_id,
+                        "Check transfer sent for subject not pending to confirm or reject"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "A Check transfer is being sent for a subject that is not pending to confirm or reject event".to_owned(),
+                    });
                 }
 
                 let witness = self.auth.get(&subject_id.to_string());
@@ -268,18 +305,22 @@ impl Handler<Auth> for Auth {
                             vec.clone()
                         }
                         AuthWitness::None => {
-                            let e = "The subject has no witnesses to try to ask for an update.";
-                            error!(TARGET_AUTH, "Update, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            error!(
+                                msg_type = "CheckTransfer",
+                                subject_id = %subject_id,
+                                "Subject has no witnesses to ask for update"
+                            );
+                            return Err(ActorError::Functional{description: "The subject has no witnesses to try to ask for an update.".to_owned()});
                         }
                     }.iter().cloned().collect();
                     let data = UpdateNew {
+                        network,
                         subject_id: subject_id.clone(),
                         our_key: self.our_key.clone(),
                         response: None,
                         witnesses,
                         request: None,
-                        update_type: crate::update::UpdateType::Transfer,
+                        update_type: UpdateType::Transfer,
                     };
 
                     let authorization = Update::new(data);
@@ -288,32 +329,46 @@ impl Handler<Auth> for Auth {
                             &format!("transfer_{}", subject_id),
                             authorization,
                         )
-                        .await;
-                    let Ok(child) = child else {
-                        let e = ActorError::Create(
-                            ctx.path().clone(),
-                            subject_id.to_string(),
-                        );
-                        return Err(e);
-                    };
+                        .await?;
 
-                    if let Err(e) = child.tell(UpdateMessage::Transfer).await {
+                    if let Err(e) = child.tell(UpdateMessage::Run).await {
                         return Err(emit_fail(ctx, e).await);
                     }
+
+                    debug!(
+                        msg_type = "CheckTransfer",
+                        subject_id = %subject_id,
+                        "Transfer check initiated successfully"
+                    );
                 } else {
-                    let e = "The subject has not been authorized";
-                    error!(TARGET_AUTH, "CheckTransfer, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    error!(
+                        msg_type = "CheckTransfer",
+                        subject_id = %subject_id,
+                        "Subject has not been authorized"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "The subject has not been authorized".to_owned(),
+                    });
                 }
             }
             AuthMessage::GetAuth { subject_id } => {
                 if let Some(witnesses) = self.auth.get(&subject_id.to_string())
                 {
+                    debug!(
+                        msg_type = "GetAuth",
+                        subject_id = %subject_id,
+                        "Retrieved auth witnesses"
+                    );
                     return Ok(AuthResponse::Witnesses(witnesses.clone()));
                 } else {
-                    let e = "The subject has not been authorized";
-                    warn!(TARGET_AUTH, "GetAuth, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    warn!(
+                        msg_type = "GetAuth",
+                        subject_id = %subject_id,
+                        "Subject has not been authorized"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "The subject has not been authorized".to_owned(),
+                    });
                 }
             }
             AuthMessage::DeleteAuth { subject_id } => {
@@ -324,6 +379,12 @@ impl Handler<Auth> for Auth {
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "DeleteAuth",
+                    subject_id = %subject_id,
+                    "Auth deleted successfully"
+                );
             }
             AuthMessage::NewAuth {
                 subject_id,
@@ -337,16 +398,37 @@ impl Handler<Auth> for Auth {
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "NewAuth",
+                    subject_id = %subject_id,
+                    "New auth created successfully"
+                );
             }
             AuthMessage::GetAuths => {
-                return Ok(AuthResponse::Auths {
-                    subjects: self.auth.keys().cloned().collect(),
-                });
+                let subjects: Vec<String> = self.auth.keys().cloned().collect();
+                debug!(
+                    msg_type = "GetAuths",
+                    count = subjects.len(),
+                    "Retrieved all authorized subjects"
+                );
+                return Ok(AuthResponse::Auths { subjects });
             }
             AuthMessage::Update {
                 subject_id,
                 more_info,
             } => {
+                let Some(network) = self.network.clone() else {
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Network is none"
+                    );
+                    return Err(ActorError::FunctionalCritical {
+                        description: "network is none".to_string(),
+                    });
+                };
+
                 let more_witness = match more_info {
                     WitnessesAuth::None => None,
                     WitnessesAuth::Owner(key_identifier) => {
@@ -355,17 +437,24 @@ impl Handler<Auth> for Auth {
                     WitnessesAuth::Witnesses => {
                         match get_gov(ctx, &subject_id.to_string()).await {
                             Ok(gov) => {
-                                let witnesses =
-                                    gov.get_witnesses(WitnessesData::Gov)?;
+                                let witnesses = gov
+                                    .get_witnesses(WitnessesData::Gov)
+                                    .map_err(|e| ActorError::Functional {
+                                        description: format!(
+                                            "Can not obtain witnesses: {}",
+                                            e
+                                        ),
+                                    })?;
                                 Some(AuthWitness::Many(Vec::from_iter(
                                     witnesses.iter().cloned(),
                                 )))
                             }
                             Err(e) => {
                                 warn!(
-                                    TARGET_AUTH,
-                                    "Update, When attempting to update governance, the use of explicit witnesses within governance has been indicated, but no governance has been found: {}",
-                                    e
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Governance not found when attempting to use explicit witnesses"
                                 );
                                 Some(AuthWitness::None)
                             }
@@ -387,9 +476,10 @@ impl Handler<Auth> for Auth {
                         Ok(data) => data,
                         Err(e) => {
                             error!(
-                                TARGET_AUTH,
-                                "Update, can not obtain request, sn, schema_id: {}",
-                                e
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Cannot obtain request, sn, schema_id"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
@@ -407,20 +497,7 @@ impl Handler<Auth> for Auth {
                                 ),
                             };
 
-                            let helper: Option<Arc<NetworkSender>> =
-                                ctx.system().get_helper("network").await;
-
-                            let Some(helper) = helper else {
-                                error!(
-                                    TARGET_AUTH,
-                                    "Update, can not obtain network helper"
-                                );
-                                let e =
-                                    ActorError::NotHelper("network".to_owned());
-                                return Err(emit_fail(ctx, e).await);
-                            };
-
-                            if let Err(e) = helper
+                            if let Err(e) = network
                                 .send_command(
                                     network::CommandHelper::SendMessage {
                                         message: NetworkMessage {
@@ -432,16 +509,24 @@ impl Handler<Auth> for Auth {
                                 .await
                             {
                                 error!(
-                                    TARGET_AUTH,
-                                    "Update, can not send response to network: {}",
-                                    e
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Cannot send response to network"
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             };
+
+                            debug!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                "Update message sent to single witness"
+                            );
                         }
                         AuthWitness::Many(vec) => {
                             let witnesses = vec.iter().cloned().collect();
                             let data = UpdateNew {
+                                network,
                                 subject_id: subject_id.clone(),
                                 our_key: self.our_key.clone(),
                                 response: Some(UpdateRes::Sn(sn)),
@@ -453,31 +538,39 @@ impl Handler<Auth> for Auth {
                             let updater = Update::new(data);
                             let child = ctx
                                 .create_child(&subject_id.to_string(), updater)
-                                .await;
-                            let Ok(child) = child else {
-                                let e = ActorError::Create(
-                                    ctx.path().clone(),
-                                    subject_id.to_string(),
-                                );
-                                return Err(e);
-                            };
+                                .await?;
 
-                            if let Err(e) =
-                                child.tell(UpdateMessage::Create).await
+                            if let Err(e) = child.tell(UpdateMessage::Run).await
                             {
                                 return Err(emit_fail(ctx, e).await);
                             }
+
+                            debug!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                "Update process initiated with multiple witnesses"
+                            );
                         }
                         AuthWitness::None => {
-                            let e = "The subject has no witnesses to try to ask for an update.";
-                            error!(TARGET_AUTH, "Update, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                "Subject has no witnesses to ask for update"
+                            );
+                            return Err(ActorError::Functional {
+                                description: "The subject has no witnesses to try to ask for an update.".to_owned(),
+                            });
                         }
                     };
                 } else {
-                    let e = "The subject has not been authorized";
-                    error!(TARGET_AUTH, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Subject has not been authorized"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "The subject has not been authorized".to_owned(),
+                    });
                 }
             }
         };
@@ -491,9 +584,14 @@ impl Handler<Auth> for Auth {
         ctx: &mut ActorContext<Auth>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
-            error!(TARGET_AUTH, "OnEvent, can not persist information: {}", e);
+            error!(
+                error = %e,
+                "Failed to persist auth event"
+            );
             emit_fail(ctx, e).await;
-        };
+        } else {
+            debug!("Auth event persisted successfully");
+        }
     }
 
     async fn on_child_fault(
@@ -501,7 +599,10 @@ impl Handler<Auth> for Auth {
         error: ActorError,
         ctx: &mut ActorContext<Auth>,
     ) -> ChildAction {
-        error!(TARGET_AUTH, "OnChildFault, {}", error);
+        error!(
+            error = %error,
+            "Child actor fault"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
@@ -510,7 +611,7 @@ impl Handler<Auth> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
-    type InitParams = Arc<PublicKey>;
+    type InitParams = (Arc<PublicKey>, Arc<NetworkSender>);
 
     fn update(&mut self, state: Self) {
         self.auth = state.auth;
@@ -518,7 +619,8 @@ impl PersistentActor for Auth {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            our_key: params,
+            network: Some(params.1),
+            our_key: params.0,
             auth: HashMap::new(),
         }
     }
@@ -531,9 +633,19 @@ impl PersistentActor for Auth {
                 witness,
             } => {
                 self.auth.insert(subject_id.clone(), witness.clone());
+                debug!(
+                    event_type = "NewAuth",
+                    subject_id = %subject_id,
+                    "Applied new auth"
+                );
             }
             AuthEvent::DeleteAuth { subject_id } => {
                 self.auth.remove(subject_id);
+                debug!(
+                    event_type = "DeleteAuth",
+                    subject_id = %subject_id,
+                    "Applied auth deletion"
+                );
             }
         };
 

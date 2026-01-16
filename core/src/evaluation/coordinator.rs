@@ -2,25 +2,18 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
-    model::{
-        common::emit_fail,
-        network::RetryNetwork,
-    },
+    model::{common::emit_fail, network::RetryNetwork},
 };
 
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
-use ave_common::{
-    identity::{
-        PublicKey, Signed,
-    }}
-;
+use ave_common::identity::{PublicKey, Signed};
 
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction,
     FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
@@ -28,8 +21,7 @@ use ave_actors::{
 use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
-    Evaluation, EvaluationMessage,
-    request::EvaluationReq,
+    Evaluation, EvaluationMessage, request::EvaluationReq,
     response::EvaluationRes,
 };
 
@@ -39,7 +31,7 @@ pub struct EvalCoordinator {
     node_key: PublicKey,
     request_id: String,
     version: u64,
-    network: Arc<NetworkSender>
+    network: Arc<NetworkSender>,
 }
 
 impl EvalCoordinator {
@@ -47,9 +39,14 @@ impl EvalCoordinator {
         node_key: PublicKey,
         request_id: String,
         version: u64,
-        network: Arc<NetworkSender>
+        network: Arc<NetworkSender>,
     ) -> Self {
-        Self { node_key, request_id, version, network }
+        Self {
+            node_key,
+            request_id,
+            version,
+            network,
+        }
     }
 }
 
@@ -99,17 +96,19 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
                 evaluation_req,
                 node_key,
             } => {
-                let receiver_actor = if evaluation_req.content().schema_id.is_gov() {
-                    format!(
-                        "/user/node/{}/evaluator",
-                        evaluation_req.content().governance_id
-                    )
-                } else {
-                    format!(
-                        "/user/node/{}/{}_evaluation",
-                        evaluation_req.content().governance_id,  evaluation_req.content().schema_id
-                    )
-                };
+                let receiver_actor =
+                    if evaluation_req.content().schema_id.is_gov() {
+                        format!(
+                            "/user/node/{}/evaluator",
+                            evaluation_req.content().governance_id
+                        )
+                    } else {
+                        format!(
+                            "/user/node/{}/{}_evaluation",
+                            evaluation_req.content().governance_id,
+                            evaluation_req.content().schema_id
+                        )
+                    };
 
                 // Lanzar evento donde lanzar los retrys
                 let message = NetworkMessage {
@@ -201,47 +200,50 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
                             error = %e,
                             "Failed to verify evaluation response signature"
                         );
-                        return Err(ActorError::Functional { description: format!(
-                            "Can not verify signature: {}",
-                            e
-                        )});
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not verify signature: {}",
+                                e
+                            ),
+                        });
                     }
 
-                    // Evaluation path.
-                    let evaluation_path = ctx.path().parent();
-
                     // Evaluation actor.
-                    let evaluation_actor: Option<ActorRef<Evaluation>> =
-                        ctx.system().get_actor(&evaluation_path).await;
-
-                    if let Some(evaluation_actor) = evaluation_actor {
-                        if let Err(e) = evaluation_actor
-                            .tell(EvaluationMessage::Response {
-                                evaluation_res: evaluation_res.content().clone(),
-                                sender: self.node_key.clone(),
-                                signature: Some(evaluation_res.signature().clone()),
-                            })
-                            .await
-                        {
+                    match ctx.get_parent::<Evaluation>().await {
+                        Ok(evaluation_actor) => {
+                            if let Err(e) = evaluation_actor
+                                .tell(EvaluationMessage::Response {
+                                    evaluation_res: evaluation_res
+                                        .content()
+                                        .clone(),
+                                    sender: self.node_key.clone(),
+                                    signature: Some(
+                                        evaluation_res.signature().clone(),
+                                    ),
+                                })
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkResponse",
+                                    error = %e,
+                                    "Failed to send response to evaluation actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
+                        Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
-                                error = %e,
-                                "Failed to send response to evaluation actor"
+                                path = %ctx.path().parent(),
+                                "Evaluation actor not found"
                             );
+
                             return Err(emit_fail(ctx, e).await);
                         }
-                    } else {
-                        error!(
-                            msg_type = "NetworkResponse",
-                            path = %evaluation_path,
-                            "Evaluation actor not found"
-                        );
-                        let e = ActorError::NotFound {path: evaluation_path};
-                        return Err(emit_fail(ctx, e).await);
                     }
 
                     'retry: {
-                        let Some(retry) = ctx
+                        let Ok(retry) = ctx
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
@@ -292,41 +294,39 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
     ) {
         match error {
             ActorError::Retry => {
-                let evaluation_path = ctx.path().parent();
-
-                // Evaluation actor.
-                let evaluation_actor: Option<ActorRef<Evaluation>> =
-                    ctx.system().get_actor(&evaluation_path).await;
-
-                if let Some(evaluation_actor) = evaluation_actor {
-                    if let Err(e) = evaluation_actor
-                        .tell(EvaluationMessage::Response {
-                            evaluation_res: EvaluationRes::TimeOut,
-                            signature: None,
-                            sender: self.node_key.clone(),
-                        })
-                        .await
-                    {
+                match ctx.get_parent::<Evaluation>().await {
+                    Ok(evaluation_actor) => {
+                        if let Err(e) = evaluation_actor
+                            .tell(EvaluationMessage::Response {
+                                evaluation_res: EvaluationRes::TimeOut,
+                                signature: None,
+                                sender: self.node_key.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to evaluation actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                request_id = %self.request_id,
+                                version = self.version,
+                                "Timeout response sent to evaluation actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         error!(
                             error = %e,
-                            "Failed to send timeout response to evaluation actor"
+                            path = %ctx.path().parent(),
+                            "Evaluation actor not found"
                         );
                         emit_fail(ctx, e).await;
-                    } else {
-                        debug!(
-                            request_id = %self.request_id,
-                            version = self.version,
-                            "Timeout response sent to evaluation actor"
-                        );
                     }
-                } else {
-                    let e = ActorError::NotFound {path: evaluation_path.clone()};
-                    error!(
-                        path = %evaluation_path,
-                        "Evaluation actor not found"
-                    );
-                    emit_fail(ctx, e).await;
                 }
+
                 ctx.stop(None).await;
             }
             _ => {

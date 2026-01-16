@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ave_actors::ActorPath;
 use ave_actors::{
     Actor, ActorContext, ActorError, ChildAction, Handler, Message,
     NotPersistentActor,
 };
-use ave_actors::{ActorPath, ActorRef};
 
 use ave_common::identity::{
     CryptoError, DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
@@ -94,21 +94,17 @@ impl Approval {
         if signer == *self.our_key {
             let approver_path =
                 ActorPath::from(format!("/user/node/{}/approver", subject_id));
-            let approver_actor: Option<ActorRef<ApprPersist>> =
-                ctx.system().get_actor(&approver_path).await;
-            if let Some(approver_actor) = approver_actor {
-                approver_actor
-                    .tell(ApprPersistMessage::LocalApproval {
-                        request_id: self.request_id.clone(),
-                        version: self.version,
-                        approval_req: self.request.clone(),
-                    })
-                    .await?
-            } else {
-                return Err(ActorError::NotFound {
-                    path: approver_path,
-                });
-            }
+            let approver_actor = ctx
+                .system()
+                .get_actor::<ApprPersist>(&approver_path)
+                .await?;
+            approver_actor
+                .tell(ApprPersistMessage::LocalApproval {
+                    request_id: self.request_id.clone(),
+                    version: self.version,
+                    approval_req: self.request.clone(),
+                })
+                .await?
         } else {
             // Create Approvers child
             let child = ctx
@@ -142,36 +138,22 @@ impl Approval {
         ctx: &mut ActorContext<Approval>,
         response: bool,
     ) -> Result<(), ActorError> {
-        let req_path =
-            ActorPath::from(format!("/user/request/{}", self.request_id));
-        let req_actor: Option<ActorRef<RequestManager>> =
-            ctx.system().get_actor(&req_path).await;
+        let req_actor = ctx.get_parent::<RequestManager>().await?;
 
-        if let Some(req_actor) = req_actor {
-            req_actor
-                .tell(RequestManagerMessage::ApprovalRes {
-                    appro_res: ApprovalData {
-                        approval_req_signature: self
-                            .request
-                            .signature()
-                            .clone(),
-                        approval_req_hash: self.approval_req_hash.clone(),
-                        approvers_agrees_signatures: self
-                            .approvers_agrees
-                            .clone(),
-                        approvers_disagrees_signatures: self
-                            .approvers_disagrees
-                            .clone(),
-                        approvers_timeout: self.approvers_timeout.clone(),
-                        approved: response,
-                    },
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound { path: req_path });
-        };
-
-        Ok(())
+        req_actor
+            .tell(RequestManagerMessage::ApprovalRes {
+                appro_res: ApprovalData {
+                    approval_req_signature: self.request.signature().clone(),
+                    approval_req_hash: self.approval_req_hash.clone(),
+                    approvers_agrees_signatures: self.approvers_agrees.clone(),
+                    approvers_disagrees_signatures: self
+                        .approvers_disagrees
+                        .clone(),
+                    approvers_timeout: self.approvers_timeout.clone(),
+                    approved: response,
+                },
+            })
+            .await
     }
 
     fn create_appro_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
@@ -233,7 +215,10 @@ impl Handler<Approval> for Approval {
                         return Err(emit_fail(
                             ctx,
                             ActorError::FunctionalCritical {
-                                description: format!("Cannot create approval request hash: {}", e)
+                                description: format!(
+                                    "Cannot create approval request hash: {}",
+                                    e
+                                ),
                             },
                         )
                         .await);
@@ -245,7 +230,9 @@ impl Handler<Approval> for Approval {
                 self.version = version;
 
                 for signer in self.approvers.clone() {
-                    if let Err(e) = self.create_approvers(ctx, signer.clone()).await {
+                    if let Err(e) =
+                        self.create_approvers(ctx, signer.clone()).await
+                    {
                         error!(
                             msg_type = "Create",
                             error = %e,

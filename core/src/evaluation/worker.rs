@@ -36,7 +36,7 @@ use json_patch::diff;
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
     Message, NotPersistentActor,
 };
 
@@ -110,25 +110,19 @@ impl EvalWorker {
                 "/user/node/{}/{}_compiler",
                 self.governance_id, id
             ));
-            let compiler_actor: Option<ActorRef<Compiler>> =
-                ctx.system().get_actor(&compiler_path).await;
+            let compiler_actor =
+                ctx.system().get_actor::<Compiler>(&compiler_path).await?;
 
-            if let Some(compiler_actor) = compiler_actor {
-                compiler_actor
-                    .ask(CompilerMessage::Compile {
-                        contract_name: format!("{}_{}", self.governance_id, id),
-                        contract: schema.contract.clone(),
-                        initial_value: schema.initial_value.0.clone(),
-                        contract_path: contracts_path
-                            .join("contracts")
-                            .join(format!("{}_{}", self.governance_id, id)),
-                    })
-                    .await?
-            } else {
-                return Err(ActorError::NotFound {
-                    path: compiler_path,
-                });
-            };
+            compiler_actor
+                .ask(CompilerMessage::Compile {
+                    contract_name: format!("{}_{}", self.governance_id, id),
+                    contract: schema.contract.clone(),
+                    initial_value: schema.initial_value.0.clone(),
+                    contract_path: contracts_path
+                        .join("contracts")
+                        .join(format!("{}_{}", self.governance_id, id)),
+                })
+                .await?
         }
         Ok(())
     }
@@ -222,16 +216,12 @@ impl EvalWorker {
     ) -> Result<Vec<SchemaType>, ActorError> {
         let subject_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
-        let subject: Option<ActorRef<Governance>> =
-            ctx.system().get_actor(&subject_path).await;
+        let subject =
+            ctx.system().get_actor::<Governance>(&subject_path).await?;
 
-        let response = if let Some(subject) = subject {
-            subject
-                .ask(GovernanceMessage::CreateCompilers(ids.to_vec()))
-                .await?
-        } else {
-            return Err(ActorError::NotFound { path: subject_path });
-        };
+        let response = subject
+            .ask(GovernanceMessage::CreateCompilers(ids.to_vec()))
+            .await?;
 
         match response {
             GovernanceResponse::NewCompilers(new_compilers) => {
@@ -570,43 +560,37 @@ impl Handler<EvalWorker> for EvalWorker {
                     }
                 };
 
-                // Evaluatiob path.
-                let evaluation_path = ctx.path().parent();
+                match ctx.get_parent::<Evaluation>().await {
+                    Ok(evaluation_actor) => {
+                        if let Err(e) = evaluation_actor
+                            .tell(EvaluationMessage::Response {
+                                evaluation_res: evaluation.clone(),
+                                sender: (*self.our_key).clone(),
+                                signature: Some(signature),
+                            })
+                            .await
+                        {
+                            error!(
+                                msg_type = "LocalEvaluation",
+                                error = %e,
+                                "Failed to send response to evaluation actor"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
 
-                let evaluation_actor: Option<ActorRef<Evaluation>> =
-                    ctx.system().get_actor(&evaluation_path).await;
-
-                // Send response of evaluation to parent
-                if let Some(evaluation_actor) = evaluation_actor {
-                    if let Err(e) = evaluation_actor
-                        .tell(EvaluationMessage::Response {
-                            evaluation_res: evaluation.clone(),
-                            sender: (*self.our_key).clone(),
-                            signature: Some(signature),
-                        })
-                        .await
-                    {
+                        debug!(
+                            msg_type = "LocalEvaluation",
+                            "Local evaluation completed successfully"
+                        );
+                    }
+                    Err(e) => {
                         error!(
                             msg_type = "LocalEvaluation",
-                            error = %e,
-                            "Failed to send response to evaluation actor"
+                            path = %ctx.path().parent(),
+                            "Evaluation actor not found"
                         );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(e);
                     }
-
-                    debug!(
-                        msg_type = "LocalEvaluation",
-                        "Local evaluation completed successfully"
-                    );
-                } else {
-                    error!(
-                        msg_type = "LocalEvaluation",
-                        path = %evaluation_path,
-                        "Evaluation actor not found"
-                    );
-                    return Err(ActorError::NotFound {
-                        path: evaluation_path,
-                    });
                 }
 
                 ctx.stop(None).await;

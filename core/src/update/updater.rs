@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction,
     FixedIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
@@ -81,37 +81,35 @@ impl Handler<Updater> for Updater {
         match msg {
             UpdaterMessage::TransferResponse { res, sender } => {
                 if sender == self.node {
-                    let update_path = ctx.path().parent();
-                    let update_actor: Option<ActorRef<Update>> =
-                        ctx.system().get_actor(&update_path).await;
-
-                    if let Some(update_actor) = update_actor {
-                        if let Err(e) = update_actor
-                            .tell(UpdateMessage::TransferRes {
-                                sender: self.node.clone(),
-                                res,
-                            })
-                            .await
-                        {
+                    match ctx.get_parent::<Update>().await {
+                        Ok(update_actor) => {
+                            if let Err(e) = update_actor
+                                .tell(UpdateMessage::TransferRes {
+                                    sender: self.node.clone(),
+                                    res,
+                                })
+                                .await
+                            {
+                                error!(
+                                    msg_type = "TransferResponse",
+                                    error = %e,
+                                    "Failed to send response to update actor"
+                                );
+                                return Err(e);
+                            }
+                        }
+                        Err(e) => {
                             error!(
                                 msg_type = "TransferResponse",
-                                error = %e,
-                                "Failed to send response to update actor"
+                                path = %ctx.path().parent(),
+                                "Update actor not found"
                             );
                             return Err(e);
                         }
-                    } else {
-                        let e = ActorError::NotFound { path: update_path.clone() };
-                        error!(
-                            msg_type = "TransferResponse",
-                            path = %update_path,
-                            "Update actor not found"
-                        );
-                        return Err(e);
-                    }
+                    };
 
                     'retry: {
-                        let Some(retry) = ctx
+                        let Ok(retry) = ctx
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
@@ -157,7 +155,9 @@ impl Handler<Updater> for Updater {
                         receiver: node_key.clone(),
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
-                    message: ActorMessage::Transfer { subject_id: subject_id.clone() },
+                    message: ActorMessage::Transfer {
+                        subject_id: subject_id.clone(),
+                    },
                 };
 
                 let target = RetryNetwork::new(self.network.clone());
@@ -213,7 +213,9 @@ impl Handler<Updater> for Updater {
                         receiver: node_key.clone(),
                         receiver_actor: "/user/node/distributor".to_string(),
                     },
-                    message: ActorMessage::DistributionGetLastSn { subject_id: subject_id.clone() },
+                    message: ActorMessage::DistributionGetLastSn {
+                        subject_id: subject_id.clone(),
+                    },
                 };
 
                 let target = RetryNetwork::new(self.network.clone());
@@ -260,37 +262,35 @@ impl Handler<Updater> for Updater {
             }
             UpdaterMessage::NetworkResponse { sn, sender } => {
                 if sender == self.node {
-                    let update_path = ctx.path().parent();
-                    let update_actor: Option<ActorRef<Update>> =
-                        ctx.system().get_actor(&update_path).await;
-
-                    if let Some(update_actor) = update_actor {
-                        if let Err(e) = update_actor
-                            .tell(UpdateMessage::Response {
-                                sender: self.node.clone(),
-                                sn,
-                            })
-                            .await
-                        {
+                    match ctx.get_parent::<Update>().await {
+                        Ok(update_actor) => {
+                            if let Err(e) = update_actor
+                                .tell(UpdateMessage::Response {
+                                    sender: self.node.clone(),
+                                    sn,
+                                })
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkResponse",
+                                    error = %e,
+                                    "Failed to send response to update actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
+                        Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
-                                error = %e,
-                                "Failed to send response to update actor"
+                                path = %ctx.path().parent(),
+                                "Update actor not found"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
-                    } else {
-                        let e = ActorError::NotFound { path: update_path.clone() };
-                        error!(
-                            msg_type = "NetworkResponse",
-                            path = %update_path,
-                            "Update actor not found"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
+                    };
 
                     'retry: {
-                        let Some(retry) = ctx
+                        let Ok(retry) = ctx
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
@@ -324,7 +324,6 @@ impl Handler<Updater> for Updater {
         Ok(())
     }
 
-
     // TODO ver si en los child_error quitamos el emit_fail
     async fn on_child_error(
         &mut self,
@@ -333,39 +332,36 @@ impl Handler<Updater> for Updater {
     ) {
         match error {
             ActorError::Retry => {
-                let update_path = ctx.path().parent();
-
-                // Evaluation actor.
-                let update_actor: Option<ActorRef<Update>> =
-                    ctx.system().get_actor(&update_path).await;
-
-                if let Some(update_actor) = update_actor {
-                    if let Err(e) = update_actor
-                        .tell(UpdateMessage::Response {
-                            sender: self.node.clone(),
-                            sn: 0,
-                        })
-                        .await
-                    {
+                match ctx.get_parent::<Update>().await {
+                    Ok(update_actor) => {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::Response {
+                                sender: self.node.clone(),
+                                sn: 0,
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to update actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                node = %self.node,
+                                "Timeout response sent to update actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         error!(
-                            error = %e,
-                            "Failed to send timeout response to update actor"
+                            path = %ctx.path().parent(),
+                            "Update actor not found"
                         );
                         emit_fail(ctx, e).await;
-                    } else {
-                        debug!(
-                            node = %self.node,
-                            "Timeout response sent to update actor"
-                        );
                     }
-                } else {
-                    let e = ActorError::NotFound { path: update_path.clone() };
-                    error!(
-                        path = %update_path,
-                        "Update actor not found"
-                    );
-                    emit_fail(ctx, e).await;
-                }
+                };
+
                 ctx.stop(None).await;
             }
             _ => {

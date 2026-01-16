@@ -11,7 +11,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction,
     CustomIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
@@ -208,42 +208,40 @@ impl Handler<ApprLight> for ApprLight {
                         return Ok(());
                     }
 
-                    let approval_path = ctx.path().parent();
-                    let approval_actor: Option<ActorRef<Approval>> =
-                        ctx.system().get_actor(&approval_path).await;
-
-                    if let Some(approval_actor) = approval_actor {
-                        if let Err(e) = approval_actor
-                            .tell(ApprovalMessage::Response {
-                                approval_res: approval_res.content().clone(),
-                                sender: self.node_key.clone(),
-                                signature: Some(
-                                    approval_res.signature().clone(),
-                                ),
-                            })
-                            .await
-                        {
+                    match ctx.get_parent::<Approval>().await {
+                        Ok(approval_actor) => {
+                            if let Err(e) = approval_actor
+                                .tell(ApprovalMessage::Response {
+                                    approval_res: approval_res
+                                        .content()
+                                        .clone(),
+                                    sender: self.node_key.clone(),
+                                    signature: Some(
+                                        approval_res.signature().clone(),
+                                    ),
+                                })
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkResponse",
+                                    error = %e,
+                                    "Failed to send response to approval actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
+                        Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
-                                error = %e,
-                                "Failed to send response to approval actor"
+                                path = %ctx.path().parent(),
+                                "Approval actor not found"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
-                    } else {
-                        error!(
-                            msg_type = "NetworkResponse",
-                            path = %approval_path,
-                            "Approval actor not found"
-                        );
-                        let e = ActorError::NotFound {
-                            path: approval_path,
-                        };
-                        return Err(emit_fail(ctx, e).await);
-                    }
+                    };
 
                     'retry: {
-                        let Some(retry) = ctx
+                        let Ok(retry) = ctx
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
@@ -290,43 +288,39 @@ impl Handler<ApprLight> for ApprLight {
     ) {
         match error {
             ActorError::Retry => {
-                let approval_path = ctx.path().parent();
+                match ctx.get_parent::<Approval>().await {
+                    Ok(approval_actor) => {
+                        if let Err(e) = approval_actor
+                            .tell(ApprovalMessage::Response {
+                                approval_res: ApprovalRes::TimeOut(TimeOut {
+                                    re_trys: 3,
+                                    timestamp: TimeStamp::now(),
+                                    who: self.node_key.clone(),
+                                }),
+                                sender: self.node_key.clone(),
+                                signature: None,
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to approval actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        }
 
-                let approval_actor: Option<ActorRef<Approval>> =
-                    ctx.system().get_actor(&approval_path).await;
-
-                if let Some(approval_actor) = approval_actor {
-                    if let Err(e) = approval_actor
-                        .tell(ApprovalMessage::Response {
-                            approval_res: ApprovalRes::TimeOut(TimeOut {
-                                re_trys: 3,
-                                timestamp: TimeStamp::now(),
-                                who: self.node_key.clone(),
-                            }),
-                            sender: self.node_key.clone(),
-                            signature: None,
-                        })
-                        .await
-                    {
+                        debug!("Timeout response sent to approval actor");
+                    }
+                    Err(e) => {
                         error!(
                             error = %e,
-                            "Failed to send timeout response to approval actor"
+                            path = %ctx.path().parent(),
+                            "Approval actor not found"
                         );
                         emit_fail(ctx, e).await;
                     }
-
-                    debug!("Timeout response sent to approval actor");
-                } else {
-                    let e = ActorError::NotFound {
-                        path: approval_path.clone(),
-                    };
-                    error!(
-                        error = %e,
-                        path = %approval_path,
-                        "Approval actor not found"
-                    );
-                    emit_fail(ctx, e).await;
                 }
+
                 ctx.stop(None).await;
             }
             _ => {

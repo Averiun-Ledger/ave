@@ -1,18 +1,13 @@
 use ave_actors::Message;
-use ave_common::identity::{DigestIdentifier, Signed};
+use ave_common::{SchemaType, identity::{DigestIdentifier, Signed}};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Event as AveEvent,
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
-    model::{event::ProtocolsSignatures,},
-    subject::{LastStateData, SignedLedger},
-    update::TransferResponse,
-    validation::{
-        proof::ValidationProof, request::ValidationReq, response::ValidationRes,
-    },
+    subject::SignedLedger,
+    update::TransferResponse, validation::{request::ValidationReq, response::ValidationRes},
 };
 
 pub mod intermediary;
@@ -40,9 +35,6 @@ pub enum ActorMessage {
     },
     DistributionLastEventReq {
         ledger: Box<SignedLedger>,
-        event: Box<Signed<AveEvent>>,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
     },
     DistributionLastEventRes,
     DistributionLedgerReq {
@@ -52,7 +44,6 @@ pub enum ActorMessage {
     },
     DistributionLedgerRes {
         ledger: Vec<SignedLedger>,
-        last_state: Option<LastStateData>,
         namespace: String,
         schema_id: SchemaType,
         governance_id: DigestIdentifier,

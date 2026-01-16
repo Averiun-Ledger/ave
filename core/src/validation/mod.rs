@@ -9,11 +9,13 @@ use crate::{
     },
     request::manager::{RequestManager, RequestManagerMessage},
     validation::{
-        response::ResponseSummary, coordinator::{ValiCoordinator, ValiCoordinatorMessage}, worker::{ValiWorker, ValiWorkerMessage}
+        coordinator::{ValiCoordinator, ValiCoordinatorMessage},
+        response::ResponseSummary,
+        worker::{ValiWorker, ValiWorkerMessage},
     },
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
     Message, NotPersistentActor,
 };
 
@@ -32,10 +34,10 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use std::{collections::HashSet, sync::Arc};
 
+pub mod coordinator;
 pub mod request;
 pub mod response;
 pub mod schema;
-pub mod coordinator;
 pub mod worker;
 
 #[derive(Clone, Debug)]
@@ -105,15 +107,16 @@ impl Validation {
     ) -> Result<(), ActorError> {
         for validator in self.current_validators.clone() {
             if validator == *self.our_key {
-                let child: Option<ActorRef<ValiWorker>> =
-                    ctx.get_child(&validator.to_string()).await;
-                if let Some(child) = child {
+                if let Ok(child) =
+                    ctx.get_child::<ValiWorker>(&validator.to_string()).await
+                {
                     child.ask_stop().await?;
                 }
             } else {
-                let child: Option<ActorRef<ValiCoordinator>> =
-                    ctx.get_child(&validator.to_string()).await;
-                if let Some(child) = child {
+                if let Ok(child) = ctx
+                    .get_child::<ValiCoordinator>(&validator.to_string())
+                    .await
+                {
                     child.ask_stop().await?;
                 }
             }
@@ -183,23 +186,16 @@ impl Validation {
     async fn send_validation_to_req(
         &self,
         ctx: &mut ActorContext<Validation>,
-        response: ValidationData
+        response: ValidationData,
     ) -> Result<(), ActorError> {
-        let req_path =
-            ActorPath::from(format!("/user/request/{}", self.request_id));
-        let req_actor: Option<ActorRef<RequestManager>> =
-            ctx.system().get_actor(&req_path).await;
+        let req_actor = ctx.get_parent::<RequestManager>().await?;
 
-        if let Some(req_actor) = req_actor {
-            req_actor
-                .tell(RequestManagerMessage::ValidationRes {
-                    val_req: self.request.content().clone(),
-                    val_res: response
-                })
-                .await?;
-        } else {
-            return Err(ActorError::NotFound { path: req_path});
-        };
+        req_actor
+            .tell(RequestManagerMessage::ValidationRes {
+                val_req: self.request.content().clone(),
+                val_res: response,
+            })
+            .await?;
 
         Ok(())
     }
@@ -209,7 +205,7 @@ impl Validation {
     }
 
     fn check_responses(&self) -> ResponseSummary {
-        let res_set: HashSet<ValidationMetadata> = 
+        let res_set: HashSet<ValidationMetadata> =
             HashSet::from_iter(self.validators_response.iter().cloned());
 
         if res_set.len() == 1 {
@@ -219,9 +215,7 @@ impl Validation {
         }
     }
 
-    fn build_validation_data(
-        &self,
-    ) -> ValidationData {
+    fn build_validation_data(&self) -> ValidationData {
         ValidationData {
             validation_req_signature: self.request.signature().clone(),
             validation_req_hash: self.validation_request_hash.clone(),
@@ -255,7 +249,7 @@ impl Actor for Validation {
     type Message = ValidationMessage;
     type Response = ();
 
-        fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
             info_span!(parent: parent_span, "Validation", id = id)
         } else {
@@ -289,7 +283,10 @@ impl Handler<Validation> for Validation {
                         return Err(emit_fail(
                             ctx,
                             ActorError::FunctionalCritical {
-                                description: format!("Cannot create validation request hash: {}", e)
+                                description: format!(
+                                    "Cannot create validation request hash: {}",
+                                    e
+                                ),
                             },
                         )
                         .await);
@@ -368,12 +365,16 @@ impl Handler<Validation> for Validation {
                                     });
                                 }
 
-                                self.validators_response.push(ValidationMetadata::Metadata(subject_metadata));
+                                self.validators_response.push(
+                                    ValidationMetadata::Metadata(
+                                        subject_metadata,
+                                    ),
+                                );
                                 self.validators_signatures.push(signature);
                             }
                             ValidationRes::Response {
                                 vali_req_hash,
-                                modified_metadata_hash
+                                modified_metadata_hash,
                             } => {
                                 let Some(signature) = signature else {
                                     error!(
@@ -399,7 +400,11 @@ impl Handler<Validation> for Validation {
                                     });
                                 }
 
-                                self.validators_response.push(ValidationMetadata::ModifiedHash(modified_metadata_hash));
+                                self.validators_response.push(
+                                    ValidationMetadata::ModifiedHash(
+                                        modified_metadata_hash,
+                                    ),
+                                );
                                 self.validators_signatures.push(signature);
                             }
                             ValidationRes::TimeOut => {
@@ -460,8 +465,9 @@ impl Handler<Validation> for Validation {
 
                             let validation_data = self.build_validation_data();
 
-                            if let Err(e) =
-                                self.send_validation_to_req(ctx, validation_data).await
+                            if let Err(e) = self
+                                .send_validation_to_req(ctx, validation_data)
+                                .await
                             {
                                 error!(
                                     msg_type = "Response",

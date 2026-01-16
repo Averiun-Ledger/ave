@@ -4,8 +4,8 @@
 use crate::{
     evaluation::{
         coordinator::{EvalCoordinator, EvalCoordinatorMessage},
-        worker::{EvalWorker, EvalWorkerMessage},
         response::{EvaluatorError, ResponseSummary},
+        worker::{EvalWorker, EvalWorkerMessage},
     },
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
@@ -16,7 +16,7 @@ use crate::{
     request::manager::{RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
     Message, NotPersistentActor,
 };
 
@@ -36,11 +36,11 @@ use tracing::{Span, debug, error, info_span, warn};
 
 pub mod compiler;
 pub mod coordinator;
-pub mod worker;
 pub mod request;
 pub mod response;
 pub mod runner;
 pub mod schema;
+pub mod worker;
 
 use std::{collections::HashSet, sync::Arc};
 pub struct Evaluation {
@@ -112,17 +112,18 @@ impl Evaluation {
     ) -> Result<(), ActorError> {
         for evaluator in self.current_evaluators.clone() {
             if evaluator == *self.our_key {
-                let child: Option<ActorRef<EvalWorker>> =
-                    ctx.get_child(&evaluator.to_string()).await;
-                if let Some(child) = child {
+                if let Ok(child) =
+                    ctx.get_child::<EvalWorker>(&evaluator.to_string()).await
+                {
                     child.ask_stop().await?;
-                }
+                };
             } else {
-                let child: Option<ActorRef<EvalCoordinator>> =
-                    ctx.get_child(&evaluator.to_string()).await;
-                if let Some(child) = child {
+                if let Ok(child) = ctx
+                    .get_child::<EvalCoordinator>(&evaluator.to_string())
+                    .await
+                {
                     child.ask_stop().await?;
-                }
+                };
             }
         }
 
@@ -231,23 +232,14 @@ impl Evaluation {
         ctx: &mut ActorContext<Evaluation>,
         response: EvaluationData,
     ) -> Result<(), ActorError> {
-        let req_path =
-            ActorPath::from(format!("/user/request/{}", self.request_id));
-        let req_actor: Option<ActorRef<RequestManager>> =
-            ctx.system().get_actor(&req_path).await;
+        let req_actor = ctx.get_parent::<RequestManager>().await?;
 
-        if let Some(req_actor) = req_actor {
-            req_actor
-                .tell(RequestManagerMessage::EvaluationRes {
-                    eval_req: self.request.content().clone(),
-                    eval_res: response,
-                })
-                .await?;
-        } else {
-            return Err(ActorError::NotFound { path: req_path });
-        };
-
-        Ok(())
+        req_actor
+            .tell(RequestManagerMessage::EvaluationRes {
+                eval_req: self.request.content().clone(),
+                eval_res: response,
+            })
+            .await
     }
 
     fn create_eval_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
@@ -313,7 +305,10 @@ impl Handler<Evaluation> for Evaluation {
                         return Err(emit_fail(
                             ctx,
                             ActorError::FunctionalCritical {
-                                description: format!("Cannot create evaluation request hash: {}", e)
+                                description: format!(
+                                    "Cannot create evaluation request hash: {}",
+                                    e
+                                ),
                             },
                         )
                         .await);
@@ -502,8 +497,9 @@ impl Handler<Evaluation> for Evaluation {
                                 }
                             };
 
-                            if let Err(e) =
-                                self.send_evaluation_to_req(ctx, response.clone()).await
+                            if let Err(e) = self
+                                .send_evaluation_to_req(ctx, response.clone())
+                                .await
                             {
                                 error!(
                                     msg_type = "Response",

@@ -7,14 +7,11 @@ use ave_actors::{
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    governance::{Governance, GovernanceMessage, GovernanceResponse},
     model::common::{emit_fail, node::subject_owner},
-    subject::{LastStateData, SignedLedger},
-    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";
@@ -44,18 +41,12 @@ impl Actor for ManualDistribution {
     type Event = ();
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "ManualDistribution", id = id)
+        } else {
+            info_span!("ManualDistribution", id = id)
+        }
     }
 }
 

@@ -1,16 +1,14 @@
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message, NotPersistentActor
+    Actor,  ActorError, ActorPath, Handler, Message, NotPersistentActor
 };
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 
 use crate::
     error::Error
 ;
-
-const TARGET_EXTERNAL: &str = "Ave-ExternalDB";
 
 
 #[derive(
@@ -33,18 +31,12 @@ impl Actor for DBManager {
     type Event = ();
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "DBManager", id = id)
+        } else {
+            info_span!("DBManager", id = id)
+        }
     }
 }
 
@@ -59,8 +51,9 @@ impl Handler<DBManager> for DBManager {
         match msg {
             DBManagerMessage::Error(error) => {
                 error!(
-                    TARGET_EXTERNAL,
-                    "Error, Problem in Subscriber: {}", error
+                    msg_type = "Error",
+                    error = %error,
+                    "Problem in database subscriber"
                 );
                 ctx.system().stop_system();
                 Ok(())

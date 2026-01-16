@@ -42,8 +42,8 @@ use json_patch::{Patch, patch};
 use network::ComunicateInfo;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -990,35 +990,29 @@ impl Handler<ValiWorker> for ValiWorker {
                     }
                 };
 
-                // Valiuatiob path.
-                let validation_path = ctx.path().parent();
+                match ctx.get_parent::<Validation>().await {
+                    Ok(validation_actor) => {
+                        validation_actor
+                            .tell(ValidationMessage::Response {
+                                validation_res: validation,
+                                sender: (*self.our_key).clone(),
+                                signature: Some(signature),
+                            })
+                            .await?;
 
-                let validation_actor: Option<ActorRef<Validation>> =
-                    ctx.system().get_actor(&validation_path).await;
-
-                // Send response of validation to parent
-                if let Some(validation_actor) = validation_actor {
-                    validation_actor
-                        .tell(ValidationMessage::Response {
-                            validation_res: validation,
-                            sender: (*self.our_key).clone(),
-                            signature: Some(signature),
-                        })
-                        .await?;
-
-                    debug!(
-                        msg_type = "LocalValidation",
-                        "Validation completed and sent to parent"
-                    );
-                } else {
-                    error!(
-                        msg_type = "LocalValidation",
-                        "Failed to obtain Validation actor"
-                    );
-                    return Err(ActorError::NotFound {
-                        path: validation_path,
-                    });
-                }
+                        debug!(
+                            msg_type = "LocalValidation",
+                            "Validation completed and sent to parent"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "LocalValidation",
+                            "Failed to obtain Validation actor"
+                        );
+                        return Err(e);
+                    }
+                };
 
                 ctx.stop(None).await;
             }
