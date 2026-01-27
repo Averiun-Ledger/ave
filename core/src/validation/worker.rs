@@ -6,7 +6,7 @@ use crate::{
     governance::{
         data::GovernanceData,
         model::Quorum,
-        roles_register::{RoleDataRegister, SearchRole},
+        role_register::{RoleDataRegister, SearchRole},
     },
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::{

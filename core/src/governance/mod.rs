@@ -6,7 +6,6 @@ use crate::{
         persist::{ApprPersist, InitApprPersist},
         types::VotationType,
     },
-    auth::WitnessesAuth,
     db::Storable,
     evaluation::{
         compiler::{Compiler, CompilerMessage},
@@ -16,28 +15,29 @@ use crate::{
     governance::{
         data::GovernanceData,
         events::GovernanceEvent,
-        model::{HashThisRole, ProtocolTypes, RoleTypes, Schema},
-        relationship::RelationShip,
-        roles_register::{
-            RoleData, RolesRegister, RolesRegisterMessage, RolesRegisterUpdate,
-            UpdateQuorum, UpdateRole,
+        model::{
+            CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
+            Schema,
+        },
+        role_register::{RoleRegister, RoleRegisterMessage},
+        sn_register::SnRegister,
+        subject_register::{SubjectRegister, SubjectRegisterMessage},
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
         },
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
     model::{
-        common::{
-            emit_fail, get_last_event, get_n_events, node::try_to_update,
-        },
+        common::{emit_fail, get_last_event, get_n_events},
         event::{Protocols, ValidationMetadata},
     },
-    node::register::RegisterMessage,
+    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
         DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
     },
     system::ConfigHelper,
-    update::TransferResponse,
     validation::{
         request::LastData,
         schema::{ValidationSchema, ValidationSchemaMessage},
@@ -53,6 +53,7 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
     request::EventRequest,
+    schematype::ReservedWords,
 };
 
 use async_trait::async_trait;
@@ -71,8 +72,56 @@ pub mod data;
 pub mod error;
 pub mod events;
 pub mod model;
-pub mod relationship;
-pub mod roles_register;
+pub mod role_register;
+pub mod sn_register;
+pub mod subject_register;
+pub mod witnesses_register;
+
+pub struct RolesUpdate {
+    pub appr_quorum: Option<Quorum>,
+    pub new_approvers: Vec<PublicKey>,
+    pub remove_approvers: Vec<PublicKey>,
+
+    pub eval_quorum: HashMap<SchemaType, Quorum>,
+    pub new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub vali_quorum: HashMap<SchemaType, Quorum>,
+    pub new_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub new_creator: HashMap<
+        (SchemaType, String, PublicKey),
+        (CreatorQuantity, Vec<WitnessesType>),
+    >,
+    pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
+
+    pub new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+}
+
+pub struct RolesUpdateRemove {
+    pub witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub creator: HashSet<(SchemaType, String, PublicKey)>,
+    pub approvers: Vec<PublicKey>,
+    pub evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+}
+
+pub struct CreatorRoleUpdate {
+    pub new_creator: HashMap<
+        (SchemaType, String, PublicKey),
+        (CreatorQuantity, BTreeSet<String>),
+    >,
+
+    pub update_creator_quantity:
+        HashSet<(SchemaType, String, PublicKey, CreatorQuantity)>,
+
+    pub update_creator_witnesses:
+        HashSet<(SchemaType, String, PublicKey, BTreeSet<String>)>,
+
+    pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
+}
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Governance {
@@ -80,9 +129,7 @@ pub struct Governance {
     pub our_key: Arc<PublicKey>,
     #[serde(skip)]
     pub hash: Option<HashAlgorithm>,
-
     pub subject_metadata: SubjectMetadata,
-    /// The current status of the subject.
     pub properties: GovernanceData,
 }
 
@@ -123,6 +170,47 @@ impl BorshDeserialize for Governance {
 
 #[async_trait]
 impl Subject for Governance {
+    async fn reject(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        _gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::RejectTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await
+    }
+
+    async fn confirm(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        _new_owner: PublicKey,
+        _gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::ConfirmTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await
+    }
+
+    async fn transfer(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        _gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::TransferSubject(TransferSubject {
+            name: self.subject_metadata.name.clone(),
+            subject_id: self.subject_metadata.subject_id.clone(),
+            new_owner: new_owner.clone(),
+            actual_owner: self.subject_metadata.owner.clone(),
+        }))
+        .await
+    }
+
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -351,13 +439,6 @@ impl Subject for Governance {
                 SinkDataMessage::UpdateState(Box::new(Metadata::from(
                     self.clone(),
                 ))),
-            )
-            .await?;
-
-            Self::update_subject_node(
-                ctx,
-                &self.subject_metadata.subject_id.to_string(),
-                self.subject_metadata.sn,
             )
             .await?;
         }
@@ -1153,283 +1234,218 @@ impl Governance {
         Ok(())
     }
 
-    fn create_roles_register_message(
+    fn build_creators_register(
         &self,
-        update: &RolesRegisterUpdate,
-    ) -> Result<RolesRegisterMessage, SubjectError> {
-        let appr_quorum = (update.appr_quorum)
-            .then(|| self.properties.policies_gov.approve.clone());
+        new_creator: HashMap<
+            (SchemaType, String, PublicKey),
+            (CreatorQuantity, Vec<WitnessesType>),
+        >,
+        remove_creator: HashSet<(SchemaType, String, PublicKey)>,
+        creator_update: CreatorRoleUpdate,
+        new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
+        let mut data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)> =
+            vec![];
+        let mut new_creator_data: HashMap<
+            (SchemaType, String, PublicKey),
+            Vec<WitnessesType>,
+        > = HashMap::new();
+        let mut update_creator_witnesses_data: HashSet<(
+            SchemaType,
+            String,
+            PublicKey,
+            Vec<WitnessesType>,
+        )> = HashSet::new();
 
-        let approvers = if update.approvers {
-            let mut approvers_set = HashSet::new();
-            for approver in &self.properties.roles_gov.approver {
-                let Some(approver_key) = self.properties.members.get(approver)
-                else {
-                    let error = SubjectError::NotAMember {
-                        what: "Approver".to_string(),
-                        who: approver.clone(),
-                    };
-                    return Err(error);
-                };
+        for ((schema_id, ns, creator), (quantity, witnesses)) in
+            new_creator.iter()
+        {
+            data.push((
+                creator.clone(),
+                schema_id.clone(),
+                ns.clone(),
+                quantity.clone(),
+            ));
 
-                approvers_set.insert(approver_key.clone());
+            new_creator_data.insert(
+                (schema_id.clone(), ns.clone(), creator.clone()),
+                witnesses.clone(),
+            );
+        }
+
+        for (schema_id, ns, creator) in remove_creator.iter() {
+            data.push((
+                creator.clone(),
+                schema_id.clone(),
+                ns.clone(),
+                CreatorQuantity::Quantity(0),
+            ));
+        }
+
+        for ((schema_id, ns, creator), (quantity, creator_witnesses)) in
+            creator_update.new_creator.iter()
+        {
+            data.push((
+                creator.clone(),
+                schema_id.clone(),
+                ns.clone(),
+                quantity.clone(),
+            ));
+
+            let mut witnesses = vec![];
+            for witness in creator_witnesses.iter() {
+                if witness == &ReservedWords::Witnesses.to_string() {
+                    witnesses.push(WitnessesType::Witnesses);
+                } else {
+                    if let Some(w) = self.properties.members.get(witness) {
+                        witnesses.push(WitnessesType::User(w.clone()));
+                    }
+                }
             }
 
-            Some(approvers_set)
-        } else {
-            None
-        };
+            new_creator_data.insert(
+                (schema_id.clone(), ns.clone(), creator.clone()),
+                witnesses,
+            );
+        }
 
-        let eval_quorum = if let Some(eval_quorum) = &update.eval_quorum {
-            let mut eval_vec: Vec<UpdateQuorum> = vec![];
+        for (schema_id, ns, creator, quantity) in
+            creator_update.update_creator_quantity.iter()
+        {
+            data.push((
+                creator.clone(),
+                schema_id.clone(),
+                ns.clone(),
+                quantity.clone(),
+            ));
+        }
 
-            for schema_id in eval_quorum {
-                let quorum = match schema_id {
-                    SchemaType::Governance => {
-                        self.properties.policies_gov.evaluate.clone()
+        for (schema_id, ns, creator, creator_witnesses) in
+            creator_update.update_creator_witnesses.iter()
+        {
+            let mut witnesses = vec![];
+            for witness in creator_witnesses.iter() {
+                if witness == &ReservedWords::Witnesses.to_string() {
+                    witnesses.push(WitnessesType::Witnesses);
+                } else {
+                    if let Some(w) = self.properties.members.get(witness) {
+                        witnesses.push(WitnessesType::User(w.clone()));
                     }
-                    _ => {
-                        let Some(policies) =
-                            self.properties.policies_schema.get(schema_id)
-                        else {
-                            let error = SubjectError::SchemaNoPolicies {
-                                schema_id: schema_id.to_string(),
-                            };
-                            return Err(error);
-                        };
-
-                        policies.evaluate.clone()
-                    }
-                };
-                eval_vec.push(UpdateQuorum {
-                    schema_id: schema_id.clone(),
-                    quorum,
-                });
+                }
             }
 
-            Some(eval_vec)
-        } else {
-            None
-        };
+            update_creator_witnesses_data.insert((
+                schema_id.clone(),
+                ns.clone(),
+                creator.clone(),
+                witnesses,
+            ));
+        }
 
-        let evaluators = if let Some(evaluators) = &update.evaluators {
-            let mut eval_vec: Vec<UpdateRole> = vec![];
+        for (schema_id, ns, creator) in creator_update.remove_creator.iter() {
+            data.push((
+                creator.clone(),
+                schema_id.clone(),
+                ns.clone(),
+                CreatorQuantity::Quantity(0),
+            ));
+        }
 
-            for schema_id in evaluators {
-                let mut evaluators: HashSet<RoleData> = HashSet::new();
-                match schema_id {
-                    SchemaType::Governance => {
-                        for name in &self.properties.roles_gov.evaluator {
-                            let Some(key) = self.properties.members.get(name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Evaluator".to_string(),
-                                    who: name.clone(),
-                                };
-                                return Err(error);
-                            };
-
-                            evaluators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: Namespace::new(),
-                            });
-                        }
-                    }
-                    SchemaType::AllSchemas => {
-                        for role in &self.properties.roles_all_schemas.evaluator
-                        {
-                            let Some(key) =
-                                self.properties.members.get(&role.name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Evaluator".to_string(),
-                                    who: role.name.clone(),
-                                };
-                                return Err(error);
-                            };
-                            evaluators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: role.namespace.clone(),
-                            });
-                        }
-                    }
-                    _ => {
-                        let Some(schema) =
-                            self.properties.roles_schema.get(schema_id)
-                        else {
-                            let error = SubjectError::InvalidSchema {
-                                schema_id: schema_id.to_string(),
-                            };
-                            return Err(error);
-                        };
-
-                        for role in &schema.evaluator {
-                            let Some(key) =
-                                self.properties.members.get(&role.name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Evaluator".to_string(),
-                                    who: role.name.clone(),
-                                };
-                                return Err(error);
-                            };
-                            evaluators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: role.namespace.clone(),
-                            });
-                        }
-                    }
-                };
-
-                eval_vec.push(UpdateRole {
-                    schema_id: schema_id.clone(),
-                    role: evaluators,
-                });
-            }
-
-            Some(eval_vec)
-        } else {
-            None
-        };
-
-        let vali_quorum = if let Some(vali_quorum) = &update.vali_quorum {
-            let mut vali_vec: Vec<UpdateQuorum> = vec![];
-
-            for schema_id in vali_quorum {
-                let quorum = match schema_id {
-                    SchemaType::Governance => {
-                        self.properties.policies_gov.validate.clone()
-                    }
-                    _ => {
-                        let Some(policies) =
-                            self.properties.policies_schema.get(schema_id)
-                        else {
-                            let error = SubjectError::SchemaNoPolicies {
-                                schema_id: schema_id.to_string(),
-                            };
-                            return Err(error);
-                        };
-
-                        policies.validate.clone()
-                    }
-                };
-                vali_vec.push(UpdateQuorum {
-                    schema_id: schema_id.clone(),
-                    quorum,
-                });
-            }
-
-            Some(vali_vec)
-        } else {
-            None
-        };
-
-        let validators = if let Some(validators) = &update.validators {
-            let mut vali_vec: Vec<UpdateRole> = vec![];
-
-            for schema_id in validators {
-                let mut validators: HashSet<RoleData> = HashSet::new();
-                match schema_id {
-                    SchemaType::Governance => {
-                        for name in &self.properties.roles_gov.validator {
-                            let Some(key) = self.properties.members.get(name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Validator".to_string(),
-                                    who: name.clone(),
-                                };
-                                return Err(error);
-                            };
-
-                            validators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: Namespace::new(),
-                            });
-                        }
-                    }
-                    SchemaType::AllSchemas => {
-                        for role in &self.properties.roles_all_schemas.validator
-                        {
-                            let Some(key) =
-                                self.properties.members.get(&role.name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Validator".to_string(),
-                                    who: role.name.clone(),
-                                };
-                                return Err(error);
-                            };
-                            validators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: role.namespace.clone(),
-                            });
-                        }
-                    }
-                    _ => {
-                        let Some(schema) =
-                            self.properties.roles_schema.get(schema_id)
-                        else {
-                            let error = SubjectError::InvalidSchema {
-                                schema_id: schema_id.to_string(),
-                            };
-                            return Err(error);
-                        };
-
-                        for role in &schema.validator {
-                            let Some(key) =
-                                self.properties.members.get(&role.name)
-                            else {
-                                let error = SubjectError::NotAMember {
-                                    what: "Validator".to_string(),
-                                    who: role.name.clone(),
-                                };
-                                return Err(error);
-                            };
-                            validators.insert(RoleData {
-                                key: key.clone(),
-                                namespace: role.namespace.clone(),
-                            });
-                        }
-                    }
-                };
-
-                vali_vec.push(UpdateRole {
-                    schema_id: schema_id.clone(),
-                    role: validators,
-                });
-            }
-
-            Some(vali_vec)
-        } else {
-            None
-        };
-
-        Ok(RolesRegisterMessage::Update {
-            version: self.properties.version,
-            appr_quorum,
-            eval_quorum,
-            vali_quorum,
-            validators,
-            evaluators,
-            approvers,
-        })
+        (
+            SubjectRegisterMessage::RegisterData {
+                gov_version: self.properties.version,
+                data,
+            },
+            WitnessesRegisterMessage::UpdateCreatorsWitnesses {
+                version: self.properties.version,
+                new_creator: new_creator_data,
+                remove_creator,
+                update_creator_witnesses: update_creator_witnesses_data,
+                new_witnesses,
+                remove_witnesses,
+            },
+        )
     }
 
-    async fn update_roles_register(
+    async fn first_role_register(
         &self,
         ctx: &mut ActorContext<Self>,
-        update: &RolesRegisterUpdate,
     ) -> Result<(), ActorError> {
-        let actor = ctx.get_child::<RolesRegister>("roles_register").await?;
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+        
+        actor
+            .tell(RoleRegisterMessage::Update {
+                version: 0,
+                appr_quorum: Some(Quorum::Majority),
+                eval_quorum: HashMap::from([(SchemaType::Governance, Quorum::Majority)]),
+                new_approvers: vec![self.subject_metadata.owner.clone()],
+                new_evaluators: HashMap::from([((SchemaType::Governance, self.subject_metadata.owner.clone()), vec![Namespace::new()])]),
+                new_validators: HashMap::from([((SchemaType::Governance, self.subject_metadata.owner.clone()), vec![Namespace::new()])]),
+                remove_approvers: vec![],
+                remove_evaluators: HashMap::new(),
+                remove_validators: HashMap::new(),
+                vali_quorum: HashMap::from([(SchemaType::Governance, Quorum::Majority)]),
+            })
+            .await
+    }
 
-        let message =
-            self.create_roles_register_message(update).map_err(|e| {
-                ActorError::FunctionalCritical {
-                    description: e.to_string(),
-                }
-            })?;
+    async fn update_registers(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        update: RolesUpdate,
+        creator_update: CreatorRoleUpdate,
+    ) -> Result<(), ActorError> {
+        let RolesUpdate {
+            appr_quorum,
+            new_approvers,
+            remove_approvers,
+            eval_quorum,
+            new_evaluators,
+            remove_evaluators,
+            vali_quorum,
+            new_validators,
+            remove_validators,
+            new_creator,
+            remove_creator,
+            new_witnesses,
+            remove_witnesses,
+        } = update;
 
-        actor.tell(message).await
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+        actor
+            .tell(RoleRegisterMessage::Update {
+                version: self.properties.version,
+                appr_quorum,
+                eval_quorum,
+                new_approvers,
+                new_evaluators,
+                new_validators,
+                remove_approvers,
+                remove_evaluators,
+                remove_validators,
+                vali_quorum,
+            })
+            .await?;
+
+        let (subj_msg, wit_msg) = self.build_creators_register(
+            new_creator,
+            remove_creator,
+            creator_update,
+            new_witnesses,
+            remove_witnesses,
+        );
+
+        let actor =
+            ctx.get_child::<SubjectRegister>("subject_register").await?;
+
+        actor.tell(subj_msg).await?;
+
+        let actor = ctx
+            .get_child::<WitnessesRegister>("witnesses_register")
+            .await?;
+
+        actor.tell(wit_msg).await
     }
 
     async fn verify_new_ledger_events(
@@ -1471,16 +1487,8 @@ impl Governance {
             )
             .await?;
 
-            self.update_roles_register(
+            self.first_role_register(
                 ctx,
-                &RolesRegisterUpdate {
-                    appr_quorum: true,
-                    approvers: true,
-                    eval_quorum: Some(vec![SchemaType::Governance]),
-                    evaluators: Some(vec![SchemaType::Governance]),
-                    vali_quorum: Some(vec![SchemaType::Governance]),
-                    validators: Some(vec![SchemaType::Governance]),
-                },
             )
             .await?;
 
@@ -1548,46 +1556,28 @@ impl Governance {
                     }
                 }
             };
-            let roles_update = if last_event_is_ok {
-                let update = match event
-                    .content()
-                    .event_request
-                    .content()
-                    .clone()
-                {
+            if last_event_is_ok {
+                match event.content().event_request.content().clone() {
                     EventRequest::Transfer(transfer_request) => {
-                        Governance::new_transfer_subject(
+                        self.transfer(
                             ctx,
-                            self.subject_metadata.name.clone(),
-                            &transfer_request.subject_id.to_string(),
-                            &transfer_request.new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
+                            transfer_request.new_owner.clone(),
+                            0,
                         )
                         .await?;
-
-                        None
                     }
-                    EventRequest::Reject(reject_request) => {
-                        Governance::reject_transfer_subject(
+                    EventRequest::Reject(..) => {
+                        self.reject(ctx, 0).await?;
+                    }
+                    EventRequest::Confirm(..) => {
+                        self.confirm(
                             ctx,
-                            &reject_request.subject_id.to_string(),
+                            event.signature().signer.clone(),
+                            0,
                         )
                         .await?;
-
-                        None
                     }
-                    EventRequest::Confirm(confirm_request) => {
-                        Governance::change_node_subject(
-                            ctx,
-                            &confirm_request.subject_id.to_string(),
-                            &event.signature().signer.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        None
-                    }
-                    EventRequest::EOL(_eolrequest) => {
+                    EventRequest::EOL(..) => {
                         Self::register(
                             ctx,
                             RegisterMessage::EOLGov {
@@ -1598,17 +1588,8 @@ impl Governance {
                             },
                         )
                         .await?;
-
-                        None
                     }
-                    EventRequest::Fact(fact_request) => {
-                        let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0).map_err(|e| {
-                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
-                        })?;
-
-                        governance_event.roles_update()
-                    }
-                    _ => None,
+                    _ => {}
                 };
 
                 Self::event_to_sink(
@@ -1633,8 +1614,44 @@ impl Governance {
                     &event.content().event_request.content(),
                 )
                 .await?;
+            }
 
-                update
+            let update = if let EventRequest::Fact(fact_request) =
+                &event.content().event_request.content()
+            {
+                let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
+                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
+                        })?;
+
+                let rm_members = if let Some(members) = &governance_event.members
+                {
+                    members.remove.clone()
+                } else {
+                    None
+                };
+
+                let rm_schemas = if let Some(schemas) = &governance_event.schemas
+                {
+                    schemas.remove.clone()
+                } else {
+                    None
+                };
+
+                let rm_roles = if rm_members.is_some() || rm_schemas.is_some() {
+                    Some(
+                        self.properties
+                            .roles_update_remove(rm_members, rm_schemas),
+                    )
+                } else {
+                    None
+                };
+
+                let creator_update = governance_event.update_creator_change(
+                    &self.properties.members,
+                    &self.properties.roles_schema,
+                );
+
+                Some((governance_event, creator_update, rm_roles))
             } else {
                 None
             };
@@ -1642,8 +1659,11 @@ impl Governance {
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
 
-            if let Some(update) = roles_update {
-                self.update_roles_register(ctx, &update).await?;
+            if let Some((event, creator_update, rm_roles)) = update {
+                let update =
+                    event.roles_update(&self.properties.members, rm_roles);
+
+                self.update_registers(ctx, update, creator_update).await?;
             }
 
             // Acutalizar último evento.
@@ -1682,17 +1702,11 @@ impl Governance {
 /// Governance command.
 #[derive(Debug, Clone)]
 pub enum GovernanceMessage {
-    UpdateTransfer(TransferResponse),
     CreateCompilers(Vec<SchemaType>),
-    /// Get the subject metadata.
     GetMetadata,
-    GetLedger {
-        last_sn: u64,
-    },
+    GetLedger { last_sn: u64 },
     GetLastLedger,
-    UpdateLedger {
-        events: Vec<SignedLedger>,
-    },
+    UpdateLedger { events: Vec<SignedLedger> },
     GetLastSn,
     GetGovernance,
 }
@@ -1823,23 +1837,45 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
-            .create_child("relation_ship", RelationShip::initial(()))
+            .create_child("role_register", RoleRegister::initial(()))
             .await
         {
             error!(
                 error = %e,
-                "Failed to create relation_ship child"
+                "Failed to create role_register child"
             );
             return Err(e);
         }
 
         if let Err(e) = ctx
-            .create_child("roles_register", RolesRegister::initial(()))
+            .create_child("subject_register", SubjectRegister::initial(()))
             .await
         {
             error!(
                 error = %e,
-                "Failed to create roles_register child"
+                "Failed to create subject_register child"
+            );
+            return Err(e);
+        }
+
+        if let Err(e) = ctx
+            .create_child("sn_register", SnRegister::initial(()))
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create sn_register child"
+            );
+            return Err(e);
+        }
+
+        if let Err(e) = ctx
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create witnesses_register child"
             );
             return Err(e);
         }
@@ -1878,64 +1914,6 @@ impl Handler<Governance> for Governance {
                     "Returning last sequence number"
                 );
                 Ok(GovernanceResponse::Sn(self.subject_metadata.sn))
-            }
-            GovernanceMessage::UpdateTransfer(res) => {
-                match res {
-                    TransferResponse::Confirm => {
-                        let Some(new_owner) =
-                            self.subject_metadata.new_owner.clone()
-                        else {
-                            error!(
-                                msg_type = "UpdateTransfer",
-                                transfer_action = "Confirm",
-                                subject_id = %self.subject_metadata.subject_id,
-                                "Failed to obtain new_owner"
-                            );
-                            return Err(ActorError::Functional {
-                                description: "Can not obtain new_owner"
-                                    .to_owned(),
-                            });
-                        };
-
-                        Governance::change_node_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                            &new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        debug!(
-                            msg_type = "UpdateTransfer",
-                            transfer_action = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
-                            new_owner = %new_owner,
-                            "Transfer confirmed successfully"
-                        );
-                    }
-                    TransferResponse::Reject => {
-                        Governance::reject_transfer_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                        )
-                        .await?;
-                        try_to_update(
-                            ctx,
-                            self.subject_metadata.subject_id.clone(),
-                            WitnessesAuth::None,
-                        )
-                        .await?;
-
-                        debug!(
-                            msg_type = "UpdateTransfer",
-                            transfer_action = "Reject",
-                            subject_id = %self.subject_metadata.subject_id,
-                            "Transfer rejected successfully"
-                        );
-                    }
-                }
-
-                Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::CreateCompilers(compilers) => {
                 let new_compilers =

@@ -17,7 +17,7 @@ use crate::{
     model::{common::emit_fail, network::RetryNetwork},
 };
 
-use super::{TransferResponse, Update, UpdateMessage};
+use super::{Update, UpdateMessage};
 
 #[derive(Clone, Debug)]
 pub struct Updater {
@@ -33,14 +33,6 @@ impl Updater {
 
 #[derive(Debug, Clone)]
 pub enum UpdaterMessage {
-    Transfer {
-        subject_id: DigestIdentifier,
-        node_key: PublicKey,
-    },
-    TransferResponse {
-        res: TransferResponse,
-        sender: PublicKey,
-    },
     NetworkLastSn {
         subject_id: DigestIdentifier,
         node_key: PublicKey,
@@ -79,129 +71,6 @@ impl Handler<Updater> for Updater {
         ctx: &mut ActorContext<Updater>,
     ) -> Result<(), ActorError> {
         match msg {
-            UpdaterMessage::TransferResponse { res, sender } => {
-                if sender == self.node {
-                    match ctx.get_parent::<Update>().await {
-                        Ok(update_actor) => {
-                            if let Err(e) = update_actor
-                                .tell(UpdateMessage::TransferRes {
-                                    sender: self.node.clone(),
-                                    res,
-                                })
-                                .await
-                            {
-                                error!(
-                                    msg_type = "TransferResponse",
-                                    error = %e,
-                                    "Failed to send response to update actor"
-                                );
-                                return Err(e);
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                msg_type = "TransferResponse",
-                                path = %ctx.path().parent(),
-                                "Update actor not found"
-                            );
-                            return Err(e);
-                        }
-                    };
-
-                    'retry: {
-                        let Ok(retry) = ctx
-                            .get_child::<RetryActor<RetryNetwork>>("retry")
-                            .await
-                        else {
-                            // Aquí me da igual, porque al parar este actor para el hijo
-                            break 'retry;
-                        };
-
-                        if let Err(e) = retry.tell(RetryMessage::End).await {
-                            warn!(
-                                msg_type = "TransferResponse",
-                                error = %e,
-                                "Failed to end retry actor"
-                            );
-                            // Aquí me da igual, porque al parar este actor para el hijo
-                            break 'retry;
-                        };
-                    }
-
-                    debug!(
-                        msg_type = "TransferResponse",
-                        sender = %sender,
-                        "Transfer response processed successfully"
-                    );
-
-                    ctx.stop(None).await;
-                } else {
-                    warn!(
-                        msg_type = "TransferResponse",
-                        expected_sender = %self.node,
-                        received_sender = %sender,
-                        "Invalid sender"
-                    );
-                }
-            }
-            UpdaterMessage::Transfer {
-                subject_id,
-                node_key,
-            } => {
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
-                        request_id: String::default(),
-                        version: 0,
-                        receiver: node_key.clone(),
-                        receiver_actor: "/user/node/distributor".to_string(),
-                    },
-                    message: ActorMessage::Transfer {
-                        subject_id: subject_id.clone(),
-                    },
-                };
-
-                let target = RetryNetwork::new(self.network.clone());
-
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(5)),
-                );
-
-                let retry_actor = RetryActor::new(target, message, strategy);
-
-                let retry = match ctx
-                    .create_child::<RetryActor<RetryNetwork>, _>(
-                        "retry",
-                        retry_actor,
-                    )
-                    .await
-                {
-                    Ok(retry) => retry,
-                    Err(e) => {
-                        error!(
-                            msg_type = "Transfer",
-                            error = %e,
-                            "Failed to create retry actor"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                if let Err(e) = retry.tell(RetryMessage::Retry).await {
-                    error!(
-                        msg_type = "Transfer",
-                        error = %e,
-                        "Failed to send retry message to retry actor"
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                } else {
-                    debug!(
-                        msg_type = "Transfer",
-                        subject_id = %subject_id,
-                        node_key = %node_key,
-                        "Transfer request sent to network with retry"
-                    );
-                };
-            }
             UpdaterMessage::NetworkLastSn {
                 subject_id,
                 node_key,

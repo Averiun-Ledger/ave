@@ -181,7 +181,7 @@ impl Message for AuthMessage {}
 
 #[derive(Debug, Clone)]
 pub enum AuthResponse {
-    Auths { subjects: Vec<String> },
+    Auths { subjects: Vec<DigestIdentifier> },
     Witnesses(AuthWitness),
     None,
 }

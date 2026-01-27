@@ -7,9 +7,7 @@ use ave_actors::{
     RetryMessage, Strategy,
 };
 use ave_common::{
-    Namespace, SchemaType,
-    identity::{DigestIdentifier, PublicKey},
-    request::EventRequest,
+    Namespace, SchemaType, identity::{DigestIdentifier, PublicKey}, namespace, request::EventRequest
 };
 use network::ComunicateInfo;
 
@@ -25,7 +23,7 @@ use crate::{
         },
         event::Ledger,
         network::RetryNetwork,
-    }, node::SubjectData, subject::SignedLedger, tracker::{Tracker, TrackerMessage, TrackerResponse}, update::TransferResponse
+    }, node::SubjectData, subject::SignedLedger, tracker::{Tracker, TrackerMessage, TrackerResponse}
 };
 
 use tracing::{error, warn};
@@ -193,7 +191,7 @@ impl Distributor {
     async fn authorized_subj(
         &self,
         ctx: &mut ActorContext<Distributor>,
-        subject_id: &str,
+        subject_id: &DigestIdentifier,
     ) -> Result<(bool, Option<SubjectData>), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
@@ -223,7 +221,7 @@ impl Distributor {
 
         // Si está auth o si soy el dueño del sujeto.
         let (auth, subject_data) =
-            self.authorized_subj(ctx, &subject_id.to_string()).await?;
+            self.authorized_subj(ctx, &subject_id).await?;
 
         // Extraer schema_id, namespace y governance_id según si conocemos el sujeto o no
         let (schema_id, namespace, governance_id)  =
@@ -239,10 +237,12 @@ impl Distributor {
                                 subject_id
                             ),
                         }
-                    })?.to_string())
+                    })?.clone())
                 };
 
-                (data.schema_id.clone(), data.namespace.clone(), gov_id)
+                let namespace = Namespace::from(data.namespace.clone());
+
+                (data.schema_id.clone(), namespace, gov_id)
             } else {
                 // No lo conozco - debe ser evento Create
                 if let EventRequest::Create(create) = ledger.event_request.content() {
@@ -258,7 +258,7 @@ impl Distributor {
                     let gov_id = if create.schema_id.is_gov() {
                         None
                     } else {
-                        Some(create.governance_id.to_string())
+                        Some(create.governance_id.clone())
                     };
 
                     (create.schema_id.clone(), create.namespace.clone(), gov_id)
@@ -282,8 +282,8 @@ impl Distributor {
         } else {
             // Es un Tracker - verificar rol de witness si no está autorizado
             if !auth {
-                let governance_id = governance_id.expect("governance_id debe existir para Trackers");
-                let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+                let governance_id = governance_id.expect("governance_id is Some for Trackers");
+                let gov = get_gov(ctx, &governance_id.to_string()).await.map_err(|e| {
                     ActorError::FunctionalCritical {
                         description: format!("Can not get GovernanceData {}", e),
                     }
@@ -298,6 +298,15 @@ impl Distributor {
                 // apuntar quienes son los testigos que también debería haber pedido esta copia y actualizarme.
                 // El actor que se encargue de esto tendrá withelist para que no me venga un nodo random y se intente
                 // actualizar, que sean nodos que cumplen servicio solo.
+                match gov.version.cmp(&ledger.gov_version) {
+                    std::cmp::Ordering::Less => {
+                        return Err(ActorError::Functional {
+                            description: "Our version of governance is less than yours".to_string(),
+                        });
+                    },
+                    std::cmp::Ordering::Equal => {},
+                    std::cmp::Ordering::Greater => {},
+                };
 
                 if !gov.has_this_role(HashThisRole::SchemaWitness {
                     who: (*self.our_key).clone(),
@@ -318,12 +327,47 @@ impl Distributor {
     async fn check_gov_version(
         &self,
         ctx: &mut ActorContext<Distributor>,
-        subject_id: &str,
+        subject_id: &DigestIdentifier,
         gov_version: Option<u64>,
-        info: &ComunicateInfo,
         sender: PublicKey,
     ) -> Result<bool, ActorError> {
+        // Tengo al sujeto que me piden.
         let data = get_node_subject_data(ctx, subject_id).await?;
+
+        let Some(data) = data else {
+            return Err(ActorError::Functional {description: "We do not have the subject that we have been asked for".to_owned()});
+        };
+
+        // obtenemos gobernanza
+        let gov = get_gov(ctx, &subject_id.to_string()).await.map_err(|e| {
+            ActorError::FunctionalCritical {
+                description: format!("Can not get GovernanceData {}", e),
+            }
+        })?;
+
+        let has_this_rol = if data.schema_id.is_gov() {
+            HashThisRole::Gov {
+                who: sender.clone(),
+                role: RoleTypes::Witness,
+            }
+        } else {
+            if let Some(gov_version) = gov_version {
+                
+            }
+
+            todo!()
+        };
+
+
+
+
+
+
+
+
+
+
+
 
         let (namespace, governance_id, owner, schema_id, new_owner) =
             if let Some((subject_data, new_owner)) = data {

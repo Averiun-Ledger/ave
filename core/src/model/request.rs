@@ -4,7 +4,7 @@
 use std::{collections::HashSet, fmt::Display};
 
 use crate::{
-    governance::{data::GovernanceData, model::SignersType},
+    governance::{data::GovernanceData, model::{RoleTypes}},
     subject::Metadata,
 };
 
@@ -64,7 +64,7 @@ pub fn check_signers(
         }
         EventRequest::Fact(_) => {
             let (set, any) = gov.get_signers(
-                SignersType::Issuer,
+                RoleTypes::Issuer,
                 &metadata.schema_id,
                 metadata.namespace.clone(),
             );

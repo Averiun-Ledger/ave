@@ -1,13 +1,8 @@
-// Copyright 2025 Kore Ledger, SL
-// SPDX-License-Identifier: AGPL-3.0-or-later
-
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     governance::model::Quorum,
-    model::{
-        common::{CeilingMap, emit_fail},
-    },
+    model::common::{CeilingMap, Interval, IntervalSet, emit_fail},
 };
 use async_trait::async_trait;
 use ave_actors::{
@@ -55,40 +50,32 @@ pub struct RoleData {
     BorshSerialize,
     Default,
 )]
-pub struct RolesRegister {
+pub struct RoleRegister {
     version: u64,
 
-    appr_quorum: CeilingMap<Quorum>,
-    approvers: CeilingMap<HashSet<PublicKey>>,
+    appr_quorum: Quorum,
+    approvers: HashSet<PublicKey>,
 
-    eval_quorum: HashMap<SchemaType, CeilingMap<Quorum>>,
-    evaluators: HashMap<SchemaType, CeilingMap<HashSet<RoleData>>>,
+    eval_quorum: HashMap<SchemaType, Quorum>,
+    evaluators: HashMap<SchemaType, HashSet<(PublicKey, Namespace)>>,
 
     vali_quorum: HashMap<SchemaType, CeilingMap<Quorum>>,
-    validators: HashMap<SchemaType, CeilingMap<HashSet<RoleData>>>,
+    validators: HashMap<
+        SchemaType,
+        HashMap<(PublicKey, Namespace), (IntervalSet, Option<u64>)>,
+    >,
 }
 
-pub struct RolesRegisterUpdate {
-    pub appr_quorum: bool,
-    pub approvers: bool,
-
-    pub eval_quorum: Option<Vec<SchemaType>>,
-    pub evaluators: Option<Vec<SchemaType>>,
-
-    pub vali_quorum: Option<Vec<SchemaType>>,
-    pub validators: Option<Vec<SchemaType>>,
-}
-
-impl RolesRegister {
+impl RoleRegister {
     pub fn new() -> Self {
         Self {
             version: 0,
-            appr_quorum: CeilingMap::new(),
+            appr_quorum: Quorum::Majority,
             eval_quorum: HashMap::new(),
             vali_quorum: HashMap::new(),
             evaluators: HashMap::new(),
             validators: HashMap::new(),
-            approvers: CeilingMap::new(),
+            approvers: HashSet::new(),
         }
     }
 }
@@ -116,7 +103,7 @@ pub struct RoleDataRegister {
 }
 
 #[derive(Debug, Clone)]
-pub enum RolesRegisterMessage {
+pub enum RoleRegisterMessage {
     SearchActualRoles {
         version: u64,
         evaluation: SearchRole,
@@ -128,18 +115,25 @@ pub enum RolesRegisterMessage {
     },
     Update {
         version: u64,
+
         appr_quorum: Option<Quorum>,
-        eval_quorum: Option<Vec<UpdateQuorum>>,
-        vali_quorum: Option<Vec<UpdateQuorum>>,
-        validators: Option<Vec<UpdateRole>>,
-        evaluators: Option<Vec<UpdateRole>>,
-        approvers: Option<HashSet<PublicKey>>,
+        eval_quorum: HashMap<SchemaType, Quorum>,
+        vali_quorum: HashMap<SchemaType, Quorum>,
+
+        new_approvers: Vec<PublicKey>,
+        remove_approvers: Vec<PublicKey>,
+
+        new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+        new_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
 }
-impl Message for RolesRegisterMessage {}
+impl Message for RoleRegisterMessage {}
 
 #[derive(Debug, Clone)]
-pub enum RolesRegisterResponse {
+pub enum RoleRegisterResponse {
     ActualRoles {
         evaluation: RoleDataRegister,
         approval: Option<RoleDataRegister>,
@@ -150,36 +144,43 @@ pub enum RolesRegisterResponse {
     Ok,
 }
 
-impl Response for RolesRegisterResponse {}
+impl Response for RoleRegisterResponse {}
 
 #[derive(
     Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
 )]
-pub enum RolesRegisterEvent {
+pub enum RoleRegisterEvent {
     Update {
         version: u64,
+
         appr_quorum: Option<Quorum>,
-        eval_quorum: Option<Vec<UpdateQuorum>>,
-        vali_quorum: Option<Vec<UpdateQuorum>>,
-        validators: Option<Vec<UpdateRole>>,
-        evaluators: Option<Vec<UpdateRole>>,
-        approvers: Option<HashSet<PublicKey>>,
+        eval_quorum: HashMap<SchemaType, Quorum>,
+        vali_quorum: HashMap<SchemaType, Quorum>,
+
+        new_approvers: Vec<PublicKey>,
+        remove_approvers: Vec<PublicKey>,
+
+        new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+        new_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
 }
 
-impl Event for RolesRegisterEvent {}
+impl Event for RoleRegisterEvent {}
 
 #[async_trait]
-impl Actor for RolesRegister {
-    type Event = RolesRegisterEvent;
-    type Message = RolesRegisterMessage;
-    type Response = RolesRegisterResponse;
+impl Actor for RoleRegister {
+    type Event = RoleRegisterEvent;
+    type Message = RoleRegisterMessage;
+    type Response = RoleRegisterResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RolesRegister", id = id)
+            info_span!(parent: parent_span, "RoleRegister", id = id)
         } else {
-            info_span!("RolesRegister", id = id)
+            info_span!("RoleRegister", id = id)
         }
     }
 
@@ -188,7 +189,7 @@ impl Actor for RolesRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let prefix = ctx.path().parent().key();
-        self.init_store("roles_register", Some(prefix), true, ctx)
+        self.init_store("role_register", Some(prefix), true, ctx)
             .await
     }
 
@@ -201,20 +202,20 @@ impl Actor for RolesRegister {
 }
 
 #[async_trait]
-impl Handler<RolesRegister> for RolesRegister {
+impl Handler<RoleRegister> for RoleRegister {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: RolesRegisterMessage,
-        ctx: &mut ActorContext<RolesRegister>,
-    ) -> Result<RolesRegisterResponse, ActorError> {
+        msg: RoleRegisterMessage,
+        ctx: &mut ActorContext<RoleRegister>,
+    ) -> Result<RoleRegisterResponse, ActorError> {
         match msg {
-            RolesRegisterMessage::SearchActualRoles {
+            RoleRegisterMessage::SearchActualRoles {
                 version,
                 evaluation,
                 approval,
             } => {
-                if version > self.version {
+                if version != self.version {
                     debug!(
                         msg_type = "SearchActualRoles",
                         version = version,
@@ -223,58 +224,36 @@ impl Handler<RolesRegister> for RolesRegister {
                         namespace = %evaluation.namespace,
                         "Request version exceeds current version"
                     );
-                    return Ok(RolesRegisterResponse::OutOfVersion);
+                    return Ok(RoleRegisterResponse::OutOfVersion);
                 }
 
                 'data: {
                     let approvers = if approval {
-                        let gov_approvers = if let Some(approvers) =
-                            self.approvers.get_prev_or_equal(version)
-                        {
-                            approvers
-                        } else {
-                            break 'data;
-                        };
-
-                        let Some(quorum) =
-                            self.appr_quorum.get_prev_or_equal(version)
-                        else {
-                            break 'data;
-                        };
-
-                        if gov_approvers.is_empty() {
+                        if self.approvers.is_empty() {
                             break 'data;
                         } else {
                             Some(RoleDataRegister {
-                                workers: gov_approvers,
-                                quorum,
+                                workers: self.approvers.clone(),
+                                quorum: self.appr_quorum.clone(),
                             })
                         }
                     } else {
                         None
                     };
 
-                    let mut all_eval = if let Some(evaluators) =
+                    let mut all_eval = if !evaluation.schema_id.is_gov() && let Some(evaluators) =
                         self.evaluators.get(&SchemaType::AllSchemas)
                     {
-                        if let Some(evaluators) =
-                            evaluators.get_prev_or_equal(version)
-                        {
-                            let mut schema_eval = vec![];
-
-                            for witness in evaluators {
-                                if witness
-                                    .namespace
-                                    .is_ancestor_or_equal_of(&evaluation.namespace)
-                                {
-                                    schema_eval.push(witness.key);
-                                }
+                        let mut schema_eval = vec![];
+                        for (key, namespace) in evaluators {
+                            if namespace
+                                .is_ancestor_or_equal_of(&evaluation.namespace)
+                            {
+                                schema_eval.push(key.clone());
                             }
-
-                            schema_eval
-                        } else {
-                            vec![]
                         }
+
+                        schema_eval
                     } else {
                         vec![]
                     };
@@ -282,24 +261,16 @@ impl Handler<RolesRegister> for RolesRegister {
                     let mut schema_eval = if let Some(evaluators) =
                         self.evaluators.get(&evaluation.schema_id)
                     {
-                        if let Some(evaluators) =
-                            evaluators.get_prev_or_equal(version)
-                        {
-                            let mut schema_eval = vec![];
-
-                            for witness in evaluators {
-                                if witness
-                                    .namespace
-                                    .is_ancestor_or_equal_of(&evaluation.namespace)
-                                {
-                                    schema_eval.push(witness.key);
-                                }
+                        let mut schema_eval = vec![];
+                        for (key, namespace) in evaluators {
+                            if namespace
+                                .is_ancestor_or_equal_of(&evaluation.namespace)
+                            {
+                                schema_eval.push(key.clone());
                             }
-
-                            schema_eval
-                        } else {
-                            vec![]
                         }
+
+                        schema_eval
                     } else {
                         vec![]
                     };
@@ -307,13 +278,7 @@ impl Handler<RolesRegister> for RolesRegister {
                     let quorum = if let Some(quorum_schema) =
                         self.eval_quorum.get(&evaluation.schema_id)
                     {
-                        let Some(quorum) =
-                            quorum_schema.get_prev_or_equal(version)
-                        else {
-                            break 'data;
-                        };
-
-                        quorum
+                        quorum_schema.clone()
                     } else {
                         break 'data;
                     };
@@ -336,7 +301,13 @@ impl Handler<RolesRegister> for RolesRegister {
                         "Found actual roles successfully"
                     );
 
-                    return Ok(RolesRegisterResponse::ActualRoles { evaluation: RoleDataRegister { workers: evaluators.iter().cloned().collect(), quorum }, approval: approvers } );
+                    return Ok(RoleRegisterResponse::ActualRoles {
+                        evaluation: RoleDataRegister {
+                            workers: evaluators.iter().cloned().collect(),
+                            quorum,
+                        },
+                        approval: approvers,
+                    });
                 }
 
                 debug!(
@@ -346,9 +317,9 @@ impl Handler<RolesRegister> for RolesRegister {
                     namespace = %evaluation.namespace,
                     "Missing role data for version"
                 );
-                Ok(RolesRegisterResponse::MissingData)
+                Ok(RoleRegisterResponse::MissingData)
             }
-            RolesRegisterMessage::SearchValidators { search, version } => {
+            RoleRegisterMessage::SearchValidators { search, version } => {
                 if version > self.version {
                     debug!(
                         msg_type = "SearchValidators",
@@ -358,30 +329,28 @@ impl Handler<RolesRegister> for RolesRegister {
                         namespace = %search.namespace,
                         "Request version exceeds current version"
                     );
-                    return Ok(RolesRegisterResponse::OutOfVersion);
+                    return Ok(RoleRegisterResponse::OutOfVersion);
                 }
 
-                let mut all_val = if let Some(validators) =
+                let mut all_val = if !search.schema_id.is_gov() &&let Some(validators) =
                     self.validators.get(&SchemaType::AllSchemas)
                 {
-                    if let Some(validators) =
-                        validators.get_prev_or_equal(version)
-                    {
-                        let mut schema_val = vec![];
-
-                        for witness in validators {
-                            if witness
-                                .namespace
-                                .is_ancestor_or_equal_of(&search.namespace)
+                    // PublicKey, Namespace), (IntervalSet, Option<u64>
+                    let mut schema_val = vec![];
+                    for ((key, namespace), (interval, last)) in validators {
+                        if namespace.is_ancestor_or_equal_of(&search.namespace)
+                        {
+                            if let Some(last) = last
+                                && last <= &version
                             {
-                                schema_val.push(witness.key);
+                                schema_val.push(key.clone());
+                            } else if interval.contains(version) {
+                                schema_val.push(key.clone());
                             }
                         }
-
-                        schema_val
-                    } else {
-                        vec![]
                     }
+
+                    schema_val
                 } else {
                     vec![]
                 };
@@ -389,24 +358,21 @@ impl Handler<RolesRegister> for RolesRegister {
                 let mut schema_val = if let Some(validators) =
                     self.validators.get(&search.schema_id)
                 {
-                    if let Some(validators) =
-                        validators.get_prev_or_equal(version)
-                    {
-                        let mut schema_val = vec![];
-
-                        for witness in validators {
-                            if witness
-                                .namespace
-                                .is_ancestor_or_equal_of(&search.namespace)
+                    let mut schema_val = vec![];
+                    for ((key, namespace), (interval, last)) in validators {
+                        if namespace.is_ancestor_or_equal_of(&search.namespace)
+                        {
+                            if let Some(last) = last
+                                && last <= &version
                             {
-                                schema_val.push(witness.key);
+                                schema_val.push(key.clone());
+                            } else if interval.contains(version) {
+                                schema_val.push(key.clone());
                             }
                         }
-
-                        schema_val
-                    } else {
-                        vec![]
                     }
+
+                    schema_val
                 } else {
                     vec![]
                 };
@@ -443,10 +409,12 @@ impl Handler<RolesRegister> for RolesRegister {
                         "Found validators successfully"
                     );
 
-                    return Ok(RolesRegisterResponse::Validation(RoleDataRegister {
-                        workers: validators.iter().cloned().collect(),
-                        quorum
-                    }));
+                    return Ok(RoleRegisterResponse::Validation(
+                        RoleDataRegister {
+                            workers: validators.iter().cloned().collect(),
+                            quorum,
+                        },
+                    ));
                 }
 
                 debug!(
@@ -456,26 +424,32 @@ impl Handler<RolesRegister> for RolesRegister {
                     namespace = %search.namespace,
                     "Missing validator data for version"
                 );
-                Ok(RolesRegisterResponse::MissingData)
+                Ok(RoleRegisterResponse::MissingData)
             }
-            RolesRegisterMessage::Update {
+            RoleRegisterMessage::Update {
                 version,
-                eval_quorum,
                 appr_quorum,
+                eval_quorum,
                 vali_quorum,
-                validators,
-                evaluators,
-                approvers,
+                new_approvers,
+                remove_approvers,
+                new_evaluators,
+                remove_evaluators,
+                new_validators,
+                remove_validators,
             } => {
                 if version > self.version {
-                    ctx.publish_event(RolesRegisterEvent::Update {
+                    ctx.publish_event(RoleRegisterEvent::Update {
                         version,
-                        eval_quorum,
                         appr_quorum,
+                        eval_quorum,
                         vali_quorum,
-                        validators,
-                        evaluators,
-                        approvers,
+                        new_approvers,
+                        remove_approvers,
+                        new_evaluators,
+                        remove_evaluators,
+                        new_validators,
+                        remove_validators,
                     })
                     .await?;
 
@@ -493,15 +467,15 @@ impl Handler<RolesRegister> for RolesRegister {
                     );
                 }
 
-                Ok(RolesRegisterResponse::Ok)
+                Ok(RoleRegisterResponse::Ok)
             }
         }
     }
 
     async fn on_event(
         &mut self,
-        event: RolesRegisterEvent,
-        ctx: &mut ActorContext<RolesRegister>,
+        event: RoleRegisterEvent,
+        ctx: &mut ActorContext<RoleRegister>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -516,7 +490,7 @@ impl Handler<RolesRegister> for RolesRegister {
 }
 
 #[async_trait]
-impl PersistentActor for RolesRegister {
+impl PersistentActor for RoleRegister {
     type Persistence = LightPersistence;
     type InitParams = ();
 
@@ -526,107 +500,100 @@ impl PersistentActor for RolesRegister {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RolesRegisterEvent::Update {
+            RoleRegisterEvent::Update {
                 version,
-                validators,
-                evaluators,
-                approvers,
-                eval_quorum,
                 appr_quorum,
+                eval_quorum,
                 vali_quorum,
+                new_approvers,
+                remove_approvers,
+                new_evaluators,
+                remove_evaluators,
+                new_validators,
+                remove_validators,
             } => {
                 self.version = *version;
 
-                if let Some(vali_quorum) = vali_quorum {
-                    for quorum in vali_quorum.clone() {
-                        self.vali_quorum
-                            .entry(quorum.schema_id)
-                            .or_default()
-                            .insert(*version, quorum.quorum);
-                    }
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        quorum_count = vali_quorum.len(),
-                        "Applied validator quorum update"
-                    );
-                }
-
-                if let Some(eval_quorum) = eval_quorum {
-                    for quorum in eval_quorum.clone() {
-                        self.eval_quorum
-                            .entry(quorum.schema_id)
-                            .or_default()
-                            .insert(*version, quorum.quorum);
-                    }
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        quorum_count = eval_quorum.len(),
-                        "Applied evaluator quorum update"
-                    );
-                }
-
                 if let Some(appr_quorum) = appr_quorum {
-                    self.appr_quorum.insert(*version, appr_quorum.clone());
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        "Applied approver quorum update"
-                    );
+                    self.appr_quorum = appr_quorum.clone();
                 }
 
-                if let Some(validators) = validators {
-                    for role in validators.clone() {
-                        self.validators
-                            .entry(role.schema_id)
-                            .or_default()
-                            .insert(*version, role.role);
-                    }
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        role_count = validators.len(),
-                        "Applied validator roles update"
-                    );
+                for (schema_id, quorum) in vali_quorum.iter() {
+                    self.vali_quorum
+                        .entry(schema_id.clone())
+                        .or_default()
+                        .insert(*version, quorum.clone());
                 }
 
-                if let Some(evaluators) = evaluators {
-                    for role in evaluators.clone() {
-                        self.evaluators
-                            .entry(role.schema_id)
-                            .or_default()
-                            .insert(*version, role.role);
-                    }
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        role_count = evaluators.len(),
-                        "Applied evaluator roles update"
-                    );
+                for (schema_id, quorum) in eval_quorum.iter() {
+                    self.eval_quorum.insert(schema_id.clone(), quorum.clone());
                 }
 
-                if let Some(approvers) = approvers
-                    && !approvers.is_empty()
+                for approver in new_approvers.iter() {
+                    self.approvers.insert(approver.clone());
+                }
+
+                for approver in remove_approvers.iter() {
+                    self.approvers.remove(approver);
+                }
+
+                for ((schema_id, evaluator), namespaces) in
+                    new_evaluators.iter()
                 {
-                    self.approvers.insert(*version, approvers.clone());
-                    debug!(
-                        event_type = "Update",
-                        version = version,
-                        approver_count = approvers.len(),
-                        "Applied approver roles update"
-                    );
+                    for ns in namespaces.iter() {
+                        self.evaluators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .insert((evaluator.clone(), ns.clone()));
+                    }
                 }
 
-                debug!(
-                    event_type = "Update",
-                    version = version,
-                    "Roles register update applied successfully"
-                );
+                for ((schema_id, evaluator), namespaces) in
+                    remove_evaluators.iter()
+                {
+                    for ns in namespaces.iter() {
+                        self.evaluators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .remove(&(evaluator.clone(), ns.clone()));
+                    }
+                }
+
+                for ((schema_id, validator), namespaces) in
+                    new_validators.iter()
+                {
+                    for ns in namespaces.iter() {
+                        self.validators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .entry((validator.clone(), ns.clone()))
+                            .or_default()
+                            .1 = Some(*version);
+                    }
+                }
+
+                for ((schema_id, validator), namespaces) in
+                    remove_validators.iter()
+                {
+                    for ns in namespaces.iter() {
+                        let (interval, last) = self
+                            .validators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .entry((validator.clone(), ns.clone()))
+                            .or_default();
+                        if let Some(last) = last.take() {
+                            interval.insert(Interval {
+                                lo: last,
+                                hi: *version,
+                            });
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
 }
 
-impl Storable for RolesRegister {}
+impl Storable for RoleRegister {}

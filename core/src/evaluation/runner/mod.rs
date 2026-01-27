@@ -8,7 +8,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
+use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey, schematype::ReservedWords};
 use borsh::{BorshDeserialize, to_vec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -29,7 +29,6 @@ use crate::{
     model::common::contract::{MAX_FUEL, MemoryManager, generate_linker},
 };
 
-type ChangeRemoveMembers = (Vec<(String, String)>, Vec<String>);
 type AddRemoveChangeSchema = (
     HashSet<SchemaType>,
     HashSet<SchemaType>,
@@ -173,12 +172,12 @@ impl Runner {
             });
         }
 
-        let Some(owner_key) = governance.members.get("Owner") else {
+        let Some(owner_key) = governance.members.get(&ReservedWords::Owner.to_string()) else {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_gov",
                 kind: error::InvalidEventKind::NotFound {
                     what: "member".to_owned(),
-                    id: "Owner".to_owned(),
+                    id: ReservedWords::Owner.to_string(),
                 },
             });
         };
@@ -226,13 +225,13 @@ impl Runner {
             });
         }
 
-        let Some(old_owner_key) = governance.members.get("Owner").cloned()
+        let Some(old_owner_key) = governance.members.get(&ReservedWords::Owner.to_string()).cloned()
         else {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_confirm_gov",
                 kind: error::InvalidEventKind::NotFound {
                     what: "member".to_owned(),
-                    id: "Owner".to_owned(),
+                    id: ReservedWords::Owner.to_string(),
                 },
             });
         };
@@ -254,11 +253,11 @@ impl Runner {
 
         governance
             .members
-            .insert("Owner".to_owned(), new_owner.clone());
+            .insert(ReservedWords::Owner.to_string(), new_owner.clone());
         governance.members.remove(&new_owner_member);
 
         governance
-            .change_name_role(&vec![(new_owner_member, "Owner".to_owned())]);
+            .change_name_role(&vec![(new_owner_member, ReservedWords::Owner.to_string())]);
 
         if let Some(mut old_owner_name) = old_owner_name {
             old_owner_name = old_owner_name.trim().to_owned();
@@ -434,13 +433,10 @@ impl Runner {
         }
 
         if let Some(member_event) = event.members {
-            let (change_name, remove) =
+            let  remove =
                 Self::check_members(&member_event, &mut governance)?;
             if !remove.is_empty() {
                 governance.remove_member_role(&remove);
-            }
-            if !change_name.is_empty() {
-                governance.change_name_role(&change_name);
             }
         }
 
@@ -777,7 +773,7 @@ impl Runner {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::ReservedWord {
                             field: "schema id".to_owned(),
-                            value: "all_schemas".to_owned(),
+                            value: ReservedWords::AllSchemas.to_string(),
                         },
                     });
                 }
@@ -787,7 +783,7 @@ impl Runner {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::ReservedWord {
                             field: "schema id".to_owned(),
-                            value: "governance".to_owned(),
+                            value: ReservedWords::Governance.to_string(),
                         },
                     });
                 }
@@ -955,7 +951,7 @@ impl Runner {
     fn check_members(
         member_event: &MemberEvent,
         governance: &mut GovernanceData,
-    ) -> Result<ChangeRemoveMembers, RunnerError> {
+    ) -> Result<Vec<String>, RunnerError> {
         if member_event.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "check_members",
@@ -1000,22 +996,22 @@ impl Runner {
                     });
                 }
 
-                if new_member.name == "Any" {
+                if new_member.name == ReservedWords::Any.to_string() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_members",
                         kind: error::InvalidEventKind::ReservedWord {
                             field: "member name".to_owned(),
-                            value: "Any".to_owned(),
+                            value: ReservedWords::Any.to_string(),
                         },
                     });
                 }
 
-                if new_member.name == "Witnesses" {
+                if new_member.name == ReservedWords::Witnesses.to_string() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_members",
                         kind: error::InvalidEventKind::ReservedWord {
                             field: "member name".to_owned(),
-                            value: "Witnesses".to_owned(),
+                            value: ReservedWords::Witnesses.to_string(),
                         },
                     });
                 }
@@ -1056,11 +1052,11 @@ impl Runner {
             }
 
             for remove_member in remove.clone() {
-                if remove_member == "Owner" {
+                if remove_member == ReservedWords::Owner.to_string() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_members",
                         kind: error::InvalidEventKind::CannotRemove {
-                            what: "Owner".to_owned(),
+                            what: ReservedWords::Owner.to_string(),
                             reason: "governance owner cannot be removed"
                                 .to_owned(),
                         },
@@ -1090,160 +1086,27 @@ impl Runner {
             remove_members = remove.iter().cloned().collect::<Vec<String>>();
         }
 
-        let mut change_name_members: Vec<(String, String)> = vec![];
-        if let Some(change) = member_event.change.clone() {
-            if change.is_empty() {
-                return Err(RunnerError::InvalidEvent {
-                    location: "check_members",
-                    kind: error::InvalidEventKind::Empty {
-                        what: "ChangeMember vec".to_owned(),
-                    },
-                });
-            }
-
-            for change_member in change {
-                if change_member.actual_name == "Owner" {
-                    return Err(RunnerError::InvalidEvent {
-                        location: "check_members",
-                        kind: error::InvalidEventKind::CannotModify {
-                            what: "Owner".to_owned(),
-                            reason: "governance owner cannot be changed"
-                                .to_owned(),
-                        },
-                    });
-                }
-
-                if change_member.is_empty() {
-                    return Err(RunnerError::InvalidEvent {
-                        location: "check_members",
-                        kind: error::InvalidEventKind::Empty {
-                            what: format!(
-                                "change data for member {}",
-                                change_member.actual_name
-                            ),
-                        },
-                    });
-                }
-
-                let mut actual_member_name = change_member.actual_name.clone();
-                let Some(mut actual_member_key) =
-                    new_members.remove(&change_member.actual_name)
-                else {
-                    return Err(RunnerError::InvalidEvent {
-                        location: "check_members",
-                        kind: error::InvalidEventKind::NotFound {
-                            what: "member".to_owned(),
-                            id: change_member.actual_name,
-                        },
-                    });
-                };
-
-                if let Some(mut new_name) = change_member.new_name.clone() {
-                    new_name = new_name.trim().to_owned();
-
-                    if new_name.is_empty() {
-                        return Err(RunnerError::InvalidEvent {
-                            location: "check_members",
-                            kind: error::InvalidEventKind::Empty {
-                                what: format!(
-                                    "new name for member {}",
-                                    actual_member_name
-                                ),
-                            },
-                        });
-                    }
-
-                    if new_name.len() > 100 {
-                        return Err(RunnerError::InvalidEvent {
-                            location: "check_members",
-                            kind: error::InvalidEventKind::InvalidSize {
-                                field: format!(
-                                    "new name for member {}",
-                                    actual_member_name
-                                ),
-                                actual: new_name.len(),
-                                max: 100,
-                            },
-                        });
-                    }
-
-                    if new_name == "Any" {
-                        return Err(RunnerError::InvalidEvent {
-                            location: "check_members",
-                            kind: error::InvalidEventKind::ReservedWord {
-                                field: "new member name".to_owned(),
-                                value: "Any".to_owned(),
-                            },
-                        });
-                    }
-
-                    if new_name == "Witnesses" {
-                        return Err(RunnerError::InvalidEvent {
-                            location: "check_members",
-                            kind: error::InvalidEventKind::ReservedWord {
-                                field: "new member name".to_owned(),
-                                value: "Witnesses".to_owned(),
-                            },
-                        });
-                    }
-
-                    change_name_members
-                        .push((actual_member_name, new_name.clone()));
-                    actual_member_name = new_name;
-                }
-
-                if let Some(new_key) = change_member.new_key.clone() {
-                    if new_key.is_empty() {
-                        return Err(RunnerError::InvalidEvent {
-                            location: "check_members",
-                            kind: error::InvalidEventKind::Empty {
-                                what: format!(
-                                    "new key for member {}",
-                                    actual_member_name
-                                ),
-                            },
-                        });
-                    }
-
-                    actual_member_key = new_key;
-                }
-
-                if new_members
-                    .insert(actual_member_name.clone(), actual_member_key)
-                    .is_some()
-                {
-                    return Err(RunnerError::InvalidEvent {
-                        location: "check_members",
-                        kind: error::InvalidEventKind::AlreadyExists {
-                            what: "member".to_owned(),
-                            id: actual_member_name,
-                        },
-                    });
-                }
-            }
-        }
-
         let members_name: HashSet<String> =
             new_members.keys().cloned().collect();
         let members_value: HashSet<PublicKey> =
             new_members.values().cloned().collect();
 
-        if new_members.contains_key("Any") {
+        if new_members.contains_key(&ReservedWords::Any.to_string()) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_members",
                 kind: error::InvalidEventKind::ReservedWord {
                     field: "member name".to_owned(),
-                    value: "Any".to_owned(),
+                    value: ReservedWords::Any.to_string(),
                 },
             });
         }
 
-        if new_members.contains_key("Witnesses") {
+        if new_members.contains_key(&ReservedWords::Witnesses.to_string()) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_members",
                 kind: error::InvalidEventKind::ReservedWord {
                     field: "member name".to_owned(),
-                    value: "Witnesses".to_owned(),
+                    value: ReservedWords::Witnesses.to_string(),
                 },
             });
         }
@@ -1260,7 +1123,7 @@ impl Runner {
 
         governance.members = new_members;
 
-        Ok((change_name_members, remove_members))
+        Ok(remove_members)
     }
 
     fn generate_context(

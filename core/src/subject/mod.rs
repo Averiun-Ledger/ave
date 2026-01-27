@@ -9,16 +9,14 @@ use crate::{
         Governance,
         data::GovernanceData,
         model::Quorum,
-        roles_register::{RoleDataRegister, SearchRole},
+        role_register::{RoleDataRegister, SearchRole},
     },
     model::{
         common::{check_quorum_signers, get_validation_roles_register},
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{
-        NodeMessage, TransferSubject,
         register::{Register, RegisterMessage},
-        transfer::{TransferRegister, TransferRegisterMessage},
     },
     tracker::Tracker,
     validation::{
@@ -702,106 +700,6 @@ where
         Ok(())
     }
 
-    async fn change_node_subject(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &str,
-        new_owner: &str,
-        old_owner: &str,
-    ) -> Result<(), ActorError> {
-        match ctx.get_parent::<Node>().await {
-            Ok(node_actor) => {
-                node_actor
-                    .tell(NodeMessage::ChangeSubjectOwner {
-                        new_owner: new_owner.to_owned(),
-                        old_owner: old_owner.to_owned(),
-                        subject_id: subject_id.to_owned(),
-                    })
-                    .await?;
-
-                debug!(
-                    subject_id = subject_id,
-                    new_owner = new_owner,
-                    old_owner = old_owner,
-                    "Subject owner changed successfully"
-                );
-            }
-            Err(e) => {
-                error!(
-                    path = %ctx.path().parent(),
-                    subject_id = subject_id,
-                    "Node actor not found"
-                );
-                return Err(e);
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn new_transfer_subject(
-        ctx: &mut ActorContext<Self>,
-        name: Option<String>,
-        subject_id: &str,
-        new_owner: &str,
-        actual_owner: &str,
-    ) -> Result<(), ActorError> {
-        match ctx.get_parent::<Node>().await {
-            Ok(node_actor) => {
-                node_actor
-                    .tell(NodeMessage::TransferSubject(TransferSubject {
-                        name: name.unwrap_or_default(),
-                        subject_id: subject_id.to_owned(),
-                        new_owner: new_owner.to_owned(),
-                        actual_owner: actual_owner.to_owned(),
-                    }))
-                    .await?;
-
-                debug!(
-                    subject_id = subject_id,
-                    new_owner = new_owner,
-                    actual_owner = actual_owner,
-                    "Transfer subject initiated successfully"
-                );
-            }
-            Err(e) => {
-                error!(
-                    path = %ctx.path().parent(),
-                    subject_id = subject_id,
-                    "Node actor not found"
-                );
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
-    async fn reject_transfer_subject(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &str,
-    ) -> Result<(), ActorError> {
-        match ctx.get_parent::<Node>().await {
-            Ok(node_actor) => {
-                node_actor
-                    .tell(NodeMessage::RejectTransfer(subject_id.to_owned()))
-                    .await?;
-
-                debug!(
-                    subject_id = subject_id,
-                    "Transfer rejected successfully"
-                );
-            }
-            Err(e) => {
-                error!(
-                    path = %ctx.path().parent(),
-                    subject_id = subject_id,
-                    "Node actor not found"
-                );
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
     async fn register(
         ctx: &mut ActorContext<Self>,
         message: RegisterMessage,
@@ -881,41 +779,6 @@ where
         Self::publish_sink(ctx, event_to_sink).await
     }
 
-    async fn transfer_register(
-        ctx: &mut ActorContext<Self>,
-        msg: TransferRegisterMessage
-    ) -> Result<(), ActorError> {
-        let tranfer_register_path =
-            ActorPath::from("/user/node/transfer_register");
-
-        match ctx
-            .system()
-            .get_actor::<TransferRegister>(&tranfer_register_path)
-            .await
-        {
-            Ok(transfer_register_actor) => {
-                transfer_register_actor
-                    .tell(msg.clone())
-                    .await?;
-
-                debug!(
-                    msg = ?msg,
-                    "Transfer registration completed successfully"
-                );
-            }
-            Err(e) => {
-                error!(
-                    path = %tranfer_register_path,
-                    msg = ?msg,
-                    "Transfer register actor not found"
-                );
-                return Err(e);
-            }
-        }
-
-        Ok(())
-    }
-
     async fn publish_sink(
         ctx: &mut ActorContext<Self>,
         message: SinkDataMessage,
@@ -928,37 +791,25 @@ where
         Ok(())
     }
 
-    async fn update_subject_node(
+    async fn reject(
+        &self,
         ctx: &mut ActorContext<Self>,
-        subject_id: &str,
-        sn: u64,
-    ) -> Result<(), ActorError> {
-        match ctx.get_parent::<Node>().await {
-            Ok(node_actor) => {
-                node_actor
-                    .tell(NodeMessage::UpdateSubject {
-                        subject_id: subject_id.to_owned(),
-                        sn,
-                    })
-                    .await?;
+        gov_version: u64
+    ) -> Result<(), ActorError>;
 
-                debug!(
-                    subject_id = subject_id,
-                    sn = sn,
-                    "Subject node updated successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    path = %ctx.path().parent(),
-                    subject_id = subject_id,
-                    "Node actor not found"
-                );
-                Err(e)
-            }
-        }
-    }
+    async fn confirm(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64
+    ) -> Result<(), ActorError>;
+
+    async fn transfer(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64
+    ) -> Result<(), ActorError>;
 
     fn apply_patch(
         &mut self,

@@ -1,8 +1,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
-    Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
 
 use async_trait::async_trait;
@@ -14,26 +14,17 @@ use updater::{Updater, UpdaterMessage};
 
 use crate::{
     ActorMessage, NetworkMessage,
-    governance::{Governance, GovernanceMessage},
     helpers::network::service::NetworkSender,
     model::common::emit_fail,
     request::manager::{RequestManager, RequestManagerMessage},
-    tracker::{Tracker, TrackerMessage},
 };
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum TransferResponse {
-    Confirm,
-    Reject,
-}
 
 pub mod updater;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateType {
     Auth,
-    Request { id: String },
-    Transfer,
+    Request,
 }
 
 pub struct UpdateNew {
@@ -49,7 +40,6 @@ pub struct UpdateNew {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateRes {
     Sn(u64),
-    Transfer(TransferResponse),
 }
 
 #[derive(Clone, Debug)]
@@ -78,65 +68,23 @@ impl Update {
         }
     }
 
-    pub async fn update_subject(
-        ctx: &mut ActorContext<Update>,
-        subject_id: &str,
-        res: TransferResponse,
-    ) -> Result<(), ActorError> {
-        let path = ActorPath::from(format!("/user/node/{}", subject_id));
-
-        if let Ok(governance_actor) =
-            ctx.system().get_actor::<Governance>(&path).await
-        {
-            governance_actor
-                .tell(GovernanceMessage::UpdateTransfer(res))
-                .await
-        } else if let Ok(tracker_actor) =
-            ctx.system().get_actor::<Tracker>(&path).await
-        {
-            tracker_actor
-                .tell(TrackerMessage::UpdateTransfer(res))
-                .await
-        } else {
-            Err(ActorError::NotFound { path })
-        }
-    }
-
     pub fn update_response(
         &mut self,
         update: UpdateRes,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
-        match self.update_type {
-            UpdateType::Request { .. } | UpdateType::Auth => {
-                if let UpdateRes::Sn(update_sn) = update {
-                    match self.response.clone() {
-                        Some(UpdateRes::Sn(sn)) if update_sn > sn => {
-                            self.response = Some(update);
-                            self.better = Some(sender);
-                        }
-                        Some(UpdateRes::Sn(_)) => {} // No actualizar si update_sn <= sn
-                        Some(_) => {
-                            return Err(ActorError::Functional {
-                                description:
-                                    "self response must be UpdateRes::Sn"
-                                        .to_owned(),
-                            });
-                        }
-                        None => {
-                            self.response = Some(update);
-                            self.better = Some(sender);
-                        }
-                    }
-                } else {
-                    return Err(ActorError::Functional {
-                        description: "update must be UpdateRes::Sn".to_owned(),
-                    });
-                }
+        let UpdateRes::Sn(update_sn) = update;
+        match self.response.clone() {
+            Some(UpdateRes::Sn(sn)) if update_sn > sn => {
+                self.response = Some(update);
+                self.better = Some(sender);
             }
-            _ => {}
+            Some(UpdateRes::Sn(_)) => {} // No actualizar si update_sn <= sn
+            None => {
+                self.response = Some(update);
+                self.better = Some(sender);
+            }
         }
-
         Ok(())
     }
 
@@ -158,10 +106,6 @@ impl Update {
                         node_key: witness,
                     }
                 }
-                UpdateType::Transfer => UpdaterMessage::Transfer {
-                    subject_id: self.subject_id.clone(),
-                    node_key: witness,
-                },
             };
 
             child.tell(message).await?;
@@ -173,14 +117,7 @@ impl Update {
 #[derive(Debug, Clone)]
 pub enum UpdateMessage {
     Run,
-    TransferRes {
-        sender: PublicKey,
-        res: TransferResponse,
-    },
-    Response {
-        sender: PublicKey,
-        sn: u64,
-    },
+    Response { sender: PublicKey, sn: u64 },
 }
 
 impl Message for UpdateMessage {}
@@ -225,37 +162,6 @@ impl Handler<Update> for Update {
                         witnesses_count = self.witnesses.len(),
                         "Updates created successfully"
                     );
-                }
-            }
-            UpdateMessage::TransferRes { sender, res } => {
-                if self.check_witness(sender.clone()) && self.response.is_none()
-                {
-                    self.response = Some(UpdateRes::Transfer(res.clone()));
-
-                    if let Err(e) = Update::update_subject(
-                        ctx,
-                        &self.subject_id.to_string(),
-                        res.clone(),
-                    )
-                    .await
-                    {
-                        error!(
-                            msg_type = "TransferRes",
-                            error = %e,
-                            subject_id = %self.subject_id,
-                            "Failed to update subject"
-                        );
-                    } else {
-                        debug!(
-                            msg_type = "TransferRes",
-                            subject_id = %self.subject_id,
-                            sender = %sender,
-                            response = ?res,
-                            "Transfer response processed successfully"
-                        );
-                    }
-
-                    ctx.stop(None).await;
                 }
             }
             UpdateMessage::Response { sender, sn } => {
@@ -320,10 +226,10 @@ impl Handler<Update> for Update {
                             }
                         }
 
-                        if let UpdateType::Request { id } = &self.update_type {
+                        if let UpdateType::Request = &self.update_type {
                             let request_path = ActorPath::from(format!(
                                 "/user/request/{}",
-                                id
+                                self.subject_id
                             ));
                             match ctx
                                 .system()
@@ -347,7 +253,7 @@ impl Handler<Update> for Update {
                                         error!(
                                             msg_type = "Response",
                                             error = %e,
-                                            request_id = %id,
+                                            subject_id = %self.subject_id,
                                             "Failed to send response to request actor"
                                         );
                                         return Err(emit_fail(ctx, e).await);
@@ -357,7 +263,7 @@ impl Handler<Update> for Update {
                                     error!(
                                         msg_type = "Response",
                                         path = %request_path,
-                                        request_id = %id,
+                                        subject_id = %self.subject_id,
                                         "Request actor not found"
                                     );
                                     return Err(emit_fail(ctx, e).await);

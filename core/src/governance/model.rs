@@ -1,7 +1,7 @@
 //! # Governance model.
 //!
 
-use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
+use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey, schematype::ReservedWords};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -48,10 +48,10 @@ pub struct RolesGov {
 
 impl RolesGov {
     pub fn check_basic_gov(&self) -> bool {
-        self.approver.contains("Owner")
-            && self.evaluator.contains("Owner")
-            && self.validator.contains("Owner")
-            && self.issuer.users.contains("Owner")
+        self.approver.contains(&ReservedWords::Owner.to_string())
+            && self.evaluator.contains(&ReservedWords::Owner.to_string())
+            && self.validator.contains(&ReservedWords::Owner.to_string())
+            && self.issuer.users.contains(&ReservedWords::Owner.to_string())
     }
 
     pub fn remove_member_role(&mut self, remove_members: &Vec<String>) {
@@ -100,7 +100,7 @@ impl RolesGov {
         }
     }
 
-    pub fn get_signers(&self, role: RoleTypes) -> (Vec<String>, bool) {
+    pub fn get_users(&self, role: RoleTypes) -> (Vec<String>, bool) {
         match role {
             RoleTypes::Evaluator => (
                 self.evaluator.iter().cloned().collect::<Vec<String>>(),
@@ -340,7 +340,7 @@ impl RolesAllSchemas {
         }
     }
 
-    pub fn get_signers(
+    pub fn get_users(
         &self,
         role: RoleTypes,
         namespace: Namespace,
@@ -679,7 +679,7 @@ impl RolesSchema {
             .map(|x| x.quantity.clone())
     }
 
-    pub fn get_signers(
+    pub fn get_users(
         &self,
         role: RoleTypes,
         namespace: Namespace,
@@ -766,37 +766,6 @@ impl From<ProtocolTypes> for RoleTypes {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum SignersType {
-    Approver,
-    Evaluator,
-    Validator,
-    Creator,
-    Issuer,
-}
-
-impl From<SignersType> for RoleTypes {
-    fn from(value: SignersType) -> Self {
-        match value {
-            SignersType::Approver => RoleTypes::Approver,
-            SignersType::Evaluator => RoleTypes::Evaluator,
-            SignersType::Validator => RoleTypes::Validator,
-            SignersType::Creator => RoleTypes::Creator,
-            SignersType::Issuer => RoleTypes::Issuer,
-        }
-    }
-}
-
-impl From<ProtocolTypes> for SignersType {
-    fn from(value: ProtocolTypes) -> Self {
-        match value {
-            ProtocolTypes::Approval => SignersType::Approver,
-            ProtocolTypes::Evaluation => SignersType::Evaluator,
-            ProtocolTypes::Validation => SignersType::Validator,
-        }
-    }
-}
-
 pub enum WitnessesData {
     Gov,
     Schema {
@@ -872,7 +841,7 @@ pub struct RoleCreator {
 }
 
 fn default_witnesses_creator() -> BTreeSet<String> {
-    BTreeSet::from(["Witnesses".to_owned()])
+    BTreeSet::from([ReservedWords::Witnesses.to_string()])
 }
 
 impl Hash for RoleCreator {

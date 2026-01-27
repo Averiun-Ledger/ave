@@ -4,6 +4,7 @@ use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
+use std::slice;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
@@ -12,8 +13,8 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
-use crate::governance::model::Quorum;
-use crate::governance::roles_register::{
+use crate::governance::model::{CreatorQuantity, Quorum};
+use crate::governance::role_register::{
     RoleDataRegister, RolesRegister, RolesRegisterMessage,
     RolesRegisterResponse, SearchRole,
 };
@@ -105,6 +106,162 @@ where
 }
 
 #[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct Interval {
+    pub lo: u64,
+    pub hi: u64, // inclusivo
+}
+
+impl Interval {
+    pub fn new(a: u64, b: u64) -> Self {
+        if a <= b {
+            Self { lo: a, hi: b }
+        } else {
+            Self { lo: b, hi: a }
+        }
+    }
+}
+
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct IntervalSet {
+    // Invariante: ordenados por lo, disjuntos y ya "mergeados" (hi < siguiente.lo)
+    intervals: Vec<Interval>,
+}
+
+impl IntervalSet {
+    pub fn new() -> Self {
+        Self {
+            intervals: Vec::new(),
+        }
+    }
+
+    // Devuelve true si `x` está dentro de algún intervalo (extremos inclusivos).
+    pub fn contains(&self, x: u64) -> bool {
+        if self.intervals.is_empty() {
+            return false;
+        }
+
+        match self.intervals.binary_search_by(|iv| iv.lo.cmp(&x)) {
+            Ok(_) => true, // existe un intervalo con lo == x => contenido seguro
+            Err(pos) => {
+                if pos == 0 {
+                    return false; // x es menor que el lo del primer intervalo
+                }
+                let iv = self.intervals[pos - 1];
+                iv.hi >= x
+            }
+        }
+    }
+
+    // Inserta un intervalo inclusivo y fusiona solapes (incluye tocar por extremo: [1,4] + [4,7] => [1,7]).
+    pub fn insert(&mut self, mut iv: Interval) {
+        // Posición donde iv.lo podría insertarse manteniendo orden
+        let mut i = match self.intervals.binary_search_by(|x| x.lo.cmp(&iv.lo))
+        {
+            Ok(pos) | Err(pos) => pos,
+        };
+
+        // Si puede fusionar con el anterior, retrocede uno
+        if i > 0 && self.intervals[i - 1].hi >= iv.lo {
+            i -= 1;
+        }
+
+        // Fusiona hacia delante todo lo que solape/toque (condición inclusiva: next.lo <= iv.hi)
+        while i < self.intervals.len() && self.intervals[i].lo <= iv.hi {
+            let cur = self.intervals[i];
+            iv.lo = iv.lo.min(cur.lo);
+            iv.hi = iv.hi.max(cur.hi);
+            self.intervals.remove(i); // O(n) pero muy compacto en memoria
+        }
+
+        self.intervals.insert(i, iv);
+    }
+
+    // Consulta: devuelve el máximo valor cubierto dentro de [ql, qh], o None.
+    pub fn max_covered_in(&self, ql: u64, qh: u64) -> Option<u64> {
+        let (ql, qh) = if ql <= qh { (ql, qh) } else { (qh, ql) };
+        if self.intervals.is_empty() {
+            return None;
+        }
+
+        // Queremos el intervalo más a la derecha con lo <= qh
+        let idx = match self.intervals.binary_search_by(|iv| iv.lo.cmp(&qh)) {
+            Ok(pos) => pos, // lo == qh
+            Err(pos) => {
+                if pos == 0 {
+                    return None;
+                }
+                pos - 1
+            }
+        };
+
+        let iv = self.intervals[idx];
+        // Hay intersección si iv.hi >= ql (ya sabemos iv.lo <= qh)
+        if iv.hi >= ql {
+            Some(iv.hi.min(qh))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_slice(&self) -> &[Interval] {
+        &self.intervals
+    }
+
+    pub fn iter(&self) -> slice::Iter<'_, Interval> {
+        self.intervals.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> slice::IterMut<'_, Interval> {
+        self.intervals.iter_mut()
+    }
+}
+
+impl<'a> IntoIterator for &'a IntervalSet {
+    type Item = &'a Interval;
+    type IntoIter = slice::Iter<'a, Interval>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.intervals.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut IntervalSet {
+    type Item = &'a mut Interval;
+    type IntoIter = slice::IterMut<'a, Interval>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.intervals.iter_mut()
+    }
+}
+
+impl IntoIterator for IntervalSet {
+    type Item = Interval;
+    type IntoIter = std::vec::IntoIter<Interval>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.intervals.into_iter()
+    }
+}
+
+#[derive(
     Debug,
     Clone,
     Serialize,
@@ -119,12 +276,16 @@ pub struct CeilingMap<T> {
 
 impl<T> CeilingMap<T>
 where
-    T: Debug + Clone + Serialize + Default,
+    T: Debug + Clone + Serialize,
 {
     pub fn new() -> Self {
         CeilingMap {
             inner: BTreeMap::new(),
         }
+    }
+
+    pub fn last(&self) -> Option<(&u64, &T)> {
+        self.inner.last_key_value()
     }
 
     pub fn insert(&mut self, key: u64, value: T) {
@@ -156,32 +317,6 @@ where
             .range((Unbounded, Included(&key)))
             .next_back()
             .map(|x| x.1.clone())
-    }
-}
-
-impl CeilingMap<HashSet<PublicKey>> {
-    pub fn contains_from(&self, key: u64, target: &PublicKey) -> Option<u64> {
-        for (k, v) in self.inner.range((Included(&key), Unbounded)) {
-            if v.contains(target) {
-                return Some(*k);
-            }
-        }
-        None
-    }
-}
-
-impl CeilingMap<HashMap<PublicKey, BTreeSet<String>>> {
-    pub fn contains_from(
-        &self,
-        key: u64,
-        target: &PublicKey,
-    ) -> Option<(u64, BTreeSet<String>)> {
-        for (k, v) in self.inner.range((Included(&key), Unbounded)) {
-            if let Some(povs) = v.get(target) {
-                return Some((*k, povs.clone()));
-            }
-        }
-        None
     }
 }
 

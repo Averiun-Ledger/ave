@@ -11,7 +11,7 @@ use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
     auth::{Auth, AuthMessage, WitnessesAuth},
     helpers::network::service::NetworkSender,
-    model::{event::Ledger},
+    model::event::Ledger,
     node::{
         SubjectData,
         transfer::{
@@ -23,10 +23,7 @@ use crate::{
 use ave_common::request::EventRequest;
 
 use crate::{
-    approval::{
-        request::ApprovalReq,
-        response::{ApprovalRes},
-    },
+    approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     validation::{request::ValidationReq, response::ValidationRes},
 };
@@ -133,33 +130,24 @@ where
 
 pub async fn get_node_subject_data<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
-) -> Result<Option<(SubjectData, Option<String>)>, ActorError>
+    subject_id: &DigestIdentifier,
+) -> Result<Option<SubjectData>, ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let node_path = ActorPath::from("/user/node");
-    let node_actor: Option<ActorRef<Node>> =
-        ctx.system().get_actor(&node_path).await;
+    let path = ActorPath::from("/user/node");
+    let node_actor = ctx.system().get_actor::<Node>(&path).await?;
 
-    // We obtain the validator
-    let node_response = if let Some(node_actor) = node_actor {
-        node_actor
-            .ask(NodeMessage::GetSubjectData(subject_id.to_owned()))
-            .await?
-    } else {
-        return Err(ActorError::NotFound(node_path));
-    };
+    let response = node_actor
+        .ask(NodeMessage::GetSubjectData(subject_id.to_owned()))
+        .await?;
 
-    match node_response {
-        NodeResponse::None => Ok(None),
-        NodeResponse::SubjectData { data, new_owner } => {
-            Ok(Some((data, new_owner)))
-        }
-        _ => Err(ActorError::UnexpectedResponse(
-            node_path,
-            "NodeResponse::SubjectData || NodeResponse::None".to_owned(),
-        )),
+    match response {
+        NodeResponse::SubjectData(data) => Ok(data),
+        _ => Err(ActorError::UnexpectedResponse {
+            path,
+            expected: "NodeResponse::SubjectData".to_owned(),
+        }),
     }
 }
 

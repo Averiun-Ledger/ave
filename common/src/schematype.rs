@@ -22,6 +22,27 @@ pub enum SchemaType {
     AllSchemas,
 }
 
+pub enum ReservedWords {
+    AllSchemas,
+    Governance,
+    Any,
+    Witnesses,
+    Owner
+}
+
+impl Display for ReservedWords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReservedWords::AllSchemas => write!(f, "all_schemas"),
+            ReservedWords::Governance => write!(f, "governance"),
+            ReservedWords::Any => write!(f, "Any"),
+            ReservedWords::Witnesses => write!(f, "Witnesses"),
+            ReservedWords::Owner => write!(f, "Owner"),
+        }
+    }
+}
+
+
 impl std::str::FromStr for SchemaType {
     type Err = String;
 
@@ -62,8 +83,8 @@ impl SchemaType {
             SchemaType::AllSchemas => true,
             SchemaType::Type(schema_id) => {
                 !schema_id.is_empty()
-                    && schema_id != "governance"
-                    && schema_id != "all_schemas"
+                    && schema_id != &ReservedWords::Governance.to_string()
+                    && schema_id != &ReservedWords::AllSchemas.to_string()
                     && schema_id.trim().len() == schema_id.len()
             }
         }

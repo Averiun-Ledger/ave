@@ -7,7 +7,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use register::Register;
 use tokio::fs;
 use tracing::{Span, debug, error, info_span};
-use transfer::TransferRegister;
 
 use crate::{
     Error,
@@ -27,7 +26,7 @@ use crate::{
 };
 
 use ave_common::{
-    Namespace, SchemaType,
+    SchemaType,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
@@ -42,25 +41,24 @@ use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 
 pub mod register;
-pub mod transfer;
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct TransferSubject {
-    pub name: String,
-    pub subject_id: String,
-    pub new_owner: String,
-    pub actual_owner: String,
+    pub name: Option<String>,
+    pub subject_id: DigestIdentifier,
+    pub new_owner: PublicKey,
+    pub actual_owner: PublicKey,
 }
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct TransferData {
-    pub name: String,
-    pub new_owner: String,
-    pub actual_owner: String,
+    pub name: Option<String>,
+    pub new_owner: PublicKey,
+    pub actual_owner: PublicKey,
 }
 
 #[derive(
@@ -69,7 +67,7 @@ pub struct TransferData {
 pub struct SubjectData {
     pub governance_id: Option<DigestIdentifier>,
     pub schema_id: SchemaType,
-    pub namespace: Namespace,
+    pub namespace: String,
 }
 
 /// Node struct.
@@ -83,11 +81,11 @@ pub struct Node {
     #[serde(skip)]
     hash: Option<HashAlgorithm>,
     /// The node's owned subjects.
-    owned_subjects: HashMap<String, SubjectData>,
+    owned_subjects: HashMap<DigestIdentifier, SubjectData>,
     /// The node's known subjects.
-    known_subjects: HashMap<String, SubjectData>,
+    known_subjects: HashMap<DigestIdentifier, SubjectData>,
 
-    transfer_subjects: HashMap<String, TransferData>,
+    transfer_subjects: HashMap<DigestIdentifier, TransferData>,
 }
 
 // Manual Borsh implementation to skip the 'owner' field
@@ -110,11 +108,17 @@ impl BorshDeserialize for Node {
     ) -> std::io::Result<Self> {
         // Deserialize the persisted fields
         let owned_subjects =
-            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+            HashMap::<DigestIdentifier, SubjectData>::deserialize_reader(
+                reader,
+            )?;
         let known_subjects =
-            HashMap::<String, SubjectData>::deserialize_reader(reader)?;
+            HashMap::<DigestIdentifier, SubjectData>::deserialize_reader(
+                reader,
+            )?;
         let transfer_subjects =
-            HashMap::<String, TransferData>::deserialize_reader(reader)?;
+            HashMap::<DigestIdentifier, TransferData>::deserialize_reader(
+                reader,
+            )?;
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
@@ -146,33 +150,33 @@ impl Node {
         );
     }
 
-    pub fn delete_transfer(&mut self, subject_id: String) {
-        self.transfer_subjects.remove(&subject_id);
+    pub fn delete_transfer(&mut self, subject_id: &DigestIdentifier) {
+        self.transfer_subjects.remove(subject_id);
     }
 
-    pub fn confirm_transfer_owner(
-        &mut self,
-        subject_id: String,
-    ) {
-        let our_key = self.our_key.to_string();
+    pub fn confirm_transfer_owner(&mut self, subject_id: DigestIdentifier) {
+        self.our_key.to_string();
 
         if let Some(data) = self.transfer_subjects.remove(&subject_id) {
-            if data.actual_owner == our_key {
+            if data.actual_owner == *self.our_key {
                 if let Some(data) = self.owned_subjects.remove(&subject_id) {
                     self.known_subjects.insert(subject_id, data);
                 }
-            } else if data.new_owner == our_key {
+            } else if data.new_owner == *self.our_key {
                 if let Some(data) = self.known_subjects.remove(&subject_id) {
                     self.owned_subjects.insert(subject_id, data);
                 };
             }
         };
-
-
     }
 
-    pub fn register_subject(&mut self, subject_id: String, owner: String, data: SubjectData) {
-        if self.owner.public_key().to_string() == owner {
+    pub fn register_subject(
+        &mut self,
+        subject_id: DigestIdentifier,
+        owner: PublicKey,
+        data: SubjectData,
+    ) {
+        if *self.our_key == owner {
             self.owned_subjects.insert(subject_id, data);
         } else {
             self.known_subjects.insert(subject_id, data);
@@ -238,13 +242,11 @@ impl Node {
             });
         };
 
-        let our_key_string = self.our_key.to_string();
-
         for (subject, data) in self.owned_subjects.clone() {
             if !data.schema_id.is_gov() {
                 let tracker_actor = ctx
                     .create_child(
-                        &subject,
+                        &subject.to_string(),
                         Tracker::initial((None, self.our_key.clone(), hash)),
                     )
                     .await?;
@@ -265,7 +267,7 @@ impl Node {
             } else {
                 let governance_actor = ctx
                     .create_child(
-                        &subject,
+                        &subject.to_string(),
                         Governance::initial((None, self.our_key.clone(), hash)),
                     )
                     .await?;
@@ -291,7 +293,7 @@ impl Node {
         for (subject, data) in self.known_subjects.clone() {
             let i_new_owner =
                 if let Some(transfer) = self.transfer_subjects.get(&subject) {
-                    transfer.new_owner == our_key_string
+                    transfer.new_owner == *self.our_key
                 } else {
                     false
                 };
@@ -299,7 +301,7 @@ impl Node {
             if data.schema_id.is_gov() {
                 let governance_actor = ctx
                     .create_child(
-                        &subject,
+                        &subject.to_string(),
                         Governance::initial((None, self.our_key.clone(), hash)),
                     )
                     .await?;
@@ -322,7 +324,7 @@ impl Node {
             } else if i_new_owner {
                 let tracker_actor = ctx
                     .create_child(
-                        &subject,
+                        &subject.to_string(),
                         Tracker::initial((None, self.our_key.clone(), hash)),
                     )
                     .await?;
@@ -352,17 +354,14 @@ impl Node {
 pub enum NodeMessage {
     SignRequest(SignTypesNode),
     PendingTransfers,
-    UpSubject {
-        subject_id: String, 
-        light: bool
-    },
-    GetSubjectData(String),
+    UpSubject { subject_id: String, light: bool },
+    GetSubjectData(DigestIdentifier),
     CreateNewSubject(SignedLedger),
-    OwnerPendingSubject(String),
-    AuthData(String),
+    OwnerPendingSubject(DigestIdentifier),
+    AuthData(DigestIdentifier),
     TransferSubject(TransferSubject),
-    RejectTransfer(String),
-    ConfirmTransfer(String),
+    RejectTransfer(DigestIdentifier),
+    ConfirmTransfer(DigestIdentifier),
 }
 
 impl Message for NodeMessage {}
@@ -370,10 +369,7 @@ impl Message for NodeMessage {}
 /// Node response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
-    SubjectData {
-        data: SubjectData,
-        new_owner: Option<String>,
-    },
+    SubjectData(Option<SubjectData>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
     IOwnerPending((bool, bool)),
@@ -392,13 +388,13 @@ impl Response for NodeResponse {}
 )]
 pub enum NodeEvent {
     RegisterSubject {
-        owner: String,
-        subject_id: String,
+        owner: PublicKey,
+        subject_id: DigestIdentifier,
         data: SubjectData,
     },
     TransferSubject(TransferSubject),
-    RejectTransfer(String),
-    ConfirmTransfer(String),
+    RejectTransfer(DigestIdentifier),
+    ConfirmTransfer(DigestIdentifier),
 }
 
 impl Event for NodeEvent {}
@@ -511,17 +507,6 @@ impl Actor for Node {
             return Err(e);
         }
 
-        if let Err(e) = ctx
-            .create_child("transfer_register", TransferRegister::initial(()))
-            .await
-        {
-            error!(
-                error = %e,
-                "Failed to create transfer_register child"
-            );
-            return Err(e);
-        }
-
         Ok(())
     }
 
@@ -549,7 +534,7 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
-            NodeMessage::UpSubject {subject_id, light} => {
+            NodeMessage::UpSubject { subject_id, light } => {
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
                 else {
@@ -602,32 +587,27 @@ impl Handler<Node> for Node {
                 let data = if let Some(data) =
                     self.owned_subjects.get(&subject_id)
                 {
-                    data.clone()
+                    Some(data.clone())
                 } else if let Some(data) = self.known_subjects.get(&subject_id)
                 {
-                    data.clone()
+                    Some(data.clone())
                 } else {
                     debug!(
                         msg_type = "GetSubjectData",
                         subject_id = %subject_id,
                         "Subject not found"
                     );
-                    return Ok(NodeResponse::Ok);
-                };
 
-                let new_owner = self
-                    .transfer_subjects
-                    .get(&subject_id)
-                    .map(|x| x.new_owner.clone());
+                    None
+                };
 
                 debug!(
                     msg_type = "GetSubjectData",
                     subject_id = %subject_id,
-                    has_new_owner = new_owner.is_some(),
                     "Subject data retrieved successfully"
                 );
 
-                Ok(NodeResponse::SubjectData { data, new_owner })
+                Ok(NodeResponse::SubjectData(data))
             }
             NodeMessage::PendingTransfers => {
                 let transfers: Vec<TransferSubject> = self
@@ -853,12 +833,12 @@ impl Handler<Node> for Node {
 
                 self.on_event(
                     NodeEvent::RegisterSubject {
-                        subject_id: subject_id.clone(),
-                        owner: metadata.owner.to_string(),
+                        subject_id: metadata.subject_id.clone(),
+                        owner: metadata.owner.clone(),
                         data: SubjectData {
                             governance_id,
                             schema_id: metadata.schema_id,
-                            namespace: metadata.namespace,
+                            namespace: metadata.namespace.to_string(),
                         },
                     },
                     ctx,
@@ -939,14 +919,12 @@ impl Handler<Node> for Node {
                 Ok(NodeResponse::SignRequest(sign))
             }
             NodeMessage::OwnerPendingSubject(subject_id) => {
-                let our_key = self.owner.public_key().to_string();
-
                 let is_owner =
-                    self.owned_subjects.keys().any(|x| **x == subject_id);
+                    self.owned_subjects.keys().any(|x| *x == subject_id);
                 let is_pending = if let Some(data) =
                     self.transfer_subjects.get(&subject_id)
                 {
-                    data.new_owner == our_key
+                    data.new_owner == *self.our_key
                 } else {
                     false
                 };
@@ -1092,8 +1070,16 @@ impl PersistentActor for Node {
                     "Applied transfer confirmation"
                 );
             }
-            NodeEvent::RegisterSubject { subject_id, data, owner } => {
-                self.register_subject(subject_id.clone(), owner.clone(), data.clone());
+            NodeEvent::RegisterSubject {
+                subject_id,
+                data,
+                owner,
+            } => {
+                self.register_subject(
+                    subject_id.clone(),
+                    owner.clone(),
+                    data.clone(),
+                );
                 debug!(
                     event_type = "RegisterSubject",
                     subject_id = %subject_id,
@@ -1102,7 +1088,7 @@ impl PersistentActor for Node {
                 );
             }
             NodeEvent::RejectTransfer(subject_id) => {
-                self.delete_transfer(subject_id.clone());
+                self.delete_transfer(subject_id);
                 debug!(
                     event_type = "RejectTransfer",
                     subject_id = %subject_id,

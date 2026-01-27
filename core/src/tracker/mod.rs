@@ -1,32 +1,25 @@
 use std::sync::Arc;
 
 use crate::{
-    auth::WitnessesAuth,
     db::Storable,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
-        model::CreatorQuantity,
-        relationship::{
-            OwnerSchema, RelationShip, RelationShipMessage,
-            RelationShipResponse,
-        },
+        sn_register::{SnRegister, SnRegisterMessage},
+        subject_register::{SubjectRegister, SubjectRegisterMessage},
+        witnesses_register::{WitnessesRegister, WitnessesRegisterMessage},
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        common::{
-            emit_fail, get_last_event, get_n_events, node::try_to_update,
-            subject::get_gov,
-        },
+        common::{emit_fail, get_last_event, get_n_events},
         event::{Protocols, ValidationMetadata},
     },
-    node::{register::RegisterMessage, transfer::TransferRegisterMessage},
+    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
         DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
     },
-    update::TransferResponse,
     validation::request::LastData,
 };
 
@@ -51,6 +44,8 @@ use tracing::{Span, debug, error, info_span, warn};
 pub struct Tracker {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
+    #[serde(skip)]
+    pub service: bool,
     #[serde(skip)]
     pub hash: Option<HashAlgorithm>,
 
@@ -118,6 +113,7 @@ impl BorshDeserialize for Tracker {
         let hash = None;
 
         Ok(Self {
+            service: false,
             hash,
             our_key,
             subject_metadata,
@@ -131,6 +127,115 @@ impl BorshDeserialize for Tracker {
 
 #[async_trait]
 impl Subject for Tracker {
+    async fn reject(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::RejectTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await?;
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Reject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn + 1,
+                gov_version,
+            })
+            .await
+    }
+
+    async fn confirm(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::ConfirmTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await?;
+
+        if !self.service && *self.our_key == self.subject_metadata.owner
+            || self.service
+        {
+            let subject_register = ctx
+                .system()
+                .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
+                    "/user/node/{}/subject_register",
+                    self.governance_id
+                )))
+                .await?;
+
+            let _response = subject_register
+                .ask(SubjectRegisterMessage::UpdateSubject {
+                    new_owner,
+                    old_owner: self.subject_metadata.owner.clone(),
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    gov_version,
+                })
+                .await?;
+        }
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Confirm {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn + 1,
+                gov_version,
+            })
+            .await
+    }
+
+    async fn transfer(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::TransferSubject(TransferSubject {
+            name: self.subject_metadata.name.clone(),
+            subject_id: self.subject_metadata.subject_id.clone(),
+            new_owner: new_owner.clone(),
+            actual_owner: self.subject_metadata.owner.clone(),
+        }))
+        .await?;
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Transfer {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner,
+                gov_version,
+            })
+            .await
+    }
+
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -234,12 +339,7 @@ impl Subject for Tracker {
             )
             .await?;
 
-            Self::update_subject_node(
-                ctx,
-                &self.subject_metadata.subject_id.to_string(),
-                self.subject_metadata.sn,
-            )
-            .await?;
+            self.update_sn(ctx).await?;
         }
 
         Ok(())
@@ -247,6 +347,107 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
+    async fn update_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::UpdateSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn,
+            })
+            .await
+    }
+
+    async fn create(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let sn_register = ctx
+            .system()
+            .get_actor::<SnRegister>(&ActorPath::from(format!(
+                "/user/node/{}/sn_register",
+                self.governance_id
+            )))
+            .await?;
+
+        sn_register
+            .tell(SnRegisterMessage::RegisterSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                sn: 0,
+            })
+            .await?;
+
+        if !self.service && *self.our_key == self.subject_metadata.owner
+            || self.service
+        {
+            let subject_register = ctx
+                .system()
+                .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
+                    "/user/node/{}/subject_register",
+                    self.governance_id
+                )))
+                .await?;
+
+            let _response = subject_register
+                .ask(SubjectRegisterMessage::CreateSubject {
+                    creator: self.subject_metadata.owner.clone(),
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    gov_version,
+                })
+                .await?;
+        }
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Create {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                owner: self.subject_metadata.owner.clone(),
+            })
+            .await
+    }
+
+    async fn register_gov_version_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let sn_register = ctx
+            .system()
+            .get_actor::<SnRegister>(&ActorPath::from(format!(
+                "/user/node/{}/sn_register",
+                self.governance_id
+            )))
+            .await?;
+
+        sn_register
+            .tell(SnRegisterMessage::RegisterSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                sn: self.subject_metadata.sn,
+            })
+            .await
+    }
+
     async fn get_governance(
         &self,
         ctx: &mut ActorContext<Tracker>,
@@ -281,21 +482,8 @@ impl Tracker {
         let mut iter = events.into_iter();
         let last_ledger = get_last_event(ctx).await?;
 
-        let gov = get_gov(ctx, &self.governance_id.to_string()).await?;
-
         let Some(first) = iter.next() else {
             return Ok(());
-        };
-
-        let Some(max_quantity) = gov.max_creations(
-            &first.signature().signer,
-            self.subject_metadata.schema_id.clone(),
-            self.namespace.clone(),
-        ) else {
-            let error = SubjectError::MaxSubjectCreationNotFound;
-            return Err(ActorError::Functional {
-                description: error.to_string(),
-            });
         };
 
         let mut pending = Vec::new();
@@ -304,13 +492,6 @@ impl Tracker {
             pending.push(first);
             last_ledger
         } else {
-            self.register_relation(
-                ctx,
-                self.subject_metadata.owner.to_string(),
-                max_quantity.clone(),
-            )
-            .await?;
-
             if let Err(e) = Self::verify_first_ledger_event(
                 ctx,
                 &first,
@@ -323,6 +504,8 @@ impl Tracker {
                     description: e.to_string(),
                 });
             }
+
+            self.create(ctx, first.content().gov_version).await?;
 
             self.on_event(first.clone(), ctx).await;
 
@@ -358,15 +541,6 @@ impl Tracker {
             )
             .await?;
 
-            Tracker::transfer_register(
-                ctx,
-                TransferRegisterMessage::Create {
-                    subject_id: self.subject_metadata.subject_id.to_string(),
-                    owner: self.subject_metadata.owner.clone(),
-                },
-            )
-            .await?;
-
             first
         };
 
@@ -389,6 +563,8 @@ impl Tracker {
                     .protocols
                     .get_validation_data(),
             };
+
+            let last_gov_version = last_data.gov_version;
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
@@ -415,79 +591,31 @@ impl Tracker {
             };
 
             if last_event_is_ok {
+                if last_gov_version != event.content().gov_version {
+                    self.register_gov_version_sn(ctx, last_gov_version).await?;
+                }
+
                 match event.content().event_request.content().clone() {
                     EventRequest::Transfer(transfer_request) => {
-                        Tracker::new_transfer_subject(
+                        self.transfer(
                             ctx,
-                            self.subject_metadata.name.clone(),
-                            &transfer_request.subject_id.to_string(),
-                            &transfer_request.new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        Tracker::transfer_register(
-                            ctx,
-                            TransferRegisterMessage::Transfer {
-                                subject_id: self
-                                    .subject_metadata
-                                    .subject_id
-                                    .to_string(),
-                                new_owner: transfer_request.new_owner,
-                            },
+                            transfer_request.new_owner,
+                            event.content().gov_version,
                         )
                         .await?;
                     }
-                    EventRequest::Reject(reject_request) => {
-                        Tracker::reject_transfer_subject(
-                            ctx,
-                            &reject_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        Tracker::transfer_register(
-                            ctx,
-                            TransferRegisterMessage::Reject {
-                                subject_id: self
-                                    .subject_metadata
-                                    .subject_id
-                                    .to_string(),
-                                sn: event.content().sn,
-                            },
-                        )
-                        .await?;
+                    EventRequest::Reject(..) => {
+                        self.reject(ctx, event.content().gov_version).await?;
                     }
-                    EventRequest::Confirm(confirm_request) => {
-                        self.register_relation(
+                    EventRequest::Confirm(..) => {
+                        self.confirm(
                             ctx,
-                            event.signature().signer.to_string(),
-                            max_quantity.clone(),
+                            event.signature().signer.clone(),
+                            event.content().gov_version,
                         )
-                        .await?;
-
-                        Tracker::change_node_subject(
-                            ctx,
-                            &confirm_request.subject_id.to_string(),
-                            &event.signature().signer.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        self.delete_relation(ctx).await?;
-
-                        Tracker::transfer_register(
-                            ctx,
-                            TransferRegisterMessage::Confirm {
-                                subject_id: self
-                                    .subject_metadata
-                                    .subject_id
-                                    .to_string(),
-                                sn: event.content().sn,
-                            },
-                        )
-                        .await?;
+                        .await;
                     }
-                    EventRequest::EOL(_eolrequest) => {
+                    EventRequest::EOL(..) => {
                         Self::register(
                             ctx,
                             RegisterMessage::EOLSubj {
@@ -536,88 +664,14 @@ impl Tracker {
 
         Ok(())
     }
-
-    async fn register_relation(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        owner: String,
-        max_quantity: CreatorQuantity,
-    ) -> Result<(), ActorError> {
-        let relation_path = ActorPath::from(&format!(
-            "/user/node/{}/relation_ship",
-            self.governance_id
-        ));
-        let relation_actor = ctx
-            .system()
-            .get_actor::<RelationShip>(&relation_path)
-            .await?;
-
-        let response = relation_actor
-            .ask(RelationShipMessage::RegisterNewSubject {
-                data: OwnerSchema {
-                    owner,
-                    schema_id: self.subject_metadata.schema_id.clone(),
-                    namespace: self.namespace.to_string(),
-                },
-                subject_id: self.subject_metadata.subject_id.to_string(),
-                max_quantity,
-            })
-            .await?;
-
-        match response {
-            RelationShipResponse::None => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "RelationShipResponse::None".to_owned(),
-                path: relation_path,
-            }),
-        }
-    }
-
-    pub async fn delete_relation(
-        &self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let relation_path = ActorPath::from(&format!(
-            "/user/node/{}/relation_ship",
-            self.governance_id
-        ));
-        let relation_actor = ctx
-            .system()
-            .get_actor::<RelationShip>(&relation_path)
-            .await?;
-        let response = relation_actor
-            .ask(RelationShipMessage::DeleteSubject {
-                data: OwnerSchema {
-                    owner: self.subject_metadata.owner.to_string(),
-                    schema_id: self.subject_metadata.schema_id.clone(),
-                    namespace: self.namespace.to_string(),
-                },
-                subject_id: self.subject_metadata.subject_id.to_string(),
-            })
-            .await?;
-
-        match response {
-            RelationShipResponse::None => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "RelationShipResponse::None".to_owned(),
-                path: relation_path,
-            }),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub enum TrackerMessage {
-    UpdateTransfer(TransferResponse),
-    /// Get the subject metadata.
     GetMetadata,
-    GetLedger {
-        last_sn: u64,
-    },
+    GetLedger { last_sn: u64 },
     GetLastLedger,
-    UpdateLedger {
-        events: Vec<SignedLedger>,
-    },
+    UpdateLedger { events: Vec<SignedLedger> },
     GetLastSn,
     GetGovernance,
 }
@@ -751,66 +805,7 @@ impl Handler<Tracker> for Tracker {
                 );
                 Ok(TrackerResponse::Sn(self.subject_metadata.sn))
             }
-            TrackerMessage::UpdateTransfer(res) => {
-                match res {
-                    TransferResponse::Confirm => {
-                        let Some(new_owner) =
-                            self.subject_metadata.new_owner.clone()
-                        else {
-                            error!(
-                                msg_type = "UpdateTransfer",
-                                transfer_action = "Confirm",
-                                subject_id = %self.subject_metadata.subject_id,
-                                "Failed to obtain new_owner"
-                            );
-                            return Err(ActorError::Functional {
-                                description: "Can not obtain new_owner"
-                                    .to_owned(),
-                            });
-                        };
 
-                        Tracker::change_node_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                            &new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        self.delete_relation(ctx).await?;
-
-                        debug!(
-                            msg_type = "UpdateTransfer",
-                            transfer_action = "Confirm",
-                            subject_id = %self.subject_metadata.subject_id,
-                            new_owner = %new_owner,
-                            "Transfer confirmed successfully"
-                        );
-                    }
-                    TransferResponse::Reject => {
-                        Tracker::reject_transfer_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                        )
-                        .await?;
-                        try_to_update(
-                            ctx,
-                            self.subject_metadata.subject_id.clone(),
-                            WitnessesAuth::None,
-                        )
-                        .await?;
-
-                        debug!(
-                            msg_type = "UpdateTransfer",
-                            transfer_action = "Reject",
-                            subject_id = %self.subject_metadata.subject_id,
-                            "Transfer rejected successfully"
-                        );
-                    }
-                }
-
-                Ok(TrackerResponse::Ok)
-            }
             TrackerMessage::GetLedger { last_sn } => {
                 let ledger = self.get_ledger(ctx, last_sn).await?;
                 Ok(TrackerResponse::Ledger { ledger })
@@ -909,7 +904,8 @@ impl Handler<Tracker> for Tracker {
 #[async_trait]
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
-    type InitParams = (Option<TrackerInit>, Arc<PublicKey>, HashAlgorithm);
+    type InitParams =
+        (Option<TrackerInit>, Arc<PublicKey>, HashAlgorithm, bool);
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
@@ -923,6 +919,7 @@ impl PersistentActor for Tracker {
         let init = params.0.unwrap_or_default();
 
         Self {
+            service: params.3,
             hash: Some(params.2),
             our_key: params.1,
             subject_metadata: init.subject_metadata,
