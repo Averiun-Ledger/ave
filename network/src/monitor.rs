@@ -1,6 +1,6 @@
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
+    Response,
 };
 use tracing::{Span, info_span};
 
@@ -74,9 +74,9 @@ impl Actor for Monitor {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Monitor", id = id)   
+            info_span!(parent: parent_span, "Monitor", id = id)
         } else {
-            info_span!("Monitor", id = id)   
+            info_span!("Monitor", id = id)
         }
     }
 }

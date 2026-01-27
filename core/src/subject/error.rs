@@ -23,7 +23,9 @@ pub enum SubjectError {
     InvalidValidatorSignature,
 
     // Event and ledger errors
-    #[error("event is not the next one to be applied: expected sn {expected}, got {actual}")]
+    #[error(
+        "event is not the next one to be applied: expected sn {expected}, got {actual}"
+    )]
     InvalidSequenceNumber { expected: u64, actual: u64 },
 
     #[error("previous ledger event hash does not match")]
@@ -94,7 +96,9 @@ pub enum SubjectError {
     #[error("failed to convert properties into GovernanceData: {details}")]
     GovernanceDataConversionFailed { details: String },
 
-    #[error("schema_id is Governance, but cannot convert properties: {details}")]
+    #[error(
+        "schema_id is Governance, but cannot convert properties: {details}"
+    )]
     GovernancePropertiesConversionFailed { details: String },
 
     #[error("{what} '{who}' is not a member")]

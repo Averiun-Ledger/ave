@@ -260,7 +260,8 @@ impl Handler<Register> for Register {
                         "Governance id is not registered"
                     );
                     return Err(ActorError::Functional {
-                        description: "Governance id is not registered".to_owned(),
+                        description: "Governance id is not registered"
+                            .to_owned(),
                     });
                 }
             }
@@ -289,7 +290,13 @@ impl Handler<Register> for Register {
                 );
             }
             RegisterMessage::EOLGov { gov_id } => {
-                self.on_event(RegisterEvent::EOLGov { gov_id: gov_id.clone() }, ctx).await;
+                self.on_event(
+                    RegisterEvent::EOLGov {
+                        gov_id: gov_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
 
                 debug!(
                     msg_type = "EOLGov",
@@ -328,8 +335,14 @@ impl Handler<Register> for Register {
                 );
             }
             RegisterMessage::EOLSubj { gov_id, subj_id } => {
-                self.on_event(RegisterEvent::EOLSubj { gov_id: gov_id.clone(), subj_id: subj_id.clone() }, ctx)
-                    .await;
+                self.on_event(
+                    RegisterEvent::EOLSubj {
+                        gov_id: gov_id.clone(),
+                        subj_id: subj_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
 
                 debug!(
                     msg_type = "EOLSubj",

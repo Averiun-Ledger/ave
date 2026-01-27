@@ -4,7 +4,7 @@ use crate::{
     ActorMessage, NetworkMessage,
     approval::types::{ApprovalState, ApprovalStateRes, VotationType},
     db::Storable,
-    governance::{data::GovernanceData},
+    governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
     model::common::{
         emit_fail,
@@ -15,8 +15,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::{
@@ -331,13 +330,13 @@ impl Actor for ApprPersist {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-            if let Err(e) = self.stop_store(ctx).await {
-                error!(
-                    error = %e,
-                    "Failed to stop approver store"
-                );
-                return Err(e);
-            }
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop approver store"
+            );
+            return Err(e);
+        }
         Ok(())
     }
 }

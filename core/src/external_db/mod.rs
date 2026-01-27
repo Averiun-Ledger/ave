@@ -1,19 +1,13 @@
-
 use async_trait::async_trait;
 use ave_actors::{
-    Actor,  ActorError, ActorPath, Handler, Message, NotPersistentActor
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::
-    error::Error
-;
+use crate::error::Error;
 
-
-#[derive(
-    Clone, Debug, Serialize, Deserialize
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DBManager;
 
 impl NotPersistentActor for DBManager {}

@@ -20,11 +20,11 @@ use crate::subject::Metadata;
 pub enum ValidationRes {
     Response {
         vali_req_hash: DigestIdentifier,
-        modified_metadata_hash: DigestIdentifier
+        modified_metadata_hash: DigestIdentifier,
     },
     Create {
         vali_req_hash: DigestIdentifier,
-        subject_metadata: Metadata
+        subject_metadata: Metadata,
     },
     Abort(String),
     TimeOut,
@@ -34,25 +34,15 @@ pub enum ValidationRes {
 #[derive(Debug, Error, Clone)]
 pub enum ValidatorError {
     #[error("Can not verify {data} signature")]
-    InvalidSignature {
-        data: &'static str
-    },
+    InvalidSignature { data: &'static str },
     #[error("The signer {signer} is not what was expected.")]
-    InvalidSigner {
-        signer: String
-    },
+    InvalidSigner { signer: String },
     #[error("The value {value} does not match the expected value")]
-    InvalidData {
-        value: &'static str
-    },
+    InvalidData { value: &'static str },
     #[error("An internal problem has occurred: {problem}")]
-    InternalError {
-        problem: String
-    },
+    InternalError { problem: String },
     #[error("The action could not be performed: {action}")]
-    InvalidOperation {
-        action: &'static str
-    },
+    InvalidOperation { action: &'static str },
 }
 
 pub enum ResponseSummary {

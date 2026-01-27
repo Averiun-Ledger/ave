@@ -1,20 +1,34 @@
 //! # Governance model.
 //!
 
-use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey, schematype::ReservedWords};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    schematype::ReservedWords,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 
 use std::{
     collections::{BTreeSet, HashSet},
     fmt::{self},
-    hash::Hash, vec,
+    hash::Hash,
+    vec,
 };
 
 pub type MemberName = String;
 
 /// Governance schema.
-#[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    Hash,
+    PartialEq,
+    Eq,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct Schema {
     pub initial_value: ValueWrapper,
     pub contract: String,
@@ -37,7 +51,17 @@ pub struct SchemaKeyCreators {
     pub evaluation: Option<HashSet<PublicKey>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RolesGov {
     pub approver: BTreeSet<MemberName>,
     pub evaluator: BTreeSet<MemberName>,
@@ -51,7 +75,10 @@ impl RolesGov {
         self.approver.contains(&ReservedWords::Owner.to_string())
             && self.evaluator.contains(&ReservedWords::Owner.to_string())
             && self.validator.contains(&ReservedWords::Owner.to_string())
-            && self.issuer.users.contains(&ReservedWords::Owner.to_string())
+            && self
+                .issuer
+                .users
+                .contains(&ReservedWords::Owner.to_string())
     }
 
     pub fn remove_member_role(&mut self, remove_members: &Vec<String>) {
@@ -126,7 +153,17 @@ impl RolesGov {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RolesAllSchemas {
     pub evaluator: BTreeSet<Role>,
     pub validator: BTreeSet<Role>,
@@ -165,16 +202,22 @@ impl RolesAllSchemas {
     ) -> Vec<Namespace> {
         let role = RoleTypes::from(role);
         match role {
-            RoleTypes::Evaluator => {
-                self.evaluator.iter().filter(|x| x.name == name).map(|x| x.namespace.clone()).collect()
-            }
-            RoleTypes::Validator => {
-                self.validator.iter().filter(|x| x.name == name).map(|x| x.namespace.clone()).collect()
-            }
+            RoleTypes::Evaluator => self
+                .evaluator
+                .iter()
+                .filter(|x| x.name == name)
+                .map(|x| x.namespace.clone())
+                .collect(),
+            RoleTypes::Validator => self
+                .validator
+                .iter()
+                .filter(|x| x.name == name)
+                .map(|x| x.namespace.clone())
+                .collect(),
             RoleTypes::Approver => {
                 vec![]
             }
-            _ => unreachable!("The role is obtained from ProtocolTypes")
+            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -191,10 +234,8 @@ impl RolesAllSchemas {
             RoleTypes::Validator => {
                 self.validator.iter().any(|x| x.name == name)
             }
-            RoleTypes::Approver => {
-                false
-            }
-            _ => unreachable!("The role is obtained from ProtocolTypes")
+            RoleTypes::Approver => false,
+            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -317,23 +358,23 @@ impl RolesAllSchemas {
             RoleTypes::Evaluator => self.evaluator.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Validator => self.validator.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Witness => self.witness.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Issuer => {
                 self.issuer.users.iter().any(|x| {
                     let namespace_role = x.namespace.clone();
                     namespace_role.is_ancestor_or_equal_of(&namespace)
-                    && x.name == name
+                        && x.name == name
                 }) || self.issuer.any
             }
             RoleTypes::Approver | RoleTypes::Creator => false,
@@ -396,7 +437,17 @@ impl RolesAllSchemas {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RolesSchema {
     pub evaluator: BTreeSet<Role>,
     pub validator: BTreeSet<Role>,
@@ -596,34 +647,34 @@ impl RolesSchema {
             RoleTypes::Evaluator => self.evaluator.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Validator => self.validator.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Witness => self.witness.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Creator => self.creator.iter().any(|x| {
                 let namespace_role = x.namespace.clone();
                 namespace_role.is_ancestor_or_equal_of(&namespace)
-                && x.name == name
+                    && x.name == name
             }),
             RoleTypes::Issuer => {
                 self.issuer.users.iter().any(|x| {
                     let namespace_role = x.namespace.clone();
                     namespace_role.is_ancestor_or_equal_of(&namespace)
-                    && x.name == name
+                        && x.name == name
                 }) || self.issuer.any
             }
             RoleTypes::Approver => false,
         }
     }
-    
+
     pub fn role_namespace(
         &self,
         role: ProtocolTypes,
@@ -631,16 +682,22 @@ impl RolesSchema {
     ) -> Vec<Namespace> {
         let role = RoleTypes::from(role);
         match role {
-            RoleTypes::Evaluator => {
-                self.evaluator.iter().filter(|x| x.name == name).map(|x| x.namespace.clone()).collect()
-            }
-            RoleTypes::Validator => {
-                self.validator.iter().filter(|x| x.name == name).map(|x| x.namespace.clone()).collect()
-            }
+            RoleTypes::Evaluator => self
+                .evaluator
+                .iter()
+                .filter(|x| x.name == name)
+                .map(|x| x.namespace.clone())
+                .collect(),
+            RoleTypes::Validator => self
+                .validator
+                .iter()
+                .filter(|x| x.name == name)
+                .map(|x| x.namespace.clone())
+                .collect(),
             RoleTypes::Approver => {
                 vec![]
             }
-            _ => unreachable!("The role is obtained from ProtocolTypes")
+            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -657,10 +714,8 @@ impl RolesSchema {
             RoleTypes::Validator => {
                 self.validator.iter().any(|x| x.name == name)
             }
-            RoleTypes::Approver => {
-                false
-            }
-            _ => unreachable!("The role is obtained from ProtocolTypes")
+            RoleTypes::Approver => false,
+            _ => unreachable!("The role is obtained from ProtocolTypes"),
         }
     }
 
@@ -824,14 +879,26 @@ impl HashThisRole {
 
 /// Governance role.
 #[derive(
-    Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq, PartialOrd, Ord, BorshDeserialize, BorshSerialize
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Hash,
+    Eq,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 pub struct Role {
     pub name: String,
     pub namespace: Namespace,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize,
+)]
 pub struct RoleCreator {
     pub name: String,
     pub namespace: Namespace,
@@ -883,19 +950,49 @@ impl RoleCreator {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RoleGovIssuer {
     pub users: BTreeSet<MemberName>,
     pub any: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RoleSchemaIssuer {
     pub users: BTreeSet<Role>,
     pub any: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub enum CreatorQuantity {
     Quantity(u32),
     Infinity,
@@ -1033,7 +1130,15 @@ impl Quorum {
 }
 
 /// Governance policy.
-#[derive(Debug, Serialize, Deserialize, Clone, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct PolicyGov {
     /// Approve quorum
     pub approve: Quorum,
@@ -1054,7 +1159,16 @@ impl PolicyGov {
 }
 
 #[derive(
-    Debug, Serialize, Deserialize, Clone, Hash, PartialEq, Eq, Default, BorshDeserialize, BorshSerialize
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 pub struct PolicySchema {
     /// Evaluate quorum

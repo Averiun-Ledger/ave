@@ -4,10 +4,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
 
-use ave_common::{
-    Namespace, SchemaType,
-    identity::{PublicKey},
-};
+use ave_common::{Namespace, SchemaType, identity::PublicKey};
 
 use crate::{
     governance::{
@@ -32,12 +29,14 @@ where
 {
     let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-    if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await
-    {
+    if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor.ask(TrackerMessage::GetGovernance).await?;
         match response {
             TrackerResponse::Governance(gov_data) => Ok(*gov_data),
-            _ => Err(ActorError::UnexpectedResponse { expected: "TrackerResponse::Governance".to_owned(), path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "TrackerResponse::Governance".to_owned(),
+                path,
+            }),
         }
     } else if let Ok(governance_actor) =
         ctx.system().get_actor::<Governance>(&path).await
@@ -47,10 +46,13 @@ where
             .await?;
         match response {
             GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
-            _ => Err(ActorError::UnexpectedResponse { expected: "GovernanceResponse::Governance".to_owned(), path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "GovernanceResponse::Governance".to_owned(),
+                path,
+            }),
         }
     } else {
-        Err(ActorError::NotFound {path})
+        Err(ActorError::NotFound { path })
     }
 }
 
@@ -63,12 +65,14 @@ where
 {
     let path = ActorPath::from(format!("/user/node/{}", subject_id));
 
-    if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await
-    {
+    if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor.ask(TrackerMessage::GetMetadata).await?;
         match response {
             TrackerResponse::Metadata(metadata) => Ok(*metadata),
-            _ => Err(ActorError::UnexpectedResponse { expected: "TrackerResponse::Metadata".to_owned(), path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "TrackerResponse::Metadata".to_owned(),
+                path,
+            }),
         }
     } else if let Ok(governance_actor) =
         ctx.system().get_actor::<Governance>(&path).await
@@ -77,10 +81,13 @@ where
             governance_actor.ask(GovernanceMessage::GetMetadata).await?;
         match response {
             GovernanceResponse::Metadata(metadata) => Ok(*metadata),
-            _ => Err(ActorError::UnexpectedResponse {expected:"GovernanceResponse::Metadata".to_owned(), path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "GovernanceResponse::Metadata".to_owned(),
+                path,
+            }),
         }
     } else {
-        Err(ActorError::NotFound {path})
+        Err(ActorError::NotFound { path })
     }
 }
 
@@ -139,7 +146,7 @@ where
 async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &str,
-) -> Result<Option<SignedLedger>, ActorError> 
+) -> Result<Option<SignedLedger>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -149,9 +156,7 @@ where
     {
         let response = tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
         match response {
-            TrackerResponse::LastLedger { ledger_event } => {
-                Ok(ledger_event)
-            }
+            TrackerResponse::LastLedger { ledger_event } => Ok(ledger_event),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "TrackerResponse::LastLedger".to_owned(),
@@ -164,9 +169,7 @@ where
             .ask(GovernanceMessage::GetLastLedger)
             .await?;
         match response {
-            GovernanceResponse::LastLedger { ledger_event } => {
-                Ok(ledger_event)
-            }
+            GovernanceResponse::LastLedger { ledger_event } => Ok(ledger_event),
             _ => Err(ActorError::UnexpectedResponse(
                 path,
                 "GovernanceResponse::LastLedger".to_owned(),

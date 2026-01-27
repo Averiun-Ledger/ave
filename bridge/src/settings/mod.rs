@@ -527,7 +527,9 @@ http:
             Duration::from_secs(42)
         );
         match &node.network.memory_limit {
-            Some(network::MemoryLimit::Bytes(bytes)) => assert_eq!(*bytes, 1073741824),
+            Some(network::MemoryLimit::Bytes(bytes)) => {
+                assert_eq!(*bytes, 1073741824)
+            }
             _ => panic!("Expected Some(Bytes) variant for memory_limit"),
         }
 

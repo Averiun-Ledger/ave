@@ -1,10 +1,16 @@
 use std::collections::HashSet;
 
 use crate::{
-    evaluation::request::EvaluationReq, governance::model::Quorum, model::event::{EvaluationData, Ledger, ValidationData}, validation::request::ValidationReq
+    evaluation::request::EvaluationReq,
+    governance::model::Quorum,
+    model::event::{EvaluationData, Ledger, ValidationData},
+    validation::request::ValidationReq,
 };
 
-use ave_common::{ValueWrapper, identity::{PublicKey, Signed}};
+use ave_common::{
+    ValueWrapper,
+    identity::{PublicKey, Signed},
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -23,14 +29,14 @@ pub enum RequestManagerState {
         request: Signed<ValidationReq>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
-        signers: HashSet<PublicKey>
+        signers: HashSet<PublicKey>,
     },
     ValidationRes {
         val_req: ValidationReq,
-        val_res: ValidationData
+        val_res: ValidationData,
     },
     Distribution {
-        ledger: Signed<Ledger>
+        ledger: Signed<Ledger>,
     },
 }
 

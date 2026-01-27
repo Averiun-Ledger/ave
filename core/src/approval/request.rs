@@ -1,6 +1,7 @@
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, PublicKey, Signed}, request::EventRequest,
+    identity::{DigestIdentifier, PublicKey, Signed},
+    request::EventRequest,
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -29,5 +30,5 @@ pub struct ApprovalReq {
     /// The hash of the state after applying the patch.
     pub properties_hash: DigestIdentifier,
 
-    pub signer: PublicKey
+    pub signer: PublicKey,
 }

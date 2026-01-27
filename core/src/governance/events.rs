@@ -1,13 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use ave_common::{Namespace, SchemaType, identity::PublicKey, schematype::ReservedWords};
+use ave_common::{
+    Namespace, SchemaType, identity::PublicKey, schematype::ReservedWords,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     evaluation::runner::error::{self, RunnerError},
     governance::{
-        CreatorRoleUpdate, RolesUpdate, RolesUpdateRemove, data::GovernanceData, model::{Quorum, Role}, witnesses_register::WitnessesType
+        CreatorRoleUpdate, RolesUpdate, RolesUpdateRemove,
+        data::GovernanceData,
+        model::{Quorum, Role},
+        witnesses_register::WitnessesType,
     },
 };
 
@@ -26,15 +31,29 @@ pub struct GovernanceEvent {
 }
 
 impl GovernanceEvent {
-    pub fn update_creator_change(&self, members: &BTreeMap<MemberName, PublicKey>, roles_schema: &BTreeMap<SchemaType, RolesSchema>) -> CreatorRoleUpdate {
+    pub fn update_creator_change(
+        &self,
+        members: &BTreeMap<MemberName, PublicKey>,
+        roles_schema: &BTreeMap<SchemaType, RolesSchema>,
+    ) -> CreatorRoleUpdate {
         let mut new_creator: HashMap<
             (SchemaType, String, PublicKey),
             (CreatorQuantity, BTreeSet<String>),
         > = HashMap::new();
 
-        let mut update_creator_quantity: HashSet<(SchemaType, String, PublicKey, CreatorQuantity)> = HashSet::new();
+        let mut update_creator_quantity: HashSet<(
+            SchemaType,
+            String,
+            PublicKey,
+            CreatorQuantity,
+        )> = HashSet::new();
 
-        let mut update_creator_witnesses: HashSet<(SchemaType, String, PublicKey, BTreeSet<String>)> = HashSet::new();
+        let mut update_creator_witnesses: HashSet<(
+            SchemaType,
+            String,
+            PublicKey,
+            BTreeSet<String>,
+        )> = HashSet::new();
 
         let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
             HashSet::new();
@@ -44,109 +63,117 @@ impl GovernanceEvent {
                 for schema in schemas {
                     if let Some(change) = &schema.change {
                         if let Some(creator) = &change.creator {
-                            if let Some(roles) = roles_schema.get(&schema.schema_id) {
+                            if let Some(roles) =
+                                roles_schema.get(&schema.schema_id)
+                            {
                                 creator.iter().for_each(|x| {
-                                if let Some(user) = members.get(&x.actual_name) {
-                                    if let Some(new_namespace) = &x.new_namespace {
-                                        remove_creator
-                                            .insert((
+                                    if let Some(user) = members.get(&x.actual_name) {
+                                        if let Some(new_namespace) = &x.new_namespace {
+                                            remove_creator.insert((
                                                 schema.schema_id.clone(),
                                                 x.actual_namespace.to_string(),
-                                                user.clone()
+                                                user.clone(),
                                             ));
 
-
-                                    match (&x.new_witnesses, &x.new_quantity) {
-                                        (None, None) => {
-                                                if let Some(creator) = roles.creator.get(&RoleCreator { name: x.actual_name.clone(), namespace: x.actual_namespace.clone(), witnesses: BTreeSet::new(), quantity: CreatorQuantity::Infinity }) {
-                                                    if let Some(user) = members.get(&creator.name) {
-
-new_creator
-                                    .insert((
-                                        schema.schema_id.clone(),
-                                        new_namespace.to_string(),
-                                        user.clone()
-                                    ), (
-                                        
-                                        creator.quantity.clone(),
-                                        creator.witnesses.clone(),
-                                    ));
-                                }
-
+                                            match (&x.new_witnesses, &x.new_quantity) {
+                                                (None, None) => {
+                                                    if let Some(creator) =
+                                                        roles.creator.get(&RoleCreator {
+                                                            name: x.actual_name.clone(),
+                                                            namespace: x.actual_namespace.clone(),
+                                                            witnesses: BTreeSet::new(),
+                                                            quantity: CreatorQuantity::Infinity,
+                                                        })
+                                                    {
+                                                        if let Some(user) = members.get(&creator.name) {
+                                                            new_creator.insert(
+                                                                (
+                                                                    schema.schema_id.clone(),
+                                                                    new_namespace.to_string(),
+                                                                    user.clone(),
+                                                                ),
+                                                                (
+                                                                    creator.quantity.clone(),
+                                                                    creator.witnesses.clone(),
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
                                                 }
-                                            
-                                        },
-                                        (None, Some(q)) => {
-                                                if let Some(creator) = roles.creator.get(&RoleCreator { name: x.actual_name.clone(), namespace: x.actual_namespace.clone(), witnesses: BTreeSet::new(), quantity: CreatorQuantity::Infinity }) {
-                                                    if let Some(user) = members.get(&creator.name) {
-                                    let mut witnesses = vec![];
-                                    for witness in creator.witnesses.iter() {
-                                        if  witness == &ReservedWords::Witnesses.to_string() {
-                                                witnesses.push(WitnessesType::Witnesses);
-                                            } else {
-                                                if let Some(w) = members.get(witness) {
-                                                    witnesses.push(WitnessesType::User(w.clone()));
+                                                (None, Some(q)) => {
+                                                    if let Some(creator) =
+                                                        roles.creator.get(&RoleCreator {
+                                                            name: x.actual_name.clone(),
+                                                            namespace: x.actual_namespace.clone(),
+                                                            witnesses: BTreeSet::new(),
+                                                            quantity: CreatorQuantity::Infinity,
+                                                        })
+                                                    {
+                                                        if let Some(user) = members.get(&creator.name) {
+                                                            new_creator.insert(
+                                                                (
+                                                                    schema.schema_id.clone(),
+                                                                    new_namespace.to_string(),
+                                                                    user.clone(),
+                                                                ),
+                                                                (q.clone(), creator.witnesses.clone()),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                (Some(w), None) => {
+                                                    if let Some(creator) =
+                                                        roles.creator.get(&RoleCreator {
+                                                            name: x.actual_name.clone(),
+                                                            namespace: x.actual_namespace.clone(),
+                                                            witnesses: BTreeSet::new(),
+                                                            quantity: CreatorQuantity::Infinity,
+                                                        })
+                                                    {
+                                                        if let Some(user) = members.get(&creator.name) {
+                                                            new_creator.insert(
+                                                                (
+                                                                    schema.schema_id.clone(),
+                                                                    new_namespace.to_string(),
+                                                                    user.clone(),
+                                                                ),
+                                                                (creator.quantity.clone(), w.clone()),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                (Some(w), Some(q)) => {
+                                                    new_creator.insert(
+                                                        (
+                                                            schema.schema_id.clone(),
+                                                            new_namespace.to_string(),
+                                                            user.clone(),
+                                                        ),
+                                                        (q.clone(), w.clone()),
+                                                    );
                                                 }
                                             }
+                                        } else {
+                                            if let Some(q) = &x.new_quantity {
+                                                update_creator_quantity.insert((
+                                                    schema.schema_id.clone(),
+                                                    x.actual_namespace.to_string(),
+                                                    user.clone(),
+                                                    q.clone(),
+                                                ));
+                                            }
+
+                                            if let Some(w) = &x.new_witnesses {
+                                                update_creator_witnesses.insert((
+                                                    schema.schema_id.clone(),
+                                                    x.actual_namespace.to_string(),
+                                                    user.clone(),
+                                                    w.clone(),
+                                                ));
+                                            }
+                                        }
                                     }
-new_creator
-                                    .insert((
-                                        schema.schema_id.clone(),
-                                        new_namespace.to_string(),
-                                        user.clone()
-                                    ), (
-                                        
-                                        q.clone(),
-                                        creator.witnesses.clone(),
-                                    ));
-                                }
-
-                                                }
-                                        },
-                                        (Some(w), None) => {
-
-                                                                                    if let Some(creator) = roles.creator.get(&RoleCreator { name: x.actual_name.clone(), namespace: x.actual_namespace.clone(), witnesses: BTreeSet::new(), quantity: CreatorQuantity::Infinity }) {
-                                                    if let Some(user) = members.get(&creator.name) {
-new_creator
-                                    .insert((
-                                        schema.schema_id.clone(),
-                                        new_namespace.to_string(),
-                                        user.clone()
-                                    ), ( 
-                                        creator.quantity.clone(),
-                                        w.clone(),
-                                    ));
-                                }
-
-                                                }
-                                        },
-                                        (Some(w), Some(q)) => {
-
-new_creator
-                                    .insert((
-                                        schema.schema_id.clone(),
-                                        new_namespace.to_string(),
-                                        user.clone()
-                                    ), (q.clone(),
-                                        w.clone(),));
-                                        },
-                                    }
-                                    } else {
-                                        if let Some(q) = &x.new_quantity
-                                    {
-                                        update_creator_quantity
-                                                .insert((schema.schema_id.clone(), x.actual_namespace.to_string(), user.clone(), q.clone()));
-                                        
-                                    }
-
-                                    if let Some(w) = &x.new_witnesses {
-                                        update_creator_witnesses
-                                        .insert((schema.schema_id.clone(), x.actual_namespace.to_string(), user.clone(), w.clone()));
-                                    }
-
-                                    }
-                                }
-                            });
+                                });
                             }
                         }
                     }
@@ -162,7 +189,11 @@ new_creator
         }
     }
 
-    pub fn roles_update(&self, members: &BTreeMap<MemberName, PublicKey>, rm_roles: Option<RolesUpdateRemove>) -> RolesUpdate {
+    pub fn roles_update(
+        &self,
+        members: &BTreeMap<MemberName, PublicKey>,
+        rm_roles: Option<RolesUpdateRemove>,
+    ) -> RolesUpdate {
         let mut appr_quorum: Option<Quorum> = None;
         let mut eval_quorum: HashMap<SchemaType, Quorum> = HashMap::new();
         let mut vali_quorum: HashMap<SchemaType, Quorum> = HashMap::new();
@@ -180,7 +211,6 @@ new_creator
             Vec<Namespace>,
         > = HashMap::new();
 
-
         let mut new_validators: HashMap<
             (SchemaType, PublicKey),
             Vec<Namespace>,
@@ -192,9 +222,9 @@ new_creator
         > = HashMap::new();
 
         let mut new_creator: HashMap<
-        (SchemaType, String, PublicKey),
-        (CreatorQuantity, Vec<WitnessesType>),
-    > = HashMap::new();
+            (SchemaType, String, PublicKey),
+            (CreatorQuantity, Vec<WitnessesType>),
+        > = HashMap::new();
 
         let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
             HashSet::new();
@@ -209,7 +239,9 @@ new_creator
             Vec<Namespace>,
         > = HashMap::new();
 
-        if let Some(schema) = &self.schemas && let Some(schema_add) = &schema.add {
+        if let Some(schema) = &self.schemas
+            && let Some(schema_add) = &schema.add
+        {
             for schema_data in schema_add {
                 eval_quorum.insert(schema_data.id.clone(), Quorum::Majority);
                 vali_quorum.insert(schema_data.id.clone(), Quorum::Majority);
@@ -220,193 +252,180 @@ new_creator
             // Gov
             if let Some(governance) = &roles.governance {
                 if let Some(add) = &governance.add {
-                if let Some(approvers) = &add.approver {
+                    if let Some(approvers) = &add.approver {
                         approvers.iter().for_each(|x| {
-                                if let Some(user) = members.get(x) {
-                            new_approvers.push(user.clone());
-                                    
-                                }
-                                
-                            });
+                            if let Some(user) = members.get(x) {
+                                new_approvers.push(user.clone());
+                            }
+                        });
                     }
-                    
+
                     if let Some(evaluators) = &add.evaluator {
                         evaluators.iter().for_each(|x| {
-                                if let Some(user) = members.get(x) {
-                            new_evaluators
+                            if let Some(user) = members.get(x) {
+                                new_evaluators
                                     .entry((
                                         SchemaType::Governance,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(Namespace::new());
-                                }
-                                
-                            });
+                            }
+                        });
                     }
-                    
+
                     if let Some(validators) = &add.validator {
                         validators.iter().for_each(|x| {
-                                if let Some(user) = members.get(x) {
-                            new_validators
+                            if let Some(user) = members.get(x) {
+                                new_validators
                                     .entry((
                                         SchemaType::Governance,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(Namespace::new());
-                                }
-                                
-                            });
+                            }
+                        });
                     }
                 }
                 if let Some(remove) = &governance.remove {
                     if let Some(approvers) = &remove.approver {
                         approvers.iter().for_each(|x| {
-                                if let Some(user) = members.get(x) {
-                            remove_approvers.push(user.clone());
-                                    
-                                }
-                                
-                            });
+                            if let Some(user) = members.get(x) {
+                                remove_approvers.push(user.clone());
+                            }
+                        });
                     }
 
                     if let Some(evaluators) = &remove.evaluator {
-                            evaluators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(x) {
-                             remove_evaluators
+                        evaluators.iter().for_each(|x| {
+                            if let Some(user) = members.get(x) {
+                                remove_evaluators
                                     .entry((
                                         SchemaType::Governance,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(Namespace::new());
-                                }
-                            });
-                        }
+                            }
+                        });
+                    }
 
                     if let Some(validators) = &remove.validator {
-                            validators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(x) {
-                             remove_validators
+                        validators.iter().for_each(|x| {
+                            if let Some(user) = members.get(x) {
+                                remove_validators
                                     .entry((
                                         SchemaType::Governance,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(Namespace::new());
-                                }
-                            });
-                        }
+                            }
+                        });
+                    }
                 }
             }
 
             // all schemas
             if let Some(all_schemas) = &roles.all_schemas {
                 if let Some(add) = &all_schemas.add {
-if let Some(evaluators) = &add.evaluator {
+                    if let Some(evaluators) = &add.evaluator {
                         evaluators.iter().for_each(|x| {
-                                if let Some(user) = members.get(&x.name) {
-                            new_evaluators
+                            if let Some(user) = members.get(&x.name) {
+                                new_evaluators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                                
-                            });
+                            }
+                        });
                     }
-
 
                     if let Some(validators) = &add.validator {
                         validators.iter().for_each(|x| {
-                                if let Some(user) = members.get(&x.name) {
-                            new_validators
+                            if let Some(user) = members.get(&x.name) {
+                                new_validators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                                
-                            });
+                            }
+                        });
                     }
 
                     if let Some(witnesses) = &add.witness {
-                            witnesses.iter().for_each(|x| {
-                                if let Some(user) = members.get(&x.name) {
-                            new_witnesses
+                        witnesses.iter().for_each(|x| {
+                            if let Some(user) = members.get(&x.name) {
+                                new_witnesses
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                                
-                            });
-                        }
-
+                            }
+                        });
+                    }
                 }
                 if let Some(remove) = &all_schemas.remove {
                     if let Some(evaluators) = &remove.evaluator {
-                            evaluators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_evaluators
+                        evaluators.iter().for_each(|x| {
+                            if let Some(user) = members.get(&x.name) {
+                                remove_evaluators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                            });
-                        }
+                            }
+                        });
+                    }
 
                     if let Some(validators) = &remove.validator {
-                            validators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_validators
+                        validators.iter().for_each(|x| {
+                            if let Some(user) = members.get(&x.name) {
+                                remove_validators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                            });
-                        }
-
+                            }
+                        });
+                    }
 
                     if let Some(witnesses) = &remove.witness {
-                            witnesses.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_witnesses
+                        witnesses.iter().for_each(|x| {
+                            if let Some(user) = members.get(&x.name) {
+                                remove_witnesses
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.namespace.clone());
-                                }
-                            });
-                        }
+                            }
+                        });
+                    }
                 }
                 if let Some(change) = &all_schemas.change {
                     if let Some(evaluators) = &change.evaluator {
-                          evaluators.iter().for_each(|x| {
+                        evaluators.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.actual_name) {
-remove_evaluators
+                                remove_evaluators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.actual_namespace.clone());
-
 
                                 new_evaluators
                                     .entry((
@@ -416,21 +435,19 @@ remove_evaluators
                                     .or_default()
                                     .push(x.new_namespace.clone());
                             }
+                        });
+                    }
 
-                            });
-                        }
-
-if let Some(validators) = &change.validator {
-                          validators.iter().for_each(|x| {
+                    if let Some(validators) = &change.validator {
+                        validators.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.actual_name) {
-remove_validators
+                                remove_validators
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.actual_namespace.clone());
-
 
                                 new_validators
                                     .entry((
@@ -440,22 +457,19 @@ remove_validators
                                     .or_default()
                                     .push(x.new_namespace.clone());
                             }
+                        });
+                    }
 
-                            });
-                        }
-
-
-                                            if let Some(witnesses) = &change.witness {
-                          witnesses.iter().for_each(|x| {
+                    if let Some(witnesses) = &change.witness {
+                        witnesses.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.actual_name) {
-remove_witnesses
+                                remove_witnesses
                                     .entry((
                                         SchemaType::AllSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
                                     .push(x.actual_namespace.clone());
-
 
                                 new_witnesses
                                     .entry((
@@ -465,9 +479,8 @@ remove_witnesses
                                     .or_default()
                                     .push(x.new_namespace.clone());
                             }
-
-                            });
-                        }
+                        });
+                    }
                 }
             }
 
@@ -477,27 +490,27 @@ remove_witnesses
                     if let Some(add) = &schema.add {
                         if let Some(evaluators) = &add.evaluator {
                             evaluators.iter().for_each(|x| {
-                                            if let Some(user) = members.get(&x.name) {
-                            new_evaluators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    new_evaluators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
                                 }
                             });
                         }
                         if let Some(validators) = &add.validator {
                             validators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                            new_validators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    new_validators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
                                 }
                             });
                         }
@@ -506,39 +519,47 @@ remove_witnesses
                                 if let Some(user) = members.get(&x.name) {
                                     let mut witnesses = vec![];
                                     for witness in x.witnesses.iter() {
-                                        if  witness == &ReservedWords::Witnesses.to_string() {
-                                                witnesses.push(WitnessesType::Witnesses);
-                                            } else {
-                                                if let Some(w) = members.get(witness) {
-                                                    witnesses.push(WitnessesType::User(w.clone()));
-                                                }
+                                        if witness
+                                            == &ReservedWords::Witnesses
+                                                .to_string()
+                                        {
+                                            witnesses
+                                                .push(WitnessesType::Witnesses);
+                                        } else {
+                                            if let Some(w) =
+                                                members.get(witness)
+                                            {
+                                                witnesses.push(
+                                                    WitnessesType::User(
+                                                        w.clone(),
+                                                    ),
+                                                );
                                             }
+                                        }
                                     }
 
-new_creator
-                                    .insert((
-                                        schema.schema_id.clone(),
-                                        x.namespace.to_string(),
-                                        user.clone()
-                                    ), (
-                                        x.quantity.clone(),
-                                        witnesses,
-                                    ));
+                                    new_creator.insert(
+                                        (
+                                            schema.schema_id.clone(),
+                                            x.namespace.to_string(),
+                                            user.clone(),
+                                        ),
+                                        (x.quantity.clone(), witnesses),
+                                    );
                                 }
-                                
                             });
                         }
 
                         if let Some(witnesses) = &add.witness {
                             witnesses.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                            new_witnesses
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    new_witnesses
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
                                 }
                             });
                         }
@@ -547,130 +568,122 @@ new_creator
                     if let Some(remove) = &schema.remove {
                         if let Some(evaluators) = &remove.evaluator {
                             evaluators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_evaluators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    remove_evaluators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
                                 }
                             });
                         }
                         if let Some(validators) = &remove.validator {
                             validators.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_validators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    remove_validators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
                                 }
                             });
                         }
                         if let Some(creator) = &remove.creator {
-creator.iter().for_each(|x| {
+                            creator.iter().for_each(|x| {
                                 if let Some(user) = members.get(&x.name) {
-
-                            remove_creator
-                                    .insert((
+                                    remove_creator.insert((
                                         schema.schema_id.clone(),
                                         x.namespace.to_string(),
-                                        user.clone()
+                                        user.clone(),
                                     ));
                                 }
-                                
                             });
                         }
                         if let Some(witnesses) = &remove.witness {
                             witnesses.iter().for_each(|x| {
-                                                                if let Some(user) = members.get(&x.name) {
-                             remove_witnesses
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.namespace.clone());
+                                if let Some(user) = members.get(&x.name) {
+                                    remove_witnesses
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.namespace.clone());
+                                }
+                            });
+                        }
+                    }
+                    if let Some(change) = &schema.change {
+                        if let Some(evaluators) = &change.evaluator {
+                            evaluators.iter().for_each(|x| {
+                                if let Some(user) = members.get(&x.actual_name)
+                                {
+                                    remove_evaluators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.actual_namespace.clone());
+
+                                    new_evaluators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.new_namespace.clone());
                                 }
                             });
                         }
 
-                    }
-                    if let Some(change) = &schema.change {
-                        if let Some(evaluators) = &change.evaluator {
-                          evaluators.iter().for_each(|x| {
-                            if let Some(user) = members.get(&x.actual_name) {
-remove_evaluators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.actual_namespace.clone());
-
-
-                                new_evaluators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.new_namespace.clone());
-                            }
-
-                            });
-                        }
-
-
                         if let Some(validators) = &change.validator {
-                          validators.iter().for_each(|x| {
-                            if let Some(user) = members.get(&x.actual_name) {
-remove_validators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.actual_namespace.clone());
+                            validators.iter().for_each(|x| {
+                                if let Some(user) = members.get(&x.actual_name)
+                                {
+                                    remove_validators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.actual_namespace.clone());
 
-
-                                new_validators
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.new_namespace.clone());
-                            }
-
+                                    new_validators
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.new_namespace.clone());
+                                }
                             });
                         }
 
                         if let Some(witnesses) = &change.witness {
-                          witnesses.iter().for_each(|x| {
-                            if let Some(user) = members.get(&x.actual_name) {
-remove_witnesses
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.actual_namespace.clone());
+                            witnesses.iter().for_each(|x| {
+                                if let Some(user) = members.get(&x.actual_name)
+                                {
+                                    remove_witnesses
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.actual_namespace.clone());
 
-
-                                new_witnesses
-                                    .entry((
-                                        schema.schema_id.clone(),
-                                        user.clone(),
-                                    ))
-                                    .or_default()
-                                    .push(x.new_namespace.clone());
-                            }
-
+                                    new_witnesses
+                                        .entry((
+                                            schema.schema_id.clone(),
+                                            user.clone(),
+                                        ))
+                                        .or_default()
+                                        .push(x.new_namespace.clone());
+                                }
                             });
                         }
                     }
@@ -682,7 +695,7 @@ remove_witnesses
             // gov
             if let Some(governance) = &policies.governance {
                 appr_quorum = governance.change.approve.clone();
-                
+
                 if let Some(quorum) = &governance.change.evaluate {
                     eval_quorum.insert(SchemaType::Governance, quorum.clone());
                 }
@@ -694,11 +707,13 @@ remove_witnesses
             // schemas
             if let Some(schemas) = &policies.schema {
                 for schema in schemas {
-                if let Some(quorum) = &schema.change.evaluate {
-                    eval_quorum.insert(schema.schema_id.clone(), quorum.clone());
-                }
+                    if let Some(quorum) = &schema.change.evaluate {
+                        eval_quorum
+                            .insert(schema.schema_id.clone(), quorum.clone());
+                    }
                     if let Some(quorum) = &schema.change.validate {
-                        vali_quorum.insert(schema.schema_id.clone(), quorum.clone());
+                        vali_quorum
+                            .insert(schema.schema_id.clone(), quorum.clone());
                     }
                 }
             }
@@ -712,21 +727,21 @@ remove_witnesses
             remove_validators.extend(rm.validators);
         }
 
-       RolesUpdate {
-                appr_quorum,
-                new_evaluators,
-                new_validators,
-                eval_quorum,
-                new_approvers,
-                remove_approvers,
-                vali_quorum,
-                remove_evaluators,
-                remove_validators,
-                new_creator,
-                remove_creator,
-                new_witnesses,
-                remove_witnesses
-            }
+        RolesUpdate {
+            appr_quorum,
+            new_evaluators,
+            new_validators,
+            eval_quorum,
+            new_approvers,
+            remove_approvers,
+            vali_quorum,
+            remove_evaluators,
+            remove_validators,
+            new_creator,
+            remove_creator,
+            new_witnesses,
+            remove_witnesses,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -792,7 +807,9 @@ impl GovRoleEvent {
         let mut seen_roles: HashSet<(String, String)> = HashSet::new();
 
         // Helper para registrar un rol y detectar duplicados
-        let mut check_and_register = |role_type: &str, name: &str| -> Result<(), RunnerError> {
+        let mut check_and_register = |role_type: &str,
+                                      name: &str|
+         -> Result<(), RunnerError> {
             let key = (role_type.to_string(), name.to_string());
             if !seen_roles.insert(key) {
                 return Err(RunnerError::InvalidEvent {
@@ -1366,8 +1383,15 @@ impl SchemaIdRole {
         let mut seen_roles: HashSet<(String, String, String)> = HashSet::new();
 
         // Helper para registrar un rol y detectar duplicados
-        let mut check_and_register = |role_type: &str, name: &str, namespace: &Namespace| -> Result<(), RunnerError> {
-            let key = (role_type.to_string(), name.to_string(), namespace.to_string());
+        let mut check_and_register = |role_type: &str,
+                                      name: &str,
+                                      namespace: &Namespace|
+         -> Result<(), RunnerError> {
+            let key = (
+                role_type.to_string(),
+                name.to_string(),
+                namespace.to_string(),
+            );
             if !seen_roles.insert(key) {
                 return Err(RunnerError::InvalidEvent {
                     location: "SchemaIdRole::check_data",
@@ -1387,7 +1411,11 @@ impl SchemaIdRole {
         if let Some(ref add) = self.add {
             if let Some(ref evaluators) = add.evaluator {
                 for eval in evaluators {
-                    check_and_register("evaluator", &eval.name, &eval.namespace)?;
+                    check_and_register(
+                        "evaluator",
+                        &eval.name,
+                        &eval.namespace,
+                    )?;
                 }
             }
             if let Some(ref validators) = add.validator {
@@ -1402,12 +1430,20 @@ impl SchemaIdRole {
             }
             if let Some(ref creators) = add.creator {
                 for creator in creators {
-                    check_and_register("creator", &creator.name, &creator.namespace)?;
+                    check_and_register(
+                        "creator",
+                        &creator.name,
+                        &creator.namespace,
+                    )?;
                 }
             }
             if let Some(ref issuers) = add.issuer {
                 for issuer in issuers {
-                    check_and_register("issuer", &issuer.name, &issuer.namespace)?;
+                    check_and_register(
+                        "issuer",
+                        &issuer.name,
+                        &issuer.namespace,
+                    )?;
                 }
             }
         }
@@ -1416,27 +1452,47 @@ impl SchemaIdRole {
         if let Some(ref change) = self.change {
             if let Some(ref evaluators) = change.evaluator {
                 for eval in evaluators {
-                    check_and_register("evaluator", &eval.actual_name, &eval.actual_namespace)?;
+                    check_and_register(
+                        "evaluator",
+                        &eval.actual_name,
+                        &eval.actual_namespace,
+                    )?;
                 }
             }
             if let Some(ref validators) = change.validator {
                 for val in validators {
-                    check_and_register("validator", &val.actual_name, &val.actual_namespace)?;
+                    check_and_register(
+                        "validator",
+                        &val.actual_name,
+                        &val.actual_namespace,
+                    )?;
                 }
             }
             if let Some(ref witnesses) = change.witness {
                 for wit in witnesses {
-                    check_and_register("witness", &wit.actual_name, &wit.actual_namespace)?;
+                    check_and_register(
+                        "witness",
+                        &wit.actual_name,
+                        &wit.actual_namespace,
+                    )?;
                 }
             }
             if let Some(ref creators) = change.creator {
                 for creator in creators {
-                    check_and_register("creator", &creator.actual_name, &creator.actual_namespace)?;
+                    check_and_register(
+                        "creator",
+                        &creator.actual_name,
+                        &creator.actual_namespace,
+                    )?;
                 }
             }
             if let Some(ref issuers) = change.issuer {
                 for issuer in issuers {
-                    check_and_register("issuer", &issuer.actual_name, &issuer.actual_namespace)?;
+                    check_and_register(
+                        "issuer",
+                        &issuer.actual_name,
+                        &issuer.actual_namespace,
+                    )?;
                 }
             }
         }
@@ -1445,7 +1501,11 @@ impl SchemaIdRole {
         if let Some(ref remove) = self.remove {
             if let Some(ref evaluators) = remove.evaluator {
                 for eval in evaluators {
-                    check_and_register("evaluator", &eval.name, &eval.namespace)?;
+                    check_and_register(
+                        "evaluator",
+                        &eval.name,
+                        &eval.namespace,
+                    )?;
                 }
             }
             if let Some(ref validators) = remove.validator {
@@ -1460,12 +1520,20 @@ impl SchemaIdRole {
             }
             if let Some(ref creators) = remove.creator {
                 for creator in creators {
-                    check_and_register("creator", &creator.name, &creator.namespace)?;
+                    check_and_register(
+                        "creator",
+                        &creator.name,
+                        &creator.namespace,
+                    )?;
                 }
             }
             if let Some(ref issuers) = remove.issuer {
                 for issuer in issuers {
-                    check_and_register("issuer", &issuer.name, &issuer.namespace)?;
+                    check_and_register(
+                        "issuer",
+                        &issuer.name,
+                        &issuer.namespace,
+                    )?;
                 }
             }
         }
@@ -1775,7 +1843,8 @@ impl SchemaIdRole {
                     }
 
                     for witness in creator.witnesses.iter() {
-                        if witness != &ReservedWords::Witnesses.to_string() && !members.contains(witness)
+                        if witness != &ReservedWords::Witnesses.to_string()
+                            && !members.contains(witness)
                         {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
@@ -2337,7 +2406,8 @@ impl SchemaIdRole {
                         let mut witnesses = witnesses.clone();
 
                         if witnesses.is_empty() {
-                            witnesses.insert(ReservedWords::Witnesses.to_string());
+                            witnesses
+                                .insert(ReservedWords::Witnesses.to_string());
                         }
 
                         for witness in witnesses.iter() {

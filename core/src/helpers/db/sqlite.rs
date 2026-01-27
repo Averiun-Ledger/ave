@@ -451,7 +451,8 @@ impl Subscriber<LastStateEvent> for SqliteLocal {
         let sn = event.event.content().sn;
         let subject_id = event.event.content().subject_id.to_string();
 
-        let sig_eval = if let Some(sig_eval) = event.event.content().evaluators {
+        let sig_eval = if let Some(sig_eval) = event.event.content().evaluators
+        {
             let Ok(sig_eval) = serde_json::to_string(&sig_eval) else {
                 let e = Error::ExtDB(
                     "Can not Serialize evaluators as String".to_owned(),
@@ -560,9 +561,9 @@ impl Subscriber<SignedLedger> for SqliteLocal {
         let subject_id = event.content().subject_id.to_string();
         let sn = event.content().sn;
         let succes: i32;
-        let Ok(event_req) =
-            serde_json::to_string(&json!(event.content().event_request.content))
-        else {
+        let Ok(event_req) = serde_json::to_string(&json!(
+            event.content().event_request.content
+        )) else {
             let e = Error::ExtDB(
                 "Can not Serialize protocols_error as String".to_owned(),
             );

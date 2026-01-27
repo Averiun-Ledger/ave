@@ -10,12 +10,15 @@ use ave_identity::{DigestIdentifier, PublicKey, Signed};
 use crate::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::{
-        BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest, BridgeTransferRequest
+        BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
+        BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
+        BridgeSignedEventRequest, BridgeTransferRequest,
     },
     request::{
-        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest,
-        TransferRequest,
-    }, signature::BridgeSignature,
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
+        RejectRequest, TransferRequest,
+    },
+    signature::BridgeSignature,
 };
 
 /// Error type for conversion failures
@@ -33,12 +36,24 @@ pub enum ConversionError {
 impl std::fmt::Display for ConversionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConversionError::InvalidSubjectId(e) => write!(f, "Invalid subject identifier: {}", e),
-            ConversionError::InvalidGovernanceId(e) => write!(f, "Invalid governance identifier: {}", e),
-            ConversionError::InvalidSchemaId(e) => write!(f, "Invalid schema identifier: {}", e),
-            ConversionError::InvalidPublicKey(e) => write!(f, "Invalid public key: {}", e),
-            ConversionError::InvalidNamespace(e) => write!(f, "Invalid namespace: {}", e),
-            ConversionError::MissingGovernanceId => write!(f, "Missing governance identifier"),
+            ConversionError::InvalidSubjectId(e) => {
+                write!(f, "Invalid subject identifier: {}", e)
+            }
+            ConversionError::InvalidGovernanceId(e) => {
+                write!(f, "Invalid governance identifier: {}", e)
+            }
+            ConversionError::InvalidSchemaId(e) => {
+                write!(f, "Invalid schema identifier: {}", e)
+            }
+            ConversionError::InvalidPublicKey(e) => {
+                write!(f, "Invalid public key: {}", e)
+            }
+            ConversionError::InvalidNamespace(e) => {
+                write!(f, "Invalid namespace: {}", e)
+            }
+            ConversionError::MissingGovernanceId => {
+                write!(f, "Missing governance identifier")
+            }
             ConversionError::MissingNamespace => write!(f, "Missing namespace"),
         }
     }
@@ -73,9 +88,13 @@ impl From<EventRequest> for BridgeEventRequest {
         match request {
             EventRequest::Create(req) => BridgeEventRequest::Create(req.into()),
             EventRequest::Fact(req) => BridgeEventRequest::Fact(req.into()),
-            EventRequest::Transfer(req) => BridgeEventRequest::Transfer(req.into()),
+            EventRequest::Transfer(req) => {
+                BridgeEventRequest::Transfer(req.into())
+            }
             EventRequest::EOL(req) => BridgeEventRequest::EOL(req.into()),
-            EventRequest::Confirm(req) => BridgeEventRequest::Confirm(req.into()),
+            EventRequest::Confirm(req) => {
+                BridgeEventRequest::Confirm(req.into())
+            }
             EventRequest::Reject(req) => BridgeEventRequest::Reject(req.into()),
         }
     }
@@ -86,12 +105,24 @@ impl TryFrom<BridgeEventRequest> for EventRequest {
 
     fn try_from(request: BridgeEventRequest) -> Result<Self, Self::Error> {
         match request {
-            BridgeEventRequest::Create(req) => Ok(EventRequest::Create(req.try_into()?)),
-            BridgeEventRequest::Fact(req) => Ok(EventRequest::Fact(req.try_into()?)),
-            BridgeEventRequest::Transfer(req) => Ok(EventRequest::Transfer(req.try_into()?)),
-            BridgeEventRequest::EOL(req) => Ok(EventRequest::EOL(req.try_into()?)),
-            BridgeEventRequest::Confirm(req) => Ok(EventRequest::Confirm(req.try_into()?)),
-            BridgeEventRequest::Reject(req) => Ok(EventRequest::Reject(req.try_into()?)),
+            BridgeEventRequest::Create(req) => {
+                Ok(EventRequest::Create(req.try_into()?))
+            }
+            BridgeEventRequest::Fact(req) => {
+                Ok(EventRequest::Fact(req.try_into()?))
+            }
+            BridgeEventRequest::Transfer(req) => {
+                Ok(EventRequest::Transfer(req.try_into()?))
+            }
+            BridgeEventRequest::EOL(req) => {
+                Ok(EventRequest::EOL(req.try_into()?))
+            }
+            BridgeEventRequest::Confirm(req) => {
+                Ok(EventRequest::Confirm(req.try_into()?))
+            }
+            BridgeEventRequest::Reject(req) => {
+                Ok(EventRequest::Reject(req.try_into()?))
+            }
         }
     }
 }
@@ -126,15 +157,14 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
         let schema_id = SchemaType::from_str(&request.schema_id)
             .map_err(|e| ConversionError::InvalidSchemaId(e))?;
 
-        let namespace = request
-            .namespace
-            .ok_or(ConversionError::MissingNamespace)?;
+        let namespace =
+            request.namespace.ok_or(ConversionError::MissingNamespace)?;
 
         let namespace = Namespace::from(namespace);
 
         if !namespace.check() {
             return Err(ConversionError::InvalidNamespace(
-                "Namespace validation failed".to_string()
+                "Namespace validation failed".to_string(),
             ));
         }
 
@@ -291,7 +321,8 @@ mod tests {
     #[test]
     fn test_fact_request_conversion() {
         let bridge_fact = BridgeFactRequest {
-            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s".to_string(),
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
             payload: json!({"test": "value"}),
         };
 
@@ -308,7 +339,9 @@ mod tests {
         let bridge_create = BridgeCreateRequest {
             name: Some("Test".to_string()),
             description: Some("Test description".to_string()),
-            governance_id: Some("BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s".to_string()),
+            governance_id: Some(
+                "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s".to_string(),
+            ),
             schema_id: "governance".to_string(),
             namespace: Some("test.namespace".to_string()),
         };
@@ -329,7 +362,10 @@ mod tests {
 
         let create: Result<CreateRequest, _> = bridge_create.try_into();
         assert!(create.is_err());
-        assert!(matches!(create.unwrap_err(), ConversionError::MissingGovernanceId));
+        assert!(matches!(
+            create.unwrap_err(),
+            ConversionError::MissingGovernanceId
+        ));
     }
 
     #[test]
@@ -341,6 +377,9 @@ mod tests {
 
         let fact: Result<FactRequest, _> = bridge_fact.try_into();
         assert!(fact.is_err());
-        assert!(matches!(fact.unwrap_err(), ConversionError::InvalidSubjectId(_)));
+        assert!(matches!(
+            fact.unwrap_err(),
+            ConversionError::InvalidSubjectId(_)
+        ));
     }
 }

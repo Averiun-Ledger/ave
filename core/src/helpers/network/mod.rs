@@ -1,5 +1,8 @@
 use ave_actors::Message;
-use ave_common::{SchemaType, identity::{DigestIdentifier, Signed}};
+use ave_common::{
+    SchemaType,
+    identity::{DigestIdentifier, Signed},
+};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +10,8 @@ use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     subject::SignedLedger,
-    update::TransferResponse, validation::{request::ValidationReq, response::ValidationRes},
+    update::TransferResponse,
+    validation::{request::ValidationReq, response::ValidationRes},
 };
 
 pub mod intermediary;

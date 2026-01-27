@@ -100,7 +100,7 @@ async fn test_governance_and_subject_copy_with_approve() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -475,7 +475,10 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.namespace, "");
     assert_eq!(state.schema_id, "governance");
     assert_eq!(state.owner, owner_governance.controller_id());
-    assert_eq!(state.new_owner, Some(future_owner.controller_id().to_string()));
+    assert_eq!(
+        state.new_owner,
+        Some(future_owner.controller_id().to_string())
+    );
     assert_eq!(state.creator, owner_governance.controller_id());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
@@ -1433,7 +1436,7 @@ async fn test_delete_schema() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -1580,7 +1583,7 @@ async fn test_change_schema() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }

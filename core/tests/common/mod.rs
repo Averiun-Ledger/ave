@@ -1,8 +1,9 @@
 use ave_common::{
-    RequestState, ValueWrapper, identity::{
+    RequestState, ValueWrapper,
+    identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
-    }
+    },
 };
 use ave_core::{
     Api,
@@ -12,7 +13,8 @@ use ave_core::{
     model::{
         Namespace,
         request::{
-            ConfirmRequest, CreateRequest, EventRequest, FactRequest, RejectRequest, SchemaType, TransferRequest
+            ConfirmRequest, CreateRequest, EventRequest, FactRequest,
+            RejectRequest, SchemaType, TransferRequest,
         },
     },
 };
@@ -68,7 +70,7 @@ pub async fn create_node(
         vec![listen_address.to_owned()],
         vec![],
         peers,
-        None
+        None,
     );
 
     let contract_dir =

@@ -4,7 +4,7 @@
 use std::{collections::HashSet, fmt::Display};
 
 use crate::{
-    governance::{data::GovernanceData, model::{RoleTypes}},
+    governance::{data::GovernanceData, model::RoleTypes},
     subject::Metadata,
 };
 

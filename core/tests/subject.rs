@@ -261,7 +261,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -313,7 +313,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -345,7 +345,7 @@ async fn test_limits_in_subjects() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -547,7 +547,7 @@ async fn test_namespace_in_role_1() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -597,7 +597,7 @@ async fn test_namespace_in_role_1() {
                                 "fixed": 10
                             }
                         }
-                    
+
                 }
             ]
         }
@@ -811,7 +811,7 @@ async fn test_namespace_in_role_2() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -861,7 +861,7 @@ async fn test_namespace_in_role_2() {
                                 "fixed": 10
                             }
                         }
-                    
+
                 }
             ]
         }
@@ -1083,7 +1083,7 @@ async fn test_subject_transfer_event_1() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -1334,7 +1334,7 @@ async fn test_subject_transfer_event_2() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -1652,7 +1652,7 @@ async fn test_subject_transfer_event_3() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -1955,7 +1955,7 @@ async fn test_dynamic_witnesses_1() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -2010,7 +2010,7 @@ async fn test_dynamic_witnesses_1() {
                             }
                         ]
                     }
-                
+
             }
         ]
     }});
@@ -2198,7 +2198,7 @@ async fn test_dynamic_witnesses_2() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -2254,7 +2254,7 @@ async fn test_dynamic_witnesses_2() {
                             }
                         ]
                     }
-                
+
             }
         ]
     }});
@@ -2474,7 +2474,7 @@ async fn test_dynamic_witnesses_explicit_1() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -2651,7 +2651,7 @@ async fn test_dynamic_witnesses_explicit_2() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -2876,7 +2876,7 @@ async fn test_dynamic_witnesses_explicit_3() {
                                 },
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3006,7 +3006,7 @@ async fn test_no_subject_validator() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3091,7 +3091,7 @@ async fn test_no_subject_evaluator() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3190,7 +3190,7 @@ async fn test_no_subject_issuer() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3308,7 +3308,7 @@ async fn test_1000_events() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         }
@@ -3448,7 +3448,7 @@ async fn test_subj_no_all_validators() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3465,7 +3465,7 @@ async fn test_subj_no_all_validators() {
                                 "fixed": 1
                            }
                         }
-                    
+
                 }
             ]
         }
@@ -3603,7 +3603,7 @@ async fn test_subj_no_all_evaluators() {
                                 }
                             ]
                         }
-                    
+
                 }
             ]
         },
@@ -3620,7 +3620,7 @@ async fn test_subj_no_all_evaluators() {
                                 "fixed": 1
                            }
                         }
-                    
+
                 }
             ]
         }

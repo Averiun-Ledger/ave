@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -139,18 +142,18 @@ impl Handler<ValidationSchema> for ValidationSchema {
                 }
 
                 if let Some(ns) = self.creators.get(&sender) {
-                    let namespace = match validation_req.content().get_namespace()
-                    {
-                        Ok(namespace) => namespace,
-                        Err(e) => {
-                            warn!(
-                                msg_type = "NetworkRequest",
-                                error = %e,
-                                "Failed to get namespace"
-                            );
-                            return Ok(());
-                        }
-                    };
+                    let namespace =
+                        match validation_req.content().get_namespace() {
+                            Ok(namespace) => namespace,
+                            Err(e) => {
+                                warn!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to get namespace"
+                                );
+                                return Ok(());
+                            }
+                        };
                     if !ns.contains(&namespace) {
                         warn!(
                             msg_type = "NetworkRequest",

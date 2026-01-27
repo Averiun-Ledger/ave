@@ -241,7 +241,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalCritical {description: e}
+                    ActorError::FunctionalCritical { description: e }
                 })?;
 
                 (
@@ -261,7 +261,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalCritical {description: e}
+                    ActorError::FunctionalCritical { description: e }
                 })?;
 
                 (
@@ -281,7 +281,7 @@ impl RequestManager {
                         "can not convert GovernanceData from properties: {}",
                         e
                     );
-                    ActorError::FunctionalCritical {description: e}
+                    ActorError::FunctionalCritical { description: e }
                 })?;
 
                 (
@@ -303,7 +303,7 @@ impl RequestManager {
                             "can not obtain schema {} from governance: {}",
                             metadata.schema_id, e
                         );
-                        ActorError::FunctionalCritical {description: e}
+                        ActorError::FunctionalCritical { description: e }
                     })?;
 
                 (
@@ -400,7 +400,9 @@ impl RequestManager {
     ) -> Result<(), ActorError> {
         info!(TARGET_MANAGER, "Init evaluation {}", self.id);
         let Some((hash, network)) = self.helpers.clone() else {
-            return Err(ActorError::FunctionalCritical {description:"Helpers is None".to_string()});
+            return Err(ActorError::FunctionalCritical {
+                description: "Helpers is None".to_string(),
+            });
         };
 
         let child = ctx
@@ -480,7 +482,7 @@ impl RequestManager {
                 "can not convert GovernanceData from properties: {}",
                 e
             );
-            ActorError::FunctionalCritical {description: e}
+            ActorError::FunctionalCritical { description: e }
         })?;
 
         let (signers, quorum) = governance_data.get_quorum_and_signers(
@@ -628,7 +630,7 @@ impl RequestManager {
                             "can not obtain schema {} from governance: {}",
                             create.schema_id, e
                         );
-                        ActorError::FunctionalCritical {description: e}
+                        ActorError::FunctionalCritical { description: e }
                     })?;
 
                 Ok((
@@ -688,7 +690,7 @@ impl RequestManager {
                         "can not obtain schema {} from governance: {}",
                         metadata.schema_id, e
                     );
-                    ActorError::FunctionalCritical {description: e}
+                    ActorError::FunctionalCritical { description: e }
                 })?;
 
             Ok((
@@ -922,7 +924,7 @@ impl RequestManager {
                     "can not convert governance from properties: {}",
                     e
                 );
-                return Err(ActorError::FunctionalCritical {description: e});
+                return Err(ActorError::FunctionalCritical { description: e });
             }
         };
 

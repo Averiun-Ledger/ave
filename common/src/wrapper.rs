@@ -867,10 +867,7 @@ mod tests {
         push_i64(&mut bytes, -123456789);
 
         let result = deser(bytes).expect("should deserialize i64");
-        assert_eq!(
-            result.0,
-            Value::Number(Number::from(-123456789i64))
-        );
+        assert_eq!(result.0, Value::Number(Number::from(-123456789i64)));
     }
 
     // Tests push_i64: handles boundary values (MIN/MAX)
@@ -927,10 +924,7 @@ mod tests {
         push_u64(&mut bytes, 987654321);
 
         let result = deser(bytes).expect("should deserialize u64");
-        assert_eq!(
-            result.0,
-            Value::Number(Number::from(987654321u64))
-        );
+        assert_eq!(result.0, Value::Number(Number::from(987654321u64)));
     }
 
     // Tests push_u64: handles boundary values (MIN=0, MAX)
@@ -962,10 +956,7 @@ mod tests {
         push_f64(&mut bytes, 3.14159);
 
         let result = deser(bytes).expect("should deserialize f64");
-        assert_eq!(
-            result.0,
-            Value::Number(Number::from_f64(3.14159).unwrap())
-        );
+        assert_eq!(result.0, Value::Number(Number::from_f64(3.14159).unwrap()));
     }
 
     // Tests push_f64: handles special values (+0, -0, very large/small)
@@ -996,7 +987,8 @@ mod tests {
         push_u8(&mut bytes_small, 1);
         push_u8(&mut bytes_small, 0);
         push_f64(&mut bytes_small, -2.2250738585072014e-308);
-        let result = deser(bytes_small).expect("should deserialize small negative f64");
+        let result =
+            deser(bytes_small).expect("should deserialize small negative f64");
         assert!(result.0.is_number());
     }
 

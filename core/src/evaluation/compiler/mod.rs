@@ -365,10 +365,7 @@ impl Handler<Compiler> for Compiler {
                 {
                     config.hash_algorithm
                 } else {
-                    error!(
-                        msg_type = "Compile",
-                        "Config helper not found"
-                    );
+                    error!(msg_type = "Compile", "Config helper not found");
                     return Err(ActorError::Helper {
                         name: "config".to_owned(),
                         reason: "Not found".to_owned(),

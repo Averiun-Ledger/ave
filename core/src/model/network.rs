@@ -36,7 +36,7 @@ pub struct TimeOut {
 
 #[derive(Clone, Debug)]
 pub struct RetryNetwork {
-    network: Arc<NetworkSender>
+    network: Arc<NetworkSender>,
 }
 
 impl RetryNetwork {
@@ -62,7 +62,8 @@ impl Handler<RetryNetwork> for RetryNetwork {
         msg: NetworkMessage,
         ctx: &mut ActorContext<RetryNetwork>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self.network
+        if let Err(e) = self
+            .network
             .send_command(network::CommandHelper::SendMessage { message: msg })
             .await
         {

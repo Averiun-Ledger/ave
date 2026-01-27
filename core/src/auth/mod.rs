@@ -347,7 +347,8 @@ impl Handler<Auth> for Auth {
                         "Subject has not been authorized"
                     );
                     return Err(ActorError::Functional {
-                        description: "The subject has not been authorized".to_owned(),
+                        description: "The subject has not been authorized"
+                            .to_owned(),
                     });
                 }
             }
@@ -367,7 +368,8 @@ impl Handler<Auth> for Auth {
                         "Subject has not been authorized"
                     );
                     return Err(ActorError::Functional {
-                        description: "The subject has not been authorized".to_owned(),
+                        description: "The subject has not been authorized"
+                            .to_owned(),
                     });
                 }
             }
@@ -467,23 +469,21 @@ impl Handler<Auth> for Auth {
                 let witness = merge_options(more_witness, auth_witness);
 
                 if let Some(witness) = witness {
-                    let (sn, request) = match Auth::create_req_schema(
-                        ctx,
-                        subject_id.clone(),
-                    )
-                    .await
-                    {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!(
-                                msg_type = "Update",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Cannot obtain request, sn, schema_id"
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
+                    let (sn, request) =
+                        match Auth::create_req_schema(ctx, subject_id.clone())
+                            .await
+                        {
+                            Ok(data) => data,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Cannot obtain request, sn, schema_id"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        };
 
                     match witness {
                         AuthWitness::One(key_identifier) => {
@@ -569,7 +569,8 @@ impl Handler<Auth> for Auth {
                         "Subject has not been authorized"
                     );
                     return Err(ActorError::Functional {
-                        description: "The subject has not been authorized".to_owned(),
+                        description: "The subject has not been authorized"
+                            .to_owned(),
                     });
                 }
             }

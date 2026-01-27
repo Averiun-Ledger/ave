@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Namespace, SchemaType, ValueWrapper};
 
-
 /// An enum representing a Ave Ledger event request.
 #[derive(
     Debug,

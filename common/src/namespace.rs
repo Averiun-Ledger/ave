@@ -167,7 +167,9 @@ impl Namespace {
     ///
     pub fn is_ancestor_or_equal_of(&self, other: &Namespace) -> bool {
         let me = format!("{}.", self);
-        other.to_string().as_str().starts_with(me.as_str()) || self.is_empty() || self == other
+        other.to_string().as_str().starts_with(me.as_str())
+            || self.is_empty()
+            || self == other
     }
 
     /// Returns if the name space is a descendant of another name space.

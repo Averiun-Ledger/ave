@@ -5,14 +5,15 @@
 
 use ave_common::bridge::conversions::ConversionError;
 use ave_common::{
-    BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest,
-    BridgeFactRequest, BridgeRejectRequest, BridgeTransferRequest,
+    BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
+    BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
+    BridgeTransferRequest,
 };
 use core::{
     error::Error,
     model::request::{
-        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest,
-        TransferRequest,
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
+        RejectRequest, TransferRequest,
     },
 };
 
@@ -20,19 +21,27 @@ use core::{
 // Conversion functions that delegate to the From/TryFrom traits
 // ============================================================================
 
-pub fn bridge_to_event_request(request: BridgeEventRequest) -> Result<EventRequest, Error> {
+pub fn bridge_to_event_request(
+    request: BridgeEventRequest,
+) -> Result<EventRequest, Error> {
     EventRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
-pub fn bridge_to_reject_request(request: BridgeRejectRequest) -> Result<RejectRequest, Error> {
+pub fn bridge_to_reject_request(
+    request: BridgeRejectRequest,
+) -> Result<RejectRequest, Error> {
     RejectRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
-pub fn bridge_to_create_request(request: BridgeCreateRequest) -> Result<CreateRequest, Error> {
+pub fn bridge_to_create_request(
+    request: BridgeCreateRequest,
+) -> Result<CreateRequest, Error> {
     CreateRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
-pub fn bridge_to_fact_request(request: BridgeFactRequest) -> Result<FactRequest, Error> {
+pub fn bridge_to_fact_request(
+    request: BridgeFactRequest,
+) -> Result<FactRequest, Error> {
     FactRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
@@ -42,11 +51,15 @@ pub fn bridge_to_transfer_request(
     TransferRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
-pub fn bridge_to_eol_request(request: BridgeEOLRequest) -> Result<EOLRequest, Error> {
+pub fn bridge_to_eol_request(
+    request: BridgeEOLRequest,
+) -> Result<EOLRequest, Error> {
     EOLRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
-pub fn bridge_to_confirm_request(request: BridgeConfirmRequest) -> Result<ConfirmRequest, Error> {
+pub fn bridge_to_confirm_request(
+    request: BridgeConfirmRequest,
+) -> Result<ConfirmRequest, Error> {
     ConfirmRequest::try_from(request).map_err(|e| Error::Bridge(e.to_string()))
 }
 
@@ -63,7 +76,9 @@ pub fn core_request_to_common(data: core::request::RequestData) -> RequestData {
     }
 }
 
-pub fn core_transfer_to_common(transfer: core::node::TransferSubject) -> TransferSubject {
+pub fn core_transfer_to_common(
+    transfer: core::node::TransferSubject,
+) -> TransferSubject {
     TransferSubject {
         name: transfer.name,
         subject_id: transfer.subject_id,

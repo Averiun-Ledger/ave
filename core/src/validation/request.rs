@@ -50,13 +50,15 @@ impl ValidationReq {
                 } else {
                     true
                 }
-            },
+            }
         }
     }
 
     pub fn get_signed_event_request(&self) -> Signed<EventRequest> {
         match self {
-            ValidationReq::Create { event_request, .. } =>event_request.clone(),
+            ValidationReq::Create { event_request, .. } => {
+                event_request.clone()
+            }
             ValidationReq::Event { event_request, .. } => event_request.clone(),
         }
     }

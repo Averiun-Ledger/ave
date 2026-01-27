@@ -27,7 +27,7 @@ pub enum ReservedWords {
     Governance,
     Any,
     Witnesses,
-    Owner
+    Owner,
 }
 
 impl Display for ReservedWords {
@@ -41,7 +41,6 @@ impl Display for ReservedWords {
         }
     }
 }
-
 
 impl std::str::FromStr for SchemaType {
     type Err = String;

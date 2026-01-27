@@ -1373,19 +1373,37 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
-        
+
         actor
             .tell(RoleRegisterMessage::Update {
                 version: 0,
                 appr_quorum: Some(Quorum::Majority),
-                eval_quorum: HashMap::from([(SchemaType::Governance, Quorum::Majority)]),
+                eval_quorum: HashMap::from([(
+                    SchemaType::Governance,
+                    Quorum::Majority,
+                )]),
                 new_approvers: vec![self.subject_metadata.owner.clone()],
-                new_evaluators: HashMap::from([((SchemaType::Governance, self.subject_metadata.owner.clone()), vec![Namespace::new()])]),
-                new_validators: HashMap::from([((SchemaType::Governance, self.subject_metadata.owner.clone()), vec![Namespace::new()])]),
+                new_evaluators: HashMap::from([(
+                    (
+                        SchemaType::Governance,
+                        self.subject_metadata.owner.clone(),
+                    ),
+                    vec![Namespace::new()],
+                )]),
+                new_validators: HashMap::from([(
+                    (
+                        SchemaType::Governance,
+                        self.subject_metadata.owner.clone(),
+                    ),
+                    vec![Namespace::new()],
+                )]),
                 remove_approvers: vec![],
                 remove_evaluators: HashMap::new(),
                 remove_validators: HashMap::new(),
-                vali_quorum: HashMap::from([(SchemaType::Governance, Quorum::Majority)]),
+                vali_quorum: HashMap::from([(
+                    SchemaType::Governance,
+                    Quorum::Majority,
+                )]),
             })
             .await
     }
@@ -1487,10 +1505,7 @@ impl Governance {
             )
             .await?;
 
-            self.first_role_register(
-                ctx,
-            )
-            .await?;
+            self.first_role_register(ctx).await?;
 
             Self::event_to_sink(
                 ctx,
@@ -1570,12 +1585,8 @@ impl Governance {
                         self.reject(ctx, 0).await?;
                     }
                     EventRequest::Confirm(..) => {
-                        self.confirm(
-                            ctx,
-                            event.signature().signer.clone(),
-                            0,
-                        )
-                        .await?;
+                        self.confirm(ctx, event.signature().signer.clone(), 0)
+                            .await?;
                     }
                     EventRequest::EOL(..) => {
                         Self::register(
@@ -1623,19 +1634,19 @@ impl Governance {
                             ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
                         })?;
 
-                let rm_members = if let Some(members) = &governance_event.members
-                {
-                    members.remove.clone()
-                } else {
-                    None
-                };
+                let rm_members =
+                    if let Some(members) = &governance_event.members {
+                        members.remove.clone()
+                    } else {
+                        None
+                    };
 
-                let rm_schemas = if let Some(schemas) = &governance_event.schemas
-                {
-                    schemas.remove.clone()
-                } else {
-                    None
-                };
+                let rm_schemas =
+                    if let Some(schemas) = &governance_event.schemas {
+                        schemas.remove.clone()
+                    } else {
+                        None
+                    };
 
                 let rm_roles = if rm_members.is_some() || rm_schemas.is_some() {
                     Some(

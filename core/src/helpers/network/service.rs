@@ -26,10 +26,9 @@ impl NetworkSender {
         &self,
         command: Command<NetworkMessage>,
     ) -> Result<(), ActorError> {
-        self.command_sender
-            .send(command)
-            .await
-            .map_err(|e|  ActorError::Functional(Error::Network(e.to_string()).to_string()))
+        self.command_sender.send(command).await.map_err(|e| {
+            ActorError::Functional(Error::Network(e.to_string()).to_string())
+        })
     }
 
     /// Send a message to the Helper worker.

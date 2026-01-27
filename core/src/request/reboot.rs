@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};

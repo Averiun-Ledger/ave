@@ -129,7 +129,7 @@ impl Protocols {
             | Protocols::GovFact { validation, .. }
             | Protocols::Transfer { validation, .. }
             | Protocols::TrackerConfirm { validation }
-            | Protocols::GovConfirm { validation, ..  }
+            | Protocols::GovConfirm { validation, .. }
             | Protocols::Reject { validation }
             | Protocols::EOL { validation } => validation.clone(),
         }
@@ -316,9 +316,11 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn get_create_metadata(&self) -> Result<Metadata, String> {
-        if let Protocols::Create { validation } = &self.protocols 
-            && let ValidationMetadata::Metadata(metadata) = &validation.validation_metadata {
-                Ok(metadata.clone())
+        if let Protocols::Create { validation } = &self.protocols
+            && let ValidationMetadata::Metadata(metadata) =
+                &validation.validation_metadata
+        {
+            Ok(metadata.clone())
         } else {
             todo!()
         }

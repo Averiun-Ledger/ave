@@ -8,10 +8,12 @@ use tokio_util::sync::CancellationToken;
 use wasmtime::Engine;
 
 use crate::{
-    Error,config::{Config, SinkAuth},
+    Error,
+    config::{Config, SinkAuth},
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink}, model::common::contract::create_secure_wasmtime_config,
+    helpers::{db::ExternalDB, sink::AveSink},
+    model::common::contract::create_secure_wasmtime_config,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,7 +21,7 @@ pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
     pub hash_algorithm: HashAlgorithm,
-    pub tracking_size: usize
+    pub tracking_size: usize,
 }
 
 impl From<Config> for ConfigHelper {
@@ -28,7 +30,7 @@ impl From<Config> for ConfigHelper {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
             hash_algorithm: value.hash_algorithm,
-            tracking_size: value.tracking_size
+            tracking_size: value.tracking_size,
         }
     }
 }
@@ -42,17 +44,22 @@ pub async fn system(
     // Create de actor system.
     let (system, mut runner) = ActorSystem::create(token);
 
-    system.add_helper("config", ConfigHelper::from(config.clone())).await;
+    system
+        .add_helper("config", ConfigHelper::from(config.clone()))
+        .await;
 
     // Create secure Wasmtime configuration with resource limits
-    let engine = Engine::new(&create_secure_wasmtime_config()).map_err(|e| {
-        Error::System(format!("Error creating the engine: {}", e))
-    })?;
+    let engine =
+        Engine::new(&create_secure_wasmtime_config()).map_err(|e| {
+            Error::System(format!("Error creating the engine: {}", e))
+        })?;
 
     system.add_helper("engine", Arc::new(engine)).await;
 
-    let contracts: HashMap::<String, Vec<u8>> = HashMap::new();
-    system.add_helper("contracts", Arc::new(RwLock::new(contracts))).await;
+    let contracts: HashMap<String, Vec<u8>> = HashMap::new();
+    system
+        .add_helper("contracts", Arc::new(RwLock::new(contracts)))
+        .await;
 
     // Build database manager.
     let db = Database::open(&config.ave_db)
@@ -87,10 +94,7 @@ pub async fn system(
     system.add_helper("encrypted_key", encrypted_key).await;
 
     let db_manager_actor = system
-        .create_root_actor(
-            "db_manager",
-            DBManager,
-        )
+        .create_root_actor("db_manager", DBManager)
         .await
         .map_err(|e| Error::System(e.to_string()))?;
 
@@ -111,7 +115,7 @@ pub mod tests {
 
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::{Config as NetworkConfig};
+    use network::Config as NetworkConfig;
     use tempfile::TempDir;
     use test_log::test;
 
@@ -154,7 +158,7 @@ pub mod tests {
             vec![],
             vec![],
             vec![],
-            None
+            None,
         );
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,

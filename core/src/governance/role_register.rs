@@ -241,8 +241,9 @@ impl Handler<RoleRegister> for RoleRegister {
                         None
                     };
 
-                    let mut all_eval = if !evaluation.schema_id.is_gov() && let Some(evaluators) =
-                        self.evaluators.get(&SchemaType::AllSchemas)
+                    let mut all_eval = if !evaluation.schema_id.is_gov()
+                        && let Some(evaluators) =
+                            self.evaluators.get(&SchemaType::AllSchemas)
                     {
                         let mut schema_eval = vec![];
                         for (key, namespace) in evaluators {
@@ -332,8 +333,9 @@ impl Handler<RoleRegister> for RoleRegister {
                     return Ok(RoleRegisterResponse::OutOfVersion);
                 }
 
-                let mut all_val = if !search.schema_id.is_gov() &&let Some(validators) =
-                    self.validators.get(&SchemaType::AllSchemas)
+                let mut all_val = if !search.schema_id.is_gov()
+                    && let Some(validators) =
+                        self.validators.get(&SchemaType::AllSchemas)
                 {
                     // PublicKey, Namespace), (IntervalSet, Option<u64>
                     let mut schema_val = vec![];

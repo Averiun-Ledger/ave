@@ -2,8 +2,8 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
+    Response,
 };
 use ave_common::response::{RequestInfo, RequestState};
 use lru::LruCache;
@@ -108,7 +108,11 @@ impl Handler<RequestTracking> for RequestTracking {
                 if let Some(info) = self.cache.get_mut(&request_id) {
                     info.version = version;
                 } else {
-                    error!(TARGET_TRACKING, "An attempt was made to update the version of a request that is not registered. {}", request_id);
+                    error!(
+                        TARGET_TRACKING,
+                        "An attempt was made to update the version of a request that is not registered. {}",
+                        request_id
+                    );
                 };
 
                 Ok(RequestTrackingResponse::Ok)

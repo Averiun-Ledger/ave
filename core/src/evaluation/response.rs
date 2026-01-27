@@ -3,9 +3,7 @@ use ave_common::{ValueWrapper, identity::DigestIdentifier};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    evaluation::runner::error::RunnerError
-};
+use crate::evaluation::runner::error::RunnerError;
 
 /// A struct representing an evaluation response.
 #[derive(
@@ -22,14 +20,14 @@ pub enum EvaluationRes {
     Error {
         error: EvaluatorError,
         eval_req_hash: DigestIdentifier,
-        req_subject_data_hash: DigestIdentifier
+        req_subject_data_hash: DigestIdentifier,
     },
     Abort(String),
     TimeOut,
     Response {
         response: EvaluatorResponse,
         eval_req_hash: DigestIdentifier,
-        req_subject_data_hash: DigestIdentifier
+        req_subject_data_hash: DigestIdentifier,
     },
     Reboot,
 }
@@ -85,7 +83,9 @@ impl std::fmt::Display for EvaluatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidEventSignature => write!(f, "invalid event signature"),
-            Self::InvalidEventRequest(e) => write!(f, "invalid event request {}", e),
+            Self::InvalidEventRequest(e) => {
+                write!(f, "invalid event request {}", e)
+            }
             Self::Runner(e) => write!(f, "runner error: {}", e),
             Self::InternalError(msg) => write!(f, "internal error: {}", msg),
         }

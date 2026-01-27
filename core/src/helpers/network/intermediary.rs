@@ -7,13 +7,13 @@ use crate::{
     distribution::distributor::{Distributor, DistributorMessage},
     evaluation::{
         coordinator::{EvalCoordinator, EvalCoordinatorMessage},
-        worker::{EvalWorker, EvalWorkerMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
+        worker::{EvalWorker, EvalWorkerMessage},
     },
     update::updater::{Updater, UpdaterMessage},
     validation::{
-        schema::{ValidationSchema, ValidationSchemaMessage},
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
+        schema::{ValidationSchema, ValidationSchemaMessage},
         worker::{ValiWorker, ValiWorkerMessage},
     },
 };

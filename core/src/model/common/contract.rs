@@ -29,9 +29,11 @@ pub enum ContractError {
     AllocationOverflow,
 
     #[error("linker error [{function}]: {details}")]
-    LinkerError { function: &'static str, details: String },
+    LinkerError {
+        function: &'static str,
+        details: String,
+    },
 }
-
 
 #[derive(Debug, Default)]
 pub struct MemoryManager {
@@ -62,9 +64,9 @@ impl MemoryManager {
         let current_len = self.memory.len();
 
         // Security check: prevent total memory exhaustion
-        let new_len = current_len.checked_add(len).ok_or_else(|| {
-            ContractError::AllocationOverflow
-        })?;
+        let new_len = current_len
+            .checked_add(len)
+            .ok_or_else(|| ContractError::AllocationOverflow)?;
 
         if new_len > MAX_TOTAL_MEMORY {
             return Err(ContractError::TotalMemoryExceeded {
@@ -91,10 +93,7 @@ impl MemoryManager {
 
         // Security check: validate write is within bounds
         if offset >= *len {
-            return Err(ContractError::WriteOutOfBounds {
-                offset,
-                size: *len,
-            });
+            return Err(ContractError::WriteOutOfBounds { offset, size: *len });
         }
 
         self.memory[start_ptr + offset] = data;
@@ -120,7 +119,10 @@ impl MemoryManager {
         *result as isize
     }
 
-    pub fn add_data_raw(&mut self, bytes: &[u8]) -> Result<usize, ContractError> {
+    pub fn add_data_raw(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<usize, ContractError> {
         let ptr = self.alloc(bytes.len())?;
         for (index, byte) in bytes.iter().enumerate() {
             self.memory[ptr + index] = *byte;
@@ -128,7 +130,6 @@ impl MemoryManager {
         Ok(ptr)
     }
 }
-
 
 /// Creates a secure Wasmtime configuration with resource limits.
 /// This configuration is shared between contract compilation and execution
@@ -159,15 +160,12 @@ pub fn generate_linker(
             "env",
             "pointer_len",
             |caller: Caller<'_, MemoryManager>, pointer: i32| {
-                caller.data().get_pointer_len(pointer as usize)
-                    as u32
+                caller.data().get_pointer_len(pointer as usize) as u32
             },
         )
-        .map_err(|e| {
-            ContractError::LinkerError {
-                function: "pointer_len",
-                details: e.to_string(),
-            }
+        .map_err(|e| ContractError::LinkerError {
+            function: "pointer_len",
+            details: e.to_string(),
         })?;
 
     linker
@@ -185,18 +183,19 @@ pub fn generate_linker(
                     })
             },
         )
-        .map_err(|e| {
-            ContractError::LinkerError {
-                function: "alloc",
-                details: e.to_string(),
-            }
+        .map_err(|e| ContractError::LinkerError {
+            function: "alloc",
+            details: e.to_string(),
         })?;
 
     linker
         .func_wrap(
             "env",
             "write_byte",
-            |mut caller: Caller<'_, MemoryManager>, ptr: u32, offset: u32, data: u32| {
+            |mut caller: Caller<'_, MemoryManager>,
+             ptr: u32,
+             offset: u32,
+             data: u32| {
                 caller
                     .data_mut()
                     .write_byte(ptr as usize, offset as usize, data as u8)
@@ -205,11 +204,9 @@ pub fn generate_linker(
                     });
             },
         )
-        .map_err(|e| {
-            ContractError::LinkerError {
-                function: "write_byte",
-                details: e.to_string(),
-            }
+        .map_err(|e| ContractError::LinkerError {
+            function: "write_byte",
+            details: e.to_string(),
         })?;
 
     linker
@@ -220,11 +217,9 @@ pub fn generate_linker(
                 caller.data().read_byte(index as usize) as u32
             },
         )
-        .map_err(|e| {
-            ContractError::LinkerError {
-                function: "read_byte",
-                details: e.to_string(),
-            }
+        .map_err(|e| ContractError::LinkerError {
+            function: "read_byte",
+            details: e.to_string(),
         })?;
 
     Ok(linker)

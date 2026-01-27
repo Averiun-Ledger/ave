@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::model::common::contract::ContractError;
+use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
@@ -76,7 +76,11 @@ impl std::fmt::Display for InvalidModuleKind {
                 )
             }
             Self::NonFunctionImport { import_type } => {
-                write!(f, "module has a '{}' import that is not a function", import_type)
+                write!(
+                    f,
+                    "module has a '{}' import that is not a function",
+                    import_type
+                )
             }
             Self::MissingImports { missing } => {
                 write!(
@@ -102,17 +106,26 @@ impl From<ContractError> for CompilerError {
             }
             ContractError::WriteOutOfBounds { offset, size } => {
                 CompilerError::MemoryAllocationFailed {
-                    details: format!("write out of bounds: offset {} >= size {}", offset, size),
+                    details: format!(
+                        "write out of bounds: offset {} >= size {}",
+                        offset, size
+                    ),
                 }
             }
             ContractError::AllocationTooLarge { size, max } => {
                 CompilerError::MemoryAllocationFailed {
-                    details: format!("allocation size {} exceeds maximum of {} bytes", size, max),
+                    details: format!(
+                        "allocation size {} exceeds maximum of {} bytes",
+                        size, max
+                    ),
                 }
             }
             ContractError::TotalMemoryExceeded { total, max } => {
                 CompilerError::MemoryAllocationFailed {
-                    details: format!("total memory {} exceeds maximum of {} bytes", total, max),
+                    details: format!(
+                        "total memory {} exceeds maximum of {} bytes",
+                        total, max
+                    ),
                 }
             }
             ContractError::AllocationOverflow => {
@@ -122,7 +135,10 @@ impl From<ContractError> for CompilerError {
             }
             ContractError::LinkerError { function, details } => {
                 CompilerError::InstantiationFailed {
-                    details: format!("linker error [{}]: {}", function, details),
+                    details: format!(
+                        "linker error [{}]: {}",
+                        function, details
+                    ),
                 }
             }
         }

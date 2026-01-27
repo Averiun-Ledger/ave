@@ -1,7 +1,13 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use ave_common::{
-    ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest, BridgeTransferRequest, EventInfo, EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData, RequestInfo, RequestState, SignaturesInfo, SubjectInfo, SubjsData, TransferSubject, identity::{KeyPair, keys::Ed25519Signer}
+    ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
+    BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
+    BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData,
+    RequestInfo, RequestState, SignaturesInfo, SubjectInfo, SubjsData,
+    TransferSubject,
+    identity::{KeyPair, keys::Ed25519Signer},
 };
 use ave_http::config_types::ConfigHttp;
 // Ave HTTP - Bridge Info Tests
@@ -266,7 +272,7 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            
+
                         },
                         {
                             "schema_id": "Example2",
@@ -278,7 +284,7 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            
+
                         }
                     ]
                 }
@@ -439,7 +445,7 @@ async fn test_request_state_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             res = body;
             break;
         } else {
@@ -696,7 +702,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -723,7 +729,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -801,7 +807,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -828,7 +834,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -890,7 +896,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -911,7 +917,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -932,7 +938,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1111,7 +1117,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1174,7 +1180,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1252,7 +1258,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1331,7 +1337,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1365,7 +1371,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1412,7 +1418,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1446,7 +1452,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1480,7 +1486,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1802,7 +1808,7 @@ async fn test_signatures_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["state"] == format!("{}",RequestState::Finish) {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await

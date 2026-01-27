@@ -16,8 +16,8 @@ use crate::{
     request::manager::{RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler,
-    Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
 
 use async_trait::async_trait;

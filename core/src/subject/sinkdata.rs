@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{Span, debug, error, info_span};
 
-use crate::{model::{common::emit_fail}, subject::Metadata};
+use crate::{model::common::emit_fail, subject::Metadata};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
@@ -127,9 +127,10 @@ impl From<String> for SinkTypes {
 impl SinkDataMessage {
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
-            SinkDataMessage::UpdateState(metadata) => {
-                (metadata.subject_id.to_string(), metadata.schema_id.to_string())
-            }
+            SinkDataMessage::UpdateState(metadata) => (
+                metadata.subject_id.to_string(),
+                metadata.schema_id.to_string(),
+            ),
             SinkDataMessage::Create {
                 subject_id,
                 schema_id,

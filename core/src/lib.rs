@@ -17,9 +17,9 @@ pub mod query;
 pub mod request;
 pub mod subject;
 pub(crate) mod system;
+pub mod tracker;
 pub mod update;
 pub mod validation;
-pub mod tracker;
 
 use approval::approver::ApprovalStateRes;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
@@ -43,7 +43,7 @@ use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 pub use network::MonitorNetworkState;
 
 use node::register::{
-    GovsData, Register, SubjsData, RegisterMessage, RegisterResponse,
+    GovsData, Register, RegisterMessage, RegisterResponse, SubjsData,
 };
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
@@ -57,9 +57,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use validation::{Validation, ValidationMessage};
 
-
 use crate::config::SinkAuth;
-use crate::request::tracking::{RequestTracking, RequestTrackingMessage, RequestTrackingResponse};
+use crate::request::tracking::{
+    RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
+};
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
@@ -76,7 +77,6 @@ compile_error!(
 );
 
 const TARGET_API: &str = "Ave-Api";
-
 
 #[derive(Clone)]
 pub struct Api {
@@ -229,7 +229,7 @@ impl Api {
                 register: register_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
-                tracking: tracking_actor
+                tracking: tracking_actor,
             },
             tasks,
         ))
@@ -369,7 +369,9 @@ impl Api {
     ) -> Result<RequestInfo, Error> {
         let response = self
             .tracking
-            .ask(RequestTrackingMessage::SearchRequest(request_id.to_string()))
+            .ask(RequestTrackingMessage::SearchRequest(
+                request_id.to_string(),
+            ))
             .await
             .map_err(|e| {
                 let e = format!("Can not get request state {}", e);
@@ -379,7 +381,9 @@ impl Api {
 
         match response {
             RequestTrackingResponse::Info(state) => Ok(state),
-            RequestTrackingResponse::NotFound => Err(Error::RequestTracking("The request could not be found".to_string())),
+            RequestTrackingResponse::NotFound => Err(Error::RequestTracking(
+                "The request could not be found".to_string(),
+            )),
             _ => {
                 let e = "A response was received that was not the expected one";
                 warn!(TARGET_API, e);

@@ -2,9 +2,7 @@ use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    governance::data::GovernanceData
-};
+use crate::governance::data::GovernanceData;
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
@@ -22,7 +20,6 @@ pub struct RunnerResult {
     pub final_state: ValueWrapper,
     pub approval_required: bool,
 }
-
 
 #[derive(Debug, Clone)]
 pub enum EvaluateInfo {

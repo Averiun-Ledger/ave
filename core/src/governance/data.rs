@@ -137,12 +137,11 @@ impl GovernanceData {
 
                 for creators in roles_schema.creator.iter() {
                     if let Some(user) = self.members.get(&creators.name) {
-                        remove_creator
-                            .insert((
-                                schema_id.clone(),
-                                creators.namespace.to_string(),
-                                user.clone()
-                            ));
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            user.clone(),
+                        ));
                     }
                 }
                 for witness in roles_schema.witness.iter() {
@@ -219,12 +218,11 @@ impl GovernanceData {
                         if remove_members.contains(&creators.name) {
                             if let Some(user) = self.members.get(&creators.name)
                             {
-                                remove_creator
-                                    .insert((
-                                        schema_id.clone(),
-                                        creators.namespace.to_string(),
-                                        user.clone()
-                                    ));
+                                remove_creator.insert((
+                                    schema_id.clone(),
+                                    creators.namespace.to_string(),
+                                    user.clone(),
+                                ));
                             }
                         }
                     }

@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Display},
-    path::PathBuf
+    path::PathBuf,
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
@@ -35,8 +35,6 @@ pub struct Config {
     /// Garbage collector acts
     pub tracking_size: usize,
 }
-
-
 
 impl Default for Config {
     fn default() -> Self {

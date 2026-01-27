@@ -15,9 +15,7 @@ use crate::{
         common::{check_quorum_signers, get_validation_roles_register},
         event::{Ledger, Protocols, ValidationMetadata},
     },
-    node::{
-        register::{Register, RegisterMessage},
-    },
+    node::register::{Register, RegisterMessage},
     tracker::Tracker,
     validation::{
         request::{ActualProtocols, LastData, ValidationReq},
@@ -794,21 +792,21 @@ where
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
-        gov_version: u64
+        gov_version: u64,
     ) -> Result<(), ActorError>;
 
     async fn confirm(
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
-        gov_version: u64
+        gov_version: u64,
     ) -> Result<(), ActorError>;
 
     async fn transfer(
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
-        gov_version: u64
+        gov_version: u64,
     ) -> Result<(), ActorError>;
 
     fn apply_patch(

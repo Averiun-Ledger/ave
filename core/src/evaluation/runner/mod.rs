@@ -8,7 +8,10 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::{Namespace, SchemaType, ValueWrapper, identity::PublicKey, schematype::ReservedWords};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    schematype::ReservedWords,
+};
 use borsh::{BorshDeserialize, to_vec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -172,7 +175,9 @@ impl Runner {
             });
         }
 
-        let Some(owner_key) = governance.members.get(&ReservedWords::Owner.to_string()) else {
+        let Some(owner_key) =
+            governance.members.get(&ReservedWords::Owner.to_string())
+        else {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_gov",
                 kind: error::InvalidEventKind::NotFound {
@@ -225,7 +230,10 @@ impl Runner {
             });
         }
 
-        let Some(old_owner_key) = governance.members.get(&ReservedWords::Owner.to_string()).cloned()
+        let Some(old_owner_key) = governance
+            .members
+            .get(&ReservedWords::Owner.to_string())
+            .cloned()
         else {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_confirm_gov",
@@ -256,8 +264,10 @@ impl Runner {
             .insert(ReservedWords::Owner.to_string(), new_owner.clone());
         governance.members.remove(&new_owner_member);
 
-        governance
-            .change_name_role(&vec![(new_owner_member, ReservedWords::Owner.to_string())]);
+        governance.change_name_role(&vec![(
+            new_owner_member,
+            ReservedWords::Owner.to_string(),
+        )]);
 
         if let Some(mut old_owner_name) = old_owner_name {
             old_owner_name = old_owner_name.trim().to_owned();
@@ -433,8 +443,7 @@ impl Runner {
         }
 
         if let Some(member_event) = event.members {
-            let  remove =
-                Self::check_members(&member_event, &mut governance)?;
+            let remove = Self::check_members(&member_event, &mut governance)?;
             if !remove.is_empty() {
                 governance.remove_member_role(&remove);
             }

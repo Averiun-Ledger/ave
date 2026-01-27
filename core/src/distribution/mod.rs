@@ -10,10 +10,15 @@ use distributor::{Distributor, DistributorMessage};
 use tracing::{error, warn};
 
 use crate::{
-    Event as AveEvent, governance::model::WitnessesData, helpers::network::service::NetworkSender, model::{
+    Event as AveEvent,
+    governance::model::WitnessesData,
+    helpers::network::service::NetworkSender,
+    model::{
         common::{emit_fail, subject::get_gov},
         event::ProtocolsSignatures,
-    }, request::manager::{RequestManager, RequestManagerMessage}, subject::SignedLedger
+    },
+    request::manager::{RequestManager, RequestManagerMessage},
+    subject::SignedLedger,
 };
 
 pub mod distributor;
@@ -33,17 +38,21 @@ pub struct Distribution {
     node_key: PublicKey,
     request_id: String,
     dis_type: DistributionType,
-    network: Arc<NetworkSender>
+    network: Arc<NetworkSender>,
 }
 
 impl Distribution {
-    pub fn new(node_key: PublicKey, dis_type: DistributionType, network: Arc<NetworkSender>) -> Self {
+    pub fn new(
+        node_key: PublicKey,
+        dis_type: DistributionType,
+        network: Arc<NetworkSender>,
+    ) -> Self {
         Distribution {
             node_key,
             dis_type,
             network,
             request_id: String::default(),
-            witnesses: HashSet::new()
+            witnesses: HashSet::new(),
         }
     }
 
@@ -65,7 +74,7 @@ impl Distribution {
                 &format!("{}", signer),
                 Distributor {
                     node: signer.clone(),
-                    network: self.network.clone()
+                    network: self.network.clone(),
                 },
             )
             .await;
@@ -73,7 +82,7 @@ impl Distribution {
             Ok(child) => child,
             Err(e) => return Err(e),
         };
-        
+
         let request_id = match self.dis_type {
             DistributionType::Manual => {
                 format!("node/manual_distribution/{}", self.request_id.clone())

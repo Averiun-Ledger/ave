@@ -7,15 +7,22 @@ use ave_actors::{
     RetryMessage, Strategy,
 };
 use ave_common::{
-    Namespace, SchemaType, identity::{DigestIdentifier, PublicKey}, namespace, request::EventRequest
+    Namespace, SchemaType,
+    identity::{DigestIdentifier, PublicKey},
+    namespace,
+    request::EventRequest,
 };
 use network::ComunicateInfo;
 
 use crate::{
-    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse, auth::WitnessesAuth, governance::{
+    ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
+    auth::WitnessesAuth,
+    governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{CreatorQuantity, HashThisRole, RoleTypes},
-    }, helpers::network::service::NetworkSender, model::{
+    },
+    helpers::network::service::NetworkSender,
+    model::{
         common::{
             emit_fail,
             node::{get_node_subject_data, subject_old_owner, try_to_update},
@@ -23,7 +30,10 @@ use crate::{
         },
         event::Ledger,
         network::RetryNetwork,
-    }, node::SubjectData, subject::SignedLedger, tracker::{Tracker, TrackerMessage, TrackerResponse}
+    },
+    node::SubjectData,
+    subject::SignedLedger,
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 use tracing::{error, warn};
@@ -224,13 +234,14 @@ impl Distributor {
             self.authorized_subj(ctx, &subject_id).await?;
 
         // Extraer schema_id, namespace y governance_id según si conocemos el sujeto o no
-        let (schema_id, namespace, governance_id)  =
-            if let Some(ref data) = subject_data {
-                // Lo conozco
-                let gov_id = if data.schema_id.is_gov() {
-                    None // Las gobernanzas no necesitan governance_id
-                } else {
-                    Some(data.governance_id.as_ref().ok_or_else(|| {
+        let (schema_id, namespace, governance_id) = if let Some(ref data) =
+            subject_data
+        {
+            // Lo conozco
+            let gov_id = if data.schema_id.is_gov() {
+                None // Las gobernanzas no necesitan governance_id
+            } else {
+                Some(data.governance_id.as_ref().ok_or_else(|| {
                         ActorError::FunctionalCritical {
                             description: format!(
                                 "In subject data for {}, is a Tracker and governance_id is None",
@@ -238,38 +249,41 @@ impl Distributor {
                             ),
                         }
                     })?.clone())
-                };
+            };
 
-                let namespace = Namespace::from(data.namespace.clone());
+            let namespace = Namespace::from(data.namespace.clone());
 
-                (data.schema_id.clone(), namespace, gov_id)
-            } else {
-                // No lo conozco - debe ser evento Create
-                if let EventRequest::Create(create) = ledger.event_request.content() {
-                    if !create.schema_id.is_gov() && create.governance_id.is_empty() {
-                        return Err(ActorError::Functional {
-                            description: format!(
-                                "In Create event for {}, is a Tracker and governance_id is None",
-                                subject_id
-                            ),
-                        });
-                    }
-
-                    let gov_id = if create.schema_id.is_gov() {
-                        None
-                    } else {
-                        Some(create.governance_id.clone())
-                    };
-
-                    (create.schema_id.clone(), create.namespace.clone(), gov_id)
-                } else {
-                    // No es el primer evento, necesito el primero
-                    try_to_update(ctx, subject_id, WitnessesAuth::Owner(signer)).await?;
+            (data.schema_id.clone(), namespace, gov_id)
+        } else {
+            // No lo conozco - debe ser evento Create
+            if let EventRequest::Create(create) = ledger.event_request.content()
+            {
+                if !create.schema_id.is_gov() && create.governance_id.is_empty()
+                {
                     return Err(ActorError::Functional {
-                        description: "Updating subject".to_owned(),
+                        description: format!(
+                            "In Create event for {}, is a Tracker and governance_id is None",
+                            subject_id
+                        ),
                     });
                 }
-            };
+
+                let gov_id = if create.schema_id.is_gov() {
+                    None
+                } else {
+                    Some(create.governance_id.clone())
+                };
+
+                (create.schema_id.clone(), create.namespace.clone(), gov_id)
+            } else {
+                // No es el primer evento, necesito el primero
+                try_to_update(ctx, subject_id, WitnessesAuth::Owner(signer))
+                    .await?;
+                return Err(ActorError::Functional {
+                    description: "Updating subject".to_owned(),
+                });
+            }
+        };
 
         // Verificar autorización
         if schema_id.is_gov() {
@@ -282,12 +296,16 @@ impl Distributor {
         } else {
             // Es un Tracker - verificar rol de witness si no está autorizado
             if !auth {
-                let governance_id = governance_id.expect("governance_id is Some for Trackers");
-                let gov = get_gov(ctx, &governance_id.to_string()).await.map_err(|e| {
-                    ActorError::FunctionalCritical {
-                        description: format!("Can not get GovernanceData {}", e),
-                    }
-                })?;
+                let governance_id =
+                    governance_id.expect("governance_id is Some for Trackers");
+                let gov = get_gov(ctx, &governance_id.to_string())
+                    .await
+                    .map_err(|e| ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not get GovernanceData {}",
+                            e
+                        ),
+                    })?;
 
                 // TODO, comparar gov_versiosn, si la mía es mayor seguimos, pero le digo que se actualice
                 // si la suya es mayor retorno y no sigo, partimos de la base de que los nodos testigos
@@ -301,11 +319,13 @@ impl Distributor {
                 match gov.version.cmp(&ledger.gov_version) {
                     std::cmp::Ordering::Less => {
                         return Err(ActorError::Functional {
-                            description: "Our version of governance is less than yours".to_string(),
+                            description:
+                                "Our version of governance is less than yours"
+                                    .to_string(),
                         });
-                    },
-                    std::cmp::Ordering::Equal => {},
-                    std::cmp::Ordering::Greater => {},
+                    }
+                    std::cmp::Ordering::Equal => {}
+                    std::cmp::Ordering::Greater => {}
                 };
 
                 if !gov.has_this_role(HashThisRole::SchemaWitness {
@@ -335,7 +355,11 @@ impl Distributor {
         let data = get_node_subject_data(ctx, subject_id).await?;
 
         let Some(data) = data else {
-            return Err(ActorError::Functional {description: "We do not have the subject that we have been asked for".to_owned()});
+            return Err(ActorError::Functional {
+                description:
+                    "We do not have the subject that we have been asked for"
+                        .to_owned(),
+            });
         };
 
         // obtenemos gobernanza
@@ -351,23 +375,10 @@ impl Distributor {
                 role: RoleTypes::Witness,
             }
         } else {
-            if let Some(gov_version) = gov_version {
-                
-            }
+            if let Some(gov_version) = gov_version {}
 
             todo!()
         };
-
-
-
-
-
-
-
-
-
-
-
 
         let (namespace, governance_id, owner, schema_id, new_owner) =
             if let Some((subject_data, new_owner)) = data {
@@ -466,12 +477,15 @@ impl Distributor {
 
         // We obtain the validator
         let response = node_actor
-                .ask(NodeMessage::UpSubject(subject_id.to_owned(), light))
-                .await?;
+            .ask(NodeMessage::UpSubject(subject_id.to_owned(), light))
+            .await?;
 
         match response {
             NodeResponse::Ok => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse { expected: "NodeResponse::Ok".to_owned(), path: node_path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "NodeResponse::Ok".to_owned(),
+                path: node_path,
+            }),
         }
     }
 }
@@ -485,9 +499,7 @@ impl Actor for Distributor {
 
 #[derive(Debug, Clone)]
 pub enum DistributorMessage {
-    UpdateGov {
-
-    },
+    UpdateGov {},
     Transfer {
         subject_id: String,
         info: ComunicateInfo,
