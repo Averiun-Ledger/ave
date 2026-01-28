@@ -1974,6 +1974,12 @@ async fn test_system_info_deserialization() {
     assert!(config.http.https_private_key_path.is_none());
     assert!(!config.http.enable_doc);
 
+    // Self-signed cert defaults
+    assert!(!config.http.self_signed_cert.enabled);
+    assert_eq!(config.http.self_signed_cert.common_name, "localhost");
+    assert_eq!(config.http.self_signed_cert.validity_days, 365);
+    assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
+
     // KEYS - Verify PKCS#8 with PKCS#5 encryption
     // First check if the key file actually exists in the keys_path directory
     let key_file_path =

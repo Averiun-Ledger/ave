@@ -11,6 +11,39 @@ pub struct HttpConfig {
     pub https_private_key_path: Option<PathBuf>,
     pub enable_doc: bool,
     pub cors: CorsConfig,
+    /// Self-signed certificate configuration for automatic TLS
+    pub self_signed_cert: SelfSignedCertConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SelfSignedCertConfig {
+    /// Enable automatic self-signed certificate generation.
+    /// When enabled, uses https_cert_path and https_private_key_path for output.
+    pub enabled: bool,
+    /// Common Name for the certificate (e.g., "localhost", "ave.local")
+    pub common_name: String,
+    /// Subject Alternative Names (additional hostnames/IPs)
+    pub san: Vec<String>,
+    /// Certificate validity in days
+    pub validity_days: u32,
+    /// Days before expiration to trigger renewal
+    pub renew_before_days: u32,
+    /// Check interval in seconds for certificate expiration
+    pub check_interval_secs: u64,
+}
+
+impl Default for SelfSignedCertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            common_name: "localhost".to_string(),
+            san: vec!["127.0.0.1".to_string(), "::1".to_string()],
+            validity_days: 365,
+            renew_before_days: 30,
+            check_interval_secs: 3600, // Check every hour
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -40,6 +73,7 @@ impl Default for HttpConfig {
             https_private_key_path: Default::default(),
             enable_doc: Default::default(),
             cors: CorsConfig::default(),
+            self_signed_cert: SelfSignedCertConfig::default(),
         }
     }
 }

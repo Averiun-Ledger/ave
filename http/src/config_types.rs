@@ -3,7 +3,7 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    HttpConfig, MemoryLimit, auth::{
+    HttpConfig, MemoryLimit, SelfSignedCertConfig, auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, RateLimitConfig, SessionConfig,
     }
 };
@@ -166,6 +166,7 @@ pub struct HttpConfigHttp {
     pub https_private_key_path: Option<String>,
     pub enable_doc: bool,
     pub cors: CorsConfigHttp,
+    pub self_signed_cert: SelfSignedCertConfigHttp,
 }
 
 impl From<HttpConfig> for HttpConfigHttp {
@@ -181,6 +182,36 @@ impl From<HttpConfig> for HttpConfigHttp {
                 .map(|x| x.to_string_lossy().to_string()),
             enable_doc: value.enable_doc,
             cors: CorsConfigHttp::from(value.cors),
+            self_signed_cert: SelfSignedCertConfigHttp::from(value.self_signed_cert),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SelfSignedCertConfigHttp {
+    /// Enable automatic self-signed certificate generation
+    pub enabled: bool,
+    /// Common Name for the certificate (e.g., "localhost")
+    pub common_name: String,
+    /// Subject Alternative Names (additional hostnames/IPs)
+    pub san: Vec<String>,
+    /// Certificate validity in days
+    pub validity_days: u32,
+    /// Days before expiration to trigger renewal
+    pub renew_before_days: u32,
+    /// Check interval in seconds for certificate expiration
+    pub check_interval_secs: u64,
+}
+
+impl From<SelfSignedCertConfig> for SelfSignedCertConfigHttp {
+    fn from(value: SelfSignedCertConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            common_name: value.common_name,
+            san: value.san,
+            validity_days: value.validity_days,
+            renew_before_days: value.renew_before_days,
+            check_interval_secs: value.check_interval_secs,
         }
     }
 }

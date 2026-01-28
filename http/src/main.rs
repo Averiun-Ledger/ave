@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use auth::AuthDatabase;
 use ave_bridge::{
@@ -35,6 +35,9 @@ use tower_http::{
 use tracing::{error, info};
 
 use crate::auth::build_auth;
+use crate::self_signed_cert::{
+    CertPaths, cert_needs_renewal, cert_renewal_task, generate_self_signed_cert,
+};
 
 mod auth;
 mod config_types;
@@ -42,6 +45,7 @@ mod doc;
 mod error;
 mod logging;
 mod middleware;
+mod self_signed_cert;
 mod server;
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
@@ -196,23 +200,59 @@ async fn main() {
             .install_default()
             .expect("Can not install ring for RustTLS");
 
-        let (cert, private_key) = match (
-            config.http.https_cert_path,
-            config.http.https_private_key_path,
-        ) {
-            (Some(cert), Some(private_key)) => (cert, private_key),
-            _ => {
-                error!("Https must have cert and private key");
-                return;
-            }
-        };
+        // Certificate paths are validated in build_config, unwrap is safe here
+        let cert_path = config
+            .http
+            .https_cert_path
+            .expect("https_cert_path required for HTTPS (validated in build_config)");
+        let key_path = config
+            .http
+            .https_private_key_path
+            .expect("https_private_key_path required for HTTPS (validated in build_config)");
 
-        let tls = RustlsConfig::from_pem_file(
-            PathBuf::from(&cert),
-            PathBuf::from(&private_key),
-        )
-        .await
-        .expect("Can not build tls");
+        let self_signed_config = config.http.self_signed_cert.clone();
+
+        // If self-signed mode is enabled, generate certificate if needed
+        if self_signed_config.enabled {
+            info!(
+                target: TARGET_HTTP,
+                "Self-signed certificate mode enabled"
+            );
+
+            if cert_needs_renewal(&self_signed_config, &cert_path, &key_path).await {
+                match generate_self_signed_cert(&self_signed_config, &cert_path, &key_path).await {
+                    Ok(()) => {
+                        info!(
+                            target: TARGET_HTTP,
+                            "Self-signed certificate generated at {:?}",
+                            cert_path
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            target: TARGET_HTTP,
+                            "Failed to generate self-signed certificate: {}",
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let tls = RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .expect("Can not build tls");
+
+        // Start certificate renewal background task if self-signed mode is enabled
+        if self_signed_config.enabled {
+            let tls_clone = tls.clone();
+            let paths = CertPaths {
+                cert_path,
+                key_path,
+            };
+            tokio::spawn(cert_renewal_task(self_signed_config, paths, tls_clone));
+        }
 
         let handle = Handle::new();
 

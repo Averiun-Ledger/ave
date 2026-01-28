@@ -28,8 +28,37 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, Error> {
         })?;
     }
 
+    // Validate HTTPS configuration
+    validate_https_config(&bridge_config)?;
+
     // Mix configurations.
     Ok(bridge_config)
+}
+
+/// Validate HTTPS configuration consistency
+fn validate_https_config(config: &BridgeConfig) -> Result<(), Error> {
+    let http = &config.http;
+
+    // If HTTPS is enabled, cert paths are required
+    if http.https_address.is_some() {
+        if http.https_cert_path.is_none() || http.https_private_key_path.is_none() {
+            let e = "HTTPS is enabled (https_address is set) but https_cert_path and/or \
+                     https_private_key_path are missing. Both are required for HTTPS.";
+            error!(TARGET_SETTING, e);
+            return Err(Error::Bridge(e.to_string()));
+        }
+    }
+
+    // Warn if self_signed_cert is enabled but HTTPS is not
+    if http.self_signed_cert.enabled && http.https_address.is_none() {
+        tracing::warn!(
+            target: TARGET_SETTING,
+            "self_signed_cert.enabled is true but https_address is not set. \
+             Self-signed certificates will not be used."
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,6 +173,14 @@ https_address = "127.0.0.1:4443"
 https_cert_path = "/certs/cert.pem"
 https_private_key_path = "/certs/key.pem"
 enable_doc = true
+
+[http.self_signed_cert]
+enabled = true
+common_name = "localhost"
+san = ["127.0.0.1", "::1"]
+validity_days = 365
+renew_before_days = 30
+check_interval_secs = 3600
 "#;
 
     const FULL_YAML: &str = r#"
@@ -237,6 +274,15 @@ http:
   https_cert_path: /certs/cert.pem
   https_private_key_path: /certs/key.pem
   enable_doc: true
+  self_signed_cert:
+    enabled: true
+    common_name: localhost
+    san:
+      - "127.0.0.1"
+      - "::1"
+    validity_days: 365
+    renew_before_days: 30
+    check_interval_secs: 3600
 "#;
 
     const FULL_JSON: &str = r#"
@@ -354,7 +400,15 @@ http:
     "https_address": "127.0.0.1:4443",
     "https_cert_path": "/certs/cert.pem",
     "https_private_key_path": "/certs/key.pem",
-    "enable_doc": true
+    "enable_doc": true,
+    "self_signed_cert": {
+      "enabled": true,
+      "common_name": "localhost",
+      "san": ["127.0.0.1", "::1"],
+      "validity_days": 365,
+      "renew_before_days": 30,
+      "check_interval_secs": 3600
+    }
   }
 }
 "#;
