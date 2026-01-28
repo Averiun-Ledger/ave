@@ -155,7 +155,7 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
             .map_err(|e| ConversionError::InvalidGovernanceId(e.to_string()))?;
 
         let schema_id = SchemaType::from_str(&request.schema_id)
-            .map_err(|e| ConversionError::InvalidSchemaId(e))?;
+            .map_err(ConversionError::InvalidSchemaId)?;
 
         let namespace =
             request.namespace.ok_or(ConversionError::MissingNamespace)?;
