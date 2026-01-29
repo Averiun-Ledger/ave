@@ -2,57 +2,49 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
-use ave_common::identity::{PublicKey, Signed};
-use distributor::{Distributor, DistributorMessage};
-use tracing::{error, warn};
+use ave_common::identity::{DigestIdentifier, PublicKey};
+use tracing::{Span, error, info_span};
 
 use crate::{
-    Event as AveEvent,
-    governance::model::WitnessesData,
+    distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
-    model::{
-        common::{emit_fail, subject::get_gov},
-        event::ProtocolsSignatures,
-    },
+    model::common::emit_fail,
     request::manager::{RequestManager, RequestManagerMessage},
     subject::SignedLedger,
 };
 
-pub mod distributor;
+pub mod coordinator;
+pub mod error;
+pub mod worker;
 
 const TARGET_DISTRIBUTION: &str = "Ave-Distribution";
 
-#[derive(Default)]
+#[derive(Debug, Clone)]
 pub enum DistributionType {
     Manual,
-    #[default]
-    Subject,
     Request,
 }
 
 pub struct Distribution {
-    witnesses: HashSet<PublicKey>,
-    node_key: PublicKey,
-    request_id: String,
-    dis_type: DistributionType,
     network: Arc<NetworkSender>,
+    witnesses: HashSet<PublicKey>,
+    distribution_type: DistributionType,
+    subject_id: DigestIdentifier,
 }
 
 impl Distribution {
     pub fn new(
-        node_key: PublicKey,
-        dis_type: DistributionType,
         network: Arc<NetworkSender>,
+        distribution_type: DistributionType,
     ) -> Self {
         Distribution {
-            node_key,
-            dis_type,
             network,
-            request_id: String::default(),
+            distribution_type,
             witnesses: HashSet::new(),
+            subject_id: DigestIdentifier::default(),
         }
     }
 
@@ -63,17 +55,14 @@ impl Distribution {
     async fn create_distributors(
         &self,
         ctx: &mut ActorContext<Distribution>,
-        event: Signed<AveEvent>,
         ledger: SignedLedger,
         signer: PublicKey,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
     ) -> Result<(), ActorError> {
         let child = ctx
             .create_child(
                 &format!("{}", signer),
-                Distributor {
-                    node: signer.clone(),
+                DistriCoordinator {
+                    node_key: signer.clone(),
                     network: self.network.clone(),
                 },
             )
@@ -83,24 +72,19 @@ impl Distribution {
             Err(e) => return Err(e),
         };
 
-        let request_id = match self.dis_type {
+        let request_id = match self.distribution_type {
             DistributionType::Manual => {
-                format!("node/manual_distribution/{}", self.request_id.clone())
+                format!("node/manual_distribution/{}", self.subject_id)
             }
-            DistributionType::Subject => String::default(),
             DistributionType::Request => {
-                format!("request/{}/distribution", self.request_id.clone())
+                format!("request/{}/distribution", self.subject_id)
             }
         };
 
         distributor_actor
-            .tell(DistributorMessage::NetworkDistribution {
+            .tell(DistriCoordinatorMessage::NetworkDistribution {
                 request_id,
                 ledger,
-                event,
-                node_key: signer,
-                last_proof,
-                last_vali_res,
             })
             .await
     }
@@ -109,18 +93,9 @@ impl Distribution {
         &self,
         ctx: &mut ActorContext<Distribution>,
     ) -> Result<(), ActorError> {
-        if let DistributionType::Manual = self.dis_type {
-        } else {
-            let req_path =
-                ActorPath::from(format!("/user/request/{}", self.request_id));
-            let req_actor: Option<ActorRef<RequestManager>> =
-                ctx.system().get_actor(&req_path).await;
-
-            if let Some(req_actor) = req_actor {
-                req_actor.tell(RequestManagerMessage::FinishRequest).await?;
-            } else {
-                return Err(ActorError::NotFound(req_path));
-            };
+        if let DistributionType::Request = self.distribution_type {
+            let req_actor = ctx.get_parent::<RequestManager>().await?;
+            req_actor.tell(RequestManagerMessage::FinishRequest).await?;
         }
 
         Ok(())
@@ -132,16 +107,21 @@ impl Actor for Distribution {
     type Event = ();
     type Message = DistributionMessage;
     type Response = ();
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Distribution", id = id)
+        } else {
+            info_span!("Distribution", id = id)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum DistributionMessage {
     Create {
-        request_id: String,
-        event: Box<Signed<AveEvent>>,
         ledger: Box<SignedLedger>,
-        last_proof: Box<ValidationProof>,
-        last_vali_res: Vec<ProtocolsSignatures>,
+        witnesses: HashSet<PublicKey>,
     },
     Response {
         sender: PublicKey,
@@ -161,74 +141,16 @@ impl Handler<Distribution> for Distribution {
         ctx: &mut ActorContext<Distribution>,
     ) -> Result<(), ActorError> {
         match msg {
-            DistributionMessage::Create {
-                request_id,
-                event,
-                ledger,
-                last_proof,
-                last_vali_res,
-            } => {
-                self.request_id = request_id;
-                let subject_id = ledger.content().subject_id.clone();
-                let governance =
-                    match get_gov(ctx, &subject_id.to_string()).await {
-                        Ok(gov) => gov,
-                        Err(e) => {
-                            error!(
-                                TARGET_DISTRIBUTION,
-                                "Create, can not get governance: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-
-                let mut witnesses = match governance.get_witnesses(
-                    WitnessesData::build(
-                        last_proof.schema_id.clone(),
-                        last_proof.namespace.clone(),
-                        self.node_key.clone(),
-                    ),
-                ) {
-                    Ok(witnesses) => witnesses,
-                    Err(e) => {
-                        error!(
-                            TARGET_DISTRIBUTION,
-                            "Create, can not get witnesses for distribution: {}",
-                            e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                let _ = witnesses.remove(&self.node_key);
-
-                if witnesses.is_empty() {
-                    warn!(
-                        TARGET_DISTRIBUTION,
-                        "Create, There are no witnesses available for the {} scheme",
-                        last_proof.schema_id
-                    );
-                    if let Err(e) = self.end_request(ctx).await {
-                        error!(
-                            TARGET_DISTRIBUTION,
-                            "Create, can not end distribution: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    };
-                    return Ok(());
-                }
-
+            DistributionMessage::Create { ledger, witnesses } => {
                 self.witnesses.clone_from(&witnesses);
+                self.subject_id =
+                    ledger.content().event_request.content().get_subject_id();
 
-                let last_proof = *last_proof;
-                for witness in witnesses {
+                for witness in witnesses.iter() {
                     self.create_distributors(
                         ctx,
-                        *event.clone(),
                         *ledger.clone(),
-                        witness,
-                        last_proof.clone(),
-                        last_vali_res.clone(),
+                        witness.clone(),
                     )
                     .await?
                 }
@@ -243,10 +165,7 @@ impl Handler<Distribution> for Distribution {
                         return Err(emit_fail(ctx, e).await);
                     };
 
-                    if let DistributionType::Subject = self.dis_type {
-                    } else {
-                        ctx.stop(None).await;
-                    };
+                    ctx.stop(None).await;
                 }
             }
         }

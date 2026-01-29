@@ -704,7 +704,7 @@ impl Handler<EvalWorker> for EvalWorker {
                     request_id: info.request_id.clone(),
                     version: info.version,
                     receiver_actor: format!(
-                        "/user/node/{}/evaluation/{}",
+                        "/user/request/{}/evaluation/{}",
                         evaluation_req
                             .content()
                             .event_request

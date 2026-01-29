@@ -1,6 +1,5 @@
 use ave_actors::Message;
 use ave_common::{
-    SchemaType,
     identity::{DigestIdentifier, Signed},
 };
 use network::ComunicateInfo;
@@ -10,10 +9,10 @@ use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
     subject::SignedLedger,
-    update::TransferResponse,
     validation::{request::ValidationReq, response::ValidationRes},
 };
 
+pub mod error;
 pub mod intermediary;
 pub mod service;
 
@@ -42,27 +41,18 @@ pub enum ActorMessage {
     },
     DistributionLastEventRes,
     DistributionLedgerReq {
-        gov_version: Option<u64>,
         actual_sn: Option<u64>,
         subject_id: DigestIdentifier,
     },
     DistributionLedgerRes {
         ledger: Vec<SignedLedger>,
-        namespace: String,
-        schema_id: SchemaType,
-        governance_id: DigestIdentifier,
+        is_all: bool,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,
     },
     AuthLastSn {
         sn: u64,
-    },
-    Transfer {
-        subject_id: DigestIdentifier,
-    },
-    TransferRes {
-        res: TransferResponse,
     },
 }
 

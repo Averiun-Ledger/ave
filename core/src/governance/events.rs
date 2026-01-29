@@ -58,125 +58,160 @@ impl GovernanceEvent {
         let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
             HashSet::new();
 
-        if let Some(roles) = &self.roles {
-            if let Some(schemas) = &roles.schema {
-                for schema in schemas {
-                    if let Some(change) = &schema.change {
-                        if let Some(creator) = &change.creator {
-                            if let Some(roles) =
-                                roles_schema.get(&schema.schema_id)
-                            {
-                                creator.iter().for_each(|x| {
-                                    if let Some(user) = members.get(&x.actual_name) {
-                                        if let Some(new_namespace) = &x.new_namespace {
-                                            remove_creator.insert((
-                                                schema.schema_id.clone(),
-                                                x.actual_namespace.to_string(),
-                                                user.clone(),
-                                            ));
+        if let Some(roles) = &self.roles
+            && let Some(schemas) = &roles.schema
+        {
+            for schema in schemas {
+                if let Some(change) = &schema.change
+                    && let Some(creator) = &change.creator
+                    && let Some(roles) = roles_schema.get(&schema.schema_id)
+                {
+                    creator.iter().for_each(|x| {
+                        if let Some(user) = members.get(&x.actual_name) {
+                            if let Some(new_namespace) = &x.new_namespace {
+                                remove_creator.insert((
+                                    schema.schema_id.clone(),
+                                    x.actual_namespace.to_string(),
+                                    user.clone(),
+                                ));
 
-                                            match (&x.new_witnesses, &x.new_quantity) {
-                                                (None, None) => {
-                                                    if let Some(creator) =
-                                                        roles.creator.get(&RoleCreator {
-                                                            name: x.actual_name.clone(),
-                                                            namespace: x.actual_namespace.clone(),
-                                                            witnesses: BTreeSet::new(),
-                                                            quantity: CreatorQuantity::Infinity,
-                                                        })
-                                                    {
-                                                        if let Some(user) = members.get(&creator.name) {
-                                                            new_creator.insert(
-                                                                (
-                                                                    schema.schema_id.clone(),
-                                                                    new_namespace.to_string(),
-                                                                    user.clone(),
-                                                                ),
-                                                                (
-                                                                    creator.quantity.clone(),
-                                                                    creator.witnesses.clone(),
-                                                                ),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                (None, Some(q)) => {
-                                                    if let Some(creator) =
-                                                        roles.creator.get(&RoleCreator {
-                                                            name: x.actual_name.clone(),
-                                                            namespace: x.actual_namespace.clone(),
-                                                            witnesses: BTreeSet::new(),
-                                                            quantity: CreatorQuantity::Infinity,
-                                                        })
-                                                    {
-                                                        if let Some(user) = members.get(&creator.name) {
-                                                            new_creator.insert(
-                                                                (
-                                                                    schema.schema_id.clone(),
-                                                                    new_namespace.to_string(),
-                                                                    user.clone(),
-                                                                ),
-                                                                (q.clone(), creator.witnesses.clone()),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                (Some(w), None) => {
-                                                    if let Some(creator) =
-                                                        roles.creator.get(&RoleCreator {
-                                                            name: x.actual_name.clone(),
-                                                            namespace: x.actual_namespace.clone(),
-                                                            witnesses: BTreeSet::new(),
-                                                            quantity: CreatorQuantity::Infinity,
-                                                        })
-                                                    {
-                                                        if let Some(user) = members.get(&creator.name) {
-                                                            new_creator.insert(
-                                                                (
-                                                                    schema.schema_id.clone(),
-                                                                    new_namespace.to_string(),
-                                                                    user.clone(),
-                                                                ),
-                                                                (creator.quantity.clone(), w.clone()),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                (Some(w), Some(q)) => {
-                                                    new_creator.insert(
-                                                        (
-                                                            schema.schema_id.clone(),
-                                                            new_namespace.to_string(),
-                                                            user.clone(),
-                                                        ),
-                                                        (q.clone(), w.clone()),
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            if let Some(q) = &x.new_quantity {
-                                                update_creator_quantity.insert((
-                                                    schema.schema_id.clone(),
-                                                    x.actual_namespace.to_string(),
-                                                    user.clone(),
-                                                    q.clone(),
-                                                ));
-                                            }
-
-                                            if let Some(w) = &x.new_witnesses {
-                                                update_creator_witnesses.insert((
-                                                    schema.schema_id.clone(),
-                                                    x.actual_namespace.to_string(),
-                                                    user.clone(),
-                                                    w.clone(),
-                                                ));
+                                match (&x.new_witnesses, &x.new_quantity) {
+                                    (None, None) => {
+                                        if let Some(creator) =
+                                            roles.creator.get(&RoleCreator {
+                                                name: x.actual_name.clone(),
+                                                namespace: x
+                                                    .actual_namespace
+                                                    .clone(),
+                                                witnesses: BTreeSet::new(),
+                                                quantity:
+                                                    CreatorQuantity::Infinity,
+                                            })
+                                        {
+                                            if let Some(user) =
+                                                members.get(&creator.name)
+                                            {
+                                                new_creator.insert(
+                                                    (
+                                                        schema
+                                                            .schema_id
+                                                            .clone(),
+                                                        new_namespace
+                                                            .to_string(),
+                                                        user.clone(),
+                                                    ),
+                                                    (
+                                                        creator
+                                                            .quantity
+                                                            .clone(),
+                                                        creator
+                                                            .witnesses
+                                                            .clone(),
+                                                    ),
+                                                );
                                             }
                                         }
                                     }
-                                });
+                                    (None, Some(q)) => {
+                                        if let Some(creator) =
+                                            roles.creator.get(&RoleCreator {
+                                                name: x.actual_name.clone(),
+                                                namespace: x
+                                                    .actual_namespace
+                                                    .clone(),
+                                                witnesses: BTreeSet::new(),
+                                                quantity:
+                                                    CreatorQuantity::Infinity,
+                                            })
+                                        {
+                                            if let Some(user) =
+                                                members.get(&creator.name)
+                                            {
+                                                new_creator.insert(
+                                                    (
+                                                        schema
+                                                            .schema_id
+                                                            .clone(),
+                                                        new_namespace
+                                                            .to_string(),
+                                                        user.clone(),
+                                                    ),
+                                                    (
+                                                        q.clone(),
+                                                        creator
+                                                            .witnesses
+                                                            .clone(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (Some(w), None) => {
+                                        if let Some(creator) =
+                                            roles.creator.get(&RoleCreator {
+                                                name: x.actual_name.clone(),
+                                                namespace: x
+                                                    .actual_namespace
+                                                    .clone(),
+                                                witnesses: BTreeSet::new(),
+                                                quantity:
+                                                    CreatorQuantity::Infinity,
+                                            })
+                                        {
+                                            if let Some(user) =
+                                                members.get(&creator.name)
+                                            {
+                                                new_creator.insert(
+                                                    (
+                                                        schema
+                                                            .schema_id
+                                                            .clone(),
+                                                        new_namespace
+                                                            .to_string(),
+                                                        user.clone(),
+                                                    ),
+                                                    (
+                                                        creator
+                                                            .quantity
+                                                            .clone(),
+                                                        w.clone(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (Some(w), Some(q)) => {
+                                        new_creator.insert(
+                                            (
+                                                schema.schema_id.clone(),
+                                                new_namespace.to_string(),
+                                                user.clone(),
+                                            ),
+                                            (q.clone(), w.clone()),
+                                        );
+                                    }
+                                }
+                            } else {
+                                if let Some(q) = &x.new_quantity {
+                                    update_creator_quantity.insert((
+                                        schema.schema_id.clone(),
+                                        x.actual_namespace.to_string(),
+                                        user.clone(),
+                                        q.clone(),
+                                    ));
+                                }
+
+                                if let Some(w) = &x.new_witnesses {
+                                    update_creator_witnesses.insert((
+                                        schema.schema_id.clone(),
+                                        x.actual_namespace.to_string(),
+                                        user.clone(),
+                                        w.clone(),
+                                    ));
+                                }
                             }
                         }
-                    }
+                    });
                 }
             }
         }

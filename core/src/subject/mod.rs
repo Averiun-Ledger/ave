@@ -4,7 +4,7 @@
 use std::{collections::HashSet, ops::Deref};
 
 use crate::{
-    EventRequestType, Node,
+    EventRequestType,
     governance::{
         Governance,
         data::GovernanceData,
@@ -12,7 +12,7 @@ use crate::{
         role_register::{RoleDataRegister, SearchRole},
     },
     model::{
-        common::{check_quorum_signers, get_validation_roles_register},
+        common::{check_quorum_signers, get_n_events, get_validation_roles_register},
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::register::{Register, RegisterMessage},
@@ -512,7 +512,7 @@ where
 
         let role_data = get_validation_roles_register(
             ctx,
-            &subject_metadata.governance_id.to_string(),
+            &subject_metadata.governance_id,
             SearchRole {
                 schema_id: subject_metadata.schema_id,
                 namespace: subject_metadata.namespace,
@@ -656,7 +656,7 @@ where
             },
             SchemaType::Type(_) => get_validation_roles_register(
                 ctx,
-                &metadata.governance_id.to_string(),
+                &metadata.governance_id,
                 SearchRole {
                     schema_id: metadata.schema_id.clone(),
                     namespace: metadata.namespace.clone(),
@@ -789,6 +789,33 @@ where
         Ok(())
     }
 
+    async fn get_ledger(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        lo_sn: Option<u64>,
+        hi_sn: u64
+    ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
+        if let Some(lo_sn) = lo_sn {
+            let actual_sn = lo_sn + 1;
+            if (hi_sn - actual_sn) > 99 {
+                Ok((get_n_events(ctx, lo_sn + 1, 99).await?, false))
+            } else {
+                Ok((get_n_events(ctx, actual_sn, hi_sn).await?, true))
+            }
+        } else {
+            if hi_sn > 99 {
+                Ok((get_n_events(ctx, 0, 99).await?, false))
+            } else {
+                Ok((get_n_events(ctx, 0, hi_sn).await?, true))
+            }
+        }
+    }
+
+    async fn update_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError>;
+
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -819,12 +846,6 @@ where
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError>;
-
-    async fn get_ledger(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        last_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError>;
 
     async fn get_last_ledger(
         &self,

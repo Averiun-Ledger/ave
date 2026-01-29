@@ -1,3 +1,4 @@
+use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
@@ -13,10 +14,17 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
+use crate::evaluation::schema;
 use crate::governance::model::{CreatorQuantity, Quorum};
 use crate::governance::role_register::{
     RoleDataRegister, RolesRegister, RolesRegisterMessage,
     RolesRegisterResponse, SearchRole,
+};
+use crate::governance::subject_register::{
+    SubjectRegister, SubjectRegisterMessage,
+};
+use crate::governance::witnesses_register::{
+    WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::request::manager::{RequestManager, RequestManagerMessage};
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
@@ -37,7 +45,7 @@ pub fn check_quorum_signers(
 
 pub async fn get_actual_roles_register<A>(
     ctx: &mut ActorContext<A>,
-    governance_id: &str,
+    governance_id: &DigestIdentifier,
     evaluation: SearchRole,
     approval: bool,
     version: u64,
@@ -76,7 +84,7 @@ where
 
 pub async fn get_validation_roles_register<A>(
     ctx: &mut ActorContext<A>,
-    governance_id: &str,
+    governance_id: &DigestIdentifier,
     search: SearchRole,
     version: u64,
 ) -> Result<RoleDataRegister, ActorError>
@@ -102,6 +110,100 @@ where
             actor_path,
             "RolesRegisterResponse::Validation".to_string(),
         )),
+    }
+}
+
+pub async fn check_subject_creation<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    creator: PublicKey,
+    gov_version: u64,
+    namespace: String,
+    schema_id: SchemaType,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/{}/subject_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<SubjectRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let _response = actor
+        .ask(SubjectRegisterMessage::Check {
+            creator,
+            gov_version,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    Ok(())
+}
+
+pub async fn check_witness_access<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+) -> Result<Option<u64>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::Access {
+            subject_id: subject_id.to_owned(),
+            node,
+            namespace,
+            schema_id,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::Access { sn } => Ok(sn),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::Access { sn }".to_string(),
+        }),
+    }
+}
+
+pub async fn gov_sn<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<u64, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor.ask(WitnessesRegisterMessage::GetSnGov).await?;
+
+    match response {
+        WitnessesRegisterResponse::GovSn { sn } => Ok(sn),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::GovSn { sn }".to_string(),
+        }),
     }
 }
 
@@ -430,55 +532,46 @@ where
     A: PersistentActor,
     A::Event: BorshSerialize + BorshDeserialize,
 {
-    let path = ActorPath::from(&format!("{}/store", ctx.path()));
-    let store: Option<ActorRef<Store<A>>> = ctx.get_child("store").await;
-    let response = if let Some(store) = store {
-        store.ask(StoreCommand::LastEvent).await?
-    } else {
-        return Err(ActorError::NotFound(path));
-    };
+    let store = ctx.get_child::<Store<A>>("store").await?;
+    let response = store.ask(StoreCommand::LastEvent).await?;
 
     match response {
         StoreResponse::LastEvent(event) => Ok(event),
         StoreResponse::Error(e) => {
-            Err(ActorError::FunctionalFail(e.to_string()))
+            Err(ActorError::FunctionalCritical {description: e.to_string()})
         }
-        _ => Err(ActorError::UnexpectedResponse(
-            path,
-            "StoreResponse::LastEvent".to_string(),
-        )),
+         _ => Err(ActorError::UnexpectedResponse {
+            path: ActorPath::from(format!("{}/store", ctx.path())),
+            expected: "StoreResponse::LastEvent".to_owned(),
+        }),
     }
 }
 
 pub async fn get_n_events<A>(
     ctx: &mut ActorContext<A>,
     last_sn: u64,
-    n: u64,
+    quantity: u64,
 ) -> Result<Vec<A::Event>, ActorError>
 where
     A: PersistentActor,
     A::Event: BorshSerialize + BorshDeserialize,
 {
-    let store: Option<ActorRef<Store<A>>> = ctx.get_child("store").await;
-    let response = if let Some(store) = store {
-        store
-            .ask(StoreCommand::GetEvents {
-                from: last_sn,
-                to: last_sn + n,
-            })
-            .await?
-    } else {
-        return Err(ActorError::NotFound(ActorPath::from(format!(
-            "{}/store",
-            ctx.path()
-        ))));
-    };
+    let store = ctx.get_child::<Store<A>>("store").await?;
+    let response = store
+        .ask(StoreCommand::GetEvents {
+            from: last_sn,
+            to: last_sn + quantity,
+        })
+        .await?;
 
     match response {
         StoreResponse::Events(events) => Ok(events),
-        _ => Err(ActorError::UnexpectedResponse(
-            ActorPath::from(format!("{}/store", ctx.path())),
-            "StoreResponse::Events".to_owned(),
-        )),
+        StoreResponse::Error(e) => {
+            Err(ActorError::FunctionalCritical {description: e.to_string()})
+        }
+        _ => Err(ActorError::UnexpectedResponse {
+            path: ActorPath::from(format!("{}/store", ctx.path())),
+            expected: "StoreResponse::Events".to_owned(),
+        }),
     }
 }

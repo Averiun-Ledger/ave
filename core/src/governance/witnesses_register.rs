@@ -28,6 +28,7 @@ use crate::db::Storable;
     BorshSerialize,
 )]
 pub struct WitnessesRegister {
+    gov_sn: u64,
     subjects: HashMap<DigestIdentifier, TransferData>,
     witnesses: HashMap<
         (PublicKey, SchemaType),
@@ -90,6 +91,7 @@ pub struct OldOwnerData {
 
 #[derive(Debug, Clone)]
 pub enum WitnessesRegisterMessage {
+    GetSnGov,
     UpdateCreatorsWitnesses {
         version: u64,
         new_creator:
@@ -103,6 +105,9 @@ pub enum WitnessesRegisterMessage {
     },
     UpdateSn {
         subject_id: DigestIdentifier,
+        sn: u64,
+    },
+    UpdateSnGov {
         sn: u64,
     },
     Create {
@@ -154,6 +159,9 @@ pub enum WitnessesRegisterEvent {
         subject_id: DigestIdentifier,
         sn: u64,
     },
+    UpdateSnGov {
+        sn: u64,
+    },
     Create {
         subject_id: DigestIdentifier,
         owner: PublicKey,
@@ -180,6 +188,7 @@ impl Event for WitnessesRegisterEvent {}
 
 pub enum WitnessesRegisterResponse {
     Access { sn: Option<u64> },
+    GovSn { sn: u64 },
     Ok,
 }
 
@@ -412,6 +421,18 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
         ctx: &mut ActorContext<WitnessesRegister>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
+            WitnessesRegisterMessage::GetSnGov => {
+                return Ok(WitnessesRegisterResponse::GovSn { sn: self.gov_sn })   
+            }
+            WitnessesRegisterMessage::UpdateSnGov { sn } => {
+                self.on_event(
+                    WitnessesRegisterEvent::UpdateSnGov {
+                        sn
+                    },
+                    ctx,
+                )
+                .await;
+            }
             WitnessesRegisterMessage::UpdateCreatorsWitnesses {
                 version,
                 new_creator,
@@ -639,6 +660,9 @@ impl PersistentActor for WitnessesRegister {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
+            WitnessesRegisterEvent::UpdateSnGov { sn } => {
+                self.gov_sn = *sn;
+            }
             WitnessesRegisterEvent::UpdateCreatorsWitnesses {
                 version,
                 new_creator,

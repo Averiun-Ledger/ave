@@ -588,7 +588,7 @@ impl ValiWorker {
 
             let (eval_data, appro_data) = get_actual_roles_register(
                 ctx,
-                &metadata.governance_id.to_string(),
+                &metadata.governance_id,
                 SearchRole {
                     schema_id: metadata.schema_id.clone(),
                     namespace: metadata.namespace.clone(),
@@ -654,7 +654,7 @@ impl ValiWorker {
     ) -> Result<(), ValidatorError> {
         let vali_data = get_validation_roles_register(
             ctx,
-            &metadata.governance_id.to_string(),
+            &metadata.governance_id,
             SearchRole {
                 schema_id: metadata.schema_id.clone(),
                 namespace: metadata.namespace.clone(),
@@ -1115,7 +1115,7 @@ impl Handler<ValiWorker> for ValiWorker {
                     request_id: info.request_id,
                     version: info.version,
                     receiver_actor: format!(
-                        "/user/node/{}/validation/{}",
+                        "/user/request/{}/validation/{}",
                         validation_req
                             .content()
                             .get_signed_event_request()

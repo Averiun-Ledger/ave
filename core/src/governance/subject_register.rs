@@ -97,6 +97,12 @@ impl SubjectRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterMessage {
+    Check {
+        creator: PublicKey,
+        gov_version: u64,
+        namespace: String,
+        schema_id: SchemaType,
+    },
     RegisterData {
         gov_version: u64,
         data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)>,
@@ -243,6 +249,16 @@ impl Handler<SubjectRegister> for SubjectRegister {
                     ctx,
                 )
                 .await;
+
+                Ok(SubjectRegisterResponse::Ok)
+            }
+            SubjectRegisterMessage::Check {
+                creator,
+                gov_version,
+                namespace,
+                schema_id,
+            } => {
+                self.check(&creator, &namespace, &schema_id, gov_version)?;
 
                 Ok(SubjectRegisterResponse::Ok)
             }

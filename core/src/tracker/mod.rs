@@ -11,7 +11,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        common::{emit_fail, get_last_event, get_n_events},
+        common::{emit_fail, get_last_event},
         event::{Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
@@ -127,6 +127,25 @@ impl BorshDeserialize for Tracker {
 
 #[async_trait]
 impl Subject for Tracker {
+    async fn update_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::UpdateSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn,
+            })
+            .await
+    }
+
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -243,14 +262,6 @@ impl Subject for Tracker {
         get_last_event(ctx).await
     }
 
-    async fn get_ledger(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        last_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError> {
-        get_n_events(ctx, last_sn, 100).await
-    }
-
     fn apply_patch(
         &mut self,
         json_patch: ValueWrapper,
@@ -347,25 +358,6 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
-    async fn update_sn(
-        &self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let witnesses_register = ctx
-            .system()
-            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
-                self.governance_id
-            )))
-            .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::UpdateSn {
-                subject_id: self.subject_metadata.subject_id.clone(),
-                sn: self.subject_metadata.sn,
-            })
-            .await
-    }
-
     async fn create(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -669,7 +661,7 @@ impl Tracker {
 #[derive(Debug, Clone)]
 pub enum TrackerMessage {
     GetMetadata,
-    GetLedger { last_sn: u64 },
+    GetLedger { lo_sn: Option<u64>, hi_sn: u64},
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
     GetLastSn,
@@ -685,6 +677,7 @@ pub enum TrackerResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
+        is_all: bool
     },
     LastLedger {
         ledger_event: Option<SignedLedger>,
@@ -806,9 +799,9 @@ impl Handler<Tracker> for Tracker {
                 Ok(TrackerResponse::Sn(self.subject_metadata.sn))
             }
 
-            TrackerMessage::GetLedger { last_sn } => {
-                let ledger = self.get_ledger(ctx, last_sn).await?;
-                Ok(TrackerResponse::Ledger { ledger })
+            TrackerMessage::GetLedger {lo_sn, hi_sn} => {
+                let (ledger, is_all) = self.get_ledger(ctx, lo_sn, hi_sn).await?;
+                Ok(TrackerResponse::Ledger { ledger, is_all })
             }
             TrackerMessage::GetLastLedger => {
                 let ledger_event = self.get_last_ledger(ctx).await?;

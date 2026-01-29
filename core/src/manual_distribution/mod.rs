@@ -11,7 +11,7 @@ use tracing::{Span, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    model::common::{emit_fail, node::subject_owner},
+    model::common::{emit_fail},
 };
 
 const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";

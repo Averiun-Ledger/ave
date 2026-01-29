@@ -354,10 +354,10 @@ impl Node {
 pub enum NodeMessage {
     SignRequest(SignTypesNode),
     PendingTransfers,
-    UpSubject { subject_id: String, light: bool },
+    UpSubject { subject_id: DigestIdentifier, light: bool },
     GetSubjectData(DigestIdentifier),
     CreateNewSubject(SignedLedger),
-    OwnerPendingSubject(DigestIdentifier),
+    IOwnerNewOwnerSubject(DigestIdentifier),
     AuthData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
@@ -372,7 +372,10 @@ pub enum NodeResponse {
     SubjectData(Option<SubjectData>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
-    IOwnerPending((bool, bool)),
+    IOwnerNewOwner {
+        i_owner: bool,
+        i_new_owner: bool,
+    },
     AuthData {
         auth: bool,
         subject_data: Option<SubjectData>,
@@ -918,10 +921,11 @@ impl Handler<Node> for Node {
 
                 Ok(NodeResponse::SignRequest(sign))
             }
-            NodeMessage::OwnerPendingSubject(subject_id) => {
-                let is_owner =
+            NodeMessage::IOwnerNewOwnerSubject(subject_id) => {
+                let i_owner =
                     self.owned_subjects.keys().any(|x| *x == subject_id);
-                let is_pending = if let Some(data) =
+
+                let i_new_owner = if let Some(data) =
                     self.transfer_subjects.get(&subject_id)
                 {
                     data.new_owner == *self.our_key
@@ -932,12 +936,12 @@ impl Handler<Node> for Node {
                 debug!(
                     msg_type = "OwnerPendingSubject",
                     subject_id = %subject_id,
-                    is_owner = is_owner,
-                    is_pending = is_pending,
+                    i_owner = i_owner,
+                    i_new_owner = i_new_owner,
                     "Checked owner/pending status"
                 );
 
-                Ok(NodeResponse::IOwnerPending((is_owner, is_pending)))
+                Ok(NodeResponse::IOwnerNewOwner {i_owner, i_new_owner})
             }
             NodeMessage::AuthData(subject_id) => {
                 let authorized_subjects = match ctx

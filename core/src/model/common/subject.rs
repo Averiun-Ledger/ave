@@ -4,7 +4,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
 
-use ave_common::{Namespace, SchemaType, identity::PublicKey};
+use ave_common::{Namespace, SchemaType, identity::{DigestIdentifier, PublicKey}};
 
 use crate::{
     governance::{
@@ -12,8 +12,7 @@ use crate::{
         data::GovernanceData,
         model::{ProtocolTypes, Quorum},
         subject_register::{
-            OwnerSchema, RelationShip, RelationShipMessage,
-            RelationShipResponse,
+            OwnerSchema
         },
     },
     subject::{Metadata, SignedLedger},
@@ -22,7 +21,7 @@ use crate::{
 
 pub async fn get_gov<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
+    subject_id: &DigestIdentifier,
 ) -> Result<GovernanceData, ActorError>
 where
     A: Actor + Handler<A>,
@@ -182,7 +181,7 @@ where
 
 pub async fn update_ledger<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
+    subject_id: &DigestIdentifier,
     events: Vec<SignedLedger>,
     is_gov: bool,
 ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>

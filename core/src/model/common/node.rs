@@ -14,9 +14,6 @@ use crate::{
     model::event::Ledger,
     node::{
         SubjectData,
-        transfer::{
-            TransferRegister, TransferRegisterMessage, TransferRegisterResponse,
-        },
     },
 };
 
@@ -45,31 +42,23 @@ pub enum SignTypesNode {
     Ledger(Ledger),
 }
 
-pub async fn subject_owner<A>(
+pub async fn i_owner_new_owner<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
+    subject_id: &DigestIdentifier,
 ) -> Result<(bool, bool), ActorError>
 where
     A: Actor + Handler<A>,
 {
     let node_path = ActorPath::from("/user/node");
-    let node_actor: Option<ave_actors::ActorRef<Node>> =
-        ctx.system().get_actor(&node_path).await;
+    let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
 
-    let response = if let Some(node_actor) = node_actor {
-        node_actor
-            .ask(NodeMessage::OwnerPendingSubject(subject_id.to_owned()))
-            .await?
-    } else {
-        return Err(ActorError::NotFound(node_path));
-    };
+    let response = node_actor
+            .ask(NodeMessage::IOwnerNewOwnerSubject(subject_id.to_owned()))
+            .await?;
 
     match response {
-        NodeResponse::IOwnerPending(res) => Ok(res),
-        _ => Err(ActorError::UnexpectedResponse(
-            node_path,
-            "NodeResponse::OwnerPending".to_owned(),
-        )),
+        NodeResponse::IOwnerNewOwner{i_owner, i_new_owner} => Ok((i_owner, i_new_owner)),
+        _ => Err(ActorError::UnexpectedResponse { path: node_path, expected: "NodeResponse::IOwnerNewOwner".to_owned()}),
     }
 }
 
