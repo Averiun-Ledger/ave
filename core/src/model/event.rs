@@ -18,6 +18,39 @@ use ave_common::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone)]
+pub enum ProtocolsError {
+    #[error("invalid evaluation: evaluation result does not match expected state")]
+    InvalidEvaluation,
+
+    #[error("invalid evaluation: approval required but not provided")]
+    ApprovalRequired,
+
+    #[error("invalid actual protocols: expected {expected}, got {got}")]
+    InvalidActualProtocols {
+        expected: &'static str,
+        got: &'static str,
+    },
+
+    #[error("invalid event request type: {request_type} is not supported for is_gov={is_gov}")]
+    InvalidEventRequestType {
+        request_type: &'static str,
+        is_gov: bool,
+    },
+
+    #[error("expected create event with metadata, got different protocol or validation metadata")]
+    NotCreateWithMetadata,
+}
+
+impl From<ProtocolsError> for ActorError {
+    fn from(error: ProtocolsError) -> Self {
+        ActorError::Functional {
+            description: error.to_string(),
+        }
+    }
+}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -165,15 +198,13 @@ impl Protocols {
         event_request: EventRequestType,
         actual_protocols: ActualProtocols,
         validation: ValidationData,
-    ) -> Result<Self, ActorError> {
+    ) -> Result<Self, ProtocolsError> {
         match (event_request, is_gov) {
             (EventRequestType::Fact, true) => {
                 let (evaluation, approval) = match actual_protocols {
                     ActualProtocols::Eval { eval_data } => {
                         if eval_data.evaluator_res().is_some() {
-                            return Err(ActorError::FunctionalFail(
-                                "Invalid evaluation".to_string(),
-                            ));
+                            return Err(ProtocolsError::InvalidEvaluation);
                         } else {
                             (eval_data, None)
                         }
@@ -184,22 +215,19 @@ impl Protocols {
                     } => {
                         if let Some(eval_res) = eval_data.evaluator_res() {
                             if !eval_res.appr_required {
-                                return Err(ActorError::FunctionalFail(
-                                    "Invalid evaluation".to_string(),
-                                ));
+                                return Err(ProtocolsError::ApprovalRequired);
                             }
                         } else {
-                            return Err(ActorError::FunctionalFail(
-                                "Invalid evaluation".to_string(),
-                            ));
+                            return Err(ProtocolsError::InvalidEvaluation);
                         };
 
                         (eval_data, Some(approval_data))
                     }
                     ActualProtocols::None => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval or EvalApprove",
+                            got: "None",
+                        });
                     }
                 };
 
@@ -212,11 +240,17 @@ impl Protocols {
             (EventRequestType::Fact, false) => {
                 let evaluation = match actual_protocols {
                     ActualProtocols::Eval { eval_data } => eval_data,
-                    ActualProtocols::None
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::None => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "None",
+                        });
+                    }
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "EvalApprove",
+                        });
                     }
                 };
 
@@ -229,11 +263,17 @@ impl Protocols {
             | (EventRequestType::Transfer, false) => {
                 let evaluation = match actual_protocols {
                     ActualProtocols::Eval { eval_data } => eval_data,
-                    ActualProtocols::None
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::None => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "None",
+                        });
+                    }
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "EvalApprove",
+                        });
                     }
                 };
 
@@ -245,11 +285,17 @@ impl Protocols {
             (EventRequestType::Confirm, true) => {
                 let evaluation = match actual_protocols {
                     ActualProtocols::Eval { eval_data } => eval_data,
-                    ActualProtocols::None
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::None => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "None",
+                        });
+                    }
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "EvalApprove",
+                        });
                     }
                 };
                 Ok(Self::GovConfirm {
@@ -259,45 +305,64 @@ impl Protocols {
             }
             (EventRequestType::Confirm, false) => {
                 match actual_protocols {
-                    ActualProtocols::Eval { .. }
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::Eval { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Eval",
+                        });
                     }
-                    _ => {}
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::None => {}
                 }
                 Ok(Self::TrackerConfirm { validation })
             }
             (EventRequestType::Reject, true)
             | (EventRequestType::Reject, false) => {
                 match actual_protocols {
-                    ActualProtocols::Eval { .. }
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::Eval { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Eval",
+                        });
                     }
-                    _ => {}
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::None => {}
                 }
                 Ok(Self::Reject { validation })
             }
             (EventRequestType::EOL, true) | (EventRequestType::EOL, false) => {
                 match actual_protocols {
-                    ActualProtocols::Eval { .. }
-                    | ActualProtocols::EvalApprove { .. } => {
-                        return Err(ActorError::FunctionalFail(
-                            "Invalid actual protocols".to_string(),
-                        ));
+                    ActualProtocols::Eval { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Eval",
+                        });
                     }
-                    _ => {}
+                    ActualProtocols::EvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::None => {}
                 }
                 Ok(Self::EOL { validation })
             }
-            _ => {
-                return Err(ActorError::FunctionalFail(
-                    "Invalid event request type".to_string(),
-                ));
+            (EventRequestType::Create, _) => {
+                Err(ProtocolsError::InvalidEventRequestType {
+                    request_type: "Create",
+                    is_gov,
+                })
             }
         }
     }
@@ -315,14 +380,14 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    pub fn get_create_metadata(&self) -> Result<Metadata, String> {
+    pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {
         if let Protocols::Create { validation } = &self.protocols
             && let ValidationMetadata::Metadata(metadata) =
                 &validation.validation_metadata
         {
             Ok(metadata.clone())
         } else {
-            todo!()
+            Err(ProtocolsError::NotCreateWithMetadata)
         }
     }
 }

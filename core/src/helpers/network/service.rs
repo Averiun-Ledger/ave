@@ -4,6 +4,7 @@
 use ave_actors::ActorError;
 use network::CommandHelper as Command;
 use tokio::sync::mpsc::Sender;
+use tracing::error;
 
 use super::NetworkMessage;
 
@@ -26,7 +27,11 @@ impl NetworkSender {
         command: Command<NetworkMessage>,
     ) -> Result<(), ActorError> {
         self.command_sender.send(command).await.map_err(|e| {
-            ActorError::Functional{description: e.to_string()}
+            error!(
+                error = %e,
+                "Failed to send command to network worker"
+            );
+            ActorError::Functional { description: e.to_string() }
         })
     }
 

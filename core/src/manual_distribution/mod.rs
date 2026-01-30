@@ -5,16 +5,23 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
     NotPersistentActor,
 };
-use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::{
+    Namespace,
+    identity::{DigestIdentifier, PublicKey},
+};
 use serde::{Deserialize, Serialize};
-use tracing::{Span, error, info_span, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    model::common::{emit_fail},
+    governance::model::WitnessesData,
+    helpers::network::service::NetworkSender,
+    model::common::{
+        emit_fail,
+        node::i_can_send_last_ledger,
+        subject::{get_gov, get_last_ledger_event},
+    },
 };
-
-const TARGET_MANUAL_DISTRIBUTION: &str = "Ave-Node-ManualDistribution";
 
 pub struct ManualDistribution {
     our_key: Arc<PublicKey>,
@@ -60,57 +67,170 @@ impl Handler<ManualDistribution> for ManualDistribution {
     ) -> Result<(), ActorError> {
         match msg {
             ManualDistributionMessage::Update(subject_id) => {
-                let (is_owner, _is_pending) =
-                    subject_owner(ctx, &subject_id.to_string()).await?;
+                let data = i_can_send_last_ledger(ctx, &subject_id)
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to check if we can send last ledger"
+                        );
+                        e
+                    })?;
 
-                if !is_owner {
-                    let e = "We are not subject owner";
-                    warn!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
+                let Some(data) = data else {
+                    warn!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Not the owner of the subject nor rejected transfer"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Not the owner of the subject, nor have I refused the transfer".to_owned(),
+                    });
+                };
+
+                let ledger = get_last_ledger_event(ctx, &subject_id)
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to get last ledger event"
+                        );
+                        e
+                    })?;
+
+                let Some(ledger) = ledger else {
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "No ledger event found for subject"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Cannot obtain last ledger event"
+                            .to_string(),
+                    });
+                };
+
+                let governance_id =
+                    if let Some(governance_id) = &data.governance_id {
+                        governance_id.clone()
+                    } else {
+                        subject_id.clone()
+                    };
+
+                let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        governance_id = %governance_id,
+                        error = %e,
+                        "Failed to get governance"
+                    );
+                    e
+                })?;
+
+                let is_gov = data.schema_id.is_gov();
+                let witnesses_data = if is_gov {
+                    WitnessesData::Gov
+                } else {
+                    WitnessesData::Schema {
+                        creator: (*self.our_key).clone(),
+                        schema_id: data.schema_id.clone(),
+                        namespace: Namespace::from(data.namespace.clone()),
+                    }
+                };
+
+                let mut witnesses =
+                    gov.get_witnesses(witnesses_data).map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            is_gov = is_gov,
+                            error = %e,
+                            "Failed to get witnesses from governance"
+                        );
+                        ActorError::Functional {
+                            description: e.to_string(),
+                        }
+                    })?;
+
+                witnesses.remove(&*self.our_key);
+                if witnesses.is_empty() {
+                    warn!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "No witnesses available for manual distribution"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "No witnesses available to manually send the last ledger event".to_string()
+                    });
                 }
 
-                let distribution = Distribution::new(
-                    self.our_key.clone(),
-                    DistributionType::Manual,
-                );
-                let request_id = format!("M_{}", subject_id);
+                let witnesses_count = witnesses.len();
 
-                let (ledger, last_state) =
-                    Self::get_last_ledger(ctx, &subject_id.to_string()).await?;
-
-                let Some(last_state) = last_state else {
-                    let e = "Can not obtain last state";
-                    error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_string()));
+                let Some(network) = ctx
+                    .system()
+                    .get_helper::<Arc<NetworkSender>>("network")
+                    .await
+                else {
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "Network helper not found"
+                    );
+                    return Err(ActorError::Helper {
+                        name: "network".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
                 };
 
-                let ledger = if ledger.len() != 1 {
-                    let e = "Failed to get the latest event from the ledger";
-                    error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_string()));
-                } else {
-                    ledger[0].clone()
-                };
+                let distribution =
+                    Distribution::new(network, DistributionType::Manual);
 
-                let distribution_actor = ctx.create_child(&request_id, distribution).await.map_err(|e| {
-                    warn!(TARGET_MANUAL_DISTRIBUTION, "Update, Can not create distribution child: {}", e);
-                    ActorError::Functional("There was already a manual distribution in progress".to_owned())
+                let distribution_actor = ctx.create_child(&subject_id.to_string(), distribution).await.map_err(|e| {
+                    warn!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Manual distribution already in progress"
+                    );
+                    ActorError::Functional {
+                        description: "Manual distribution already in progress for this subject".to_owned()
+                    }
                 })?;
 
                 if let Err(e) = distribution_actor
                     .tell(DistributionMessage::Create {
-                        request_id,
-                        event: last_state.event,
+                        witnesses: witnesses.clone(),
                         ledger: Box::new(ledger),
-                        last_proof: last_state.proof,
-                        last_vali_res: last_state.vali_res,
                     })
                     .await
                 {
-                    let e = format!("Can not create manual update: {}", e);
-                    error!(TARGET_MANUAL_DISTRIBUTION, "Update, {}", e);
-                    return Err(ActorError::Functional(e.to_string()));
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        witnesses_count = witnesses_count,
+                        error = %e,
+                        "Failed to start manual distribution"
+                    );
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Failed to start manual distribution: {}",
+                            e
+                        ),
+                    });
                 };
+
+                debug!(
+                    msg_type = "Update",
+                    subject_id = %subject_id,
+                    witnesses_count = witnesses_count,
+                    is_gov = is_gov,
+                    "Manual distribution started successfully"
+                );
 
                 Ok(())
             }
@@ -122,7 +242,10 @@ impl Handler<ManualDistribution> for ManualDistribution {
         error: ActorError,
         ctx: &mut ActorContext<ManualDistribution>,
     ) -> ChildAction {
-        error!(TARGET_MANUAL_DISTRIBUTION, "OnChildFault, {}", error);
+        error!(
+            error = %error,
+            "Child actor fault in manual distribution"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

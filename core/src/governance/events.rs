@@ -1200,7 +1200,7 @@ impl GovRoleEvent {
                             });
                         }
 
-                        if !new_roles.issuer.users.insert(issuer.clone()) {
+                        if !new_roles.issuer.signers.insert(issuer.clone()) {
                             return Err(RunnerError::InvalidEvent {
                                 location: "GovRoleEvent::check_data",
                                 kind: error::InvalidEventKind::AlreadyExists {
@@ -1337,7 +1337,7 @@ impl GovRoleEvent {
                 }
                 for issuer in issuers {
                     if issuer != ReservedWords::Any.to_string() {
-                        if !new_roles.issuer.users.remove(&issuer) {
+                        if !new_roles.issuer.signers.remove(&issuer) {
                             return Err(RunnerError::InvalidEvent {
                                 location: "GovRoleEvent::check_data",
                                 kind: error::InvalidEventKind::CannotRemove {
@@ -1964,7 +1964,7 @@ impl SchemaIdRole {
                             });
                         }
 
-                        if !roles_schema.issuer.users.insert(issuer.clone()) {
+                        if !roles_schema.issuer.signers.insert(issuer.clone()) {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::AlreadyExists {
@@ -2123,7 +2123,7 @@ impl SchemaIdRole {
 
                 for issuer in issuers {
                     if issuer.name != ReservedWords::Any.to_string() {
-                        if !roles_schema.issuer.users.remove(&issuer) {
+                        if !roles_schema.issuer.signers.remove(&issuer) {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::CannotRemove {
@@ -2512,7 +2512,7 @@ impl SchemaIdRole {
                             });
                         }
 
-                        if !roles_schema.issuer.users.remove(&Role {
+                        if !roles_schema.issuer.signers.remove(&Role {
                             name: issuer.actual_name.clone(),
                             namespace: issuer.actual_namespace.clone(),
                         }) {
@@ -2530,7 +2530,7 @@ impl SchemaIdRole {
                             });
                         };
 
-                        if !roles_schema.issuer.users.insert(Role {
+                        if !roles_schema.issuer.signers.insert(Role {
                             name: issuer.actual_name.clone(),
                             namespace: issuer.new_namespace.clone(),
                         }) {

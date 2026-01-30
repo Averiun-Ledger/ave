@@ -96,6 +96,8 @@ impl Distribution {
         if let DistributionType::Request = self.distribution_type {
             let req_actor = ctx.get_parent::<RequestManager>().await?;
             req_actor.tell(RequestManagerMessage::FinishRequest).await?;
+        } else {
+            ctx.stop(None);
         }
 
         Ok(())
@@ -164,8 +166,6 @@ impl Handler<Distribution> for Distribution {
                         );
                         return Err(emit_fail(ctx, e).await);
                     };
-
-                    ctx.stop(None).await;
                 }
             }
         }

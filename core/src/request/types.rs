@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::{
     evaluation::request::EvaluationReq,
     governance::model::Quorum,
-    model::event::{EvaluationData, Ledger, ValidationData},
+    model::event::{EvaluationData, ValidationData},
+    subject::SignedLedger,
     validation::request::ValidationReq,
 };
 
@@ -35,9 +36,13 @@ pub enum RequestManagerState {
         val_req: ValidationReq,
         val_res: ValidationData,
     },
-    Distribution {
-        ledger: Signed<Ledger>,
+    UpdateSubject {
+        ledger: SignedLedger,
     },
+    Distribution {
+        ledger: SignedLedger,
+    },
+    End
 }
 
 #[derive(

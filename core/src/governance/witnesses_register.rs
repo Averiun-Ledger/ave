@@ -92,6 +92,9 @@ pub struct OldOwnerData {
 #[derive(Debug, Clone)]
 pub enum WitnessesRegisterMessage {
     GetSnGov,
+    GetTrackerSnCreator {
+        subject_id: DigestIdentifier,
+    },
     UpdateCreatorsWitnesses {
         version: u64,
         new_creator:
@@ -189,6 +192,7 @@ impl Event for WitnessesRegisterEvent {}
 pub enum WitnessesRegisterResponse {
     Access { sn: Option<u64> },
     GovSn { sn: u64 },
+    TrackerCreatorSn { data: Option<(PublicKey, u64)> },
     Ok,
 }
 
@@ -421,17 +425,23 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
         ctx: &mut ActorContext<WitnessesRegister>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
+            WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
+                let data = if let Some(data) = self.subjects.get(&subject_id) {
+                    Some((data.actual_owner, data.sn))
+                } else {
+                    None
+                };
+
+                return Ok(WitnessesRegisterResponse::TrackerCreatorSn {
+                    data,
+                });
+            }
             WitnessesRegisterMessage::GetSnGov => {
-                return Ok(WitnessesRegisterResponse::GovSn { sn: self.gov_sn })   
+                return Ok(WitnessesRegisterResponse::GovSn { sn: self.gov_sn });
             }
             WitnessesRegisterMessage::UpdateSnGov { sn } => {
-                self.on_event(
-                    WitnessesRegisterEvent::UpdateSnGov {
-                        sn
-                    },
-                    ctx,
-                )
-                .await;
+                self.on_event(WitnessesRegisterEvent::UpdateSnGov { sn }, ctx)
+                    .await;
             }
             WitnessesRegisterMessage::UpdateCreatorsWitnesses {
                 version,

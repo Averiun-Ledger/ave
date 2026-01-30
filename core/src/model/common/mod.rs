@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::slice;
 
@@ -181,31 +181,7 @@ where
     }
 }
 
-pub async fn gov_sn<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-) -> Result<u64, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let actor_path = ActorPath::from(format!(
-        "/user/node/{}/witnesses_register",
-        governance_id
-    ));
 
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor.ask(WitnessesRegisterMessage::GetSnGov).await?;
-
-    match response {
-        WitnessesRegisterResponse::GovSn { sn } => Ok(sn),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected: "WitnessesRegisterResponse::GovSn { sn }".to_string(),
-        }),
-    }
-}
 
 #[derive(
     Clone,
@@ -430,14 +406,11 @@ where
     A: Actor + Handler<A>,
 {
     let tracking_path = ActorPath::from("/user/request/tracking");
-    let tracking_actor: Option<ActorRef<RequestTracking>> =
-        ctx.system().get_actor(&tracking_path).await;
-
-    if let Some(tracking_actor) = tracking_actor {
-        tracking_actor.tell(message).await
-    } else {
-        Err(ActorError::NotFound(tracking_path))
-    }
+    let tracking_actor = ctx
+        .system()
+        .get_actor::<RequestTracking>(&tracking_path)
+        .await?;
+    tracking_actor.tell(message).await
 }
 
 pub async fn emit_fail<A>(
@@ -487,18 +460,8 @@ where
     A: Actor + Handler<A>,
 {
     let req_path = ActorPath::from(format!("/user/request/{}", request_id));
-    let req_actor: Option<ActorRef<RequestManager>> =
-        ctx.system().get_actor(&req_path).await;
-
-    if let Some(req_actor) = req_actor {
-        req_actor
-            .tell(RequestManagerMessage::Reboot { governance_id })
-            .await?
-    } else {
-        return Err(ActorError::NotFound(req_path));
-    };
-
-    Ok(())
+    let req_actor = ctx.system().get_actor::<RequestManager>(&req_path).await?;
+    req_actor.tell(RequestManagerMessage::Reboot { governance_id }).await
 }
 
 pub async fn purge_storage<A>(
@@ -537,10 +500,10 @@ where
 
     match response {
         StoreResponse::LastEvent(event) => Ok(event),
-        StoreResponse::Error(e) => {
-            Err(ActorError::FunctionalCritical {description: e.to_string()})
-        }
-         _ => Err(ActorError::UnexpectedResponse {
+        StoreResponse::Error(e) => Err(ActorError::FunctionalCritical {
+            description: e.to_string(),
+        }),
+        _ => Err(ActorError::UnexpectedResponse {
             path: ActorPath::from(format!("{}/store", ctx.path())),
             expected: "StoreResponse::LastEvent".to_owned(),
         }),
@@ -566,9 +529,9 @@ where
 
     match response {
         StoreResponse::Events(events) => Ok(events),
-        StoreResponse::Error(e) => {
-            Err(ActorError::FunctionalCritical {description: e.to_string()})
-        }
+        StoreResponse::Error(e) => Err(ActorError::FunctionalCritical {
+            description: e.to_string(),
+        }),
         _ => Err(ActorError::UnexpectedResponse {
             path: ActorPath::from(format!("{}/store", ctx.path())),
             expected: "StoreResponse::Events".to_owned(),

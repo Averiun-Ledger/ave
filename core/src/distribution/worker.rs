@@ -22,9 +22,9 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_subject_creation, check_witness_access, emit_fail, gov_sn,
+            check_witness_access, emit_fail, gov_sn,
             node::{get_node_subject_data, i_owner_new_owner, try_to_update},
-            subject::{get_gov, update_ledger},
+            subject::{create_subject, get_gov, update_ledger},
         },
         event::Ledger,
     },
@@ -54,36 +54,6 @@ impl DistriWorker {
         let subject_actor =
             ctx.system().get_actor::<Tracker>(&subject_path).await?;
         subject_actor.ask_stop().await
-    }
-
-    async fn create_subject(
-        &self,
-        ctx: &mut ActorContext<DistriWorker>,
-        ledger: SignedLedger,
-    ) -> Result<(), ActorError> {
-        if let EventRequest::Create(request) =
-            ledger.content().event_request.content().clone()
-            && !request.schema_id.is_gov()
-        {
-            check_subject_creation(
-                ctx,
-                &request.governance_id,
-                ledger.signature().signer.clone(),
-                ledger.content().gov_version,
-                request.namespace.to_string(),
-                request.schema_id,
-            )
-            .await?;
-        }
-
-        let node_path = ActorPath::from("/user/node");
-        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
-
-        node_actor
-            .ask(NodeMessage::CreateNewSubject(ledger))
-            .await?;
-
-        Ok(())
     }
 
     async fn get_ledger(
@@ -638,7 +608,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .is_create_event()
                 {
                     if let Err(e) =
-                        self.create_subject(ctx, ledger.clone()).await
+                        create_subject(ctx, ledger.clone()).await
                     {
                         error!(
                             msg_type = "LastEventDistribution",
@@ -692,7 +662,6 @@ impl Handler<DistriWorker> for DistriWorker {
                         ctx,
                         &subject_id,
                         vec![ledger.clone()],
-                        is_gov,
                     )
                     .await
                     {
@@ -896,7 +865,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .is_create_event()
                 {
                     if let Err(e) =
-                        self.create_subject(ctx, ledger[0].clone()).await
+                        create_subject(ctx, ledger[0].clone()).await
                     {
                         error!(
                             msg_type = "LedgerDistribution",
@@ -950,7 +919,7 @@ impl Handler<DistriWorker> for DistriWorker {
                 };
 
                 let (i_owner, i_new_owner) = if !ledger.is_empty() {
-                    match update_ledger(ctx, &subject_id, ledger, is_gov).await
+                    match update_ledger(ctx, &subject_id, ledger).await
                     {
                         Ok((last_sn, owner, new_owner)) => {
                             let i_new_owner = if let Some(new_owner) = new_owner

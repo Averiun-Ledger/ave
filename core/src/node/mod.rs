@@ -1,7 +1,11 @@
 //! Node module
 //!
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use register::Register;
@@ -12,7 +16,7 @@ use crate::{
     Error,
     auth::{Auth, AuthMessage, AuthResponse},
     db::Storable,
-    distribution::distributor::Distributor,
+    distribution::worker::DistriWorker,
     governance::{Governance, GovernanceMessage, data::GovernanceData},
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
@@ -64,10 +68,13 @@ pub struct TransferData {
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-pub struct SubjectData {
-    pub governance_id: Option<DigestIdentifier>,
-    pub schema_id: SchemaType,
-    pub namespace: String,
+pub enum SubjectData {
+    Tracker {
+        governance_id: DigestIdentifier,
+        schema_id: SchemaType,
+        namespace: String,
+    },
+    Governance,
 }
 
 /// Node struct.
@@ -86,6 +93,8 @@ pub struct Node {
     known_subjects: HashMap<DigestIdentifier, SubjectData>,
 
     transfer_subjects: HashMap<DigestIdentifier, TransferData>,
+
+    reject_subjects: HashSet<DigestIdentifier>,
 }
 
 // Manual Borsh implementation to skip the 'owner' field
@@ -119,6 +128,8 @@ impl BorshDeserialize for Node {
             HashMap::<DigestIdentifier, TransferData>::deserialize_reader(
                 reader,
             )?;
+        let reject_subjects =
+            HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
@@ -133,6 +144,7 @@ impl BorshDeserialize for Node {
             owned_subjects,
             known_subjects,
             transfer_subjects,
+            reject_subjects,
         })
     }
 }
@@ -140,6 +152,10 @@ impl BorshDeserialize for Node {
 impl Node {
     /// Adds a subject to the node's owned subjects.
     pub fn transfer_subject(&mut self, data: TransferSubject) {
+        if data.new_owner == *self.our_key {
+            self.reject_subjects.remove(&data.subject_id);
+        }
+
         self.transfer_subjects.insert(
             data.subject_id,
             TransferData {
@@ -151,7 +167,11 @@ impl Node {
     }
 
     pub fn delete_transfer(&mut self, subject_id: &DigestIdentifier) {
-        self.transfer_subjects.remove(subject_id);
+        if let Some(data) = self.transfer_subjects.remove(subject_id)
+            && data.actual_owner == *self.our_key
+        {
+            self.reject_subjects.insert(subject_id.clone());
+        }
     }
 
     pub fn confirm_transfer_owner(&mut self, subject_id: DigestIdentifier) {
@@ -243,28 +263,7 @@ impl Node {
         };
 
         for (subject, data) in self.owned_subjects.clone() {
-            if !data.schema_id.is_gov() {
-                let tracker_actor = ctx
-                    .create_child(
-                        &subject.to_string(),
-                        Tracker::initial((None, self.our_key.clone(), hash)),
-                    )
-                    .await?;
-
-                let sink =
-                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
-
-                ctx.system().run_sink(sink).await;
-
-                ctx.create_child(
-                    &format!("distributor_{}", subject),
-                    Distributor {
-                        our_key: self.our_key.clone(),
-                        network: network.clone(),
-                    },
-                )
-                .await?;
-            } else {
+            if let SubjectData::Governance = data {
                 let governance_actor = ctx
                     .create_child(
                         &subject.to_string(),
@@ -281,7 +280,28 @@ impl Node {
 
                 ctx.create_child(
                     &format!("distributor_{}", subject),
-                    Distributor {
+                    DistriWorker {
+                        our_key: self.our_key.clone(),
+                        network: network.clone(),
+                    },
+                )
+                .await?;
+            } else {
+                let tracker_actor = ctx
+                    .create_child(
+                        &subject.to_string(),
+                        Tracker::initial((None, self.our_key.clone(), hash)),
+                    )
+                    .await?;
+
+                let sink =
+                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
+
+                ctx.system().run_sink(sink).await;
+
+                ctx.create_child(
+                    &format!("distributor_{}", subject),
+                    DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                     },
@@ -298,7 +318,7 @@ impl Node {
                     false
                 };
 
-            if data.schema_id.is_gov() {
+            if let SubjectData::Governance = data {
                 let governance_actor = ctx
                     .create_child(
                         &subject.to_string(),
@@ -315,13 +335,13 @@ impl Node {
 
                 ctx.create_child(
                     &format!("distributor_{}", subject),
-                    Distributor {
+                    DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                     },
                 )
                 .await?;
-            } else if i_new_owner {
+            } else {
                 let tracker_actor = ctx
                     .create_child(
                         &subject.to_string(),
@@ -336,7 +356,7 @@ impl Node {
 
                 ctx.create_child(
                     &format!("distributor_{}", subject),
-                    Distributor {
+                    DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                     },
@@ -354,10 +374,14 @@ impl Node {
 pub enum NodeMessage {
     SignRequest(SignTypesNode),
     PendingTransfers,
-    UpSubject { subject_id: DigestIdentifier, light: bool },
+    UpSubject {
+        subject_id: DigestIdentifier,
+        light: bool,
+    },
     GetSubjectData(DigestIdentifier),
     CreateNewSubject(SignedLedger),
     IOwnerNewOwnerSubject(DigestIdentifier),
+    ICanSendLastLedger(DigestIdentifier),
     AuthData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
@@ -496,7 +520,7 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "distributor",
-                Distributor {
+                DistriWorker {
                     our_key: self.our_key.clone(),
                     network,
                 },
@@ -537,6 +561,16 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
+            NodeMessage::ICanSendLastLedger(subject_id) => {
+                let subject_data = if self.reject_subjects.contains(&subject_id)
+                {
+                    self.known_subjects.get(&subject_id).cloned()
+                } else {
+                    self.owned_subjects.get(&subject_id).cloned()
+                };
+
+                Ok(NodeResponse::SubjectData(subject_data))
+            }
             NodeMessage::UpSubject { subject_id, light } => {
                 let Some(ext_db): Option<ExternalDB> =
                     ctx.system().get_helper("ext_db").await
@@ -736,7 +770,7 @@ impl Handler<Node> for Node {
 
                 let subject_id = metadata.subject_id.to_string();
 
-                let governance_id = if metadata.schema_id.is_gov() {
+                let subject_data = if metadata.schema_id.is_gov() {
                     let subject_metadata = SubjectMetadata::new(&metadata);
                     let governance_data =
                         serde_json::from_value::<GovernanceData>(
@@ -789,7 +823,7 @@ impl Handler<Node> for Node {
                         "Governance subject created successfully"
                     );
 
-                    None
+                    SubjectData::Governance
                 } else {
                     let tracker_init = TrackerInit::from(&metadata);
 
@@ -831,18 +865,14 @@ impl Handler<Node> for Node {
                         "Tracker subject created successfully"
                     );
 
-                    Some(metadata.governance_id)
+                    SubjectData::Tracker { governance_id: metadata.governance_id.clone(), schema_id: metadata.schema_id.clone(), namespace: metadata.namespace.to_string() }
                 };
 
                 self.on_event(
                     NodeEvent::RegisterSubject {
                         subject_id: metadata.subject_id.clone(),
                         owner: metadata.owner.clone(),
-                        data: SubjectData {
-                            governance_id,
-                            schema_id: metadata.schema_id,
-                            namespace: metadata.namespace.to_string(),
-                        },
+                        data: subject_data
                     },
                     ctx,
                 )
@@ -850,7 +880,7 @@ impl Handler<Node> for Node {
 
                 ctx.create_child(
                     &format!("distributor_{}", subject_id),
-                    Distributor {
+                    DistriWorker {
                         our_key: self.our_key.clone(),
                         network,
                     },
@@ -941,7 +971,10 @@ impl Handler<Node> for Node {
                     "Checked owner/pending status"
                 );
 
-                Ok(NodeResponse::IOwnerNewOwner {i_owner, i_new_owner})
+                Ok(NodeResponse::IOwnerNewOwner {
+                    i_owner,
+                    i_new_owner,
+                })
             }
             NodeMessage::AuthData(subject_id) => {
                 let authorized_subjects = match ctx
@@ -1050,6 +1083,7 @@ impl PersistentActor for Node {
         self.owned_subjects = state.owned_subjects;
         self.known_subjects = state.known_subjects;
         self.transfer_subjects = state.transfer_subjects;
+        self.reject_subjects = state.reject_subjects
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
@@ -1060,6 +1094,7 @@ impl PersistentActor for Node {
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),
+            reject_subjects: HashSet::new(),
         }
     }
 

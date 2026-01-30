@@ -3,10 +3,6 @@
 
 use std::{collections::HashSet, fmt::Display};
 
-use crate::{
-    governance::{data::GovernanceData, model::RoleTypes},
-    subject::Metadata,
-};
 
 use ave_common::{identity::PublicKey, request::EventRequest};
 
@@ -50,40 +46,6 @@ impl Display for EventRequestType {
     }
 }
 
-pub fn check_signers(
-    request: EventRequest,
-    signer: &PublicKey,
-    metadata: &Metadata,
-    gov: &GovernanceData,
-) -> bool {
-    match request {
-        EventRequest::Create(_)
-        | EventRequest::EOL(_)
-        | EventRequest::Transfer(_) => {
-            return metadata.owner == *signer;
-        }
-        EventRequest::Fact(_) => {
-            let (set, any) = gov.get_signers(
-                RoleTypes::Issuer,
-                &metadata.schema_id,
-                metadata.namespace.clone(),
-            );
-
-            if any {
-                return true;
-            }
-
-            return set.iter().any(|x| x == signer);
-        }
-        EventRequest::Confirm(_) | EventRequest::Reject(_) => {
-            if let Some(new_owner) = metadata.new_owner.clone() {
-                return new_owner == *signer;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 pub mod tests {
 
@@ -107,6 +69,6 @@ pub mod tests {
         };
         let content = EventRequest::Create(req);
         let signature = Signature::new(&content, &keys).unwrap();
-        Signed { content, signature }
+        Signed::from_parts(content, signature)
     }
 }

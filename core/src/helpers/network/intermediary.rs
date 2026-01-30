@@ -35,9 +35,7 @@ use serde::Deserialize;
 use std::{io::Cursor, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
-
-const TARGET_NETWORK: &str = "Ave-Helper-Network";
+use tracing::{debug, error};
 
 pub struct Intermediary;
 
@@ -54,14 +52,19 @@ impl Intermediary {
                 tokio::select! {
                     command = command_receiver.recv() => {
                         if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await {
-                                error!(TARGET_NETWORK, "{}", e);
+                                error!(
+                                    error = %e,
+                                    "Network intermediary command handling failed"
+                                );
                                 if let IntermediaryError::NetworkSendFailed { .. } = e {
+                                    error!("Network send failed, cancelling token and stopping intermediary");
                                     token.cancel();
                                     break;
                                 }
                         }
                     },
                     _ = token.cancelled() => {
+                        debug!("Network intermediary cancelled, stopping");
                         break;
                     }
                 }
@@ -78,18 +81,35 @@ impl Intermediary {
     ) -> Result<(), IntermediaryError> {
         match command {
             Command::SendMessage { message } => {
-                // Public key to peer_id
-                let node_peer =
-                    Intermediary::to_peer_id(&message.info.receiver)?;
+                let receiver = message.info.receiver.clone();
+                let receiver_actor = message.info.receiver_actor.clone();
 
-                // Message to Vec<u8>
+                let node_peer = Intermediary::to_peer_id(
+                    &message.info.receiver,
+                )
+                .map_err(|e| {
+                    error!(
+                        receiver = %receiver,
+                        receiver_actor = %receiver_actor,
+                        error = %e,
+                        "Failed to convert public key to peer ID"
+                    );
+                    e
+                })?;
+
                 let network_message =
                     rmp_serde::to_vec(&message).map_err(|error| {
+                        error!(
+                            receiver = %receiver,
+                            receiver_actor = %receiver_actor,
+                            error = %error,
+                            "Failed to serialize network message"
+                        );
                         IntermediaryError::SerializationFailed {
                             details: error.to_string(),
                         }
                     })?;
-                // Send message to network
+
                 if let Err(error) = network_sender
                     .send(NetworkCommand::SendMessage {
                         peer: node_peer,
@@ -97,11 +117,23 @@ impl Intermediary {
                     })
                     .await
                 {
+                    error!(
+                        receiver = %receiver,
+                        receiver_actor = %receiver_actor,
+                        error = %error,
+                        "Failed to send message to network"
+                    );
                     return Err(IntermediaryError::NetworkSendFailed {
                         details: error.to_string(),
                     }
                     .into());
                 };
+
+                debug!(
+                    receiver = %receiver,
+                    receiver_actor = %receiver_actor,
+                    "Message sent to network successfully"
+                );
             }
             Command::ReceivedMessage { message, sender } => {
                 let sender =
@@ -109,6 +141,10 @@ impl Intermediary {
                     {
                         Ok(sender) => sender,
                         Err(e) => {
+                            error!(
+                                error = %e,
+                                "Failed to parse sender public key"
+                            );
                             return Err(IntermediaryError::InvalidPublicKey {
                                 details: e.to_string(),
                             }
@@ -123,6 +159,11 @@ impl Intermediary {
                     match Deserialize::deserialize(&mut de) {
                         Ok(message) => message,
                         Err(e) => {
+                            error!(
+                                sender = %sender.clone(),
+                                error = %e,
+                                "Failed to deserialize network message"
+                            );
                             return Err(
                                 IntermediaryError::DeserializationFailed {
                                     details: e.to_string(),
@@ -133,6 +174,7 @@ impl Intermediary {
                     };
 
                 let path = ActorPath::from(message.info.receiver_actor.clone());
+                let request_id = message.info.request_id.clone();
                 match message.message {
                     ActorMessage::DistributionGetLastSn { subject_id } => {
                         let actor = system
@@ -146,7 +188,7 @@ impl Intermediary {
                             .tell(DistriWorkerMessage::GetLastSn {
                                 subject_id,
                                 info: message.info,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -166,7 +208,7 @@ impl Intermediary {
                         actor
                             .tell(UpdaterMessage::NetworkResponse {
                                 sn,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -179,6 +221,11 @@ impl Intermediary {
                     ActorMessage::ValidationReq { req } => {
                         let Ok(schema_id) = req.content().get_schema_id()
                         else {
+                            error!(
+                                sender = %sender.clone(),
+                                path = %path,
+                                "Invalid schema ID in validation request"
+                            );
                             return Err(IntermediaryError::InvalidSchemaId);
                         };
 
@@ -197,7 +244,7 @@ impl Intermediary {
                                 .tell(ValiWorkerMessage::NetworkRequest {
                                     validation_req: req,
                                     info: message.info,
-                                    sender,
+                                    sender: sender.clone(),
                                 })
                                 .await
                                 .map_err(|e| {
@@ -220,7 +267,7 @@ impl Intermediary {
                                 .tell(ValidationSchemaMessage::NetworkRequest {
                                     validation_req: req,
                                     info: message.info,
-                                    sender,
+                                    sender: sender.clone(),
                                 })
                                 .await
                                 .map_err(|e| {
@@ -245,7 +292,7 @@ impl Intermediary {
                                 .tell(EvalWorkerMessage::NetworkRequest {
                                     evaluation_req: req,
                                     info: message.info,
-                                    sender,
+                                    sender: sender.clone(),
                                 })
                                 .await
                                 .map_err(|e| {
@@ -268,7 +315,7 @@ impl Intermediary {
                                 .tell(EvaluationSchemaMessage::NetworkRequest {
                                     evaluation_req: Box::new(req),
                                     info: message.info,
-                                    sender,
+                                    sender: sender.clone(),
                                 })
                                 .await
                                 .map_err(|e| {
@@ -291,7 +338,7 @@ impl Intermediary {
                             .tell(ApprPersistMessage::NetworkRequest {
                                 approval_req: req,
                                 info: message.info,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -307,7 +354,12 @@ impl Intermediary {
                             .await
                         {
                             Ok(actor) => actor,
-                            Err(e) => {
+                            Err(..) => {
+                                debug!(
+                                    original_path = %path,
+                                    fallback_path = "/user/node/distributor",
+                                    "Distributor not found at path, using fallback"
+                                );
                                 let path =
                                     ActorPath::from("/user/node/distributor");
                                 system
@@ -325,7 +377,7 @@ impl Intermediary {
                             .tell(DistriWorkerMessage::LastEventDistribution {
                                 ledger: *ledger,
                                 info: message.info,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -351,7 +403,7 @@ impl Intermediary {
                                 actual_sn,
                                 subject_id,
                                 info: message.info,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -374,7 +426,7 @@ impl Intermediary {
                                 validation_res: res,
                                 request_id: message.info.request_id,
                                 version: message.info.version,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -397,7 +449,7 @@ impl Intermediary {
                                 evaluation_res: res,
                                 request_id: message.info.request_id,
                                 version: message.info.version,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -419,7 +471,7 @@ impl Intermediary {
                                 approval_res: *res,
                                 request_id: message.info.request_id,
                                 version: message.info.version,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -435,7 +487,12 @@ impl Intermediary {
                             .await
                         {
                             Ok(actor) => actor,
-                            Err(e) => {
+                            Err(_) => {
+                                debug!(
+                                    original_path = %path,
+                                    fallback_path = "/user/node/distributor",
+                                    "Distributor not found at path, using fallback"
+                                );
                                 let path =
                                     ActorPath::from("/user/node/distributor");
                                 system
@@ -454,7 +511,7 @@ impl Intermediary {
                                 ledger,
                                 info: message.info,
                                 is_all,
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -473,7 +530,7 @@ impl Intermediary {
                             })?;
                         actor
                             .tell(DistriCoordinatorMessage::NetworkResponse {
-                                sender,
+                                sender: sender.clone(),
                             })
                             .await
                             .map_err(|e| {
@@ -484,6 +541,13 @@ impl Intermediary {
                             })?;
                     }
                 }
+
+                debug!(
+                    sender = %sender,
+                    path = %path,
+                    request_id = %request_id,
+                    "Network message routed to actor successfully"
+                );
             }
         }
 

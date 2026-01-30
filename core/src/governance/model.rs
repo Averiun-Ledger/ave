@@ -77,7 +77,7 @@ impl RolesGov {
             && self.validator.contains(&ReservedWords::Owner.to_string())
             && self
                 .issuer
-                .users
+                .signers
                 .contains(&ReservedWords::Owner.to_string())
     }
 
@@ -87,7 +87,7 @@ impl RolesGov {
             self.evaluator.remove(remove);
             self.validator.remove(remove);
             self.witness.remove(remove);
-            self.issuer.users.remove(remove);
+            self.issuer.signers.remove(remove);
         }
     }
 
@@ -108,8 +108,8 @@ impl RolesGov {
             if self.witness.remove(old_name) {
                 self.witness.insert(new_name.clone());
             };
-            if self.issuer.users.remove(old_name) {
-                self.issuer.users.insert(new_name.clone());
+            if self.issuer.signers.remove(old_name) {
+                self.issuer.signers.insert(new_name.clone());
             };
         }
     }
@@ -120,14 +120,14 @@ impl RolesGov {
             RoleTypes::Evaluator => self.evaluator.contains(name),
             RoleTypes::Validator => self.validator.contains(name),
             RoleTypes::Issuer => {
-                self.issuer.users.contains(name) || self.issuer.any
+                self.issuer.signers.contains(name) || self.issuer.any
             }
             RoleTypes::Creator => false,
             RoleTypes::Witness => self.witness.contains(name),
         }
     }
 
-    pub fn get_users(&self, role: RoleTypes) -> (Vec<String>, bool) {
+    pub fn get_signers(&self, role: RoleTypes) -> (Vec<String>, bool) {
         match role {
             RoleTypes::Evaluator => (
                 self.evaluator.iter().cloned().collect::<Vec<String>>(),
@@ -142,7 +142,7 @@ impl RolesGov {
                 false,
             ),
             RoleTypes::Issuer => (
-                self.issuer.users.iter().cloned().collect::<Vec<String>>(),
+                self.issuer.signers.iter().cloned().collect::<Vec<String>>(),
                 self.issuer.any,
             ),
             RoleTypes::Witness => {
@@ -276,7 +276,7 @@ impl RolesAllSchemas {
             self.evaluator.retain(|x| x.name != *remove);
             self.validator.retain(|x| x.name != *remove);
             self.witness.retain(|x| x.name != *remove);
-            self.issuer.users.retain(|x| x.name != *remove);
+            self.issuer.signers.retain(|x| x.name != *remove);
         }
     }
 
@@ -330,9 +330,9 @@ impl RolesAllSchemas {
                 })
                 .collect();
 
-            self.issuer.users = self
+            self.issuer.signers = self
                 .issuer
-                .users
+                .signers
                 .iter()
                 .map(|x| {
                     if x.name == *old_name {
@@ -371,7 +371,7 @@ impl RolesAllSchemas {
                     && x.name == name
             }),
             RoleTypes::Issuer => {
-                self.issuer.users.iter().any(|x| {
+                self.issuer.signers.iter().any(|x| {
                     let namespace_role = x.namespace.clone();
                     namespace_role.is_ancestor_or_equal_of(&namespace)
                         && x.name == name
@@ -381,7 +381,7 @@ impl RolesAllSchemas {
         }
     }
 
-    pub fn get_users(
+    pub fn get_signers(
         &self,
         role: RoleTypes,
         namespace: Namespace,
@@ -422,7 +422,7 @@ impl RolesAllSchemas {
             ),
             RoleTypes::Issuer => (
                 self.issuer
-                    .users
+                    .signers
                     .iter()
                     .filter(|x| {
                         let namespace_role = x.namespace.clone();
@@ -473,7 +473,7 @@ impl RolesSchema {
             self.evaluator.retain(|x| x.name != *remove);
             self.validator.retain(|x| x.name != *remove);
             self.witness.retain(|x| x.name != *remove);
-            self.issuer.users.retain(|x| x.name != *remove);
+            self.issuer.signers.retain(|x| x.name != *remove);
             self.creator.retain(|x| x.name != *remove);
         }
     }
@@ -545,9 +545,9 @@ impl RolesSchema {
                 })
                 .collect();
 
-            self.issuer.users = self
+            self.issuer.signers = self
                 .issuer
-                .users
+                .signers
                 .iter()
                 .map(|x| {
                     if x.name == *old_name {
@@ -665,7 +665,7 @@ impl RolesSchema {
                     && x.name == name
             }),
             RoleTypes::Issuer => {
-                self.issuer.users.iter().any(|x| {
+                self.issuer.signers.iter().any(|x| {
                     let namespace_role = x.namespace.clone();
                     namespace_role.is_ancestor_or_equal_of(&namespace)
                         && x.name == name
@@ -734,7 +734,7 @@ impl RolesSchema {
             .map(|x| x.quantity.clone())
     }
 
-    pub fn get_users(
+    pub fn get_signers(
         &self,
         role: RoleTypes,
         namespace: Namespace,
@@ -786,7 +786,7 @@ impl RolesSchema {
             ),
             RoleTypes::Issuer => (
                 self.issuer
-                    .users
+                    .signers
                     .iter()
                     .filter(|x| {
                         let namespace_role = x.namespace.clone();
@@ -962,7 +962,7 @@ impl RoleCreator {
     BorshSerialize,
 )]
 pub struct RoleGovIssuer {
-    pub users: BTreeSet<MemberName>,
+    pub signers: BTreeSet<MemberName>,
     pub any: bool,
 }
 
@@ -978,7 +978,7 @@ pub struct RoleGovIssuer {
     BorshSerialize,
 )]
 pub struct RoleSchemaIssuer {
-    pub users: BTreeSet<Role>,
+    pub signers: BTreeSet<Role>,
     pub any: bool,
 }
 

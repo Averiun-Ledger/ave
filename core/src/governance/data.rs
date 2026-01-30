@@ -51,17 +51,17 @@ impl GovernanceData {
             validate: Quorum::Majority,
         };
 
-        let owner_users_gov: BTreeSet<MemberName> =
+        let owner_signers_gov: BTreeSet<MemberName> =
             BTreeSet::from([ReservedWords::Owner.to_string()]);
 
         let roles_gov = RolesGov {
-            approver: owner_users_gov.clone(),
-            evaluator: owner_users_gov.clone(),
-            validator: owner_users_gov.clone(),
+            approver: owner_signers_gov.clone(),
+            evaluator: owner_signers_gov.clone(),
+            validator: owner_signers_gov.clone(),
             witness: BTreeSet::new(),
             issuer: RoleGovIssuer {
                 any: false,
-                users: owner_users_gov.clone(),
+                signers: owner_signers_gov.clone(),
             },
         };
 
@@ -70,7 +70,7 @@ impl GovernanceData {
             validator: BTreeSet::new(),
             witness: BTreeSet::new(),
             issuer: RoleSchemaIssuer {
-                users: BTreeSet::new(),
+                signers: BTreeSet::new(),
                 any: false,
             },
         };
@@ -339,7 +339,7 @@ impl GovernanceData {
         schema_id: &SchemaType,
     ) -> Result<ValueWrapper, GovernanceError> {
         let Some(schema) = self.schemas.get(schema_id) else {
-            return Err(GovernanceError::SchemaNotFound);
+            return Err(GovernanceError::SchemaDoesNotExist { schema_id: schema_id.to_string() });
         };
 
         Ok(schema.initial_value.clone())
@@ -425,7 +425,7 @@ impl GovernanceData {
                 {
                     let not_gov_witnesses = self
                         .roles_all_schemas
-                        .get_users(RoleTypes::Witness, namespace.clone())
+                        .get_signers(RoleTypes::Witness, namespace.clone())
                         .0;
 
                     if not_gov_witnesses.contains(&name) {
@@ -433,7 +433,7 @@ impl GovernanceData {
                     }
 
                     let schema_witnesses = roles_schema
-                        .get_users(RoleTypes::Witness, namespace.clone())
+                        .get_signers(RoleTypes::Witness, namespace.clone())
                         .0;
 
                     if schema_witnesses.contains(&name) {
@@ -453,21 +453,21 @@ impl GovernanceData {
     /// * [`Namespace`] - The namespace.
     /// # Returns
     /// * (HashSet<[`PublicKey`]>, bool) - The set of key identifiers and a flag indicating if the user is not a member.
-    pub fn get_users(
+    pub fn get_signers(
         &self,
         role: RoleTypes,
         schema_id: &SchemaType,
         namespace: Namespace,
     ) -> (HashSet<PublicKey>, bool) {
         let (names, any) = if schema_id.is_gov() {
-            self.roles_gov.get_users(role)
+            self.roles_gov.get_signers(role)
         } else {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_all_schemas
-                .get_users(role.clone(), namespace.clone());
+                .get_signers(role.clone(), namespace.clone());
             let (mut schema_signers, schema_any) =
                 if let Some(roles) = self.roles_schema.get(schema_id) {
-                    roles.get_users(role, namespace)
+                    roles.get_signers(role, namespace)
                 } else {
                     (vec![], false)
                 };
@@ -493,7 +493,7 @@ impl GovernanceData {
     ) -> Result<HashSet<PublicKey>, GovernanceError> {
         let names = match data {
             WitnessesData::Gov => {
-                self.roles_gov.get_users(RoleTypes::Witness).0
+                self.roles_gov.get_signers(RoleTypes::Witness).0
             }
             WitnessesData::Schema {
                 creator,
@@ -522,10 +522,10 @@ impl GovernanceData {
                     if witness == ReservedWords::Witnesses.to_string() {
                         let mut not_gov_witnesses = self
                             .roles_all_schemas
-                            .get_users(RoleTypes::Witness, namespace.clone())
+                            .get_signers(RoleTypes::Witness, namespace.clone())
                             .0;
                         let mut schema_witnesses = roles_schema
-                            .get_users(RoleTypes::Witness, namespace.clone())
+                            .get_signers(RoleTypes::Witness, namespace.clone())
                             .0;
 
                         names.append(&mut not_gov_witnesses);
@@ -576,14 +576,14 @@ impl GovernanceData {
     /// * [`Namespace`] - The namespace.
     /// # Returns
     /// * (HashSet<[`PublicKey`]>, [`Quorum`]) - The set of key identifiers and the quorum.
-    pub fn get_quorum_and_users(
+    pub fn get_quorum_and_signers(
         &self,
         role: ProtocolTypes,
         schema_id: &SchemaType,
         namespace: Namespace,
     ) -> Result<(HashSet<PublicKey>, Quorum), GovernanceError> {
         let (signers, _not_members) =
-            self.get_users(RoleTypes::from(role.clone()), schema_id, namespace);
+            self.get_signers(RoleTypes::from(role.clone()), schema_id, namespace);
 
         let Some(quorum) = self.get_quorum(role.clone(), schema_id) else {
             return Err(GovernanceError::QuorumNotFound {

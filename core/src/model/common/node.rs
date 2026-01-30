@@ -12,9 +12,7 @@ use crate::{
     auth::{Auth, AuthMessage, WitnessesAuth},
     helpers::network::service::NetworkSender,
     model::event::Ledger,
-    node::{
-        SubjectData,
-    },
+    node::SubjectData,
 };
 
 use ave_common::request::EventRequest;
@@ -53,18 +51,47 @@ where
     let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
 
     let response = node_actor
-            .ask(NodeMessage::IOwnerNewOwnerSubject(subject_id.to_owned()))
-            .await?;
+        .ask(NodeMessage::IOwnerNewOwnerSubject(subject_id.to_owned()))
+        .await?;
 
     match response {
-        NodeResponse::IOwnerNewOwner{i_owner, i_new_owner} => Ok((i_owner, i_new_owner)),
-        _ => Err(ActorError::UnexpectedResponse { path: node_path, expected: "NodeResponse::IOwnerNewOwner".to_owned()}),
+        NodeResponse::IOwnerNewOwner {
+            i_owner,
+            i_new_owner,
+        } => Ok((i_owner, i_new_owner)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: node_path,
+            expected: "NodeResponse::IOwnerNewOwner".to_owned(),
+        }),
+    }
+}
+
+pub async fn i_can_send_last_ledger<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<SubjectData>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let node_path = ActorPath::from("/user/node");
+    let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
+
+    let response = node_actor
+        .ask(NodeMessage::ICanSendLastLedger(subject_id.to_owned()))
+        .await?;
+
+    match response {
+        NodeResponse::SubjectData(data) => Ok(data),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: node_path,
+            expected: "NodeResponse::SubjectData".to_owned(),
+        }),
     }
 }
 
 pub async fn subject_old<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
+    subject_id: &DigestIdentifier,
 ) -> Result<bool, ActorError>
 where
     A: Actor + Handler<A>,
@@ -117,7 +144,7 @@ where
     }
 }
 
-pub async fn get_node_subject_data<A>(
+pub async fn get_subject_data<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<Option<SubjectData>, ActorError>
@@ -214,7 +241,7 @@ where
 
 pub async fn subject_old_owner<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &str,
+    subject_id: &DigestIdentifier,
     old: PublicKey,
 ) -> Result<bool, ActorError>
 where

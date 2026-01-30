@@ -3,9 +3,6 @@ use thiserror::Error;
 #[derive(Debug, Error, Clone)]
 pub enum GovernanceError {
     // Schema errors
-    #[error("schema not found")]
-    SchemaNotFound,
-
     #[error("schema '{schema_id}' does not exist")]
     SchemaDoesNotExist { schema_id: String },
 

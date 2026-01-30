@@ -101,30 +101,6 @@ impl Validation {
         }
     }
 
-    async fn end_validators(
-        &self,
-        ctx: &mut ActorContext<Validation>,
-    ) -> Result<(), ActorError> {
-        for validator in self.current_validators.clone() {
-            if validator == *self.our_key {
-                if let Ok(child) =
-                    ctx.get_child::<ValiWorker>(&validator.to_string()).await
-                {
-                    child.ask_stop().await?;
-                }
-            } else {
-                if let Ok(child) = ctx
-                    .get_child::<ValiCoordinator>(&validator.to_string())
-                    .await
-                {
-                    child.ask_stop().await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn check_validator(&mut self, validator: PublicKey) -> bool {
         self.current_validators.remove(&validator)
     }
@@ -432,22 +408,6 @@ impl Handler<Validation> for Validation {
 
                                 self.reboot = true;
 
-                                if let Err(e) = self.end_validators(ctx).await {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        "Failed to end validators"
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                };
-
-                                debug!(
-                                    msg_type = "Response",
-                                    request_id = %self.request_id,
-                                    "Reboot requested, validators stopped"
-                                );
-
-                                ctx.stop(None).await;
                                 return Ok(());
                             }
                         };
@@ -483,8 +443,6 @@ impl Handler<Validation> for Validation {
                                 version = self.version,
                                 "Validation completed and sent to request"
                             );
-
-                            ctx.stop(None).await;
                         } else if self.current_validators.is_empty()
                             && !self.pending_validators.is_empty()
                         {

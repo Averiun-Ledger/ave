@@ -7,7 +7,7 @@ use ave_actors::{
 use ave_common::identity::{PublicKey, TimeStamp};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 
 use crate::{NetworkMessage, helpers::network::service::NetworkSender};
 
@@ -50,6 +50,14 @@ impl Actor for RetryNetwork {
     type Event = ();
     type Message = NetworkMessage;
     type Response = ();
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RetryNetwork", id = id)
+        } else {
+            info_span!("RetryNetwork", id = id)
+        }
+    }
 }
 
 impl NotPersistentActor for RetryNetwork {}

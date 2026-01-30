@@ -108,11 +108,10 @@ impl ApprPersist {
     async fn check_governance(
         &self,
         ctx: &mut ActorContext<ApprPersist>,
-        governance_id: DigestIdentifier,
+        governance_id: &DigestIdentifier,
         gov_version: u64,
     ) -> Result<(), ActorError> {
-        let governance_string = governance_id.to_string();
-        let metadata = get_metadata(ctx, &governance_string).await?;
+        let metadata = get_metadata(ctx, &governance_id).await?;
         let governance =
             match GovernanceData::try_from(metadata.properties.clone()) {
                 Ok(gov) => gov,
@@ -136,7 +135,7 @@ impl ApprPersist {
                 let data = UpdateData {
                     sn: metadata.sn,
                     gov_version: governance.version,
-                    subject_id: governance_id,
+                    subject_id: governance_id.clone(),
                     other_node: self.node_key.clone(),
                 };
                 update_ledger_network(ctx, data).await?;
@@ -601,7 +600,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     if let Err(e) = self
                         .check_governance(
                             ctx,
-                            approval_req
+                            &approval_req
                                 .content()
                                 .event_request
                                 .content()
