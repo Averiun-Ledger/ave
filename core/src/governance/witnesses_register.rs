@@ -427,7 +427,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
         match msg {
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
                 let data = if let Some(data) = self.subjects.get(&subject_id) {
-                    Some((data.actual_owner, data.sn))
+                    Some((data.actual_owner.clone(), data.sn))
                 } else {
                     None
                 };

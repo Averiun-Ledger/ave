@@ -13,8 +13,8 @@ use tracing::{Span, debug, error, info_span};
 use updater::{Updater, UpdaterMessage};
 
 use crate::{
-    ActorMessage, NetworkMessage,
-    helpers::network::service::NetworkSender,
+    NetworkMessage,
+    helpers::network::{ActorMessage, service::NetworkSender},
     model::common::emit_fail,
     request::manager::{RequestManager, RequestManagerMessage},
 };
@@ -29,27 +29,18 @@ pub enum UpdateType {
 
 pub struct UpdateNew {
     pub subject_id: DigestIdentifier,
-    pub our_key: Arc<PublicKey>,
-    pub response: Option<UpdateRes>,
     pub witnesses: HashSet<PublicKey>,
-    pub request: Option<ActorMessage>,
     pub update_type: UpdateType,
     pub network: Arc<NetworkSender>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum UpdateRes {
-    Sn(u64),
+    pub our_sn: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Update {
     subject_id: DigestIdentifier,
-    our_key: Arc<PublicKey>,
-    response: Option<UpdateRes>,
     witnesses: HashSet<PublicKey>,
-    better: Option<PublicKey>,
-    request: Option<ActorMessage>,
+    better: Option<(u64, PublicKey)>,
+    our_sn: Option<u64>,
     update_type: UpdateType,
     network: Arc<NetworkSender>,
 }
@@ -59,33 +50,30 @@ impl Update {
         Self {
             network: data.network,
             subject_id: data.subject_id,
-            our_key: data.our_key,
-            response: data.response,
             witnesses: data.witnesses,
-            better: None,
-            request: data.request,
             update_type: data.update_type,
+            our_sn: data.our_sn,
+            better: None,
         }
     }
 
-    pub fn update_response(
-        &mut self,
-        update: UpdateRes,
-        sender: PublicKey,
-    ) -> Result<(), ActorError> {
-        let UpdateRes::Sn(update_sn) = update;
-        match self.response.clone() {
-            Some(UpdateRes::Sn(sn)) if update_sn > sn => {
-                self.response = Some(update);
-                self.better = Some(sender);
+    pub fn update_better(&mut self, sn: u64, sender: PublicKey) {
+        match self.better {
+            Some((better_sn, ..)) => {
+                if sn > better_sn {
+                    self.better = Some((sn, sender))
+                }
             }
-            Some(UpdateRes::Sn(_)) => {} // No actualizar si update_sn <= sn
             None => {
-                self.response = Some(update);
-                self.better = Some(sender);
+                if let Some(our_sn) = self.our_sn
+                    && sn > our_sn
+                {
+                    self.better = Some((sn, sender))
+                } else {
+                    self.better = Some((sn, sender))
+                }
             }
         }
-        Ok(())
     }
 
     fn check_witness(&mut self, witness: PublicKey) -> bool {
@@ -166,22 +154,12 @@ impl Handler<Update> for Update {
             }
             UpdateMessage::Response { sender, sn } => {
                 if self.check_witness(sender.clone()) {
-                    if let Err(e) =
-                        self.update_response(UpdateRes::Sn(sn), sender.clone())
-                    {
-                        error!(
-                            msg_type = "Response",
-                            error = %e,
-                            sender = %sender,
-                            sn = sn,
-                            "Failed to update response"
-                        );
-                    }
+                    self.update_better(sn, sender);
 
                     if self.witnesses.is_empty() {
-                        if let Some(node) = self.better.clone() {
+                        if let Some((.., better_node)) = self.better.clone() {
                             let info = ComunicateInfo {
-                                receiver: node.clone(),
+                                receiver: better_node.clone(),
                                 request_id: String::default(),
                                 version: 0,
                                 receiver_actor: format!(
@@ -190,14 +168,16 @@ impl Handler<Update> for Update {
                                 ),
                             };
 
-                            if let Some(request) = self.request.clone() {
-                                if let Err(e) = self
+                            if let Err(e) = self
                                     .network
                                     .send_command(
                                         network::CommandHelper::SendMessage {
                                             message: NetworkMessage {
                                                 info: info.clone(),
-                                                message: request,
+                                                message: ActorMessage::DistributionLedgerReq {
+                                                    actual_sn: self.our_sn,
+                                                    subject_id: self.subject_id.clone(),
+                                                },
                                             },
                                         },
                                     )
@@ -206,7 +186,7 @@ impl Handler<Update> for Update {
                                     error!(
                                         msg_type = "Response",
                                         error = %e,
-                                        node = %node,
+                                        node = %better_node,
                                         "Failed to send request to network"
                                     );
                                     return Err(emit_fail(ctx, e).await);
@@ -218,12 +198,6 @@ impl Handler<Update> for Update {
                                         "Request sent to better node"
                                     );
                                 }
-                            } else {
-                                error!(
-                                    msg_type = "Response",
-                                    "Request cannot be None"
-                                );
-                            }
                         }
 
                         if let UpdateType::Request = &self.update_type {
@@ -240,7 +214,7 @@ impl Handler<Update> for Update {
                                     let request = if self.better.is_none() {
                                         RequestManagerMessage::FinishReboot
                                     } else {
-                                        RequestManagerMessage::Reboot {
+                                        RequestManagerMessage::RebootWait {
                                             governance_id: self
                                                 .subject_id
                                                 .clone(),

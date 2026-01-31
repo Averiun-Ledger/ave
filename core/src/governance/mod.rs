@@ -1727,7 +1727,6 @@ pub enum GovernanceMessage {
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
-    GetLastSn,
     GetGovernance,
 }
 
@@ -1928,14 +1927,6 @@ impl Handler<Governance> for Governance {
         ctx: &mut ActorContext<Governance>,
     ) -> Result<GovernanceResponse, ActorError> {
         match msg {
-            GovernanceMessage::GetLastSn => {
-                debug!(
-                    msg_type = "GetLastSn",
-                    sn = self.subject_metadata.sn,
-                    "Returning last sequence number"
-                );
-                Ok(GovernanceResponse::Sn(self.subject_metadata.sn))
-            }
             GovernanceMessage::CreateCompilers(compilers) => {
                 let new_compilers =
                     match Self::create_compilers(ctx, &compilers).await {

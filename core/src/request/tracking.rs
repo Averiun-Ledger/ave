@@ -40,12 +40,14 @@ pub enum RequestTrackingMessage {
         request_id: String,
         version: u64,
     },
+    AllRequests,
     SearchRequest(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum RequestTrackingResponse {
     Ok,
+    AllInfo(Vec<RequestInfo>),
     Info(RequestInfo),
     NotFound,
 }
@@ -78,6 +80,11 @@ impl Handler<RequestTracking> for RequestTracking {
         _ctx: &mut ave_actors::ActorContext<RequestTracking>,
     ) -> Result<RequestTrackingResponse, ActorError> {
         match msg {
+            RequestTrackingMessage::AllRequests => {
+                Ok(RequestTrackingResponse::AllInfo(
+                    self.cache.iter().map(|x| x.1.clone()).collect(),
+                ))
+            }
             RequestTrackingMessage::UpdateState {
                 request_id,
                 state,

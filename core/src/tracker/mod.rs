@@ -664,7 +664,6 @@ pub enum TrackerMessage {
     GetLedger { lo_sn: Option<u64>, hi_sn: u64},
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
-    GetLastSn,
     GetGovernance,
 }
 
@@ -790,15 +789,6 @@ impl Handler<Tracker> for Tracker {
         ctx: &mut ActorContext<Tracker>,
     ) -> Result<TrackerResponse, ActorError> {
         match msg {
-            TrackerMessage::GetLastSn => {
-                debug!(
-                    msg_type = "GetLastSn",
-                    sn = self.subject_metadata.sn,
-                    "Returning last sequence number"
-                );
-                Ok(TrackerResponse::Sn(self.subject_metadata.sn))
-            }
-
             TrackerMessage::GetLedger {lo_sn, hi_sn} => {
                 let (ledger, is_all) = self.get_ledger(ctx, lo_sn, hi_sn).await?;
                 Ok(TrackerResponse::Ledger { ledger, is_all })

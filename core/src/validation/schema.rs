@@ -17,7 +17,6 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     Signed,
-    auth::WitnessesAuth,
     helpers::network::service::NetworkSender,
     model::common::{emit_fail, node::try_to_update},
     validation::worker::{ValiWorker, ValiWorkerMessage},
@@ -176,7 +175,7 @@ impl Handler<ValidationSchema> for ValidationSchema {
                     && let Err(e) = try_to_update(
                         ctx,
                         self.governance_id.clone(),
-                        WitnessesAuth::Witnesses,
+                        None,
                     )
                     .await
                 {

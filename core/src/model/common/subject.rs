@@ -86,25 +86,6 @@ where
     }
 }
 
-pub async fn get_gov_last_sn<A>(
-    ctx: &mut ActorContext<A>,
-    subject_id: &DigestIdentifier,
-) -> Result<u64, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let path = ActorPath::from(format!("/user/node/{}", subject_id));
-    let actor = ctx.system().get_actor::<Governance>(&path).await?;
-    let response = actor.ask(GovernanceMessage::GetLastSn).await?;
-
-    match response {
-        GovernanceResponse::Sn(sn) => Ok(sn),
-        _ => Err(ActorError::UnexpectedResponse {
-            path,
-            expected: "GovernanceResponse::Sn".to_string(),
-        }),
-    }
-}
 
 pub async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,

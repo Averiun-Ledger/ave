@@ -115,7 +115,7 @@ impl Handler<ManualDistribution> for ManualDistribution {
                 };
 
                 let governance_id =
-                    if let Some(governance_id) = &data.governance_id {
+                    if let Some(governance_id) = &data.get_governance_id() {
                         governance_id.clone()
                     } else {
                         subject_id.clone()
@@ -132,14 +132,16 @@ impl Handler<ManualDistribution> for ManualDistribution {
                     e
                 })?;
 
-                let is_gov = data.schema_id.is_gov();
+                let schema_id = data.get_schema_id();
+
+                let is_gov = schema_id.is_gov();
                 let witnesses_data = if is_gov {
                     WitnessesData::Gov
                 } else {
                     WitnessesData::Schema {
                         creator: (*self.our_key).clone(),
-                        schema_id: data.schema_id.clone(),
-                        namespace: Namespace::from(data.namespace.clone()),
+                        schema_id: schema_id.clone(),
+                        namespace: Namespace::from(data.get_namespace()),
                     }
                 };
 

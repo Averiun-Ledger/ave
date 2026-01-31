@@ -188,15 +188,19 @@ pub struct RequestInfo {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum RequestState {
-    Abort,
+    // Handler
     InQueue,
     Invalid,
-    Finish,
+    // Manager
+    Abort,
     Reboot,
+    RebootDiff { seconds: u64, count: u64},
+    RebootTimeOut { seconds: u64, count: u64},
     Evaluation,
     Approval,
     Validation,
     Distribution,
+    Finish,
 }
 
 impl Display for RequestState {
@@ -207,6 +211,8 @@ impl Display for RequestState {
             RequestState::Invalid => write!(f, "Invalid"),
             RequestState::Finish => write!(f, "Finish"),
             RequestState::Reboot => write!(f, "Reboot"),
+            RequestState::RebootDiff { seconds, count } => write!(f, "Reboot diff, try: {}, seconds: {}", count, seconds),
+            RequestState::RebootTimeOut { seconds, count } => write!(f, "Reboot timeout, try: {}, seconds: {}", count, seconds),
             RequestState::Evaluation => write!(f, "Evaluation"),
             RequestState::Approval => write!(f, "Approval"),
             RequestState::Validation => write!(f, "Validation"),

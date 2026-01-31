@@ -15,11 +15,14 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{Span, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
 use crate::approval::response::ApprovalRes;
-use crate::distribution::{Distribution, DistributionMessage, DistributionType};
+use crate::distribution::{
+    Distribution, DistributionMessage, DistributionType,
+};
 use crate::evaluation::request::EvaluateData;
 use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
@@ -28,9 +31,10 @@ use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
-    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata, update_ledger
+    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata,
+    update_ledger,
 };
-use crate::model::common::{gov_sn, purge_storage, send_to_tracking};
+use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
 };
@@ -49,7 +53,7 @@ use crate::{
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
     model::common::emit_fail,
     node::{Node, NodeMessage},
-    update::{Update, UpdateMessage, UpdateNew, UpdateRes, UpdateType},
+    update::{Update, UpdateMessage, UpdateNew, UpdateType},
 };
 
 const TARGET_MANAGER: &str = "Ave-Request-Manager";
@@ -70,10 +74,21 @@ pub struct RequestManager {
     id: String,
     #[serde(skip)]
     subject_id: DigestIdentifier,
+    #[serde(skip)]
+    retry_timeout: u64,
+    #[serde(skip)]
+    retry_diff: u64,
     command: ReqManInitMessage,
     request: Option<Signed<EventRequest>>,
     state: RequestManagerState,
     version: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum RebootType {
+    Normal,
+    Diff,
+    TimeOut,
 }
 
 pub enum InitRequestManager {
@@ -123,6 +138,8 @@ impl BorshDeserialize for RequestManager {
         let id = String::default();
 
         Ok(Self {
+            retry_diff: 0,
+            retry_timeout: 0,
             helpers: None,
             our_key,
             id,
@@ -430,7 +447,17 @@ impl RequestManager {
                 version: self.version,
                 signers,
             })
-            .await
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Evaluation,
+                error: None,
+            },
+        )
+        .await
     }
     //////// APPROVE
     ////////////////////////////////////////////////
@@ -532,7 +559,17 @@ impl RequestManager {
                 request_id: self.id.clone(),
                 version: self.version,
             })
-            .await
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Approval,
+                error: None,
+            },
+        )
+        .await
     }
 
     //////// VALI
@@ -799,7 +836,17 @@ impl RequestManager {
                 version: self.version,
                 signers,
             })
-            .await
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Validation,
+                error: None,
+            },
+        )
+        .await
     }
     //////// Distribution
     ////////////////////////////////////////////////
@@ -887,9 +934,11 @@ impl RequestManager {
     async fn build_distribution(
         &self,
         ctx: &mut ActorContext<RequestManager>,
-        ledger: SignedLedger
-    ) -> Result<bool, ActorError>{
-        let witnesses = self.build_distribution_data(ctx, ledger.signature().signer.clone()).await?;
+        ledger: SignedLedger,
+    ) -> Result<bool, ActorError> {
+        let witnesses = self
+            .build_distribution_data(ctx, ledger.signature().signer.clone())
+            .await?;
 
         let Some(witnesses) = witnesses else {
             return Ok(false);
@@ -975,10 +1024,10 @@ impl RequestManager {
         &self,
         ctx: &mut ActorContext<RequestManager>,
         witnesses: HashSet<PublicKey>,
-        ledger: SignedLedger
+        ledger: SignedLedger,
     ) -> Result<(), ActorError> {
         info!(TARGET_MANAGER, "Init distribution {}", self.id);
-        let Some(( .., network)) = self.helpers.clone() else {
+        let Some((.., network)) = self.helpers.clone() else {
             return Err(ActorError::FunctionalCritical {
                 description: "Helpers is None".to_string(),
             });
@@ -987,19 +1036,26 @@ impl RequestManager {
         let child = ctx
             .create_child(
                 "distribution",
-                Distribution::new(
-                    network,
-                    DistributionType::Request,
-                ),
+                Distribution::new(network, DistributionType::Request),
             )
             .await?;
 
         child
             .tell(DistributionMessage::Create {
                 ledger: Box::new(ledger),
-                witnesses
+                witnesses,
             })
-            .await
+            .await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Distribution,
+                error: None,
+            },
+        )
+        .await
     }
 
     //////// Reboot
@@ -1009,88 +1065,93 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
         governance_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let auth_witnesses = Self::get_witnesses_auth(ctx, governance_id.clone()).await?;
-        
+        let Some((.., network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Helpers is None".to_string(),
+            });
+        };
+
         let gov_sn = get_gov_sn(ctx, governance_id).await?;
         let governance_data = get_gov(ctx, governance_id).await?;
-        let mut witnesses = governance_data.get_witnesses(WitnessesData::Gov).map_err(|e| {
-            ActorError::FunctionalCritical { description: e.to_string() }
-        })?;
 
-        let request = ActorMessage::DistributionLedgerReq {
-            actual_sn: Some(gov_sn),
-            subject_id: governance_id.clone(),
+        let witnesses = {
+            let gov_witnesses = governance_data
+                .get_witnesses(WitnessesData::Gov)
+                .map_err(|e| ActorError::FunctionalCritical {
+                    description: e.to_string(),
+                })?;
+
+            let auth_witnesses =
+                Self::get_witnesses_auth(ctx, governance_id.clone())
+                    .await
+                    .unwrap_or_default();
+
+            gov_witnesses
+                .union(&auth_witnesses)
+                .cloned()
+                .collect::<HashSet<PublicKey>>()
         };
 
-        match auth_witnesses {
-            AuthWitness::One(witness) => {
-                witnesses.insert(witness);
-            }
-            AuthWitness::Many(witnesses) => {
-                
-            }
-            AuthWitness::None =>
-        }
+        if witnesses.is_empty() {
+            todo!("reboot");
+        } else if witnesses.len() == 1 {
+            let objetive = witnesses.iter().next().expect("len is 1");
+            let info = ComunicateInfo {
+                receiver: objetive.clone(),
+                request_id: String::default(),
+                version: 0,
+                receiver_actor: format!(
+                    "/user/node/distributor_{}",
+                    governance_id
+                ),
+            };
 
-        match witnesses {
-            AuthWitness::One(key_identifier) => {
-
-                let info = ComunicateInfo {
-                    receiver: key_identifier.clone(),
-                    version: 0,
-                    request_id: String::default(),
-                    receiver_actor: format!(
-                        "/user/node/distributor_{}",
-                        governance_string
-                    )
-                };
-
-                let helper: Option<Arc<NetworkSender>> =
-                    ctx.system().get_helper("network").await;
-
-                let Some(mut helper) = helper else {
-                    return Err(ActorError::NotHelper("network".to_owned()));
-                };
-
-                helper
-                    .send_command(
-                        network::CommandHelper::SendMessage {
-                            message: NetworkMessage {
-                                info,
-                                message: request,
-                            },
+            if let Err(e) = network
+                .send_command(network::CommandHelper::SendMessage {
+                    message: NetworkMessage {
+                        info,
+                        message: ActorMessage::DistributionLedgerReq {
+                            actual_sn: Some(gov_sn),
+                            subject_id: governance_id.clone(),
                         },
-                    )
-                    .await?;
+                    },
+                })
+                .await
+            {
+                return Err(emit_fail(ctx, e).await);
+            };
 
-                let actor = ctx.reference().await;
-                if let Some(actor) = actor {
-                    actor.tell(RequestManagerMessage::Reboot { governance_id }).await?
-                } else {
-                    let path = ctx.path().clone();
-                    return Err(ActorError::NotFound(path));
-                }
-            }
-            AuthWitness::Many(vec) => {
-                let witnesses = vec.iter().cloned().collect();
-                let data = UpdateNew { subject_id: governance_id, our_key: self.our_key.clone(), response: Some(UpdateRes::Sn(metadata.sn)), witnesses, request: Some(request), update_type: UpdateType::Request { id: self.id.clone()} };
+            let actor = ctx.reference().await?;
+            actor
+                .tell(RequestManagerMessage::RebootWait {
+                    governance_id: governance_id.clone(),
+                })
+                .await?
+        } else {
+            let data = UpdateNew {
+                network,
+                subject_id: governance_id.clone(),
+                our_sn: Some(gov_sn),
+                witnesses,
+                update_type: UpdateType::Auth,
+            };
 
-                let update = Update::new(
-                    data
-                );
-                let child = ctx
-                    .create_child(
-                        &governance_string,
-                        update,
-                    )
+            let updater = Update::new(data);
+            let Ok(child) =
+                ctx.create_child(&governance_id.to_string(), updater).await
+            else {
+                let actor = ctx.reference().await?;
+                return actor
+                    .tell(RequestManagerMessage::RebootWait {
+                        governance_id: governance_id.clone(),
+                    })
                     .await;
-                let Ok(child) = child else {
-                    return Err(ActorError::Create(ctx.path().clone(), governance_string));
-                };
-                    child.tell(UpdateMessage::Create).await?
+            };
+
+            if let Err(e) = child.tell(UpdateMessage::Run).await {
+                return Err(emit_fail(ctx, e).await);
             }
-            AuthWitness::None => return Err(ActorError::Functional("Attempts have been made to obtain witnesses to update governance but there are none authorized".to_owned())),
-        };
+        }
 
         Ok(())
     }
@@ -1098,21 +1159,134 @@ impl RequestManager {
     async fn get_witnesses_auth(
         ctx: &mut ActorContext<RequestManager>,
         governance_id: DigestIdentifier,
-    ) -> Result<AuthWitness, ActorError> {
+    ) -> Result<HashSet<PublicKey>, ActorError> {
         let path = ActorPath::from("/user/node/auth");
-        let actor= ctx.system().get_actor::<Auth>(&path).await?;
+        let actor = ctx.system().get_actor::<Auth>(&path).await?;
         let response = actor
             .ask(AuthMessage::GetAuth {
-                    subject_id: governance_id,
-                })
-                .await?;
+                subject_id: governance_id,
+            })
+            .await?;
 
         match response {
             AuthResponse::Witnesses(witnesses) => Ok(witnesses),
-            _ => Err(ActorError::UnexpectedResponse { expected: "AuthResponse::Witnesses".to_owned(), path}),
+            _ => Err(ActorError::UnexpectedResponse {
+                expected: "AuthResponse::Witnesses".to_owned(),
+                path,
+            }),
         }
     }
 
+    //////// General
+    ////////////////////////////////////////////////
+    async fn finish_request(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+    ) -> Result<(), ActorError> {
+        self.on_event(RequestManagerEvent::Finish, ctx).await;
+        self.end_request(ctx).await?;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.clone(),
+                state: RequestState::Finish,
+                error: None,
+            },
+        )
+        .await
+    }
+
+    async fn reboot(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+        reboot_type: RebootType,
+        governance_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        self.on_event(
+            RequestManagerEvent::UpdateState {
+                state: Box::new(RequestManagerState::Reboot),
+            },
+            ctx,
+        )
+        .await;
+
+        let actor = ctx.reference().await?;
+
+        match reboot_type {
+            RebootType::Normal => {
+                actor
+                    .tell(RequestManagerMessage::RebootUpdate { governance_id })
+                    .await?;
+            }
+            RebootType::Diff => {
+                self.retry_diff += 1;
+
+                let seconds = match self.retry_diff {
+                    1 => 10,
+                    2 => 20,
+                    3 => 30,
+                    _ => 60,
+                };
+
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: self.id.clone(),
+                        state: RequestState::RebootDiff {
+                            seconds,
+                            count: self.retry_diff,
+                        },
+                        error: None,
+                    },
+                )
+                .await?;
+
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                    actor
+                        .tell(RequestManagerMessage::RebootUpdate {
+                            governance_id,
+                        })
+                        .await;
+                });
+            }
+            RebootType::TimeOut => {
+                self.retry_timeout += 1;
+
+                let seconds = match self.retry_timeout {
+                    1 => 30,
+                    2 => 60,
+                    3 => 120,
+                    _ => 300,
+                };
+
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: self.id.clone(),
+                        state: RequestState::RebootTimeOut {
+                            seconds,
+                            count: self.retry_timeout,
+                        },
+                        error: None,
+                    },
+                )
+                .await?;
+
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                    actor
+                        .tell(RequestManagerMessage::RebootUpdate {
+                            governance_id,
+                        })
+                        .await;
+                });
+            }
+        }
+
+        Ok(())
+    }
 
     ////////////////////////////////////////////////
     ////////////////////////////////////////////////
@@ -1163,10 +1337,6 @@ impl RequestManager {
         Ok(())
     }
 
-
-
-
-
     async fn abort_request_manager(
         &self,
         ctx: &mut ActorContext<RequestManager>,
@@ -1201,7 +1371,19 @@ pub enum RequestManagerMessage {
     Run,
     FirstRun,
     Abort,
+    RebootUpdate {
+        governance_id: DigestIdentifier,
+    },
+    RebootWait {
+        governance_id: DigestIdentifier,
+    },
     Reboot {
+        governance_id: DigestIdentifier,
+    },
+    RebootTiemOut {
+        governance_id: DigestIdentifier,
+    },
+    RebootDiff {
         governance_id: DigestIdentifier,
     },
     FinishReboot,
@@ -1225,6 +1407,7 @@ impl Message for RequestManagerMessage {}
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RequestManagerEvent {
+    Finish,
     UpdateState {
         state: Box<RequestManagerState>,
     },
@@ -1246,7 +1429,6 @@ impl Actor for RequestManager {
     type Event = RequestManagerEvent;
     type Message = RequestManagerMessage;
     type Response = ();
-
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
@@ -1280,96 +1462,64 @@ impl Handler<RequestManager> for RequestManager {
         ctx: &mut ave_actors::ActorContext<RequestManager>,
     ) -> Result<(), ActorError> {
         match msg {
-            RequestManagerMessage::Reboot { governance_id } => {
-                info!(TARGET_MANAGER, "Init reboot {}", self.id);
-                if let RequestManagerState::Reboot = self.state.clone() {
-                    let reboot_actor = match ctx
-                        .create_child(
-                            "reboot",
-                            Reboot::new(governance_id.to_string()),
-                        )
-                        .await
-                    {
-                        Ok(actor) => actor,
-                        Err(e) => {
-                            error!(
-                                TARGET_MANAGER,
-                                "Reboot, can not create Reboot actor: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    };
+            RequestManagerMessage::RebootUpdate { governance_id } => {
+                info!(TARGET_MANAGER, "Init reboot update {}", self.id);
 
-                    if let Err(e) = reboot_actor.tell(RebootMessage::Init).await
-                    {
-                        error!(
-                            TARGET_MANAGER,
-                            "Reboot, can not send Init message to Reboot actor: {}",
-                            e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                } else {
-                    self.on_event(
-                        RequestManagerEvent::UpdateState {
-                            state: Box::new(RequestManagerState::Reboot),
-                        },
-                        ctx,
-                    )
-                    .await;
-
-                    if let Err(e) = send_to_tracking(
-                        ctx,
-                        RequestTrackingMessage::UpdateState {
-                            request_id: self.id.clone(),
-                            state: RequestState::Reboot,
-                            error: None,
-                        },
-                    )
+                if let Err(e) = self.init_update(ctx, &governance_id).await {
+                    error!(
+                        TARGET_MANAGER,
+                        "Reboot, a problem in init reboot: {}", e
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                }
+            }
+            RequestManagerMessage::RebootWait { governance_id } => {
+                info!(TARGET_MANAGER, "Init reboot wait {}", self.id);
+                let reboot_actor = match ctx
+                    .create_child("reboot", Reboot::new(governance_id.clone()))
                     .await
-                    {
+                {
+                    Ok(actor) => actor,
+                    Err(e) => {
                         error!(
                             TARGET_MANAGER,
-                            "Reboot, can not update tracking: {}", e
+                            "Reboot, can not create Reboot actor: {}", e
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
+                };
 
-                    if let Err(e) = self.init_reboot(ctx, governance_id).await {
-                        if let ActorError::Functional(_) = e {
-                            warn!(
-                                TARGET_MANAGER,
-                                "Reboot, can not init reboot: {}", e
-                            );
-                            let actor = ctx.reference().await;
-                            if let Some(actor) = actor {
-                                if let Err(e) = actor
-                                    .tell(RequestManagerMessage::FinishReboot)
-                                    .await
-                                {
-                                    error!(
-                                        TARGET_MANAGER,
-                                        "Reboot, can not finish reboot: {}", e
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                }
-                            } else {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "Reboot, request actor problem: {}", e
-                                );
-                                let path = ctx.path().clone();
-                                let e = ActorError::NotFound(path);
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        } else {
-                            warn!(
-                                TARGET_MANAGER,
-                                "Reboot, a problem in init reboot: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-                    }
+                if let Err(e) = reboot_actor.tell(RebootMessage::Init).await {
+                    error!(
+                        TARGET_MANAGER,
+                        "Reboot, can not send Init message to Reboot actor: {}",
+                        e
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                }
+            }
+            RequestManagerMessage::RebootDiff { governance_id } => {
+                if let Err(e) =
+                    self.reboot(ctx, RebootType::Diff, governance_id).await
+                {
+                    error!("");
+                    return Err(emit_fail(ctx, e).await);
+                }
+            }
+            RequestManagerMessage::RebootTiemOut { governance_id } => {
+                if let Err(e) =
+                    self.reboot(ctx, RebootType::TimeOut, governance_id).await
+                {
+                    error!("");
+                    return Err(emit_fail(ctx, e).await);
+                }
+            }
+            RequestManagerMessage::Reboot { governance_id } => {
+                if let Err(e) =
+                    self.reboot(ctx, RebootType::Normal, governance_id).await
+                {
+                    error!("");
+                    return Err(emit_fail(ctx, e).await);
                 }
             }
             RequestManagerMessage::FinishReboot => {
@@ -1603,13 +1753,55 @@ impl Handler<RequestManager> for RequestManager {
                             }
                         };
 
-                        if let Err(e) = self.update_subject(ctx, signed_ledger.clone()).await {
+                        if let Err(e) = self
+                            .update_subject(ctx, signed_ledger.clone())
+                            .await
+                        {
                             todo!()
                         };
 
-                        match self.build_distribution(ctx, signed_ledger).await {
+                        match self.build_distribution(ctx, signed_ledger).await
+                        {
                             Ok(in_distribution) => {
+                                if !in_distribution {
+                                    if let Err(e) =
+                                        self.finish_request(ctx).await
+                                    {
+                                        error!(
+                                            TARGET_MANAGER,
+                                            "FinishRequest, can not end request: {}",
+                                            e
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    }
+                                }
+                            }
+                            Err(e) => {
                                 todo!()
+                            }
+                        };
+                    }
+                    RequestManagerState::UpdateSubject { ledger } => {
+                        if let Err(e) =
+                            self.update_subject(ctx, ledger.clone()).await
+                        {
+                            todo!()
+                        };
+
+                        match self.build_distribution(ctx, ledger).await {
+                            Ok(in_distribution) => {
+                                if !in_distribution {
+                                    if let Err(e) =
+                                        self.finish_request(ctx).await
+                                    {
+                                        error!(
+                                            TARGET_MANAGER,
+                                            "FinishRequest, can not end request: {}",
+                                            e
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    }
+                                }
                             }
                             Err(e) => {
                                 todo!()
@@ -1619,7 +1811,18 @@ impl Handler<RequestManager> for RequestManager {
                     RequestManagerState::Distribution { ledger } => {
                         match self.build_distribution(ctx, ledger).await {
                             Ok(in_distribution) => {
-                                todo!()
+                                if !in_distribution {
+                                    if let Err(e) =
+                                        self.finish_request(ctx).await
+                                    {
+                                        error!(
+                                            TARGET_MANAGER,
+                                            "FinishRequest, can not end request: {}",
+                                            e
+                                        );
+                                        return Err(emit_fail(ctx, e).await);
+                                    }
+                                }
                             }
                             Err(e) => {
                                 todo!()
@@ -1627,7 +1830,13 @@ impl Handler<RequestManager> for RequestManager {
                         };
                     }
                     RequestManagerState::End => {
-                        todo!()
+                        if let Err(e) = self.end_request(ctx).await {
+                            error!(
+                                TARGET_MANAGER,
+                                "FinishRequest, can not end request: {}", e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     }
                 };
             }
@@ -1635,8 +1844,8 @@ impl Handler<RequestManager> for RequestManager {
                 self.on_event(
                     RequestManagerEvent::UpdateState {
                         state: Box::new(RequestManagerState::EvaluationRes {
-                            eval_req,
-                            eval_res,
+                            eval_req: eval_req.clone(),
+                            eval_res: eval_res.clone(),
                         }),
                     },
                     ctx,
@@ -1690,20 +1899,15 @@ impl Handler<RequestManager> for RequestManager {
                 }
             }
             RequestManagerMessage::ApprovalRes { appro_res } => {
-                let (eval_req, eval_res) =
-                    if let RequestManagerState::EvaluationRes {
-                        eval_req,
-                        eval_res,
-                    } = self.state.clone()
-                    {
-                        (eval_req, eval_res)
-                    } else {
-                        let e = ActorError::FunctionalFail(
-                            "Invalid request state".to_owned(),
-                        );
-                        error!(TARGET_MANAGER, "ApprovalRes, {}", e);
-                        return Err(emit_fail(ctx, e).await);
+                let RequestManagerState::EvaluationRes { eval_req, eval_res } =
+                    self.state.clone()
+                else {
+                    let e = ActorError::FunctionalCritical {
+                        description: "Invalid request state".to_owned(),
                     };
+                    error!(TARGET_MANAGER, "ApprovalRes, {}", e);
+                    return Err(emit_fail(ctx, e).await);
+                };
                 let (request, quorum, signers, init_state) = match self
                     .build_validation_req(
                         ctx,
@@ -1748,13 +1952,23 @@ impl Handler<RequestManager> for RequestManager {
                     }
                 };
 
-                if let Err(e) = self.update_subject(ctx, signed_ledger.clone()).await {
-                            todo!()
-                        };
+                if let Err(e) =
+                    self.update_subject(ctx, signed_ledger.clone()).await
+                {
+                    todo!()
+                };
 
                 match self.build_distribution(ctx, signed_ledger).await {
                     Ok(in_distribution) => {
-                        todo!()
+                        if !in_distribution {
+                            if let Err(e) = self.finish_request(ctx).await {
+                                error!(
+                                    TARGET_MANAGER,
+                                    "FinishRequest, can not end request: {}", e
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
                     }
                     Err(e) => {
                         todo!()
@@ -1763,34 +1977,14 @@ impl Handler<RequestManager> for RequestManager {
             }
             RequestManagerMessage::FinishRequest => {
                 info!(TARGET_MANAGER, "Finish request {}", self.id);
-                if let RequestManagerState::Distribution { .. }
-                | RequestManagerState::Reboot = self.state.clone()
-                {
-                } else {
-                    let e = ActorError::FunctionalFail(
-                        "Invalid request state".to_owned(),
-                    );
-                    error!(TARGET_MANAGER, "FinishRequest, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
 
-                if let Err(e) = self.end_request(ctx).await {
+                if let Err(e) = self.finish_request(ctx).await {
                     error!(
                         TARGET_MANAGER,
                         "FinishRequest, can not end request: {}", e
                     );
                     return Err(emit_fail(ctx, e).await);
                 }
-
-                if let Err(e) = purge_storage(ctx).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "FinishRequest, can not purge storage: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-
-                ctx.stop(None).await;
             }
         }
 
@@ -1844,6 +2038,8 @@ impl PersistentActor for RequestManager {
                 request,
                 helpers,
             } => Self {
+                retry_diff: 0,
+                retry_timeout: 0,
                 our_key,
                 id,
                 subject_id,
@@ -1859,6 +2055,8 @@ impl PersistentActor for RequestManager {
                 subject_id,
                 helpers,
             } => Self {
+                retry_diff: 0,
+                retry_timeout: 0,
                 our_key,
                 id,
                 subject_id,
@@ -1874,6 +2072,11 @@ impl PersistentActor for RequestManager {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
+            RequestManagerEvent::Finish => {
+                self.state = RequestManagerState::End;
+                self.request = None;
+                self.id = String::default();
+            }
             RequestManagerEvent::UpdateState { state } => {
                 self.state = *state.clone()
             }

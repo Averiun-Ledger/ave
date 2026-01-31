@@ -14,11 +14,10 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
-use crate::evaluation::schema;
-use crate::governance::model::{CreatorQuantity, Quorum};
+use crate::governance::model::Quorum;
 use crate::governance::role_register::{
-    RoleDataRegister, RolesRegister, RolesRegisterMessage,
-    RolesRegisterResponse, SearchRole,
+    RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
+    SearchRole,
 };
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
@@ -53,32 +52,27 @@ pub async fn get_actual_roles_register<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path =
-        ActorPath::from(format!("/user/node/{}/roles_register", governance_id));
-    let actor: Option<ActorRef<RolesRegister>> =
-        ctx.system().get_actor(&actor_path).await;
+    let path =
+        ActorPath::from(format!("/user/node/{}/role_register", governance_id));
+    let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
-    let response = if let Some(actor) = actor {
-        actor
-            .ask(RolesRegisterMessage::SearchActualRoles {
-                version,
-                evaluation,
-                approval,
-            })
-            .await?
-    } else {
-        return Err(ActorError::NotFound(actor_path));
-    };
+    let response = actor
+        .ask(RoleRegisterMessage::SearchActualRoles {
+            version,
+            evaluation,
+            approval,
+        })
+        .await?;
 
     match response {
-        RolesRegisterResponse::ActualRoles {
+        RoleRegisterResponse::ActualRoles {
             evaluation,
             approval,
         } => Ok((evaluation, approval)),
-        _ => Err(ActorError::UnexpectedResponse(
-            actor_path,
-            "RolesRegisterResponse::ActualRoles".to_string(),
-        )),
+        _ => Err(ActorError::UnexpectedResponse {
+            path,
+            expected: "RolesRegisterResponse::ActualRoles".to_string(),
+        }),
     }
 }
 
@@ -91,25 +85,20 @@ pub async fn get_validation_roles_register<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path =
-        ActorPath::from(format!("/user/node/{}/roles_register", governance_id));
-    let actor: Option<ActorRef<RolesRegister>> =
-        ctx.system().get_actor(&actor_path).await;
+    let path =
+        ActorPath::from(format!("/user/node/{}/role_register", governance_id));
+    let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
-    let response = if let Some(actor) = actor {
-        actor
-            .ask(RolesRegisterMessage::SearchValidators { search, version })
-            .await?
-    } else {
-        return Err(ActorError::NotFound(actor_path));
-    };
+    let response = actor
+        .ask(RoleRegisterMessage::SearchValidators { search, version })
+        .await?;
 
     match response {
-        RolesRegisterResponse::Validation(validation) => Ok(validation),
-        _ => Err(ActorError::UnexpectedResponse(
-            actor_path,
-            "RolesRegisterResponse::Validation".to_string(),
-        )),
+        RoleRegisterResponse::Validation(validation) => Ok(validation),
+        _ => Err(ActorError::UnexpectedResponse {
+            path,
+            expected: "RolesRegisterResponse::Validation".to_string(),
+        }),
     }
 }
 
@@ -180,8 +169,6 @@ where
         }),
     }
 }
-
-
 
 #[derive(
     Clone,
@@ -461,7 +448,9 @@ where
 {
     let req_path = ActorPath::from(format!("/user/request/{}", request_id));
     let req_actor = ctx.system().get_actor::<RequestManager>(&req_path).await?;
-    req_actor.tell(RequestManagerMessage::Reboot { governance_id }).await
+    req_actor
+        .tell(RequestManagerMessage::Reboot { governance_id })
+        .await
 }
 
 pub async fn purge_storage<A>(
@@ -471,18 +460,11 @@ where
     A: PersistentActor,
     A::Event: BorshSerialize + BorshDeserialize,
 {
-    let store: Option<ActorRef<Store<A>>> = ctx.get_child("store").await;
-    let response = if let Some(store) = store {
-        store.ask(StoreCommand::Purge).await?
-    } else {
-        return Err(ActorError::NotFound(ActorPath::from(format!(
-            "{}/store",
-            ctx.path()
-        ))));
-    };
+    let store  = ctx.get_child::<Store<A>>("store").await?;
+    let response = store.ask(StoreCommand::Purge).await?;
 
     if let StoreResponse::Error(e) = response {
-        return Err(ActorError::Store(format!("Can not purge request: {}", e)));
+        return Err(ActorError::StoreOperation{operation: "purge".to_string(), reason: e.to_string()});
     };
 
     Ok(())

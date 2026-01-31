@@ -30,7 +30,7 @@ use crate::{
 };
 
 use ave_common::{
-    SchemaType,
+    Namespace, SchemaType,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
@@ -75,6 +75,31 @@ pub enum SubjectData {
         namespace: String,
     },
     Governance,
+}
+
+impl SubjectData {
+    pub fn get_schema_id(&self) -> SchemaType {
+        match self {
+            SubjectData::Tracker { schema_id, .. } => schema_id.clone(),
+            SubjectData::Governance => SchemaType::Governance,
+        }
+    }
+
+    pub fn get_governance_id(&self) -> Option<DigestIdentifier> {
+        match self {
+            SubjectData::Tracker { governance_id, .. } => {
+                Some(governance_id.clone())
+            }
+            SubjectData::Governance => None,
+        }
+    }
+
+    pub fn get_namespace(&self) -> String {
+        match self {
+            SubjectData::Tracker { namespace, .. } => namespace.clone(),
+            SubjectData::Governance => String::default(),
+        }
+    }
 }
 
 /// Node struct.
@@ -865,14 +890,18 @@ impl Handler<Node> for Node {
                         "Tracker subject created successfully"
                     );
 
-                    SubjectData::Tracker { governance_id: metadata.governance_id.clone(), schema_id: metadata.schema_id.clone(), namespace: metadata.namespace.to_string() }
+                    SubjectData::Tracker {
+                        governance_id: metadata.governance_id.clone(),
+                        schema_id: metadata.schema_id.clone(),
+                        namespace: metadata.namespace.to_string(),
+                    }
                 };
 
                 self.on_event(
                     NodeEvent::RegisterSubject {
                         subject_id: metadata.subject_id.clone(),
                         owner: metadata.owner.clone(),
-                        data: subject_data
+                        data: subject_data,
                     },
                     ctx,
                 )

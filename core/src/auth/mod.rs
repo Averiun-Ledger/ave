@@ -9,9 +9,9 @@ use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::{collections::HashMap, vec};
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
@@ -26,7 +26,7 @@ use crate::{
     db::Storable,
     governance::model::WitnessesData,
     model::common::emit_fail,
-    update::{Update, UpdateMessage, UpdateNew, UpdateRes},
+    update::{Update, UpdateMessage, UpdateNew},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,7 +82,7 @@ impl Auth {
     async fn build_update_data(
         ctx: &mut ActorContext<Auth>,
         subject_id: &DigestIdentifier,
-    ) -> Result<(HashSet<PublicKey>, ActorMessage), ActorError> {
+    ) -> Result<(HashSet<PublicKey>, Option<u64>), ActorError> {
         let data = get_subject_data(ctx, subject_id).await?;
 
         let (witnesses, actual_sn) = if let Some(data) = &data {
@@ -131,13 +131,7 @@ impl Auth {
             (HashSet::default(), None)
         };
 
-        Ok((
-            witnesses,
-            ActorMessage::DistributionLedgerReq {
-                actual_sn,
-                subject_id: subject_id.clone(),
-            },
-        ))
+        Ok((witnesses, actual_sn))
     }
 }
 
@@ -262,7 +256,7 @@ impl Handler<Auth> for Auth {
             AuthMessage::DeleteAuth { subject_id } => {
                 self.on_event(
                     AuthEvent::DeleteAuth {
-                        subject_id,
+                        subject_id: subject_id.clone(),
                     },
                     ctx,
                 )
@@ -280,7 +274,7 @@ impl Handler<Auth> for Auth {
             } => {
                 self.on_event(
                     AuthEvent::NewAuth {
-                        subject_id,
+                        subject_id: subject_id.clone(),
                         witness,
                     },
                     ctx,
@@ -318,20 +312,25 @@ impl Handler<Auth> for Auth {
                     });
                 };
 
-                let (witnesses, request) =
-                    Self::build_update_data(ctx, &subject_id).await?;
+                let (witnesses, actual_sn) = {
+                    let (mut witnesses, actual_sn) =
+                        Self::build_update_data(ctx, &subject_id).await?;
 
-                if let Some(witness) = objective {
-                    witnesses.insert(witness);
-                }
+                    if let Some(witness) = objective {
+                        witnesses.insert(witness);
+                    }
 
-                let auth_witnesses =
-                    self.auth.get(&subject_id).cloned().unwrap_or_default();
+                    let auth_witnesses =
+                        self.auth.get(&subject_id).cloned().unwrap_or_default();
 
-                let witnesses = witnesses
-                    .union(&auth_witnesses)
-                    .cloned()
-                    .collect::<HashSet<PublicKey>>();
+                    (
+                        witnesses
+                            .union(&auth_witnesses)
+                            .cloned()
+                            .collect::<HashSet<PublicKey>>(),
+                        actual_sn,
+                    )
+                };
 
                 if witnesses.is_empty() {
                     error!(
@@ -340,8 +339,8 @@ impl Handler<Auth> for Auth {
                         "Subject has no witnesses to ask for update"
                     );
                     return Err(ActorError::Functional {
-                                description: "The subject has no witnesses to try to ask for an update.".to_owned(),
-                            });
+                        description: "The subject has no witnesses to try to ask for an update.".to_owned(),
+                    });
                 } else if witnesses.len() == 1 {
                     let objetive = witnesses.iter().next().expect("len is 1");
                     let info = ComunicateInfo {
@@ -358,7 +357,10 @@ impl Handler<Auth> for Auth {
                         .send_command(network::CommandHelper::SendMessage {
                             message: NetworkMessage {
                                 info,
-                                message: request,
+                                message: ActorMessage::DistributionLedgerReq {
+                                    actual_sn,
+                                    subject_id: subject_id.clone(),
+                                },
                             },
                         })
                         .await
@@ -381,11 +383,9 @@ impl Handler<Auth> for Auth {
                     let data = UpdateNew {
                         network,
                         subject_id: subject_id.clone(),
-                        our_key: self.our_key.clone(),
-                        response: Some(UpdateRes::Sn(sn)),
+                        our_sn: actual_sn,
                         witnesses,
-                        request: Some(request),
-                        update_type: crate::update::UpdateType::Auth,
+                        update_type: UpdateType::Auth,
                     };
 
                     let updater = Update::new(data);
@@ -464,7 +464,9 @@ impl PersistentActor for Auth {
                 witness,
             } => {
                 let witnesses = match witness {
-                    AuthWitness::One(public_key) => HashSet::from([public_key.clone()]),
+                    AuthWitness::One(public_key) => {
+                        HashSet::from([public_key.clone()])
+                    }
                     AuthWitness::Many(items) => items.iter().cloned().collect(),
                     AuthWitness::None => HashSet::default(),
                 };

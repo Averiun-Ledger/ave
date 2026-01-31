@@ -21,7 +21,6 @@ use types::ReqManInitMessage;
 use crate::approval::types::ApprovalStateRes;
 use crate::governance::data::GovernanceData;
 use crate::helpers::network::service::NetworkSender;
-use crate::model::common::node::subject_owner;
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{get_gov, get_metadata, get_quantity};
 use crate::request::manager::InitRequestManager;
@@ -1222,25 +1221,6 @@ impl Handler<RequestHandler> for RequestHandler {
                     ctx,
                 )
                 .await;
-
-                if let Err(e) = send_to_tracking(
-                    ctx,
-                    RequestTrackingMessage::UpdateState {
-                        request_id: id.clone(),
-                        state: RequestState::Finish,
-                        error: None,
-                    },
-                )
-                .await
-                {
-                    error!(
-                        TARGET_REQUEST,
-                        "EndHandling, Can not send event update to RequestTracking: {}",
-                        e
-                    );
-                    ctx.system().stop_system();
-                    return Err(e);
-                }
 
                 if let Err(e) =
                     RequestHandler::queued_event(ctx, &subject_id).await

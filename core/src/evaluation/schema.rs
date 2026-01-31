@@ -16,7 +16,6 @@ use network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
-    auth::WitnessesAuth,
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::service::NetworkSender,
     model::common::{emit_fail, node::try_to_update},
@@ -139,7 +138,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                     && let Err(e) = try_to_update(
                         ctx,
                         self.governance_id.clone(),
-                        WitnessesAuth::Witnesses,
+                        None
                     )
                     .await
                 {

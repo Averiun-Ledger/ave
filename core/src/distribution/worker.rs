@@ -6,7 +6,7 @@ use ave_actors::{
     NotPersistentActor,
 };
 use ave_common::{
-    Namespace,
+    Namespace, SchemaType,
     identity::{DigestIdentifier, PublicKey},
     request::EventRequest,
 };
@@ -14,7 +14,6 @@ use network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
-    auth::WitnessesAuth,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{HashThisRole, RoleTypes},
@@ -22,9 +21,9 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_witness_access, emit_fail, gov_sn,
-            node::{get_node_subject_data, i_owner_new_owner, try_to_update},
-            subject::{create_subject, get_gov, update_ledger},
+            check_witness_access, emit_fail,
+            node::{get_subject_data, i_owner_new_owner, try_to_update},
+            subject::{create_subject, get_gov, get_gov_sn, update_ledger},
         },
         event::Ledger,
     },
@@ -157,22 +156,19 @@ impl DistriWorker {
             subject_data
         {
             // Lo conozco
-            let gov_id = if data.schema_id.is_gov() {
-                None // Las gobernanzas no necesitan governance_id
-            } else {
-                Some(
-                    data.governance_id
-                        .as_ref()
-                        .ok_or_else(|| DistributorError::MissingGovernanceId {
-                            subject_id: subject_id.clone(),
-                        })?
-                        .clone(),
-                )
-            };
-
-            let namespace = Namespace::from(data.namespace.clone());
-
-            (data.schema_id.clone(), namespace, gov_id)
+            match data {
+                SubjectData::Tracker {
+                    governance_id,
+                    schema_id,
+                    namespace,
+                } => {
+                    let namespace = Namespace::from(namespace.clone());
+                    (schema_id.clone(), namespace, Some(governance_id.clone()))
+                }
+                SubjectData::Governance => {
+                    (SchemaType::Governance, Namespace::new(), None)
+                }
+            }
         } else {
             // No lo conozco - debe ser evento Create
             if let EventRequest::Create(create) = ledger.event_request.content()
@@ -196,8 +192,7 @@ impl DistriWorker {
                 (create.schema_id.clone(), create.namespace.clone(), gov_id)
             } else {
                 // No es el primer evento, necesito el primero
-                try_to_update(ctx, subject_id, WitnessesAuth::Owner(signer))
-                    .await?;
+                try_to_update(ctx, subject_id, Some(signer)).await?;
                 return Err(DistributorError::UpdatingSubject.into());
             }
         };
@@ -254,49 +249,52 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
         sender: PublicKey,
     ) -> Result<(u64, bool), ActorError> {
-        let data = get_node_subject_data(ctx, subject_id).await?;
+        let data = get_subject_data(ctx, subject_id).await?;
 
         let Some(data) = data else {
             return Err(DistributorError::SubjectNotFound.into());
         };
 
-        if data.schema_id.is_gov() {
-            let gov = get_gov(ctx, &subject_id).await.map_err(|e| {
-                DistributorError::GetGovernanceFailed {
-                    details: e.to_string(),
-                }
-            })?;
-
-            if !gov.has_this_role(HashThisRole::Gov {
-                who: sender.clone(),
-                role: RoleTypes::Witness,
-            }) {
-                return Err(DistributorError::SenderNotMember {
-                    sender: sender.to_string(),
-                }
-                .into());
-            }
-
-            Ok((gov_sn(ctx, subject_id).await?, true))
-        } else {
-            let governance_id = &data
-                .governance_id
-                .expect("governance_id is Some for Trackers");
-
-            let Some(sn) = check_witness_access(
-                ctx,
+        match data {
+            SubjectData::Tracker {
                 governance_id,
-                subject_id,
-                sender,
-                data.namespace,
-                data.schema_id,
-            )
-            .await?
-            else {
-                return Err(DistributorError::SenderNoAccess.into());
-            };
+                schema_id,
+                namespace,
+            } => {
+                let Some(sn) = check_witness_access(
+                    ctx,
+                    &governance_id,
+                    subject_id,
+                    sender,
+                    namespace,
+                    schema_id,
+                )
+                .await?
+                else {
+                    return Err(DistributorError::SenderNoAccess.into());
+                };
 
-            Ok((sn, false))
+                Ok((sn, false))
+            }
+            SubjectData::Governance => {
+                let gov = get_gov(ctx, &subject_id).await.map_err(|e| {
+                    DistributorError::GetGovernanceFailed {
+                        details: e.to_string(),
+                    }
+                })?;
+
+                if !gov.has_this_role(HashThisRole::Gov {
+                    who: sender.clone(),
+                    role: RoleTypes::Witness,
+                }) {
+                    return Err(DistributorError::SenderNotMember {
+                        sender: sender.to_string(),
+                    }
+                    .into());
+                }
+
+                Ok((get_gov_sn(ctx, subject_id).await?, true))
+            }
         }
     }
 
@@ -607,9 +605,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .content()
                     .is_create_event()
                 {
-                    if let Err(e) =
-                        create_subject(ctx, ledger.clone()).await
-                    {
+                    if let Err(e) = create_subject(ctx, ledger.clone()).await {
                         error!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
@@ -658,12 +654,8 @@ impl Handler<DistriWorker> for DistriWorker {
                         return Err(emit_fail(ctx, error.into()).await);
                     }
 
-                    match update_ledger(
-                        ctx,
-                        &subject_id,
-                        vec![ledger.clone()],
-                    )
-                    .await
+                    match update_ledger(ctx, &subject_id, vec![ledger.clone()])
+                        .await
                     {
                         Ok((last_sn, owner, new_owner))
                             if last_sn < ledger.content().sn =>
@@ -864,8 +856,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .content()
                     .is_create_event()
                 {
-                    if let Err(e) =
-                        create_subject(ctx, ledger[0].clone()).await
+                    if let Err(e) = create_subject(ctx, ledger[0].clone()).await
                     {
                         error!(
                             msg_type = "LedgerDistribution",
@@ -919,8 +910,7 @@ impl Handler<DistriWorker> for DistriWorker {
                 };
 
                 let (i_owner, i_new_owner) = if !ledger.is_empty() {
-                    match update_ledger(ctx, &subject_id, ledger).await
-                    {
+                    match update_ledger(ctx, &subject_id, ledger).await {
                         Ok((last_sn, owner, new_owner)) => {
                             let i_new_owner = if let Some(new_owner) = new_owner
                             {
