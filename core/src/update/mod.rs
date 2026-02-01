@@ -24,7 +24,7 @@ pub mod updater;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateType {
     Auth,
-    Request,
+    Request { id: DigestIdentifier },
 }
 
 pub struct UpdateNew {
@@ -87,13 +87,9 @@ impl Update {
         for witness in self.witnesses.clone() {
             let updater = Updater::new(witness.clone(), self.network.clone());
             let child = ctx.create_child(&witness.to_string(), updater).await?;
-            let message = match self.update_type {
-                UpdateType::Auth | UpdateType::Request { .. } => {
-                    UpdaterMessage::NetworkLastSn {
-                        subject_id: self.subject_id.clone(),
-                        node_key: witness,
-                    }
-                }
+            let message = UpdaterMessage::NetworkLastSn {
+                subject_id: self.subject_id.clone(),
+                node_key: witness,
             };
 
             child.tell(message).await?;
@@ -200,7 +196,7 @@ impl Handler<Update> for Update {
                                 }
                         }
 
-                        if let UpdateType::Request = &self.update_type {
+                        if let UpdateType::Request { id } = &self.update_type {
                             let request_path = ActorPath::from(format!(
                                 "/user/request/{}",
                                 self.subject_id
@@ -212,9 +208,12 @@ impl Handler<Update> for Update {
                             {
                                 Ok(request_actor) => {
                                     let request = if self.better.is_none() {
-                                        RequestManagerMessage::FinishReboot
+                                        RequestManagerMessage::FinishReboot {
+                                            request_id: id.clone(),
+                                        }
                                     } else {
                                         RequestManagerMessage::RebootWait {
+                                            request_id: id.clone(),
                                             governance_id: self
                                                 .subject_id
                                                 .clone(),

@@ -4,10 +4,12 @@ use crate::{
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
     model::{
-        common::{emit_fail, send_reboot_to_req, take_random_signers},
+        common::{
+            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+        },
         event::{ValidationData, ValidationMetadata},
     },
-    request::manager::{RequestManager, RequestManagerMessage},
+    request::manager::{RebootType, RequestManager, RequestManagerMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         response::ResponseSummary,
@@ -58,7 +60,7 @@ pub struct Validation {
 
     network: Arc<NetworkSender>,
 
-    request_id: String,
+    request_id: DigestIdentifier,
 
     version: u64,
 
@@ -92,7 +94,7 @@ impl Validation {
             request,
             hash,
             network,
-            request_id: String::default(),
+            request_id: DigestIdentifier::default(),
             version: 0,
             validation_request_hash: DigestIdentifier::default(),
             reboot: false,
@@ -168,6 +170,7 @@ impl Validation {
 
         req_actor
             .tell(RequestManagerMessage::ValidationRes {
+                request_id: self.request_id.clone(),
                 val_req: self.request.content().clone(),
                 val_res: response,
             })
@@ -204,7 +207,7 @@ impl Validation {
 #[derive(Debug, Clone)]
 pub enum ValidationMessage {
     Create {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
         signers: HashSet<PublicKey>,
     },
@@ -271,7 +274,7 @@ impl Handler<Validation> for Validation {
 
                 self.validation_request_hash = vali_req_hash;
                 self.validators_quantity = signers.len() as u32;
-                self.request_id = request_id.to_string();
+                self.request_id = request_id.clone();
                 self.version = version;
 
                 let validators_quantity = self.quorum.get_signers(
@@ -387,14 +390,25 @@ impl Handler<Validation> for Validation {
                                 // Do nothing
                             }
                             ValidationRes::Abort(error) => {
-                                todo!("ME dijeron que abortara la request")
+                                if let Err(e) = abort_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    sender,
+                                    error,
+                                )
+                                .await
+                                {
+                                    error!("");
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                             }
                             ValidationRes::Reboot => {
                                 if let Err(e) = send_reboot_to_req(
                                     ctx,
-                                    &self.request_id,
+                                    self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid.")
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::Normal
                                 )
                                 .await
                                 {
@@ -418,9 +432,22 @@ impl Handler<Validation> for Validation {
                         ) {
                             let summary = self.check_responses();
                             if let ResponseSummary::Reboot = summary {
-                                todo!(
-                                    "Respuestas diferentes, hay que hacer reboot, pero no tengo por qué actualizar la gov"
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::Diff
                                 )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                             }
 
                             let validation_data = self.build_validation_data();
@@ -479,9 +506,22 @@ impl Handler<Validation> for Validation {
                                 "Created additional validators from pending pool"
                             );
                         } else if self.current_validators.is_empty() {
-                            todo!(
-                                "Reboot, no tengo el quorum, hay que actualizar la governance y reintentarlo"
-                            );
+                            if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::TimeOut
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                         }
                     } else {
                         warn!(

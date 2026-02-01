@@ -19,7 +19,6 @@ use std::time::Duration;
 use tracing::{Span, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
-use crate::approval::response::ApprovalRes;
 use crate::distribution::{
     Distribution, DistributionMessage, DistributionType,
 };
@@ -27,7 +26,6 @@ use crate::evaluation::request::EvaluateData;
 use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
 use crate::governance::model::{ProtocolTypes, Quorum, WitnessesData};
-use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
@@ -42,17 +40,15 @@ use crate::model::request::EventRequestType;
 use crate::node::SubjectData;
 use crate::request::tracking::RequestTrackingMessage;
 use crate::subject::{Metadata, SignedLedger};
-use crate::system::ConfigHelper;
-use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
+
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
 use crate::{
     ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
-    auth::{Auth, AuthMessage, AuthResponse, AuthWitness},
+    auth::{Auth, AuthMessage, AuthResponse},
     db::Storable,
     evaluation::{Evaluation, EvaluationMessage, request::EvaluationReq},
     model::common::emit_fail,
-    node::{Node, NodeMessage},
     update::{Update, UpdateMessage, UpdateNew, UpdateType},
 };
 
@@ -71,7 +67,7 @@ pub struct RequestManager {
     #[serde(skip)]
     our_key: Arc<PublicKey>,
     #[serde(skip)]
-    id: String,
+    id: DigestIdentifier,
     #[serde(skip)]
     subject_id: DigestIdentifier,
     #[serde(skip)]
@@ -91,21 +87,10 @@ pub enum RebootType {
     TimeOut,
 }
 
-pub enum InitRequestManager {
-    Init {
-        our_key: Arc<PublicKey>,
-        id: String,
-        subject_id: DigestIdentifier,
-        command: ReqManInitMessage,
-        request: Box<Signed<EventRequest>>,
-        helpers: (HashAlgorithm, Arc<NetworkSender>),
-    },
-    Continue {
-        our_key: Arc<PublicKey>,
-        id: String,
-        subject_id: DigestIdentifier,
-        helpers: (HashAlgorithm, Arc<NetworkSender>),
-    },
+pub struct InitRequestManager {
+    our_key: Arc<PublicKey>,
+    subject_id: DigestIdentifier,
+    helpers: (HashAlgorithm, Arc<NetworkSender>),
 }
 
 impl BorshSerialize for RequestManager {
@@ -135,7 +120,7 @@ impl BorshDeserialize for RequestManager {
 
         let our_key = Arc::new(PublicKey::default());
         let subject_id = DigestIdentifier::default();
-        let id = String::default();
+        let id = DigestIdentifier::default();
 
         Ok(Self {
             retry_diff: 0,
@@ -452,7 +437,7 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
+                request_id: self.id.to_string(),
                 state: RequestState::Evaluation,
                 error: None,
             },
@@ -489,11 +474,9 @@ impl RequestManager {
         &self,
         ctx: &mut ActorContext<RequestManager>,
         eval_req: EvaluationReq,
-        evaluator_res: EvaluatorResponse,
+        eval_res: EvaluatorResponse,
     ) -> Result<(), ActorError> {
-        let request = self
-            .build_request_appro(ctx, eval_req, evaluator_res)
-            .await?;
+        let request = self.build_request_appro(ctx, eval_req, eval_res).await?;
 
         let governance_data = get_gov(
             ctx,
@@ -564,7 +547,7 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
+                request_id: self.id.to_string(),
                 state: RequestState::Approval,
                 error: None,
             },
@@ -764,7 +747,11 @@ impl RequestManager {
                 get_last_ledger_event(ctx, &self.subject_id).await?;
 
             let Some(last_ledger_event) = last_ledger_event else {
-                todo!()
+                return Err(ActorError::FunctionalCritical {
+                    description:
+                        "The latest Ledger event could not be obtained"
+                            .to_string(),
+                });
             };
 
             let ledger_hash = hash_borsh(&*hash.hasher(), &last_ledger_event.0)
@@ -841,7 +828,7 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
+                request_id: self.id.to_string(),
                 state: RequestState::Validation,
                 error: None,
             },
@@ -1036,7 +1023,11 @@ impl RequestManager {
         let child = ctx
             .create_child(
                 "distribution",
-                Distribution::new(network, DistributionType::Request),
+                Distribution::new(
+                    network,
+                    DistributionType::Request,
+                    self.id.clone(),
+                ),
             )
             .await?;
 
@@ -1050,7 +1041,7 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
+                request_id: self.id.to_string(),
                 state: RequestState::Distribution,
                 error: None,
             },
@@ -1060,6 +1051,20 @@ impl RequestManager {
 
     //////// Reboot
     ////////////////////////////////////////////////
+    async fn init_wait(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+        governance_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let actor = ctx
+            .create_child(
+                "reboot",
+                Reboot::new(governance_id.clone(), self.id.clone()),
+            )
+            .await?;
+
+        actor.tell(RebootMessage::Init).await
+    }
     async fn init_update(
         &self,
         ctx: &mut ActorContext<RequestManager>,
@@ -1093,7 +1098,12 @@ impl RequestManager {
         };
 
         if witnesses.is_empty() {
-            todo!("reboot");
+            let actor = ctx.reference().await?;
+            return actor
+                .tell(RequestManagerMessage::FinishReboot {
+                    request_id: self.id.clone(),
+                })
+                .await;
         } else if witnesses.len() == 1 {
             let objetive = witnesses.iter().next().expect("len is 1");
             let info = ComunicateInfo {
@@ -1106,7 +1116,7 @@ impl RequestManager {
                 ),
             };
 
-            if let Err(e) = network
+            network
                 .send_command(network::CommandHelper::SendMessage {
                     message: NetworkMessage {
                         info,
@@ -1116,14 +1126,12 @@ impl RequestManager {
                         },
                     },
                 })
-                .await
-            {
-                return Err(emit_fail(ctx, e).await);
-            };
+                .await?;
 
             let actor = ctx.reference().await?;
             actor
                 .tell(RequestManagerMessage::RebootWait {
+                    request_id: self.id.clone(),
                     governance_id: governance_id.clone(),
                 })
                 .await?
@@ -1133,16 +1141,17 @@ impl RequestManager {
                 subject_id: governance_id.clone(),
                 our_sn: Some(gov_sn),
                 witnesses,
-                update_type: UpdateType::Auth,
+                update_type: UpdateType::Request {
+                    id: self.id.clone(),
+                },
             };
 
             let updater = Update::new(data);
-            let Ok(child) =
-                ctx.create_child(&governance_id.to_string(), updater).await
-            else {
+            let Ok(child) = ctx.create_child("update", updater).await else {
                 let actor = ctx.reference().await?;
                 return actor
                     .tell(RequestManagerMessage::RebootWait {
+                        request_id: self.id.clone(),
                         governance_id: governance_id.clone(),
                     })
                     .await;
@@ -1189,7 +1198,7 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.clone(),
+                request_id: self.id.to_string(),
                 state: RequestState::Finish,
                 error: None,
             },
@@ -1212,11 +1221,25 @@ impl RequestManager {
         .await;
 
         let actor = ctx.reference().await?;
+        let request_id = self.id.clone();
 
         match reboot_type {
             RebootType::Normal => {
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: self.id.to_string(),
+                        state: RequestState::Reboot,
+                        error: None,
+                    },
+                )
+                .await?;
+
                 actor
-                    .tell(RequestManagerMessage::RebootUpdate { governance_id })
+                    .tell(RequestManagerMessage::RebootUpdate {
+                        request_id,
+                        governance_id,
+                    })
                     .await?;
             }
             RebootType::Diff => {
@@ -1232,7 +1255,7 @@ impl RequestManager {
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
-                        request_id: self.id.clone(),
+                        request_id: self.id.to_string(),
                         state: RequestState::RebootDiff {
                             seconds,
                             count: self.retry_diff,
@@ -1246,6 +1269,7 @@ impl RequestManager {
                     tokio::time::sleep(Duration::from_secs(seconds)).await;
                     actor
                         .tell(RequestManagerMessage::RebootUpdate {
+                            request_id,
                             governance_id,
                         })
                         .await;
@@ -1264,7 +1288,7 @@ impl RequestManager {
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
-                        request_id: self.id.clone(),
+                        request_id: self.id.to_string(),
                         state: RequestState::RebootTimeOut {
                             seconds,
                             count: self.retry_timeout,
@@ -1278,6 +1302,7 @@ impl RequestManager {
                     tokio::time::sleep(Duration::from_secs(seconds)).await;
                     actor
                         .tell(RequestManagerMessage::RebootUpdate {
+                            request_id,
                             governance_id,
                         })
                         .await;
@@ -1286,6 +1311,62 @@ impl RequestManager {
         }
 
         Ok(())
+    }
+
+    async fn match_command(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+    ) -> Result<(), ActorError> {
+        match self.command {
+            ReqManInitMessage::Evaluate => self.build_evaluation(ctx).await,
+            ReqManInitMessage::Validate => {
+                let (request, quorum, signers, init_state) =
+                    self.build_validation_req(ctx, None, None).await?;
+
+                self.run_validation(ctx, request, quorum, signers, init_state)
+                    .await
+            }
+        }
+    }
+
+    async fn stops_childs(&self, ctx: &mut ActorContext<RequestManager>) {
+        match self.state {
+            RequestManagerState::Reboot => {
+                if let Ok(actor) = ctx.get_child::<Update>("update").await {
+                    actor.ask_stop();
+                };
+                if let Ok(actor) = ctx.get_child::<Reboot>("reboot").await {
+                    actor.ask_stop();
+                };
+            }
+            RequestManagerState::Evaluation => {
+                if let Ok(actor) =
+                    ctx.get_child::<Evaluation>("evaluation").await
+                {
+                    actor.ask_stop();
+                };
+            }
+            RequestManagerState::Approval { .. } => {
+                if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
+                    actor.ask_stop();
+                };
+            }
+            RequestManagerState::Validation { .. } => {
+                if let Ok(actor) =
+                    ctx.get_child::<Validation>("validation").await
+                {
+                    actor.ask_stop();
+                };
+            }
+            RequestManagerState::Distribution { .. } => {
+                if let Ok(actor) =
+                    ctx.get_child::<Distribution>("distribution").await
+                {
+                    actor.ask_stop();
+                };
+            }
+            _ => {}
+        }
     }
 
     ////////////////////////////////////////////////
@@ -1368,37 +1449,52 @@ impl RequestManager {
 
 #[derive(Debug, Clone)]
 pub enum RequestManagerMessage {
-    Run,
-    FirstRun,
-    Abort,
+    Run {
+        request_id: DigestIdentifier,
+    },
+    FirstRun {
+        command: ReqManInitMessage,
+        request: Signed<EventRequest>,
+        request_id: DigestIdentifier,
+    },
+    Abort {
+        request_id: DigestIdentifier,
+        who: PublicKey,
+        reason: String,
+    },
+    Reboot {
+        request_id: DigestIdentifier,
+        governance_id: DigestIdentifier,
+        reboot_type: RebootType,
+    },
     RebootUpdate {
+        request_id: DigestIdentifier,
         governance_id: DigestIdentifier,
     },
     RebootWait {
+        request_id: DigestIdentifier,
         governance_id: DigestIdentifier,
     },
-    Reboot {
-        governance_id: DigestIdentifier,
+    FinishReboot {
+        request_id: DigestIdentifier,
     },
-    RebootTiemOut {
-        governance_id: DigestIdentifier,
-    },
-    RebootDiff {
-        governance_id: DigestIdentifier,
-    },
-    FinishReboot,
     EvaluationRes {
+        request_id: DigestIdentifier,
         eval_req: EvaluationReq,
         eval_res: EvaluationData,
     },
     ApprovalRes {
+        request_id: DigestIdentifier,
         appro_res: ApprovalData,
     },
     ValidationRes {
+        request_id: DigestIdentifier,
         val_req: ValidationReq,
         val_res: ValidationData,
     },
-    FinishRequest,
+    FinishRequest {
+        request_id: DigestIdentifier,
+    },
 }
 
 impl Message for RequestManagerMessage {}
@@ -1416,9 +1512,7 @@ pub enum RequestManagerEvent {
     },
     SafeState {
         command: ReqManInitMessage,
-        request: Option<Signed<EventRequest>>,
-        state: Box<RequestManagerState>,
-        version: u64,
+        request: Signed<EventRequest>,
     },
 }
 
@@ -1462,197 +1556,154 @@ impl Handler<RequestManager> for RequestManager {
         ctx: &mut ave_actors::ActorContext<RequestManager>,
     ) -> Result<(), ActorError> {
         match msg {
-            RequestManagerMessage::RebootUpdate { governance_id } => {
-                info!(TARGET_MANAGER, "Init reboot update {}", self.id);
+            RequestManagerMessage::RebootUpdate {
+                governance_id,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    info!(TARGET_MANAGER, "Init reboot update {}", self.id);
 
-                if let Err(e) = self.init_update(ctx, &governance_id).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "Reboot, a problem in init reboot: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::RebootWait { governance_id } => {
-                info!(TARGET_MANAGER, "Init reboot wait {}", self.id);
-                let reboot_actor = match ctx
-                    .create_child("reboot", Reboot::new(governance_id.clone()))
-                    .await
-                {
-                    Ok(actor) => actor,
-                    Err(e) => {
+                    if let Err(e) = self.init_update(ctx, &governance_id).await
+                    {
                         error!(
                             TARGET_MANAGER,
-                            "Reboot, can not create Reboot actor: {}", e
+                            "Reboot, a problem in init reboot: {}", e
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                };
+                }
+            }
+            RequestManagerMessage::RebootWait {
+                governance_id,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    info!(TARGET_MANAGER, "Init reboot wait {}", self.id);
 
-                if let Err(e) = reboot_actor.tell(RebootMessage::Init).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "Reboot, can not send Init message to Reboot actor: {}",
-                        e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::RebootDiff { governance_id } => {
-                if let Err(e) =
-                    self.reboot(ctx, RebootType::Diff, governance_id).await
-                {
-                    error!("");
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::RebootTiemOut { governance_id } => {
-                if let Err(e) =
-                    self.reboot(ctx, RebootType::TimeOut, governance_id).await
-                {
-                    error!("");
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::Reboot { governance_id } => {
-                if let Err(e) =
-                    self.reboot(ctx, RebootType::Normal, governance_id).await
-                {
-                    error!("");
-                    return Err(emit_fail(ctx, e).await);
-                }
-            }
-            RequestManagerMessage::FinishReboot => {
-                info!(TARGET_MANAGER, "Finish reboot {}", self.id);
-                self.on_event(
-                    RequestManagerEvent::UpdateVersion {
-                        version: self.version + 1,
-                    },
-                    ctx,
-                )
-                .await;
-
-                if let Err(e) = send_to_tracking(
-                    ctx,
-                    RequestTrackingMessage::UpdateVersion {
-                        request_id: self.id.clone(),
-                        version: self.version,
-                    },
-                )
-                .await
-                {
-                    error!(
-                        TARGET_MANAGER,
-                        "FinishReboot, can not update tracking: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                }
-
-                match self.command {
-                    ReqManInitMessage::Evaluate => {
-                        if let Err(e) = self.build_evaluation(ctx).await {
-                            error!(
-                                TARGET_MANAGER,
-                                "FinishReboot, can not init evaluation: {}", e
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        };
+                    if let Err(e) = self.init_wait(ctx, &governance_id).await
+                    {
+                        error!(
+                            TARGET_MANAGER,
+                            "Reboot, a problem in init reboot: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
                     }
-                    ReqManInitMessage::Validate => {
-                        let (request, quorum, signers, init_value) = match self
-                            .build_validation_req(ctx, None, None)
-                            .await
+                }
+            }
+            RequestManagerMessage::Reboot {
+                governance_id,
+                request_id,
+                reboot_type,
+            } => {
+                if request_id == self.id {
+                    if let RequestManagerState::Reboot = self.state {
+                    } else {
+                        self.stops_childs(ctx).await;
+                        if let Err(e) =
+                            self.reboot(ctx, reboot_type, governance_id).await
                         {
-                            Ok(data) => data,
-                            Err(e) => {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "FinishReboot, can not build validation data: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        };
-
-                        if let Err(e) = self
-                            .run_validation(
-                                ctx, request, quorum, signers, init_value,
-                            )
-                            .await
-                        {
-                            error!(
-                                TARGET_MANAGER,
-                                "FinishReboot, can not run validation: {}", e
-                            );
+                            error!("");
                             return Err(emit_fail(ctx, e).await);
-                        };
+                        }
                     }
-                };
+                }
             }
-            RequestManagerMessage::Abort => {
-                todo!("Abort")
-            }
-            RequestManagerMessage::Run | RequestManagerMessage::FirstRun => {
-                if let RequestManagerMessage::FirstRun = msg {
+            RequestManagerMessage::FinishReboot { request_id } => {
+                if request_id == self.id {
+                    info!(TARGET_MANAGER, "Finish reboot {}", self.id);
                     self.on_event(
-                        RequestManagerEvent::SafeState {
-                            command: self.command.clone(),
-                            request: self.request.clone(),
-                            state: Box::new(self.state.clone()),
-                            version: self.version,
+                        RequestManagerEvent::UpdateVersion {
+                            version: self.version + 1,
                         },
                         ctx,
                     )
                     .await;
+
+                    if let Err(e) = send_to_tracking(
+                        ctx,
+                        RequestTrackingMessage::UpdateVersion {
+                            request_id: self.id.to_string(),
+                            version: self.version,
+                        },
+                    )
+                    .await
+                    {
+                        error!(
+                            TARGET_MANAGER,
+                            "FinishReboot, can not update tracking: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+
+                    if let Err(e) = self.match_command(ctx).await {
+                        error!(
+                            TARGET_MANAGER,
+                            "FinishReboot, can not init evaluation: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
                 }
+            }
+            RequestManagerMessage::Abort {
+                request_id,
+                who,
+                reason,
+            } => {
+                if request_id == self.id {
+                    self.stops_childs(ctx).await;
+
+                    todo!(
+                        "Guardar en la base de datos y pasar a la siguiente request, enviar al tracking"
+                    )
+                    /*
+                                        send_to_tracking(
+                        ctx,
+                        RequestTrackingMessage::UpdateState {
+                            request_id: self.id.to_string(),
+                            state: RequestState::Abort {
+                                seconds,
+                                count: self.retry_timeout,
+                            },
+                            error: None,
+                        },
+                    )
+                    .await?;
+                         */
+                }
+            }
+            RequestManagerMessage::FirstRun {
+                command,
+                request,
+                request_id,
+            } => {
+                self.id = request_id;
+                self.on_event(
+                    RequestManagerEvent::SafeState { command, request },
+                    ctx,
+                )
+                .await;
+
+                if let Err(e) = self.match_command(ctx).await {
+                    error!(
+                        TARGET_MANAGER,
+                        "Run, can not init evaluation: {}", e
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                };
+            }
+            RequestManagerMessage::Run { request_id } => {
+                self.id = request_id;
 
                 info!(TARGET_MANAGER, "Running {}", self.id);
                 match self.state.clone() {
                     RequestManagerState::Starting
                     | RequestManagerState::Reboot => {
-                        match self.command {
-                            ReqManInitMessage::Evaluate => {
-                                if let Err(e) = self.build_evaluation(ctx).await
-                                {
-                                    error!(
-                                        TARGET_MANAGER,
-                                        "Run, can not init evaluation: {}", e
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                };
-                            }
-                            ReqManInitMessage::Validate => {
-                                let (request, quorum, signers, init_state) =
-                                    match self
-                                        .build_validation_req(ctx, None, None)
-                                        .await
-                                    {
-                                        Ok(data) => data,
-                                        Err(e) => {
-                                            error!(
-                                                TARGET_MANAGER,
-                                                "FinishReboot, can not build validation data: {}",
-                                                e
-                                            );
-                                            return Err(emit_fail(ctx, e).await);
-                                        }
-                                    };
-
-                                if let Err(e) = self
-                                    .run_validation(
-                                        ctx, request, quorum, signers,
-                                        init_state,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        TARGET_MANAGER,
-                                        "FinishReboot, can not run validation: {}",
-                                        e
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                };
-                            }
+                        if let Err(e) = self.match_command(ctx).await {
+                            error!(
+                                TARGET_MANAGER,
+                                "Run, can not init evaluation: {}", e
+                            );
+                            return Err(emit_fail(ctx, e).await);
                         };
                     }
                     RequestManagerState::Evaluation => {
@@ -1665,15 +1716,12 @@ impl Handler<RequestManager> for RequestManager {
                         }
                     }
 
-                    RequestManagerState::EvaluationRes {
+                    RequestManagerState::Approval {
                         eval_req,
                         eval_res,
                     } => {
-                        if let Some(evaluator_res) = eval_res.evaluator_res()
-                            && evaluator_res.appr_required
-                        {
-                            if let Err(e) = self
-                                .build_approval(ctx, eval_req, evaluator_res)
+                        if let Err(e) = self
+                                .build_approval(ctx, eval_req, eval_res.evaluator_res().expect("If the status is approval, it means that the evaluator's response is valid."))
                                 .await
                             {
                                 error!(
@@ -1682,41 +1730,6 @@ impl Handler<RequestManager> for RequestManager {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             }
-                        } else {
-                            let (request, quorum, signers, init_state) =
-                                match self
-                                    .build_validation_req(
-                                        ctx,
-                                        Some((eval_req, eval_res)),
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    Ok(data) => data,
-                                    Err(e) => {
-                                        error!(
-                                            TARGET_MANAGER,
-                                            "FinishReboot, can not build validation data: {}",
-                                            e
-                                        );
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                                };
-
-                            if let Err(e) = self
-                                .run_validation(
-                                    ctx, request, quorum, signers, init_state,
-                                )
-                                .await
-                            {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "FinishReboot, can not run validation: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            };
-                        }
                     }
                     RequestManagerState::Validation {
                         request,
@@ -1737,55 +1750,14 @@ impl Handler<RequestManager> for RequestManager {
                             return Err(emit_fail(ctx, e).await);
                         };
                     }
-                    RequestManagerState::ValidationRes { val_req, val_res } => {
-                        let signed_ledger = match self
-                            .build_ledger(ctx, val_req, val_res)
-                            .await
-                        {
-                            Ok(signed_ledger) => signed_ledger,
-                            Err(e) => {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "ValidationRes, can not build signed ledger: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        };
-
-                        if let Err(e) = self
-                            .update_subject(ctx, signed_ledger.clone())
-                            .await
-                        {
-                            todo!()
-                        };
-
-                        match self.build_distribution(ctx, signed_ledger).await
-                        {
-                            Ok(in_distribution) => {
-                                if !in_distribution {
-                                    if let Err(e) =
-                                        self.finish_request(ctx).await
-                                    {
-                                        error!(
-                                            TARGET_MANAGER,
-                                            "FinishRequest, can not end request: {}",
-                                            e
-                                        );
-                                        return Err(emit_fail(ctx, e).await);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                todo!()
-                            }
-                        };
-                    }
                     RequestManagerState::UpdateSubject { ledger } => {
                         if let Err(e) =
                             self.update_subject(ctx, ledger.clone()).await
                         {
-                            todo!()
+                            error!(
+                                ""
+                            );
+                            return Err(emit_fail(ctx, e).await);
                         };
 
                         match self.build_distribution(ctx, ledger).await {
@@ -1804,7 +1776,10 @@ impl Handler<RequestManager> for RequestManager {
                                 }
                             }
                             Err(e) => {
-                                todo!()
+                                error!(
+                                ""
+                            );
+                            return Err(emit_fail(ctx, e).await);
                             }
                         };
                     }
@@ -1825,7 +1800,10 @@ impl Handler<RequestManager> for RequestManager {
                                 }
                             }
                             Err(e) => {
-                                todo!()
+                                error!(
+                                ""
+                            );
+                            return Err(emit_fail(ctx, e).await);
                             }
                         };
                     }
@@ -1840,36 +1818,96 @@ impl Handler<RequestManager> for RequestManager {
                     }
                 };
             }
-            RequestManagerMessage::EvaluationRes { eval_req, eval_res } => {
-                self.on_event(
-                    RequestManagerEvent::UpdateState {
-                        state: Box::new(RequestManagerState::EvaluationRes {
-                            eval_req: eval_req.clone(),
-                            eval_res: eval_res.clone(),
-                        }),
-                    },
-                    ctx,
-                )
-                .await;
+            RequestManagerMessage::EvaluationRes {
+                eval_req,
+                eval_res,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    self.stops_childs(ctx).await;
 
-                if let Some(evaluator_res) = eval_res.evaluator_res()
-                    && evaluator_res.appr_required
-                {
-                    if let Err(e) =
-                        self.build_approval(ctx, eval_req, evaluator_res).await
+                    if let Some(evaluator_res) = eval_res.evaluator_res()
+                        && evaluator_res.appr_required
                     {
-                        error!(
-                            TARGET_MANAGER,
-                            "Evaluation, can not init evaluation: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
+                        self.on_event(
+                            RequestManagerEvent::UpdateState {
+                                state: Box::new(
+                                    RequestManagerState::Approval {
+                                        eval_req: eval_req.clone(),
+                                        eval_res: eval_res.clone(),
+                                    },
+                                ),
+                            },
+                            ctx,
+                        )
+                        .await;
+
+                        if let Err(e) = self
+                            .build_approval(ctx, eval_req, evaluator_res)
+                            .await
+                        {
+                            error!(
+                                TARGET_MANAGER,
+                                "Evaluation, can not init evaluation: {}", e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    } else {
+                        let (request, quorum, signers, init_state) = match self
+                            .build_validation_req(
+                                ctx,
+                                Some((eval_req, eval_res)),
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(data) => data,
+                            Err(e) => {
+                                error!(
+                                    TARGET_MANAGER,
+                                    "FinishReboot, can not build validation data: {}",
+                                    e
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        };
+
+                        if let Err(e) = self
+                            .run_validation(
+                                ctx, request, quorum, signers, init_state,
+                            )
+                            .await
+                        {
+                            error!(
+                                TARGET_MANAGER,
+                                "FinishReboot, can not run validation: {}", e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        };
                     }
-                } else {
+                }
+            }
+            RequestManagerMessage::ApprovalRes {
+                appro_res,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    self.stops_childs(ctx).await;
+
+                    let RequestManagerState::Approval { eval_req, eval_res } =
+                        self.state.clone()
+                    else {
+                        let e = ActorError::FunctionalCritical {
+                            description: "Invalid request state".to_owned(),
+                        };
+                        error!(TARGET_MANAGER, "ApprovalRes, {}", e);
+                        return Err(emit_fail(ctx, e).await);
+                    };
                     let (request, quorum, signers, init_state) = match self
                         .build_validation_req(
                             ctx,
                             Some((eval_req, eval_res)),
-                            None,
+                            Some(appro_res),
                         )
                         .await
                     {
@@ -1877,7 +1915,7 @@ impl Handler<RequestManager> for RequestManager {
                         Err(e) => {
                             error!(
                                 TARGET_MANAGER,
-                                "FinishReboot, can not build validation data: {}",
+                                "ApprovalRes, can not build validation data: {}",
                                 e
                             );
                             return Err(emit_fail(ctx, e).await);
@@ -1892,98 +1930,74 @@ impl Handler<RequestManager> for RequestManager {
                     {
                         error!(
                             TARGET_MANAGER,
-                            "FinishReboot, can not run validation: {}", e
+                            "ApprovalRes, can not run validation: {}", e
                         );
                         return Err(emit_fail(ctx, e).await);
                     };
                 }
             }
-            RequestManagerMessage::ApprovalRes { appro_res } => {
-                let RequestManagerState::EvaluationRes { eval_req, eval_res } =
-                    self.state.clone()
-                else {
-                    let e = ActorError::FunctionalCritical {
-                        description: "Invalid request state".to_owned(),
+            RequestManagerMessage::ValidationRes {
+                val_res,
+                val_req,
+                request_id,
+            } => {
+                if request_id == self.id {
+                    self.stops_childs(ctx).await;
+
+                    let signed_ledger = match self
+                        .build_ledger(ctx, val_req, val_res)
+                        .await
+                    {
+                        Ok(signed_ledger) => signed_ledger,
+                        Err(e) => {
+                            error!(
+                                TARGET_MANAGER,
+                                "ValidationRes, can not build signed ledger: {}",
+                                e
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     };
-                    error!(TARGET_MANAGER, "ApprovalRes, {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-                let (request, quorum, signers, init_state) = match self
-                    .build_validation_req(
-                        ctx,
-                        Some((eval_req, eval_res)),
-                        Some(appro_res),
-                    )
-                    .await
-                {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "ApprovalRes, can not build validation data: {}", e
-                        );
+
+                    if let Err(e) =
+                        self.update_subject(ctx, signed_ledger.clone()).await
+                    {
+                        error!("");
                         return Err(emit_fail(ctx, e).await);
-                    }
-                };
+                    };
 
-                if let Err(e) = self
-                    .run_validation(ctx, request, quorum, signers, init_state)
-                    .await
-                {
-                    error!(
-                        TARGET_MANAGER,
-                        "ApprovalRes, can not run validation: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-            }
-            RequestManagerMessage::ValidationRes { val_res, val_req } => {
-                let signed_ledger = match self
-                    .build_ledger(ctx, val_req, val_res)
-                    .await
-                {
-                    Ok(signed_ledger) => signed_ledger,
-                    Err(e) => {
-                        error!(
-                            TARGET_MANAGER,
-                            "ValidationRes, can not build signed ledger: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                if let Err(e) =
-                    self.update_subject(ctx, signed_ledger.clone()).await
-                {
-                    todo!()
-                };
-
-                match self.build_distribution(ctx, signed_ledger).await {
-                    Ok(in_distribution) => {
-                        if !in_distribution {
-                            if let Err(e) = self.finish_request(ctx).await {
-                                error!(
-                                    TARGET_MANAGER,
-                                    "FinishRequest, can not end request: {}", e
-                                );
-                                return Err(emit_fail(ctx, e).await);
+                    match self.build_distribution(ctx, signed_ledger).await {
+                        Ok(in_distribution) => {
+                            if !in_distribution {
+                                if let Err(e) = self.finish_request(ctx).await {
+                                    error!(
+                                        TARGET_MANAGER,
+                                        "FinishRequest, can not end request: {}",
+                                        e
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        todo!()
-                    }
-                };
+                        Err(e) => {
+                            error!("");
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    };
+                }
             }
-            RequestManagerMessage::FinishRequest => {
-                info!(TARGET_MANAGER, "Finish request {}", self.id);
+            RequestManagerMessage::FinishRequest { request_id } => {
+                if request_id == self.id {
+                    info!(TARGET_MANAGER, "Finish request {}", self.id);
 
-                if let Err(e) = self.finish_request(ctx).await {
-                    error!(
-                        TARGET_MANAGER,
-                        "FinishRequest, can not end request: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
+                    self.stops_childs(ctx).await;
+                    if let Err(e) = self.finish_request(ctx).await {
+                        error!(
+                            TARGET_MANAGER,
+                            "FinishRequest, can not end request: {}", e
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
                 }
             }
         }
@@ -2029,43 +2043,17 @@ impl PersistentActor for RequestManager {
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        match params {
-            InitRequestManager::Init {
-                our_key,
-                id,
-                subject_id,
-                command,
-                request,
-                helpers,
-            } => Self {
-                retry_diff: 0,
-                retry_timeout: 0,
-                our_key,
-                id,
-                subject_id,
-                command,
-                request: Some(*request),
-                state: RequestManagerState::Starting,
-                version: 0,
-                helpers: Some(helpers),
-            },
-            InitRequestManager::Continue {
-                our_key,
-                id,
-                subject_id,
-                helpers,
-            } => Self {
-                retry_diff: 0,
-                retry_timeout: 0,
-                our_key,
-                id,
-                subject_id,
-                command: ReqManInitMessage::Evaluate,
-                request: None,
-                state: RequestManagerState::Starting,
-                version: 0,
-                helpers: Some(helpers),
-            },
+        Self {
+            retry_diff: 0,
+            retry_timeout: 0,
+            our_key: params.our_key,
+            id: DigestIdentifier::default(),
+            subject_id: params.subject_id,
+            command: ReqManInitMessage::Evaluate,
+            request: None,
+            state: RequestManagerState::Starting,
+            version: 0,
+            helpers: Some(params.helpers),
         }
     }
 
@@ -2075,7 +2063,7 @@ impl PersistentActor for RequestManager {
             RequestManagerEvent::Finish => {
                 self.state = RequestManagerState::End;
                 self.request = None;
-                self.id = String::default();
+                self.id = DigestIdentifier::default();
             }
             RequestManagerEvent::UpdateState { state } => {
                 self.state = *state.clone()
@@ -2083,15 +2071,12 @@ impl PersistentActor for RequestManager {
             RequestManagerEvent::UpdateVersion { version } => {
                 self.version = *version
             }
-            RequestManagerEvent::SafeState {
-                command,
-                request,
-                state,
-                version,
-            } => {
-                self.version = *version;
-                self.state = *state.clone();
-                self.request = request.clone();
+            RequestManagerEvent::SafeState { command, request } => {
+                self.version = 0;
+                self.retry_diff = 0;
+                self.retry_timeout = 0;
+                self.state = RequestManagerState::Starting;
+                self.request = Some(request.clone());
                 self.command = command.clone();
             }
         };

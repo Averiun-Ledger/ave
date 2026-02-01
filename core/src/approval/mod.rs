@@ -41,7 +41,7 @@ pub struct Approval {
     network: Arc<NetworkSender>,
     our_key: Arc<PublicKey>,
     quorum: Quorum,
-    request_id: String,
+    request_id: DigestIdentifier,
     version: u64,
     request: Signed<ApprovalReq>,
     approvers: HashSet<PublicKey>,
@@ -69,7 +69,7 @@ impl Approval {
             request,
             approvers_quantity: approvers.len() as u32,
             approvers,
-            request_id: String::default(),
+            request_id: DigestIdentifier::default(),
             version: 0,
             approvers_timeout: vec![],
             approvers_agrees: vec![],
@@ -142,6 +142,7 @@ impl Approval {
 
         req_actor
             .tell(RequestManagerMessage::ApprovalRes {
+                request_id: self.request_id.clone(),
                 appro_res: ApprovalData {
                     approval_req_signature: self.request.signature().clone(),
                     approval_req_hash: self.approval_req_hash.clone(),
@@ -164,7 +165,7 @@ impl Approval {
 #[derive(Debug, Clone)]
 pub enum ApprovalMessage {
     Create {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
     },
     Response {
@@ -226,7 +227,7 @@ impl Handler<Approval> for Approval {
                 };
 
                 self.approval_req_hash = approval_req_hash;
-                self.request_id = request_id.to_string();
+                self.request_id = request_id.clone();
                 self.version = version;
 
                 for signer in self.approvers.clone() {

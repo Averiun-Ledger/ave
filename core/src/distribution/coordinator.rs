@@ -79,7 +79,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
 
                 let message = NetworkMessage {
                     info: ComunicateInfo {
-                        request_id: request_id.clone(),
+                        request_id: request_id.to_string(),
                         version: 0,
                         receiver: self.node_key.clone(),
                         receiver_actor,

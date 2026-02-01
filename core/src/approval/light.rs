@@ -16,7 +16,7 @@ use ave_actors::{
     RetryMessage, Strategy,
 };
 use ave_common::{
-    identity::{HashAlgorithm, PublicKey, Signed, TimeStamp},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp},
     request::EventRequest,
 };
 use network::ComunicateInfo;
@@ -31,7 +31,7 @@ pub struct ApprLight {
     network: Arc<NetworkSender>,
     our_key: Arc<PublicKey>,
     node_key: PublicKey,
-    request_id: String,
+    request_id: DigestIdentifier,
     version: u64,
 }
 
@@ -40,7 +40,7 @@ impl ApprLight {
         network: Arc<NetworkSender>,
         our_key: Arc<PublicKey>,
         node_key: PublicKey,
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
     ) -> Self {
         Self {
@@ -54,7 +54,7 @@ impl ApprLight {
 }
 
 pub struct InitApprLight {
-    pub request_id: String,
+    pub request_id: DigestIdentifier,
     pub version: u64,
     pub our_key: Arc<PublicKey>,
     pub node_key: PublicKey,
@@ -125,7 +125,7 @@ impl Handler<ApprLight> for ApprLight {
 
                 let message = NetworkMessage {
                     info: ComunicateInfo {
-                        request_id: self.request_id.clone(),
+                        request_id: self.request_id.to_string(),
                         version: self.version,
                         receiver: self.node_key.clone(),
                         receiver_actor,
@@ -186,7 +186,7 @@ impl Handler<ApprLight> for ApprLight {
                 version,
                 sender,
             } => {
-                if request_id == self.request_id && version == self.version {
+                if request_id == self.request_id.to_string() && version == self.version {
                     if self.node_key != sender
                         || sender != approval_res.signature().signer
                     {

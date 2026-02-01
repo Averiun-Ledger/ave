@@ -258,7 +258,7 @@ pub enum ApprPersistMessage {
     MakeObsolete,
     // Mensaje para aprobar localmente
     LocalApproval {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
         approval_req: Signed<ApprovalReq>,
     },
@@ -418,7 +418,7 @@ impl Handler<ApprPersist> for ApprPersist {
                             ctx,
                             approval_req,
                             response,
-                            &self.request_id,
+                            &self.request_id.to_string(),
                             self.version,
                         )
                         .await
@@ -447,7 +447,9 @@ impl Handler<ApprPersist> for ApprPersist {
                 version,
                 approval_req,
             } => {
-                if request_id != self.request_id || version != self.version {
+                if request_id.to_string() != self.request_id
+                    || version != self.version
+                {
                     if !approval_req
                         .content()
                         .event_request
@@ -471,7 +473,7 @@ impl Handler<ApprPersist> for ApprPersist {
                                     ctx,
                                     approval_req.clone(),
                                     true,
-                                    &request_id,
+                                    &request_id.to_string(),
                                     version,
                                 )
                                 .await
@@ -501,7 +503,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         ApprPersistEvent::SafeState {
                             subject_id: self.subject_id.clone(),
                             version,
-                            request_id,
+                            request_id: request_id.to_string(),
                             request: Box::new(approval_req),
                             state,
                         },
@@ -525,7 +527,7 @@ impl Handler<ApprPersist> for ApprPersist {
                                 ctx,
                                 approval_req.clone(),
                                 response,
-                                &request_id,
+                                &request_id.to_string(),
                                 version,
                             )
                             .await
@@ -564,7 +566,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     return Ok(());
                 }
 
-                if info.request_id != self.request_id
+                if info.request_id != self.request_id.to_string()
                     || info.version != self.version
                 {
                     if let Err(e) = approval_req.verify() {
@@ -705,7 +707,7 @@ impl Handler<ApprPersist> for ApprPersist {
                             ctx,
                             approval_req.clone(),
                             response,
-                            &self.request_id,
+                            &self.request_id.to_string(),
                             self.version,
                         )
                         .await

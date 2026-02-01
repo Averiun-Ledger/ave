@@ -33,14 +33,17 @@ pub struct Distribution {
     witnesses: HashSet<PublicKey>,
     distribution_type: DistributionType,
     subject_id: DigestIdentifier,
+    request_id: DigestIdentifier,
 }
 
 impl Distribution {
     pub fn new(
         network: Arc<NetworkSender>,
         distribution_type: DistributionType,
+        request_id: DigestIdentifier,
     ) -> Self {
         Distribution {
+            request_id,
             network,
             distribution_type,
             witnesses: HashSet::new(),
@@ -95,7 +98,11 @@ impl Distribution {
     ) -> Result<(), ActorError> {
         if let DistributionType::Request = self.distribution_type {
             let req_actor = ctx.get_parent::<RequestManager>().await?;
-            req_actor.tell(RequestManagerMessage::FinishRequest).await?;
+            req_actor
+                .tell(RequestManagerMessage::FinishRequest {
+                    request_id: self.request_id.clone(),
+                })
+                .await?;
         } else {
             ctx.stop(None);
         }

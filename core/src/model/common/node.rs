@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
+    Actor, ActorContext, ActorError, ActorPath, Handler,
 };
 
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
@@ -9,7 +9,7 @@ use network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
-    auth::{Auth, AuthMessage, WitnessesAuth},
+    auth::{Auth, AuthMessage},
     helpers::network::service::NetworkSender,
     model::event::Ledger,
     node::SubjectData,

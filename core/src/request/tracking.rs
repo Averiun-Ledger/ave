@@ -5,7 +5,7 @@ use ave_actors::{
     Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
     Response,
 };
-use ave_common::response::{RequestInfo, RequestState};
+use ave_common::{response::{RequestInfo, RequestState}};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};

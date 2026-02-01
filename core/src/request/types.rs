@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::{
     evaluation::request::EvaluationReq,
     governance::model::Quorum,
-    model::event::{EvaluationData, ValidationData},
+    model::event::EvaluationData,
     subject::SignedLedger,
     validation::request::ValidationReq,
 };
@@ -22,7 +22,7 @@ pub enum RequestManagerState {
     Reboot,
     Starting,
     Evaluation,
-    EvaluationRes {
+    Approval {
         eval_req: EvaluationReq,
         eval_res: EvaluationData,
     },
@@ -31,10 +31,6 @@ pub enum RequestManagerState {
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
         signers: HashSet<PublicKey>,
-    },
-    ValidationRes {
-        val_req: ValidationReq,
-        val_res: ValidationData,
     },
     UpdateSubject {
         ledger: SignedLedger,

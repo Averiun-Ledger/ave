@@ -25,7 +25,7 @@ use crate::governance::subject_register::{
 use crate::governance::witnesses_register::{
     WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
-use crate::request::manager::{RequestManager, RequestManagerMessage};
+use crate::request::manager::{RebootType, RequestManager, RequestManagerMessage};
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
 
@@ -440,16 +440,31 @@ pub fn take_random_signers(
 
 pub async fn send_reboot_to_req<A>(
     ctx: &mut ActorContext<A>,
-    request_id: &str,
+    request_id: DigestIdentifier,
     governance_id: DigestIdentifier,
+    reboot_type: RebootType
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let req_path = ActorPath::from(format!("/user/request/{}", request_id));
-    let req_actor = ctx.system().get_actor::<RequestManager>(&req_path).await?;
+    let req_actor = ctx.get_parent::<RequestManager>().await?;
     req_actor
-        .tell(RequestManagerMessage::Reboot { governance_id })
+        .tell(RequestManagerMessage::Reboot { governance_id, reboot_type, request_id })
+        .await
+}
+
+pub async fn abort_req<A>(
+    ctx: &mut ActorContext<A>,
+    request_id: DigestIdentifier,
+    who: PublicKey,
+    reason: String,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let req_actor = ctx.get_parent::<RequestManager>().await?;
+    req_actor
+        .tell(RequestManagerMessage::Abort { request_id, who, reason })
         .await
 }
 

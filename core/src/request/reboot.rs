@@ -16,14 +16,16 @@ const TARGET_REBOOT: &str = "Ave-Request-Reboot";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reboot {
+    request_id: DigestIdentifier,
     governance_id: DigestIdentifier,
     actual_sn: u64,
     count: u64,
 }
 
 impl Reboot {
-    pub fn new(governance_id: DigestIdentifier) -> Self {
+    pub fn new(governance_id: DigestIdentifier, request_id: DigestIdentifier) -> Self {
         Self {
+            request_id,
             governance_id,
             actual_sn: 0,
             count: 0,
@@ -50,12 +52,13 @@ impl Reboot {
     }
 
     async fn finish(
+        &self,
         ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
         let request_actor = ctx.get_parent::<RequestManager>().await?;
 
         request_actor
-            .tell(RequestManagerMessage::FinishReboot)
+            .tell(RequestManagerMessage::FinishReboot {request_id: self.request_id.clone()})
             .await?;
 
         ctx.stop(None).await;
@@ -133,7 +136,7 @@ impl Handler<Reboot> for Reboot {
                 }
 
                 if self.count >= 3 {
-                    if let Err(e) = Self::finish(ctx).await {
+                    if let Err(e) = self.finish(ctx).await {
                         error!(
                             TARGET_REBOOT,
                             "Update, can not finish reboot: {}", e

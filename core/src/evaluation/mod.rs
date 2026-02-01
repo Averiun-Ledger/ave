@@ -10,10 +10,12 @@ use crate::{
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
     model::{
-        common::{emit_fail, send_reboot_to_req, take_random_signers},
+        common::{
+            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+        },
         event::{EvaluationData, EvaluationResponse},
     },
-    request::manager::{RequestManager, RequestManagerMessage},
+    request::manager::{RebootType, RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
@@ -60,7 +62,7 @@ pub struct Evaluation {
 
     network: Arc<NetworkSender>,
 
-    request_id: String,
+    request_id: DigestIdentifier,
 
     version: u64,
 
@@ -101,7 +103,7 @@ impl Evaluation {
             evaluators_signatures: vec![],
             pending_evaluators: HashSet::new(),
             reboot: false,
-            request_id: String::default(),
+            request_id: DigestIdentifier::default(),
             version: 0,
         }
     }
@@ -212,6 +214,7 @@ impl Evaluation {
 
         req_actor
             .tell(RequestManagerMessage::EvaluationRes {
+                request_id: self.request_id.clone(),
                 eval_req: self.request.content().clone(),
                 eval_res: response,
             })
@@ -226,7 +229,7 @@ impl Evaluation {
 #[derive(Debug, Clone)]
 pub enum EvaluationMessage {
     Create {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
         signers: HashSet<PublicKey>,
     },
@@ -293,7 +296,7 @@ impl Handler<Evaluation> for Evaluation {
 
                 self.evaluation_request_hash = eval_req_hash;
                 self.evaluators_quantity = signers.len() as u32;
-                self.request_id = request_id.to_string();
+                self.request_id = request_id.clone();
                 self.version = version;
 
                 let evaluators_quantity = self.quorum.get_signers(
@@ -373,7 +376,17 @@ impl Handler<Evaluation> for Evaluation {
                                 // Do nothing
                             }
                             EvaluationRes::Abort(error) => {
-                                todo!("Me dijeron que abortara")
+                                if let Err(e) = abort_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    sender,
+                                    error,
+                                )
+                                .await
+                                {
+                                    error!("");
+                                    return Err(emit_fail(ctx, e).await);
+                                };
                             }
                             EvaluationRes::Error {
                                 error,
@@ -410,11 +423,12 @@ impl Handler<Evaluation> for Evaluation {
                             EvaluationRes::Reboot => {
                                 if let Err(e) = send_reboot_to_req(
                                     ctx,
-                                    &self.request_id,
+                                    self.request_id.clone(),
                                     self.request
                                         .content()
                                         .governance_id
                                         .clone(),
+                                    RebootType::Normal,
                                 )
                                 .await
                                 {
@@ -438,9 +452,24 @@ impl Handler<Evaluation> for Evaluation {
                         ) {
                             let summary = self.check_responses();
                             if let ResponseSummary::Reboot = summary {
-                                todo!(
-                                    "Respuestas diferentes, hay que hacer reboot, pero no tengo por qué actualizar la gov"
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content()
+                                        .governance_id
+                                        .clone(),
+                                    RebootType::Diff,
                                 )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                             }
 
                             let response = match self
@@ -476,7 +505,6 @@ impl Handler<Evaluation> for Evaluation {
                                 is_ok = summary.is_ok(),
                                 "Evaluation completed and sent to request"
                             );
-
                         } else if self.current_evaluators.is_empty()
                             && !self.pending_evaluators.is_empty()
                         {
@@ -513,9 +541,21 @@ impl Handler<Evaluation> for Evaluation {
                                 "Created additional evaluators from pending pool"
                             );
                         } else if self.current_evaluators.is_empty() {
-                            todo!(
-                                "Reboot, no tengo el quorum, hay que actualizar la governance y reintentarlo"
-                            );
+                            if let Err(e) = send_reboot_to_req(
+                                ctx,
+                                self.request_id.clone(),
+                                self.request.content().governance_id.clone(),
+                                RebootType::TimeOut,
+                            )
+                            .await
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    error = %e,
+                                    "Failed to send reboot to request actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
                         }
                     } else {
                         warn!(
