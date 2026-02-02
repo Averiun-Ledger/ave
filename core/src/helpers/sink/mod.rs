@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ave_actors::Subscriber;
+use ave_common::DataToSink;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -10,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::SinkServer,
     error::Error,
-    subject::sinkdata::{SinkDataEvent, SinkDataMessage, SinkTypes},
+    subject::sinkdata::{SinkDataEvent, SinkTypes},
 };
 
 const TARGET_SINK: &str = "Ave-Helper-Sink";
@@ -80,13 +81,9 @@ impl AveSink {
         }
     }
 
-    fn server_wants_event(server: &SinkServer, event: &SinkDataEvent) -> bool {
+    fn server_wants_event(server: &SinkServer, data: &DataToSink) -> bool {
         server.events.contains(&SinkTypes::All)
-            || SinkTypes::try_from(event.event.clone())
-                .map(|t| server.events.contains(&t))
-                .unwrap_or_else(|_| {
-                    unreachable!("We return early on UpdateState; other variants must be supported")
-                })
+            || server.events.contains(&SinkTypes::from(data))
     }
 
     fn build_url(template: &str, subject_id: &str, schema_id: &str) -> String {
@@ -114,13 +111,13 @@ impl AveSink {
     async fn send_once(
         client: &Client,
         url: &str,
-        event: &SinkDataEvent,
+        data: &DataToSink,
         auth_header: Option<&str>,
     ) -> Result<(), reqwest::Error> {
         let req = if let Some(h) = auth_header {
-            client.post(url).header("Authorization", h).json(event)
+            client.post(url).header("Authorization", h).json(data)
         } else {
-            client.post(url).json(event)
+            client.post(url).json(data)
         };
 
         let res = req.send().await?;
@@ -132,7 +129,7 @@ impl AveSink {
         &self,
         client: &Client,
         url: &str,
-        event: &SinkDataEvent,
+        event: &DataToSink,
         server_requires_auth: bool,
     ) {
         // 1) Primer intento (con header si tenemos token)
@@ -207,11 +204,12 @@ impl AveSink {
 #[async_trait]
 impl Subscriber<SinkDataEvent> for AveSink {
     async fn notify(&self, event: SinkDataEvent) {
-        if matches!(event.event, SinkDataMessage::UpdateState(..)) {
-            return;
-        }
+        let data = match event {
+            SinkDataEvent::Event(data_to_sink) => data_to_sink,
+            SinkDataEvent::State(..) => return,
+        };
 
-        let (subject_id, schema_id) = event.event.get_subject_schema();
+        let (subject_id, schema_id) = data.event.get_subject_schema();
         let Some(servers) = self.sinks.get(&schema_id) else {
             return;
         };
@@ -222,14 +220,14 @@ impl Subscriber<SinkDataEvent> for AveSink {
         let client = Client::new();
 
         for server in servers {
-            if !Self::server_wants_event(server, &event) {
+            if !Self::server_wants_event(server, &data) {
                 continue;
             }
 
             let url = Self::build_url(&server.url, &subject_id, &schema_id);
             let requires_auth = server.auth;
 
-            self.send_with_retry_on_401(&client, &url, &event, requires_auth)
+            self.send_with_retry_on_401(&client, &url, &data, requires_auth)
                 .await;
         }
     }

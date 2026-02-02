@@ -1,5 +1,6 @@
+mod error;
+
 use crate::{
-    error::Error,
     external_db::DBManager,
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
@@ -9,15 +10,15 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 
-use ave_common::response::{EventInfo, PaginatorEvents, SubjectInfo};
+use ave_common::response::{LedgerDB, PaginatorEvents, SubjectDB};
+pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
 use std::path::Path;
 use tokio::fs;
+use tracing::{debug, error};
 #[cfg(feature = "ext-sqlite")]
 mod sqlite;
-
-pub mod common;
 
 #[async_trait]
 pub trait Querys {
@@ -28,14 +29,14 @@ pub trait Querys {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
-    ) -> Result<PaginatorEvents, Error>;
+    ) -> Result<PaginatorEvents, DatabaseError>;
 
     // events sn
-    async fn get_events_sn(
+    async fn get_event_sn(
         &self,
         subject_id: &str,
         sn: u64,
-    ) -> Result<EventInfo, Error>;
+    ) -> Result<LedgerDB, DatabaseError>;
 
     // n first or last events
     async fn get_first_or_end_events(
@@ -43,14 +44,13 @@ pub trait Querys {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        sucess: Option<bool>,
-    ) -> Result<Vec<EventInfo>, Error>;
+    ) -> Result<Vec<LedgerDB>, DatabaseError>;
 
     // subject
     async fn get_subject_state(
         &self,
         subject_id: &str,
-    ) -> Result<SubjectInfo, Error>;
+    ) -> Result<SubjectDB, DatabaseError>;
 }
 
 #[derive(Clone)]
@@ -63,17 +63,30 @@ impl ExternalDB {
     pub async fn build(
         ext_db: ExternalDbConfig,
         manager: ActorRef<DBManager>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, DatabaseError> {
         match ext_db {
             #[cfg(feature = "ext-sqlite")]
             ExternalDbConfig::Sqlite { path } => {
                 if !Path::new(&path).exists() {
                     fs::create_dir_all(&path).await.map_err(|e| {
-                        Error::Node(format!("Can not create src dir: {}", e))
+                        error!(
+                            path = %path.display(),
+                            error = %e,
+                            "Failed to create database directory"
+                        );
+                        DatabaseError::DirectoryCreation(e.to_string())
                     })?;
+                    debug!(
+                        path = %path.display(),
+                        "Database directory created"
+                    );
                 }
-                let path = path.join("database.db");
-                let sqlite = SqliteLocal::new(&path, manager).await?;
+                let db_path = path.join("database.db");
+                let sqlite = SqliteLocal::new(&db_path, manager).await?;
+                debug!(
+                    path = %db_path.display(),
+                    "External SQLite database built successfully"
+                );
                 Ok(ExternalDB::SqliteLocal(sqlite))
             }
         }
@@ -99,7 +112,7 @@ impl Querys for ExternalDB {
     async fn get_subject_state(
         &self,
         subject_id: &str,
-    ) -> Result<SubjectInfo, Error> {
+    ) -> Result<SubjectDB, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
@@ -114,7 +127,7 @@ impl Querys for ExternalDB {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
-    ) -> Result<PaginatorEvents, Error> {
+    ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
@@ -125,15 +138,15 @@ impl Querys for ExternalDB {
         }
     }
 
-    async fn get_events_sn(
+    async fn get_event_sn(
         &self,
         subject_id: &str,
         sn: u64,
-    ) -> Result<EventInfo, Error> {
+    ) -> Result<LedgerDB, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_events_sn(subject_id, sn).await
+                sqlite_local.get_event_sn(subject_id, sn).await
             }
         }
     }
@@ -143,15 +156,12 @@ impl Querys for ExternalDB {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        sucess: Option<bool>,
-    ) -> Result<Vec<EventInfo>, Error> {
+    ) -> Result<Vec<LedgerDB>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_first_or_end_events(
-                        subject_id, quantity, reverse, sucess,
-                    )
+                    .get_first_or_end_events(subject_id, quantity, reverse)
                     .await
             }
         }

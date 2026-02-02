@@ -528,6 +528,8 @@ impl Tracker {
                         .signature()
                         .signer
                         .to_string(),
+                    event_ledger_timestamp: first.signature().timestamp.as_nanos(),
+                    event_request_timestamp: first.content().event_request.signature().timestamp.as_nanos()
                 },
                 &first.content().event_request.content(),
             )
@@ -641,6 +643,8 @@ impl Tracker {
                             .signature()
                             .signer
                             .to_string(),
+                        event_ledger_timestamp: event.signature().timestamp.as_nanos(),
+                        event_request_timestamp: event.content().event_request.signature().timestamp.as_nanos()
                     },
                     &event.content().event_request.content(),
                 )

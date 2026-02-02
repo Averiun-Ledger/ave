@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    error::Error,
+    error::SignatureError,
     identity::{
         DigestIdentifier, PublicKey, Signature, SignatureIdentifier, TimeStamp,
     },
@@ -31,7 +31,7 @@ impl From<Signature> for BridgeSignature {
     fn from(signature: Signature) -> Self {
         Self {
             signer: signature.signer.to_string(),
-            timestamp: signature.timestamp.0,
+            timestamp: signature.timestamp.as_nanos(),
             value: signature.value.to_string(),
             content_hash: signature.content_hash.to_string(),
         }
@@ -39,20 +39,19 @@ impl From<Signature> for BridgeSignature {
 }
 
 impl TryFrom<BridgeSignature> for Signature {
-    type Error = Error;
+    type Error = SignatureError;
+
     fn try_from(signature: BridgeSignature) -> Result<Self, Self::Error> {
         Ok(Self {
-            signer: PublicKey::from_str(&signature.signer).map_err(|_| {
-                Error::InvalidIdentifier("Invalid public key".to_owned())
+            signer: PublicKey::from_str(&signature.signer).map_err(|e| {
+                SignatureError::InvalidPublicKey(e.to_string())
             })?,
-            timestamp: TimeStamp(signature.timestamp),
+            timestamp: TimeStamp::from_nanos(signature.timestamp),
             value: SignatureIdentifier::from_str(&signature.value).map_err(
-                |_| Error::InvalidIdentifier("Invalid signature".to_owned()),
+                |e| SignatureError::InvalidSignature(e.to_string()),
             )?,
             content_hash: DigestIdentifier::from_str(&signature.content_hash)
-                .map_err(|_| {
-                Error::InvalidIdentifier("Invalid digest".to_owned())
-            })?,
+                .map_err(|e| SignatureError::InvalidContentHash(e.to_string()))?,
         })
     }
 }

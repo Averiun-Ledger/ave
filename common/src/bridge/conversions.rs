@@ -14,52 +14,13 @@ use crate::{
         BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
         BridgeSignedEventRequest, BridgeTransferRequest,
     },
+    error::ConversionError,
     request::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
         RejectRequest, TransferRequest,
     },
     signature::BridgeSignature,
 };
-
-/// Error type for conversion failures
-#[derive(Debug, Clone)]
-pub enum ConversionError {
-    InvalidSubjectId(String),
-    InvalidGovernanceId(String),
-    InvalidSchemaId(String),
-    InvalidPublicKey(String),
-    InvalidNamespace(String),
-    MissingGovernanceId,
-    MissingNamespace,
-}
-
-impl std::fmt::Display for ConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConversionError::InvalidSubjectId(e) => {
-                write!(f, "Invalid subject identifier: {}", e)
-            }
-            ConversionError::InvalidGovernanceId(e) => {
-                write!(f, "Invalid governance identifier: {}", e)
-            }
-            ConversionError::InvalidSchemaId(e) => {
-                write!(f, "Invalid schema identifier: {}", e)
-            }
-            ConversionError::InvalidPublicKey(e) => {
-                write!(f, "Invalid public key: {}", e)
-            }
-            ConversionError::InvalidNamespace(e) => {
-                write!(f, "Invalid namespace: {}", e)
-            }
-            ConversionError::MissingGovernanceId => {
-                write!(f, "Missing governance identifier")
-            }
-            ConversionError::MissingNamespace => write!(f, "Missing namespace"),
-        }
-    }
-}
-
-impl std::error::Error for ConversionError {}
 
 // ============================================================================
 // EventRequest conversions

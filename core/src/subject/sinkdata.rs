@@ -5,9 +5,8 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::SchemaType;
+use ave_common::{DataToSink, DataToSinkEvent, identity::TimeStamp};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{model::common::emit_fail, subject::Metadata};
@@ -15,54 +14,6 @@ use crate::{model::common::emit_fail, subject::Metadata};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
     pub controller_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SinkDataMessage {
-    UpdateState(Box<Metadata>),
-    Create {
-        governance_id: Option<String>,
-        subject_id: String,
-        owner: String,
-        schema_id: SchemaType,
-        namespace: String,
-        sn: u64,
-    },
-    Fact {
-        governance_id: Option<String>,
-        subject_id: String,
-        schema_id: SchemaType,
-        issuer: String,
-        owner: String,
-        payload: Value,
-        sn: u64,
-    },
-    Transfer {
-        governance_id: Option<String>,
-        subject_id: String,
-        schema_id: SchemaType,
-        owner: String,
-        new_owner: String,
-        sn: u64,
-    },
-    Confirm {
-        governance_id: Option<String>,
-        subject_id: String,
-        schema_id: SchemaType,
-        sn: u64,
-    },
-    Reject {
-        governance_id: Option<String>,
-        subject_id: String,
-        schema_id: SchemaType,
-        sn: u64,
-    },
-    EOL {
-        governance_id: Option<String>,
-        subject_id: String,
-        schema_id: SchemaType,
-        sn: u64,
-    },
 }
 
 #[derive(
@@ -92,20 +43,15 @@ impl Display for SinkTypes {
     }
 }
 
-impl TryFrom<SinkDataMessage> for SinkTypes {
-    type Error = &'static str;
-
-    fn try_from(value: SinkDataMessage) -> Result<Self, Self::Error> {
-        match value {
-            SinkDataMessage::UpdateState(..) => {
-                Err("UpdateState cannot be converted to SinkTypes")
-            }
-            SinkDataMessage::Create { .. } => Ok(SinkTypes::Create),
-            SinkDataMessage::Fact { .. } => Ok(SinkTypes::Fact),
-            SinkDataMessage::Transfer { .. } => Ok(SinkTypes::Transfer),
-            SinkDataMessage::Confirm { .. } => Ok(SinkTypes::Confirm),
-            SinkDataMessage::Reject { .. } => Ok(SinkTypes::Reject),
-            SinkDataMessage::EOL { .. } => Ok(SinkTypes::EOL),
+impl From<&DataToSink> for SinkTypes {
+    fn from(value: &DataToSink) -> Self {
+        match value.event {
+            DataToSinkEvent::Create { .. } => SinkTypes::Create,
+            DataToSinkEvent::Fact { .. } => SinkTypes::Fact,
+            DataToSinkEvent::Transfer { .. } => SinkTypes::Transfer,
+            DataToSinkEvent::Confirm { .. } => SinkTypes::Confirm,
+            DataToSinkEvent::Reject { .. } => SinkTypes::Reject,
+            DataToSinkEvent::EOL { .. } => SinkTypes::EOL,
         }
     }
 }
@@ -131,38 +77,50 @@ impl SinkDataMessage {
                 metadata.subject_id.to_string(),
                 metadata.schema_id.to_string(),
             ),
-            SinkDataMessage::Create {
-                subject_id,
-                schema_id,
-                ..
-            }
-            | SinkDataMessage::Fact {
-                subject_id,
-                schema_id,
-                ..
-            }
-            | SinkDataMessage::Transfer {
-                subject_id,
-                schema_id,
-                ..
-            }
-            | SinkDataMessage::Confirm {
-                subject_id,
-                schema_id,
-                ..
-            }
-            | SinkDataMessage::Reject {
-                subject_id,
-                schema_id,
-                ..
-            }
-            | SinkDataMessage::EOL {
-                subject_id,
-                schema_id,
-                ..
-            } => (subject_id.clone(), schema_id.to_string()),
+            SinkDataMessage::Event { event, .. } => match &event {
+                DataToSinkEvent::Create {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::Fact {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::Transfer {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::Confirm {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::Reject {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::EOL {
+                    subject_id,
+                    schema_id,
+                    ..
+                } => (subject_id.clone(), schema_id.to_string()),
+            },
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SinkDataMessage {
+    UpdateState(Box<Metadata>),
+    Event {
+        event: DataToSinkEvent,
+        event_request_timestamp: u64,
+        event_ledger_timestamp: u64,
+    },
 }
 
 impl Message for SinkDataMessage {}
@@ -177,9 +135,9 @@ pub enum SinkDataResponse {
 impl Response for SinkDataResponse {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SinkDataEvent {
-    pub event: SinkDataMessage,
-    pub controller_id: String,
+pub enum SinkDataEvent {
+    Event(DataToSink),
+    State(Box<Metadata>),
 }
 
 impl Event for SinkDataEvent {}
@@ -210,22 +168,34 @@ impl Handler<SinkData> for SinkData {
         let (subject_id, schema_id) = msg.get_subject_schema();
         let msg_type = match &msg {
             SinkDataMessage::UpdateState(..) => "UpdateState",
-            SinkDataMessage::Create { .. } => "Create",
-            SinkDataMessage::Fact { .. } => "Fact",
-            SinkDataMessage::Transfer { .. } => "Transfer",
-            SinkDataMessage::Confirm { .. } => "Confirm",
-            SinkDataMessage::Reject { .. } => "Reject",
-            SinkDataMessage::EOL { .. } => "EOL",
+            SinkDataMessage::Event { event, .. } => match &event {
+                DataToSinkEvent::Create { .. } => "Create",
+                DataToSinkEvent::Fact { .. } => "Fact",
+                DataToSinkEvent::Transfer { .. } => "Transfer",
+                DataToSinkEvent::Confirm { .. } => "Confirm",
+                DataToSinkEvent::Reject { .. } => "Reject",
+                DataToSinkEvent::EOL { .. } => "EOL",
+            },
         };
 
-        self.on_event(
-            SinkDataEvent {
-                event: msg,
+        let event = match msg {
+            SinkDataMessage::UpdateState(metadata) => {
+                SinkDataEvent::State(metadata)
+            }
+            SinkDataMessage::Event {
+                event,
+                event_request_timestamp,
+                event_ledger_timestamp,
+            } => SinkDataEvent::Event(DataToSink {
+                event,
                 controller_id: self.controller_id.clone(),
-            },
-            ctx,
-        )
-        .await;
+                event_request_timestamp,
+                event_ledger_timestamp,
+                sink_timeout: TimeStamp::now().as_nanos(),
+            }),
+        };
+
+        self.on_event(event, ctx).await;
 
         debug!(
             msg_type = msg_type,
@@ -243,8 +213,15 @@ impl Handler<SinkData> for SinkData {
         event: SinkDataEvent,
         ctx: &mut ActorContext<SinkData>,
     ) {
-        let (subject_id, schema_id) = event.event.get_subject_schema();
-
+        let (subject_id, schema_id) = match &event {
+            SinkDataEvent::Event(data_to_sink) => {
+                data_to_sink.event.get_subject_schema()
+            }
+            SinkDataEvent::State(metadata) => (
+                metadata.subject_id.to_string(),
+                metadata.schema_id.to_string(),
+            ),
+        };
         if let Err(e) = ctx.publish_event(event.clone()).await {
             error!(
                 error = %e,
@@ -258,7 +235,6 @@ impl Handler<SinkData> for SinkData {
             debug!(
                 subject_id = %subject_id,
                 schema_id = %schema_id,
-                controller_id = %event.controller_id,
                 "Sink data event published successfully"
             );
         }

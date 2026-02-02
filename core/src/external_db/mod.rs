@@ -5,7 +5,7 @@ use ave_actors::{
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::error::Error;
+use crate::{helpers::db::DatabaseError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DBManager;
@@ -14,7 +14,7 @@ impl NotPersistentActor for DBManager {}
 
 #[derive(Clone, Debug)]
 pub enum DBManagerMessage {
-    Error(Error),
+    Error(DatabaseError),
 }
 
 impl Message for DBManagerMessage {}

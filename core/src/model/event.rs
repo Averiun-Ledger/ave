@@ -12,8 +12,8 @@ use crate::{
 
 use ave_actors::ActorError;
 use ave_common::{
-    identity::{DigestIdentifier, Signature, Signed},
-    request::EventRequest,
+    identity::{DigestIdentifier, Signature, Signed, TimeStamp},
+    request::EventRequest, response::{LedgerDB, RequestEventDB},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -22,7 +22,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum ProtocolsError {
-    #[error("invalid evaluation: evaluation result does not match expected state")]
+    #[error(
+        "invalid evaluation: evaluation result does not match expected state"
+    )]
     InvalidEvaluation,
 
     #[error("invalid evaluation: approval required but not provided")]
@@ -34,13 +36,17 @@ pub enum ProtocolsError {
         got: &'static str,
     },
 
-    #[error("invalid event request type: {request_type} is not supported for is_gov={is_gov}")]
+    #[error(
+        "invalid event request type: {request_type} is not supported for is_gov={is_gov}"
+    )]
     InvalidEventRequestType {
         request_type: &'static str,
         is_gov: bool,
     },
 
-    #[error("expected create event with metadata, got different protocol or validation metadata")]
+    #[error(
+        "expected create event with metadata, got different protocol or validation metadata"
+    )]
     NotCreateWithMetadata,
 }
 
@@ -155,6 +161,91 @@ pub enum Protocols {
 }
 
 impl Protocols {
+    pub fn buidl_event_db(
+        &self,
+        event_request: &EventRequest,
+    ) -> RequestEventDB {
+        match (self, event_request) {
+            (Protocols::Create { .. }, ..) => RequestEventDB::Create,
+            (
+                Protocols::TrackerFact { evaluation, .. },
+                EventRequest::Fact(fact_request),
+            ) => {
+                let evaluation_error = match evaluation.response.clone() {
+                    EvaluationResponse::Ok(_) => None,
+                    EvaluationResponse::Error(e) => Some(e.to_string()),
+                };
+                RequestEventDB::TrackerFact {
+                    payload: fact_request.payload.0.clone(),
+                    evaluation_error,
+                }
+            }
+            (
+                Protocols::GovFact {
+                    evaluation,
+                    approval,
+                    ..
+                },
+                EventRequest::Fact(fact_request),
+            ) => {
+                let (evaluation_error, approval_success) = match evaluation
+                    .response
+                    .clone()
+                {
+                    EvaluationResponse::Ok(_) => {
+                        if let Some(appr) = approval {
+                            (None, Some(appr.approved))
+                        } else {
+                            unreachable!(
+                                "In a factual governance event, if the assessment is correct, there should be approval."
+                            )
+                        }
+                    }
+                    EvaluationResponse::Error(e) => (Some(e.to_string()), None),
+                };
+                RequestEventDB::GovFact {
+                    payload: fact_request.payload.0.clone(),
+                    evaluation_error,
+                    approval_success,
+                }
+            }
+            (
+                Protocols::Transfer { evaluation, .. },
+                EventRequest::Transfer(transfer_request),
+            ) => {
+                let evaluation_error = match evaluation.response.clone() {
+                    EvaluationResponse::Ok(_) => None,
+                    EvaluationResponse::Error(e) => Some(e.to_string()),
+                };
+                RequestEventDB::Transfer {
+                    new_owner: transfer_request.new_owner.to_string(),
+                    evaluation_error,
+                }
+            }
+            (Protocols::TrackerConfirm { .. }, ..) => {
+                RequestEventDB::TrackerConfirm
+            }
+            (
+                Protocols::GovConfirm { evaluation, .. },
+                EventRequest::Confirm(confirm_request),
+            ) => {
+                let evaluation_error = match evaluation.response.clone() {
+                    EvaluationResponse::Ok(_) => None,
+                    EvaluationResponse::Error(e) => Some(e.to_string()),
+                };
+                RequestEventDB::GovConfirm {
+                    name_old_owner: confirm_request.name_old_owner.clone(),
+                    evaluation_error,
+                }
+            }
+            (Protocols::Reject { .. }, ..) => RequestEventDB::Reject,
+            (Protocols::EOL { .. }, ..) => RequestEventDB::EOL,
+            _ => unreachable!(
+                "Unreachable combination of protocol and event request"
+            ),
+        }
+    }
+
     pub fn get_validation_data(&self) -> ValidationData {
         match self {
             Protocols::Create { validation }
@@ -380,6 +471,24 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
+        LedgerDB {
+            subject_id: self
+                .event_request
+                .content()
+                .get_subject_id()
+                .to_string(),
+            sn: self.sn,
+            event_request_timestamp: self
+                .event_request
+                .signature()
+                .timestamp
+                .as_nanos(),
+            event_ledger_timestamp: signature_timestamp,
+            sink_timeout: TimeStamp::now().as_nanos(),
+            event: self.protocols.buidl_event_db(self.event_request.content()),
+        }
+    }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {
         if let Protocols::Create { validation } = &self.protocols
             && let ValidationMetadata::Metadata(metadata) =

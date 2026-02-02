@@ -1531,6 +1531,16 @@ impl Governance {
                         .signature()
                         .signer
                         .to_string(),
+                    event_ledger_timestamp: first
+                        .signature()
+                        .timestamp
+                        .as_nanos(),
+                    event_request_timestamp: first
+                        .content()
+                        .event_request
+                        .signature()
+                        .timestamp
+                        .as_nanos(),
                 },
                 &first.content().event_request.content(),
             )
@@ -1630,6 +1640,16 @@ impl Governance {
                             .signature()
                             .signer
                             .to_string(),
+                        event_ledger_timestamp: event
+                            .signature()
+                            .timestamp
+                            .as_nanos(),
+                        event_request_timestamp: event
+                            .content()
+                            .event_request
+                            .signature()
+                            .timestamp
+                            .as_nanos(),
                     },
                     &event.content().event_request.content(),
                 )
@@ -1739,7 +1759,7 @@ pub enum GovernanceResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
-        is_all: bool
+        is_all: bool,
     },
     LastLedger {
         ledger_event: Option<SignedLedger>,
@@ -1948,8 +1968,9 @@ impl Handler<Governance> for Governance {
                 );
                 Ok(GovernanceResponse::NewCompilers(new_compilers))
             }
-            GovernanceMessage::GetLedger {lo_sn, hi_sn} => {
-                let (ledger, is_all) = self.get_ledger(ctx, lo_sn, hi_sn).await?;
+            GovernanceMessage::GetLedger { lo_sn, hi_sn } => {
+                let (ledger, is_all) =
+                    self.get_ledger(ctx, lo_sn, hi_sn).await?;
                 Ok(GovernanceResponse::Ledger { ledger, is_all })
             }
             GovernanceMessage::GetLastLedger => {

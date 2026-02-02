@@ -23,6 +23,9 @@ pub mod schematype;
 #[cfg(feature = "common")]
 pub mod namespace;
 
+#[cfg(feature = "common")]
+pub mod sink;
+
 #[cfg(feature = "value-wrapper")]
 pub mod wrapper;
 
@@ -34,10 +37,16 @@ pub use ave_identity as identity;
 pub use bridge::*;
 
 #[cfg(feature = "common")]
+pub use error::{ConversionError, Error, SignatureError};
+
+#[cfg(feature = "common")]
 pub use schematype::SchemaType;
 
 #[cfg(feature = "common")]
 pub use namespace::Namespace;
+
+#[cfg(feature = "common")]
+pub use sink::*;
 
 #[cfg(feature = "value-wrapper")]
 pub use wrapper::ValueWrapper;

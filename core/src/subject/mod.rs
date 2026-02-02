@@ -12,7 +12,9 @@ use crate::{
         role_register::{RoleDataRegister, SearchRole},
     },
     model::{
-        common::{check_quorum_signers, get_n_events, get_validation_roles_register},
+        common::{
+            check_quorum_signers, get_n_events, get_validation_roles_register,
+        },
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::register::{Register, RegisterMessage},
@@ -29,7 +31,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, PersistentActor,
 };
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper,
+    DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
@@ -166,6 +168,8 @@ pub struct DataForSink {
     pub namespace: String,
     pub schema_id: SchemaType,
     pub issuer: String,
+    pub event_request_timestamp: u64,
+    pub event_ledger_timestamp: u64,
 }
 
 #[derive(
@@ -726,8 +730,8 @@ where
         data: DataForSink,
         event: &EventRequest,
     ) -> Result<(), ActorError> {
-        let event_to_sink = match event {
-            EventRequest::Create(..) => SinkDataMessage::Create {
+        let event = match event {
+            EventRequest::Create(..) => DataToSinkEvent::Create {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 owner: data.owner,
@@ -735,7 +739,7 @@ where
                 namespace: data.namespace.to_string(),
                 sn: data.sn,
             },
-            EventRequest::Fact(fact_request) => SinkDataMessage::Fact {
+            EventRequest::Fact(fact_request) => DataToSinkEvent::Fact {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 issuer: data.issuer.to_string(),
@@ -745,7 +749,7 @@ where
                 sn: data.sn,
             },
             EventRequest::Transfer(transfer_request) => {
-                SinkDataMessage::Transfer {
+                DataToSinkEvent::Transfer {
                     governance_id: data.gov_id,
                     subject_id: data.subject_id,
                     owner: data.owner,
@@ -754,19 +758,19 @@ where
                     sn: data.sn,
                 }
             }
-            EventRequest::Confirm(..) => SinkDataMessage::Confirm {
+            EventRequest::Confirm(..) => DataToSinkEvent::Confirm {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
             },
-            EventRequest::Reject(..) => SinkDataMessage::Reject {
+            EventRequest::Reject(..) => DataToSinkEvent::Reject {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
             },
-            EventRequest::EOL(..) => SinkDataMessage::EOL {
+            EventRequest::EOL(..) => DataToSinkEvent::EOL {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
@@ -774,7 +778,13 @@ where
             },
         };
 
-        Self::publish_sink(ctx, event_to_sink).await
+        let msg = SinkDataMessage::Event {
+            event,
+            event_request_timestamp: data.event_request_timestamp,
+            event_ledger_timestamp: data.event_ledger_timestamp,
+        };
+
+        Self::publish_sink(ctx, msg).await
     }
 
     async fn publish_sink(
@@ -793,7 +803,7 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
         lo_sn: Option<u64>,
-        hi_sn: u64
+        hi_sn: u64,
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
         if let Some(lo_sn) = lo_sn {
             let actual_sn = lo_sn + 1;

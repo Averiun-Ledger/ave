@@ -22,7 +22,7 @@ use crate::approval::types::ApprovalStateRes;
 use crate::governance::data::GovernanceData;
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::send_to_tracking;
-use crate::model::common::subject::{get_gov, get_metadata, get_quantity};
+use crate::model::common::subject::{get_gov, get_metadata};
 use crate::request::manager::InitRequestManager;
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use crate::system::ConfigHelper;
@@ -35,6 +35,7 @@ pub mod manager;
 pub mod reboot;
 pub mod tracking;
 pub mod types;
+pub mod error;
 
 const TARGET_REQUEST: &str = "Ave-Request";
 
