@@ -6,13 +6,9 @@ use ave_common::{
 };
 
 use crate::{
-    governance::{
+    approval::persist::{ApprPersist, ApprPersistMessage}, governance::{
         Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData, witnesses_register::{WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse},
-    },
-    model::common::check_subject_creation,
-    node::{Node, NodeMessage},
-    subject::{Metadata, SignedLedger},
-    tracker::{Tracker, TrackerMessage, TrackerResponse},
+    }, model::common::check_subject_creation, node::{Node, NodeMessage}, subject::{Metadata, SignedLedger}, tracker::{Tracker, TrackerMessage, TrackerResponse}
 };
 
 pub async fn get_gov<A>(
@@ -249,4 +245,22 @@ where
             expected: "WitnessesRegisterResponse::TrackerSn".to_string(),
         }),
     }
+}
+
+pub async fn make_obsolete<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/{}/approver",
+        governance_id
+    ));
+
+    let actor: ActorRef<ApprPersist> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    actor.tell(ApprPersistMessage::MakeObsolete).await
 }

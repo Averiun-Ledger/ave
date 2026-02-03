@@ -7,7 +7,7 @@ use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
-use ave_common::request::{CreateRequest, EventRequest};
+use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -15,27 +15,30 @@ use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{Span, error, info, info_span};
 use types::ReqManInitMessage;
 
-use crate::approval::types::ApprovalStateRes;
+use crate::approval::persist::{
+    ApprPersist, ApprPersistMessage, ApprPersistResponse,
+};
+use crate::approval::request::ApprovalReq;
+use crate::approval::types::{ApprovalState, ApprovalStateRes};
 use crate::governance::data::GovernanceData;
 use crate::helpers::network::service::NetworkSender;
-use crate::model::common::send_to_tracking;
+use crate::model::common::node::i_owner_new_owner;
+use crate::model::common::{emit_fail, send_to_tracking};
 use crate::model::common::subject::{get_gov, get_metadata};
+use crate::node::{Node, NodeMessage, NodeResponse};
 use crate::request::manager::InitRequestManager;
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use crate::system::ConfigHelper;
-use crate::{
-    Node, NodeMessage, NodeResponse, db::Storable,
-    governance::model::CreatorQuantity,
-};
+use crate::{db::Storable, governance::model::CreatorQuantity};
 
+pub mod error;
 pub mod manager;
 pub mod reboot;
 pub mod tracking;
 pub mod types;
-pub mod error;
 
 const TARGET_REQUEST: &str = "Ave-Request";
 
@@ -50,9 +53,9 @@ pub struct RequestHandler {
     #[serde(skip)]
     helpers: Option<(HashAlgorithm, Arc<NetworkSender>)>,
     #[serde(skip)]
-    node_key: Arc<PublicKey>,
-    handling: HashMap<String, String>,
-    in_queue: HashMap<String, VecDeque<Signed<EventRequest>>>,
+    our_key: Arc<PublicKey>,
+    handling: HashMap<DigestIdentifier, DigestIdentifier>,
+    in_queue: HashMap<DigestIdentifier, VecDeque<Signed<EventRequest>>>,
 }
 
 impl BorshSerialize for RequestHandler {
@@ -72,15 +75,20 @@ impl BorshDeserialize for RequestHandler {
         reader: &mut R,
     ) -> std::io::Result<Self> {
         // Deserialize the persisted fields
-        let handling = HashMap::<String, String>::deserialize_reader(reader)?;
-        let in_queue =
-             HashMap::<String, VecDeque<Signed<EventRequest>>>::deserialize_reader(reader)?;
+        let handling =
+            HashMap::<DigestIdentifier, DigestIdentifier>::deserialize_reader(
+                reader,
+            )?;
+        let in_queue = HashMap::<
+            DigestIdentifier,
+            VecDeque<Signed<EventRequest>>,
+        >::deserialize_reader(reader)?;
 
-        let node_key = Arc::new(PublicKey::default());
+        let our_key = Arc::new(PublicKey::default());
 
         Ok(Self {
             helpers: None,
-            node_key,
+            our_key,
             handling,
             in_queue,
         })
@@ -92,84 +100,12 @@ impl RequestHandler {
         ctx: &mut ActorContext<RequestHandler>,
         subject_id: &str,
     ) -> Result<(), ActorError> {
-        let request_path = ActorPath::from("/user/request");
-        let request_actor: Option<ave_actors::ActorRef<RequestHandler>> =
-            ctx.system().get_actor(&request_path).await;
-
-        if let Some(request_actor) = request_actor {
-            request_actor
-                .tell(RequestHandlerMessage::PopQueue {
-                    subject_id: subject_id.to_owned(),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound { path: request_path });
-        }
-        Ok(())
-    }
-
-    async fn create_subject(
-        ctx: &mut ActorContext<RequestHandler>,
-        create_req: CreateRequest,
-        request: Signed<EventRequest>,
-    ) -> Result<DigestIdentifier, ActorError> {
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            return Err(ActorError::NotHelper("config".to_owned()));
-        };
-
-        let subject_id = hash_borsh(&*hash.hasher(), &request)
-            .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-        let data = if create_req.schema_id.is_gov() {
-            let gov = GovernanceData::new(request.signature().signer.clone());
-            let value = gov.to_value_wrapper();
-
-            CreateSubjectData {
-                create_req,
-                subject_id,
-                creator: request.signature().signer.clone(),
-                genesis_gov_version: 0,
-                value,
-            }
-        } else {
-            let governance =
-                get_gov(ctx, &create_req.governance_id.to_string()).await?;
-            let value = governance
-                .get_init_state(&create_req.schema_id)
-                .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-            CreateSubjectData {
-                create_req,
-                subject_id,
-                creator: request.signature().signer.clone(),
-                genesis_gov_version: governance.version,
-                value,
-            }
-        };
-
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ave_actors::ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
-
-        let response = if let Some(node_actor) = node_actor {
-            node_actor
-                .ask(NodeMessage::CreateNewSubjectReq(data.clone()))
-                .await?
-        } else {
-            return Err(ActorError::NotFound(node_path));
-        };
-
-        match response {
-            NodeResponse::SonWasCreated => Ok(data.subject_id),
-            _ => Err(ActorError::UnexpectedResponse(
-                node_path,
-                "NodeResponse::SonWasCreated".to_owned(),
-            )),
-        }
+        let request_actor = ctx.reference().await?;
+        request_actor
+            .tell(RequestHandlerMessage::PopQueue {
+                subject_id: subject_id.to_owned(),
+            })
+            .await
     }
 
     async fn error_queue_handling(
@@ -232,118 +168,169 @@ impl RequestHandler {
         namespace: Namespace,
         gov: GovernanceData,
     ) -> Result<(), ActorError> {
-        if let Some(max_quantity) = gov.max_creations(
-            &self.node_key,
-            schema_id.clone(),
-            namespace.clone(),
-        ) {
-            if let CreatorQuantity::Quantity(max_quantity) = max_quantity {
-                let quantity = match get_quantity(
-                    ctx,
-                    governance_id.to_string(),
-                    schema_id.clone(),
-                    self.node_key.to_string(),
-                    namespace.to_string(),
-                )
-                .await
-                {
-                    Ok(quantity) => quantity,
-                    Err(e) => {
-                        error!(
-                            TARGET_REQUEST,
-                            "{}, can not get subject quatity of node: {}",
-                            message,
-                            e
-                        );
-                        return Err(ActorError::Functional(format!(
-                            "Can not get subject quatity of node: {}",
-                            e
-                        )));
-                    }
-                };
-
-                if quantity >= max_quantity as usize {
-                    error!(
-                        TARGET_REQUEST,
-                        "{}, The maximum number of subjects you can create for schema_id {} in governance {} has been reached.",
-                        message,
-                        schema_id,
-                        governance_id
-                    );
-                    return Err(ActorError::Functional(format!(
-                        "The maximum number of subjects you can create for schema_id {} in governance {} has been reached.",
-                        schema_id, governance_id
-                    )));
-                }
-            }
-
-            Ok(())
-        } else {
-            let e = "The Scheme does not exist or does not have permissions for the creation of subjects, it needs to be assigned the creator role.";
-            error!(TARGET_REQUEST, "{}, {}", message, e);
-
-            Err(ActorError::Functional {
-                description: e.to_owned(),
-            })
-        }
+        todo!()
     }
 
-    async fn abort_request(
-        &mut self,
-        ctx: &mut ActorContext<RequestHandler>,
-        subject_id: &str,
-        request_id: &str,
-        error: &str,
-    ) -> Result<(), ActorError> {
-        self.on_event(
-            RequestHandlerEvent::Abort {
-                subject_id: subject_id.to_owned(),
-            },
-            ctx,
-        )
-        .await;
-
-        send_to_tracking(
-            ctx,
-            RequestTrackingMessage::UpdateState {
-                request_id: request_id.to_string(),
-                state: RequestState::Abort,
-                error: Some(error.to_string()),
-            },
-        )
-        .await?;
-
-        RequestHandler::queued_event(ctx, subject_id).await?;
-
-        Ok(())
-    }
-
-    async fn approval(
+    async fn change_approval(
         &self,
         ctx: &mut ActorContext<RequestHandler>,
         subject_id: &str,
         state: ApprovalStateRes,
     ) -> Result<(), ActorError> {
+        if state == ApprovalStateRes::Obsolete {
+            return Err(ActorError::Functional {
+                description:
+                    "A user cannot mark a request approval as obsolete"
+                        .to_owned(),
+            });
+        }
+
         let approver_path =
             ActorPath::from(format!("/user/node/{}/approver", subject_id));
-        let approver_actor: Option<ActorRef<ApproverPersist>> =
-            ctx.system().get_actor(&approver_path).await;
+        let approver_actor = ctx
+            .system()
+            .get_actor::<ApprPersist>(&approver_path)
+            .await.map_err(|e| {
+                error!("");
+                ActorError::Functional {description: format!("No approval was found for {}, so the node likely no longer has the role of approver", subject_id)}
+            })?;
 
-        if let Some(approver_actor) = approver_actor {
-            approver_actor
-                .tell(ApproverPersistMessage::ChangeResponse {
-                    response: state.clone(),
-                })
-                .await
-        } else {
-            Err(ActorError::NotFound(approver_path))
+        approver_actor
+            .tell(ApprPersistMessage::ChangeResponse {
+                response: state.clone(),
+            })
+            .await
+            .map_err(|e| {
+                error!("");
+                ActorError::Functional {
+                    description:
+                        "The approval request status could not be changed"
+                            .to_owned(),
+                }
+            })
+    }
+
+    async fn get_approval(
+        &self,
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &str,
+        state: Option<ApprovalState>,
+    ) -> Result<Option<(ApprovalReq, ApprovalState)>, ActorError> {
+        let approver_path =
+            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+        let approver_actor = ctx
+            .system()
+            .get_actor::<ApprPersist>(&approver_path)
+            .await.map_err(|e| {
+                error!("");
+                ActorError::Functional {description: format!("No approval was found for {}, so the node likely no longer has the role of approver", subject_id)}
+            })?;
+
+        let response = approver_actor
+            .ask(ApprPersistMessage::GetApproval { state })
+            .await.map_err(|e| {
+                error!("");
+                ActorError::Functional {
+                    description:
+                        "The status of the approval request could not be obtained"
+                            .to_owned(),
+                }
+            })?;
+
+        let res = match response {
+            ApprPersistResponse::Ok => None,
+            ApprPersistResponse::Approval { request, state } => {
+                Some((request, state))
+            }
+        };
+
+        Ok(res)
+    }
+
+    async fn get_all_approvals(
+        &self,
+        ctx: &mut ActorContext<RequestHandler>,
+        state: Option<ApprovalState>,
+    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, ActorError> {
+        let node_path = ActorPath::from("/user/node");
+        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
+        let response = node_actor.ask(NodeMessage::GetGovernances).await?;
+        let vec = match response {
+            NodeResponse::Governances(govs) => govs,
+            _ => {
+                return Err(ActorError::UnexpectedResponse {
+                    path: node_path,
+                    expected: "NodeResponse::Governances".to_string(),
+                });
+            }
+        };
+
+        let mut responses = vec![];
+        for governance in vec.iter() {
+            let approver_path =
+                ActorPath::from(format!("/user/node/{}/approver", governance));
+            if let Ok(approver_actor) =
+                ctx.system().get_actor::<ApprPersist>(&approver_path).await
+            {
+                let response = approver_actor
+                    .ask(ApprPersistMessage::GetApproval {
+                        state: state.clone(),
+                    })
+                    .await?;
+
+                match response {
+                    ApprPersistResponse::Ok => {}
+                    ApprPersistResponse::Approval { request, state } => {
+                        responses.push((request, state))
+                    }
+                };
+            };
         }
+
+        Ok(responses)
+    }
+
+    async fn check_owner_new_owner(&self, 
+        ctx: &mut ActorContext<RequestHandler>,
+        request: &EventRequest) -> Result<(), ActorError>{
+        match request {
+            EventRequest::Create(..) => {}
+            EventRequest::Fact(..)
+            | EventRequest::Transfer(..)
+            | EventRequest::EOL(..) => {
+                let (i_owner, i_new_owner) = i_owner_new_owner(ctx, &request.get_subject_id()).await?;
+                if !i_owner {
+                    return Err(ActorError::Functional { description: "The event is a Fact, Transfer, or EOL event, and we are not the owner of the subject".to_owned() });
+                }
+
+                if i_new_owner.is_some() {
+                    return Err(ActorError::Functional { description: "The event is a Fact, Transfer, or EOL event, and there is a pending new_owner".to_owned() });
+                }
+            }
+            EventRequest::Confirm(..) | EventRequest::Reject(..) => {
+                let (i_owner, i_new_owner) = i_owner_new_owner(ctx, &request.get_subject_id()).await?;
+                if i_owner {
+                    return Err(ActorError::Functional { description: "The event is a Confirm or Reject event, and we are the owner of the subject".to_owned() });
+                }
+
+                if let Some(new_owner) = i_new_owner {
+                    if !new_owner {
+                        return Err(ActorError::Functional { description: "The event is a Confirm or Reject event, and we are not the new owner of the subject".to_owned() });
+                    }
+                } else {
+                    return Err(ActorError::Functional { description: "The event is a Confirm or Reject event, and there is no new owner pending".to_owned() });
+                }
+            }
+        };
+        Ok(())
+    }
+
+    async fn check_event_request(&self) -> Result<(), ActorError>{
+        
+        
+        Ok(())
     }
 }
-
-// Enviar un evento sin firmar
-// Enviar un evento firmado
-// Aprobar
 
 #[derive(Debug, Clone)]
 pub enum RequestHandlerMessage {
@@ -354,17 +341,19 @@ pub enum RequestHandlerMessage {
         subject_id: String,
         state: ApprovalStateRes,
     },
+    GetApproval {
+        subject_id: String,
+        state: Option<ApprovalState>,
+    },
+    GetAllApprovals {
+        state: Option<ApprovalState>,
+    },
     PopQueue {
         subject_id: String,
     },
     EndHandling {
         subject_id: String,
         id: String,
-    },
-    AbortRequest {
-        subject_id: String,
-        id: String,
-        error: String,
     },
 }
 
@@ -374,6 +363,8 @@ impl Message for RequestHandlerMessage {}
 pub enum RequestHandlerResponse {
     Ok(RequestData),
     Response(String),
+    Approval(Option<(ApprovalReq, ApprovalState)>),
+    Approvals(Vec<(ApprovalReq, ApprovalState)>),
     None,
 }
 
@@ -410,6 +401,14 @@ impl Actor for RequestHandler {
     type Message = RequestHandlerMessage;
     type Response = RequestHandlerResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RequestHandler", id = id)
+        } else {
+            info_span!("RequestHandler", id = id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -438,22 +437,21 @@ impl Actor for RequestHandler {
         };
 
         for (subject_id, request_id) in self.handling.clone() {
-            let request_manager_init = InitRequestManager::Continue {
-                our_key: self.node_key.clone(),
-                id: request_id.clone(),
-                subject_id,
+            let request_manager_init = InitRequestManager {
+                our_key: self.our_key.clone(),
+                subject_id: subject_id.clone(),
                 helpers: (hash.clone(), network.clone()),
             };
 
             let request_manager_actor = ctx
                 .create_child(
-                    &request_id,
+                    &subject_id.to_string(),
                     RequestManager::initial(request_manager_init),
                 )
                 .await?;
 
             request_manager_actor
-                .tell(RequestManagerMessage::Run)
+                .tell(RequestManagerMessage::Run { request_id })
                 .await?;
         }
 
@@ -477,52 +475,12 @@ impl Handler<RequestHandler> for RequestHandler {
         ctx: &mut ave_actors::ActorContext<RequestHandler>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
-            RequestHandlerMessage::AbortRequest {
-                subject_id,
-                id,
-                error,
-            } => {
-                info!(
-                    TARGET_REQUEST,
-                    "AbortRequest, Aborting request {} for {}: {}",
-                    id,
-                    subject_id,
-                    error
-                );
-
-                if let Err(e) =
-                    self.abort_request(ctx, &subject_id, &id, &error).await
-                {
-                    error!(TARGET_REQUEST, "AbortRequest, {}", e);
-                    ctx.system().stop_system();
-                    return Err(e);
-                };
-
-                Ok(RequestHandlerResponse::None)
-            }
             RequestHandlerMessage::ChangeApprovalState {
                 subject_id,
                 state,
             } => {
-                info!(
-                    TARGET_REQUEST,
-                    "ChangeApprovalState, new approval for {}, approval response: {}",
-                    subject_id,
-                    state
-                );
-
-                if state == ApprovalStateRes::Obsolete {
-                    error!(
-                        TARGET_REQUEST,
-                        "ChangeApprovalState, Invalid approval response"
-                    );
-                    return Err(ActorError::Functional(
-                        "Invalid Response".to_owned(),
-                    ));
-                }
-
                 if let Err(e) =
-                    self.approval(ctx, &subject_id, state.clone()).await
+                    self.change_approval(ctx, &subject_id, state.clone()).await
                 {
                     error!(TARGET_REQUEST, "ChangeApprovalState, {}", e);
 
@@ -534,57 +492,54 @@ impl Handler<RequestHandler> for RequestHandler {
                     subject_id, state
                 )))
             }
+            RequestHandlerMessage::GetApproval { subject_id, state } => {
+                let res = self
+                    .get_approval(ctx, &subject_id, state.clone())
+                    .await
+                    .map_err(|e| {
+                        error!("");
+                        e
+                    })?;
+
+                Ok(RequestHandlerResponse::Approval(res))
+            }
+            RequestHandlerMessage::GetAllApprovals { state } => {
+                let res = self
+                    .get_all_approvals(ctx, state.clone())
+                    .await
+                    .map_err(|e| {
+                        error!("");
+                        e
+                    })?;
+
+                Ok(RequestHandlerResponse::Approvals(res))
+            }
             RequestHandlerMessage::NewRequest { request } => {
                 if let Err(e) = request.verify() {
                     error!(
-                        TARGET_REQUEST,
-                        "NewRequest, can not verify new request: {}", e
+                        ""
                     );
-                    return Err(ActorError::Functional(format!(
-                        "Can not verify request signature {}",
-                        e
-                    )));
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Can not verify request signature {}",
+                            e
+                        ),
+                    });
                 };
 
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await
-                {
-                    config.hash_algorithm
-                } else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
+                let Some((hash, network)) = self.helpers.clone() else {
+                    return Err(emit_fail(ctx, ActorError::FunctionalCritical {
+                        description: "Helpers are None".to_owned(),
+                    }).await)
                 };
 
-                let subject_id = request.content().get_subject_id();
+                self.check_owner_new_owner(ctx, &request.content()).await?;
 
-                let (is_owner,is_pending) = subject_owner(
-                    ctx,
-                    &subject_id.to_string(),
-                ).await.map_err(|e| {
-                    error!(TARGET_REQUEST, "NewRequest, Could not determine if the node is the owner of the subject: {}", e);
-                    ActorError::Functional(format!(
-                        "An error has occurred: {}",
-                        e
-                    ))
-                })?;
 
-                if !is_owner
-                    && !is_pending
-                    && !request.content().is_create_event()
-                {
-                    let e = "An event is being sent to a subject that does not belong to us or its creation is pending completion, and the subject is not pending event confirmation.";
-                    error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional {
-                        description: e.to_owned(),
-                    });
-                }
 
-                if is_owner && is_pending {
-                    let e = "We are the owner of the subject but this subject is pending transfer";
-                    error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional {
-                        description: e.to_owned(),
-                    });
-                }
+
+
+
 
                 let metadata = match request.content().clone() {
                     EventRequest::Create(create_request) => {

@@ -177,15 +177,31 @@ impl Actor for SubjectRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let prefix = ctx.path().parent().key();
-        self.init_store("subject_register", Some(prefix), false, ctx)
+        if let Err(e) = self
+            .init_store("subject_register", Some(prefix), false, ctx)
             .await
+        {
+            error!(
+                error = %e,
+                "Failed to initialize subject_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop subject_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -199,11 +215,19 @@ impl Handler<SubjectRegister> for SubjectRegister {
     ) -> Result<SubjectRegisterResponse, ActorError> {
         match msg {
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
+                let data_count = data.len();
                 self.on_event(
                     SubjectRegisterEvent::RegisterData { gov_version, data },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "RegisterData",
+                    gov_version = gov_version,
+                    data_count = data_count,
+                    "Creator data registered"
+                );
 
                 Ok(SubjectRegisterResponse::Ok)
             }
@@ -218,14 +242,22 @@ impl Handler<SubjectRegister> for SubjectRegister {
 
                 self.on_event(
                     SubjectRegisterEvent::CreateSubject {
-                        creator,
-                        subject_id,
-                        namespace,
-                        schema_id,
+                        creator: creator.clone(),
+                        subject_id: subject_id.clone(),
+                        namespace: namespace.clone(),
+                        schema_id: schema_id.clone(),
                     },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "CreateSubject",
+                    subject_id = %subject_id,
+                    creator = %creator,
+                    schema_id = ?schema_id,
+                    "Subject created in register"
+                );
 
                 Ok(SubjectRegisterResponse::Ok)
             }
@@ -240,15 +272,23 @@ impl Handler<SubjectRegister> for SubjectRegister {
                 self.check(&new_owner, &namespace, &schema_id, gov_version)?;
                 self.on_event(
                     SubjectRegisterEvent::UpdateSubject {
-                        new_owner,
-                        old_owner,
-                        subject_id,
-                        namespace,
-                        schema_id,
+                        new_owner: new_owner.clone(),
+                        old_owner: old_owner.clone(),
+                        subject_id: subject_id.clone(),
+                        namespace: namespace.clone(),
+                        schema_id: schema_id.clone(),
                     },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "UpdateSubject",
+                    subject_id = %subject_id,
+                    old_owner = %old_owner,
+                    new_owner = %new_owner,
+                    "Subject ownership updated"
+                );
 
                 Ok(SubjectRegisterResponse::Ok)
             }
@@ -259,6 +299,13 @@ impl Handler<SubjectRegister> for SubjectRegister {
                 schema_id,
             } => {
                 self.check(&creator, &namespace, &schema_id, gov_version)?;
+
+                debug!(
+                    msg_type = "Check",
+                    creator = %creator,
+                    schema_id = ?schema_id,
+                    "Creator check passed"
+                );
 
                 Ok(SubjectRegisterResponse::Ok)
             }
@@ -272,12 +319,11 @@ impl Handler<SubjectRegister> for SubjectRegister {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
+                event = ?event,
                 error = %e,
-                "Failed to persist event"
+                "Failed to persist subject register event"
             );
             emit_fail(ctx, e).await;
-        } else {
-            debug!("Event persisted successfully");
         }
     }
 }
@@ -306,6 +352,13 @@ impl PersistentActor for SubjectRegister {
                         .0
                         .insert(*gov_version, quantity.to_owned());
                 }
+
+                debug!(
+                    event_type = "RegisterData",
+                    gov_version = gov_version,
+                    data_count = data.len(),
+                    "Creator data applied to state"
+                );
             }
             SubjectRegisterEvent::CreateSubject {
                 creator,
@@ -322,6 +375,13 @@ impl PersistentActor for SubjectRegister {
                     .or_insert((CeilingMap::new(), HashSet::new()))
                     .1
                     .insert(subject_id.to_owned());
+
+                debug!(
+                    event_type = "CreateSubject",
+                    subject_id = %subject_id,
+                    creator = %creator,
+                    "Subject added to register state"
+                );
             }
             SubjectRegisterEvent::UpdateSubject {
                 new_owner,
@@ -349,6 +409,14 @@ impl PersistentActor for SubjectRegister {
                     .or_insert((CeilingMap::new(), HashSet::new()))
                     .1
                     .remove(subject_id);
+
+                debug!(
+                    event_type = "UpdateSubject",
+                    subject_id = %subject_id,
+                    old_owner = %old_owner,
+                    new_owner = %new_owner,
+                    "Subject ownership updated in state"
+                );
             }
         };
 

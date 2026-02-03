@@ -4,17 +4,38 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 use ave_common::response::{
-    LedgerDB, Paginator, PaginatorEvents, RequestEventDB, SubjectDB,
+    AbortDB, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
+    RequestEventDB, SubjectDB, TimeRange,
 };
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::{debug, error};
 
 use super::{DatabaseError, Querys};
 use crate::external_db::{DBManager, DBManagerMessage};
+use crate::request::manager::RequestManagerEvent;
 use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};
+
+/// Parses an ISO 8601 string and converts it to nanoseconds (i64 for SQLite).
+fn parse_iso8601_to_nanos(s: &str) -> Result<i64, DatabaseError> {
+    let dt = OffsetDateTime::parse(s, &Rfc3339).map_err(|e| {
+        DatabaseError::DateTimeParse(format!(
+            "Invalid ISO 8601 date '{}': {}",
+            s, e
+        ))
+    })?;
+    let nanos = dt.unix_timestamp_nanos();
+    i64::try_from(nanos).map_err(|_| {
+        DatabaseError::IntegerConversion(format!(
+            "Timestamp nanoseconds out of range for i64: {}",
+            nanos
+        ))
+    })
+}
 
 #[derive(Clone)]
 pub struct SqliteLocal {
@@ -24,6 +45,158 @@ pub struct SqliteLocal {
 
 #[async_trait]
 impl Querys for SqliteLocal {
+    async fn get_aborts(
+        &self,
+        subject_id: &str,
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, DatabaseError> {
+        let quantity = quantity.unwrap_or(50).max(1);
+        let mut page = page.unwrap_or(1).max(1);
+
+        // Build WHERE clauses and parameters
+        let mut where_clauses = vec!["subject_id = ?1".to_string()];
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![subject_id.to_string().into()];
+
+        if let Some(rid) = request_id {
+            params_values.push(rid.into());
+            where_clauses
+                .push(format!("request_id = ?{}", params_values.len()));
+        }
+
+        if let Some(sn_val) = sn {
+            let sn_i64 = i64::try_from(sn_val).map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "sn out of range for SQLite INTEGER (i64): {sn_val}"
+                ))
+            })?;
+            params_values.push(sn_i64.into());
+            where_clauses.push(format!("sn = ?{}", params_values.len()));
+        }
+
+        let where_sql = where_clauses.join(" AND ");
+
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        // Count query with filters
+        let count_sql =
+            format!("SELECT COUNT(*) FROM aborts WHERE {}", where_sql);
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let total_i64: i64 = conn
+            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let total = u64::try_from(total_i64).map_err(|_| {
+            DatabaseError::IntegerConversion(
+                "COUNT(*) returned invalid value".to_owned(),
+            )
+        })?;
+
+        if total == 0 {
+            return Ok(PaginatorAborts {
+                paginator: Paginator {
+                    pages: 0,
+                    next: None,
+                    prev: None,
+                },
+                events: vec![],
+            });
+        }
+
+        let mut pages = (total + quantity - 1) / quantity;
+        if pages == 0 {
+            pages = 1;
+        }
+        if page > pages {
+            page = pages;
+        }
+
+        let offset = (page - 1) * quantity;
+
+        let order_clause = if reverse.unwrap_or(false) {
+            "sn DESC"
+        } else {
+            "sn ASC"
+        };
+
+        let quantity_i64 = i64::try_from(quantity).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "quantity out of range for SQLite INTEGER (i64): {quantity}"
+            ))
+        })?;
+        let offset_i64 = i64::try_from(offset).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "offset out of range for SQLite INTEGER (i64): {offset}"
+            ))
+        })?;
+
+        // Add LIMIT and OFFSET params
+        params_values.push(quantity_i64.into());
+        let limit_idx = params_values.len();
+        params_values.push(offset_i64.into());
+        let offset_idx = params_values.len();
+
+        let sql = format!(
+            r#"
+            SELECT request_id, subject_id, sn, error, who
+            FROM aborts
+            WHERE {}
+            ORDER BY {}
+            LIMIT ?{} OFFSET ?{}
+            "#,
+            where_sql, order_clause, limit_idx, offset_idx
+        );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let aborts: Vec<AbortDB> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+
+                Ok(AbortDB {
+                    request_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    sn,
+                    error: row.get(3)?,
+                    who: row.get(4)?,
+                })
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        let prev = if page <= 1 { None } else { Some(page - 1) };
+        let next = if page < pages { Some(page + 1) } else { None };
+        let paginator = Paginator { pages, next, prev };
+
+        Ok(PaginatorAborts {
+            paginator,
+            events: aborts,
+        })
+    }
+
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -54,16 +227,33 @@ impl Querys for SqliteLocal {
                         )
                     })?;
 
+                let genesis_gov_version =
+                    u64::try_from(row.get::<usize, i64>(4)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(8)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+
                 Ok(SubjectDB {
                     name: row.get(0)?,
                     description: row.get(1)?,
                     subject_id: row.get(2)?,
                     governance_id: row.get(3)?,
-                    genesis_gov_version: row.get::<usize, i64>(4)? as u64,
+                    genesis_gov_version,
                     prev_ledger_event_hash: row.get(5)?,
                     schema_id: row.get(6)?,
                     namespace: row.get(7)?,
-                    sn: row.get::<usize, i64>(8)? as u64,
+                    sn,
                     creator: row.get(9)?,
                     owner: row.get(10)?,
                     new_owner: row.get(11)?,
@@ -88,18 +278,63 @@ impl Querys for SqliteLocal {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
     ) -> Result<PaginatorEvents, DatabaseError> {
         let quantity = quantity.unwrap_or(50).max(1);
         let mut page = page.unwrap_or(1).max(1);
 
+        // Build WHERE clauses and parameters for timestamp filters
+        let mut where_clauses = vec!["subject_id = ?1".to_string()];
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![subject_id.to_string().into()];
+
+        // Helper to add timestamp range filters
+        let mut add_ts_filter = |col: &str,
+                                 range: Option<TimeRange>|
+         -> Result<(), DatabaseError> {
+            if let Some(r) = range {
+                if let Some(from) = r.from {
+                    let nanos = parse_iso8601_to_nanos(&from)?;
+                    params_values.push(nanos.into());
+                    where_clauses.push(format!(
+                        "{} >= ?{}",
+                        col,
+                        params_values.len()
+                    ));
+                }
+                if let Some(to) = r.to {
+                    let nanos = parse_iso8601_to_nanos(&to)?;
+                    params_values.push(nanos.into());
+                    where_clauses.push(format!(
+                        "{} <= ?{}",
+                        col,
+                        params_values.len()
+                    ));
+                }
+            }
+            Ok(())
+        };
+
+        add_ts_filter("event_request_timestamp", event_request_ts)?;
+        add_ts_filter("event_ledger_timestamp", event_ledger_ts)?;
+        add_ts_filter("sink_timestamp", sink_ts)?;
+
+        let where_sql = where_clauses.join(" AND ");
+
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
+        // Count query with filters
+        let count_sql =
+            format!("SELECT COUNT(*) FROM events WHERE {}", where_sql);
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
         let total_i64: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM events WHERE subject_id = ?1",
-                params![subject_id],
-                |row| row.get(0),
-            )
+            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let total = u64::try_from(total_i64).map_err(|_| {
@@ -128,48 +363,98 @@ impl Querys for SqliteLocal {
             "sn ASC"
         };
 
+        let quantity_i64 = i64::try_from(quantity).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "quantity out of range for SQLite INTEGER (i64): {quantity}"
+            ))
+        })?;
+        let offset_i64 = i64::try_from(offset).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "offset out of range for SQLite INTEGER (i64): {offset}"
+            ))
+        })?;
+
+        // Add LIMIT and OFFSET params
+        params_values.push(quantity_i64.into());
+        let limit_idx = params_values.len();
+        params_values.push(offset_i64.into());
+        let offset_idx = params_values.len();
+
         let sql = format!(
             r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timeout, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
         FROM events
-        WHERE subject_id = ?1
+        WHERE {}
         ORDER BY {}
-        LIMIT ?2 OFFSET ?3
+        LIMIT ?{} OFFSET ?{}
         "#,
-            order_clause
+            where_sql, order_clause, limit_idx, offset_idx
         );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let events: Vec<LedgerDB> = stmt
-            .query_map(
-                params![subject_id, quantity as i64, offset as i64],
-                |row| {
-                    let event_str: String = row.get(5)?;
-                    let event: RequestEventDB =
-                        serde_json::from_str(&event_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                5,
-                                Type::Text,
-                                Box::new(e),
-                            )
-                        })?;
+            .query_map(params_refs.as_slice(), |row| {
+                let event_str: String = row.get(5)?;
+                let event: RequestEventDB = serde_json::from_str(&event_str)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
 
-                    Ok(LedgerDB {
-                        subject_id: row.get(0)?,
-                        sn: row.get::<usize, i64>(1)? as u64,
-                        event_request_timestamp: row.get::<usize, i64>(2)?
-                            as u64,
-                        event_ledger_timestamp: row.get::<usize, i64>(3)?
-                            as u64,
-                        sink_timeout: row.get::<usize, i64>(4)? as u64,
-                        event,
-                    })
-                },
-            )
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
+                Ok(LedgerDB {
+                    subject_id: row.get(0)?,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
+                    event,
+                })
+            })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -196,7 +481,7 @@ impl Querys for SqliteLocal {
 
         let sql = r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timeout, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
         FROM events
         WHERE subject_id = ?1 AND sn = ?2
     "#;
@@ -213,12 +498,45 @@ impl Querys for SqliteLocal {
                         )
                     })?;
 
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
-                    sn: row.get::<usize, i64>(1)? as u64,
-                    event_request_timestamp: row.get::<usize, i64>(2)? as u64,
-                    event_ledger_timestamp: row.get::<usize, i64>(3)? as u64,
-                    sink_timeout: row.get::<usize, i64>(4)? as u64,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
                     event,
                 })
             })
@@ -256,7 +574,7 @@ impl Querys for SqliteLocal {
         let sql = format!(
             r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timeout, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
         FROM events
         WHERE subject_id = ?1
         ORDER BY sn {}
@@ -281,12 +599,45 @@ impl Querys for SqliteLocal {
                         )
                     })?;
 
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
-                    sn: row.get::<usize, i64>(1)? as u64,
-                    event_request_timestamp: row.get::<usize, i64>(2)? as u64,
-                    event_ledger_timestamp: row.get::<usize, i64>(3)? as u64,
-                    sink_timeout: row.get::<usize, i64>(4)? as u64,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
                     event,
                 })
             })
@@ -345,10 +696,33 @@ impl SqliteLocal {
             .content()
             .build_ledger_db(event.signature().timestamp.as_nanos());
 
-        let sn_i64 = event_db.sn as i64;
-        let req_ts_i64 = event_db.event_request_timestamp as i64;
-        let ledger_ts_i64 = event_db.event_ledger_timestamp as i64;
-        let sink_timeout_i64 = event_db.sink_timeout as i64;
+        let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                event_db.sn
+            ))
+        })?;
+        let req_ts_i64 = i64::try_from(event_db.event_request_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "event_request_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.event_request_timestamp
+                ))
+            })?;
+        let ledger_ts_i64 = i64::try_from(event_db.event_ledger_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "event_ledger_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.event_ledger_timestamp
+                ))
+            })?;
+        let sink_timestamp_i64 = i64::try_from(event_db.sink_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "sink_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.sink_timestamp
+                ))
+            })?;
 
         let event_json = serde_json::to_string(&event_db.event)
             .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
@@ -358,7 +732,7 @@ impl SqliteLocal {
         conn.execute(
             r#"
         INSERT INTO events (
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timeout, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         "#,
             params![
@@ -366,7 +740,7 @@ impl SqliteLocal {
                 sn_i64,
                 req_ts_i64,
                 ledger_ts_i64,
-                sink_timeout_i64,
+                sink_timestamp_i64,
                 event_json
             ],
         )
@@ -408,6 +782,20 @@ impl SqliteLocal {
 
         let active = if s.active { 1 } else { 0 };
 
+        let genesis_gov_version_i64 =
+            i64::try_from(s.genesis_gov_version).map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "genesis_gov_version out of range for SQLite INTEGER (i64): {}",
+                    s.genesis_gov_version
+                ))
+            })?;
+        let sn_i64 = i64::try_from(s.sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                s.sn
+            ))
+        })?;
+
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
         conn.execute(
@@ -427,11 +815,11 @@ impl SqliteLocal {
                 s.description,
                 s.subject_id,
                 s.governance_id,
-                s.genesis_gov_version as i64,
+                genesis_gov_version_i64,
                 s.prev_ledger_event_hash,
                 s.schema_id,
                 s.namespace,
-                s.sn as i64,
+                sn_i64,
                 s.creator,
                 s.owner,
                 s.new_owner,
@@ -443,12 +831,49 @@ impl SqliteLocal {
 
         Ok(())
     }
+
+    async fn save_abort(
+        &self,
+        request_id: String,
+        subject_id: String,
+        sn: u64,
+        error: String,
+        who: String,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        let sn_i64 = i64::try_from(sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                sn
+            ))
+        })?;
+
+        conn.execute(
+            r#"
+        INSERT OR REPLACE INTO aborts (
+            request_id, subject_id, sn, error, who
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5
+        )
+        "#,
+            params![request_id, subject_id, sn_i64, error, who],
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
-        let subject_id = event.content().subject_id.to_string();
+        let subject_id = event
+            .content()
+            .event_request
+            .content()
+            .get_subject_id()
+            .to_string();
         let sn = event.content().sn;
 
         if let Err(e) = self.save_signed_ledger(&event).await {
@@ -458,7 +883,8 @@ impl Subscriber<SignedLedger> for SqliteLocal {
                 error = %e,
                 "Failed to save signed ledger to SQLite"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await {
+            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            {
                 error!(
                     subject_id = %subject_id,
                     sn = sn,
@@ -493,7 +919,8 @@ impl Subscriber<SinkDataEvent> for SqliteLocal {
                 error = %e,
                 "Failed to save subject state to SQLite"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await {
+            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            {
                 error!(
                     subject_id = %subject_id,
                     sn = sn,
@@ -506,6 +933,59 @@ impl Subscriber<SinkDataEvent> for SqliteLocal {
                 subject_id = %subject_id,
                 sn = sn,
                 "Subject state saved to SQLite successfully"
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl Subscriber<RequestManagerEvent> for SqliteLocal {
+    async fn notify(&self, event: RequestManagerEvent) {
+        let RequestManagerEvent::Abort {
+            request_id,
+            subject_id,
+            who,
+            reason,
+            sn,
+        } = event
+        else {
+            return;
+        };
+
+        if let Err(e) = self
+            .save_abort(
+                request_id.to_string(),
+                subject_id.to_string(),
+                sn,
+                reason.to_string(),
+                who.to_string(),
+            )
+            .await
+        {
+            error!(
+                subject_id = %subject_id,
+                request_id = %request_id,
+                sn = sn,
+                error = %e,
+                "Failed to save abort record to SQLite"
+            );
+            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            {
+                error!(
+                    subject_id = %subject_id,
+                    request_id = %request_id,
+                    sn = sn,
+                    error = %e,
+                    "Failed to notify DBManager about abort save error"
+                );
+            }
+        } else {
+            debug!(
+                subject_id = %subject_id,
+                request_id = %request_id,
+                sn = sn,
+                who = %who,
+                "Abort record saved to SQLite successfully"
             );
         }
     }

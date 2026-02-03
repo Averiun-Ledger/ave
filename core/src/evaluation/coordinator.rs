@@ -340,7 +340,13 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
         error: ActorError,
         ctx: &mut ActorContext<EvalCoordinator>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            node_key = %self.node_key,
+            error = %error,
+            "Child fault in evaluation coordinator"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

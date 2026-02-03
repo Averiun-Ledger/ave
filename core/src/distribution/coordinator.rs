@@ -221,6 +221,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
         match error {
             ActorError::Retry => {
                 debug!(
+                    node_key = %self.node_key,
                     error = %error,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -234,18 +235,21 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
                             .await
                         {
                             error!(
+                                node_key = %self.node_key,
                                 error = %e,
                                 "Failed to notify parent distribution actor after retry exhausted"
                             );
                             emit_fail(ctx, e).await;
                         } else {
                             debug!(
+                                node_key = %self.node_key,
                                 "Parent distribution actor notified of retry exhaustion"
                             );
                         }
                     }
                     Err(e) => {
                         error!(
+                            node_key = %self.node_key,
                             error = %e,
                             "Failed to get parent distribution actor after retry exhausted"
                         );
@@ -257,6 +261,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
             }
             _ => {
                 error!(
+                    node_key = %self.node_key,
                     error = %error,
                     "Unexpected child error"
                 );
@@ -270,8 +275,9 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
         ctx: &mut ActorContext<DistriCoordinator>,
     ) -> ChildAction {
         error!(
+            node_key = %self.node_key,
             error = %error,
-            "Child actor fault, stopping distributor"
+            "Child actor fault in distributor coordinator"
         );
         emit_fail(ctx, error).await;
         ChildAction::Stop

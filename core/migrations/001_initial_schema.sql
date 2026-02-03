@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS events (
     sn INTEGER NOT NULL,
     event_request_timestamp INTEGER NOT NULL,
     event_ledger_timestamp INTEGER NOT NULL,
-    sink_timeout INTEGER NOT NULL,
+    sink_timestamp INTEGER NOT NULL,
     event TEXT NOT NULL,
     PRIMARY KEY (subject_id, sn)
 );
@@ -39,6 +39,18 @@ CREATE TABLE IF NOT EXISTS subjects (
     active INTEGER NOT NULL CHECK (active IN (0, 1)),  -- 0 = false, 1 = true
     properties TEXT NOT NULL,    -- JSON serialized subject properties
     PRIMARY KEY (subject_id)
+);
+
+-- =============================================================================
+-- ABORTS TABLE
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS aborts (
+    request_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    sn INTEGER NOT NULL,
+    error TEXT NOT NULL,
+    who TEXT NOT NULL,
+    PRIMARY KEY (request_id)
 );
 -- =============================================================================
 -- END OF MIGRATION

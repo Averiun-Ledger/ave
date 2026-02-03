@@ -709,9 +709,12 @@ where
         let register_path = ActorPath::from("/user/node/register");
         match ctx.system().get_actor::<Register>(&register_path).await {
             Ok(register) => {
-                register.tell(message).await?;
+                register.tell(message.clone()).await?;
 
-                debug!("Register message sent successfully");
+                debug!(
+                    message = ?message,
+                    "Register message sent successfully"
+                );
             }
             Err(e) => {
                 error!(
@@ -792,9 +795,14 @@ where
         message: SinkDataMessage,
     ) -> Result<(), ActorError> {
         let sink_data = ctx.get_child::<SinkData>("sink_data").await?;
+        let (subject_id, schema_id) = message.get_subject_schema();
 
         sink_data.tell(message).await?;
-        debug!("Message published to sink successfully");
+        debug!(
+            subject_id = %subject_id,
+            schema_id = %schema_id,
+            "Message published to sink successfully"
+        );
 
         Ok(())
     }

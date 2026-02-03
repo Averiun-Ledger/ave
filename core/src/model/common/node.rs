@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler,
-};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler};
 
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
 use network::ComunicateInfo;
@@ -43,7 +41,7 @@ pub enum SignTypesNode {
 pub async fn i_owner_new_owner<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
-) -> Result<(bool, bool), ActorError>
+) -> Result<(bool, Option<bool>), ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -100,11 +98,15 @@ where
     let node_actor = ctx.system().get_actor::<Node>(&path).await?;
 
     // We obtain the validator
-    let node_response = node_actor.ask(NodeMessage::SignRequest(sign_type)).await?;
+    let node_response =
+        node_actor.ask(NodeMessage::SignRequest(sign_type)).await?;
 
     match node_response {
         NodeResponse::SignRequest(signature) => Ok(signature),
-        _ => Err(ActorError::UnexpectedResponse {path, expected: "NodeResponse::SignRequest".to_owned()}),
+        _ => Err(ActorError::UnexpectedResponse {
+            path,
+            expected: "NodeResponse::SignRequest".to_owned(),
+        }),
     }
 }
 
@@ -157,13 +159,10 @@ pub struct UpdateData {
     pub other_node: PublicKey,
 }
 
-pub async fn update_ledger_network<A>(
-    ctx: &mut ActorContext<A>,
+pub async fn update_ledger_network(
     data: UpdateData,
-) -> Result<(), ActorError>
-where
-    A: Actor + Handler<A>,
-{
+    network: Arc<NetworkSender>,
+) -> Result<(), ActorError> {
     let subject_string = data.subject_id.to_string();
     let request = ActorMessage::DistributionLedgerReq {
         actual_sn: Some(data.sn),
@@ -177,15 +176,7 @@ where
         receiver_actor: format!("/user/node/distributor_{}", subject_string),
     };
 
-    let helper: Option<Arc<NetworkSender>> =
-        ctx.system().get_helper("network").await;
-
-    let Some(helper) = helper else {
-        let e = ActorError::NotHelper("network".to_owned());
-        return Err(e);
-    };
-
-    helper
+    network
         .send_command(network::CommandHelper::SendMessage {
             message: NetworkMessage {
                 info,

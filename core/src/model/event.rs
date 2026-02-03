@@ -13,7 +13,8 @@ use crate::{
 use ave_actors::ActorError;
 use ave_common::{
     identity::{DigestIdentifier, Signature, Signed, TimeStamp},
-    request::EventRequest, response::{LedgerDB, RequestEventDB},
+    request::EventRequest,
+    response::{LedgerDB, RequestEventDB},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -203,7 +204,7 @@ impl Protocols {
                     }
                     EvaluationResponse::Error(e) => (Some(e.to_string()), None),
                 };
-                RequestEventDB::GovFact {
+                RequestEventDB::GovernanceFact {
                     payload: fact_request.payload.0.clone(),
                     evaluation_error,
                     approval_success,
@@ -233,7 +234,7 @@ impl Protocols {
                     EvaluationResponse::Ok(_) => None,
                     EvaluationResponse::Error(e) => Some(e.to_string()),
                 };
-                RequestEventDB::GovConfirm {
+                RequestEventDB::GovernanceConfirm {
                     name_old_owner: confirm_request.name_old_owner.clone(),
                     evaluation_error,
                 }
@@ -485,7 +486,7 @@ impl Ledger {
                 .timestamp
                 .as_nanos(),
             event_ledger_timestamp: signature_timestamp,
-            sink_timeout: TimeStamp::now().as_nanos(),
+            sink_timestamp: TimeStamp::now().as_nanos(),
             event: self.protocols.buidl_event_db(self.event_request.content()),
         }
     }

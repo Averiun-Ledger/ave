@@ -191,7 +191,7 @@ impl Handler<SinkData> for SinkData {
                 controller_id: self.controller_id.clone(),
                 event_request_timestamp,
                 event_ledger_timestamp,
-                sink_timeout: TimeStamp::now().as_nanos(),
+                sink_timestamp: TimeStamp::now().as_nanos(),
             }),
         };
 

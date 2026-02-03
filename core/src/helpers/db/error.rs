@@ -49,4 +49,8 @@ pub enum DatabaseError {
     /// No events found for subject.
     #[error("no events found for subject: {0}")]
     NoEvents(String),
+
+    /// Failed to parse date/time string.
+    #[error("date/time parse failed: {0}")]
+    DateTimeParse(String),
 }

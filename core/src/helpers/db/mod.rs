@@ -2,6 +2,7 @@ mod error;
 
 use crate::{
     external_db::DBManager,
+    request::manager::RequestManagerEvent,
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 
@@ -10,7 +11,9 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 
-use ave_common::response::{LedgerDB, PaginatorEvents, SubjectDB};
+use ave_common::response::{
+    LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange,
+};
 pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
@@ -29,7 +32,20 @@ pub trait Querys {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
     ) -> Result<PaginatorEvents, DatabaseError>;
+
+    async fn get_aborts(
+        &self,
+        subject_id: &str,
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, DatabaseError>;
 
     // events sn
     async fn get_event_sn(
@@ -105,10 +121,38 @@ impl ExternalDB {
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
         }
     }
+
+    pub fn get_request_manager(&self) -> impl Subscriber<RequestManagerEvent> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+        }
+    }
 }
 
 #[async_trait]
 impl Querys for ExternalDB {
+    async fn get_aborts(
+        &self,
+        subject_id: &str,
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            ExternalDB::SqliteLocal(sqlite_local) => {
+                sqlite_local
+                    .get_aborts(
+                        subject_id, request_id, sn, quantity, page, reverse,
+                    )
+                    .await
+            }
+        }
+    }
+
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -127,12 +171,23 @@ impl Querys for ExternalDB {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
     ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_events(subject_id, quantity, page, reverse)
+                    .get_events(
+                        subject_id,
+                        quantity,
+                        page,
+                        reverse,
+                        event_request_ts,
+                        event_ledger_ts,
+                        sink_ts,
+                    )
                     .await
             }
         }

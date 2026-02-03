@@ -393,12 +393,18 @@ impl Handler<Validation> for Validation {
                                 if let Err(e) = abort_req(
                                     ctx,
                                     self.request_id.clone(),
-                                    sender,
+                                    sender.clone(),
                                     error,
+                                    self.request.content().get_sn()
                                 )
                                 .await
                                 {
-                                    error!("");
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        sender = %sender,
+                                        "Failed to abort request"
+                                    );
                                     return Err(emit_fail(ctx, e).await);
                                 }
                             }
@@ -541,7 +547,12 @@ impl Handler<Validation> for Validation {
         error: ActorError,
         ctx: &mut ActorContext<Validation>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            error = %error,
+            "Child fault in validation actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

@@ -265,7 +265,12 @@ impl Handler<Update> for Update {
         error: ActorError,
         ctx: &mut ActorContext<Update>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            subject_id = %self.subject_id,
+            update_type = ?self.update_type,
+            error = %error,
+            "Child fault in update actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

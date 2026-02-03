@@ -325,7 +325,13 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                 ctx.stop(None).await;
             }
             _ => {
-                error!(error = %error, "Unexpected child error");
+                error!(
+                    node_key = %self.node_key,
+                    request_id = %self.request_id,
+                    version = self.version,
+                    error = %error,
+                    "Unexpected child error"
+                );
             }
         };
     }
@@ -335,7 +341,13 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
         error: ActorError,
         ctx: &mut ActorContext<ValiCoordinator>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            node_key = %self.node_key,
+            request_id = %self.request_id,
+            version = self.version,
+            error = %error,
+            "Child fault in validation coordinator"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

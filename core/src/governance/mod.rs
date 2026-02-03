@@ -28,7 +28,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
     model::{
-        common::{emit_fail, get_last_event},
+        common::{emit_fail, get_last_event, subject::make_obsolete},
         event::{Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
@@ -441,6 +441,8 @@ impl Subject for Governance {
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
+            make_obsolete(ctx, &self.subject_metadata.subject_id).await;
+
             Self::publish_sink(
                 ctx,
                 SinkDataMessage::UpdateState(Box::new(Metadata::from(

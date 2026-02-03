@@ -10,7 +10,7 @@ pub struct DataToSink {
     pub controller_id: String,
     pub event_request_timestamp: u64,
     pub event_ledger_timestamp: u64,
-    pub sink_timeout: u64,
+    pub sink_timestamp: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

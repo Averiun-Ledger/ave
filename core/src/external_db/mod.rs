@@ -47,7 +47,7 @@ impl Handler<DBManager> for DBManager {
                 error!(
                     msg_type = "Error",
                     error = %error,
-                    "Problem in database subscriber"
+                    "Critical database error in subscriber"
                 );
                 ctx.system().stop_system();
                 Ok(())

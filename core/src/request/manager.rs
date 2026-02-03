@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{Span, error, info, info_span, warn};
+use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
 use crate::distribution::{
@@ -52,8 +52,6 @@ use crate::{
     model::common::emit_fail,
     update::{Update, UpdateMessage, UpdateNew, UpdateType},
 };
-
-const TARGET_MANAGER: &str = "Ave-Request-Manager";
 
 use super::{
     reboot::{Reboot, RebootMessage},
@@ -164,9 +162,9 @@ impl RequestManager {
 
         if signers.is_empty() {
             warn!(
-                TARGET_MANAGER,
-                "Create, There are no evaluators available for the {} scheme",
-                metadata.schema_id
+                request_id = %self.id,
+                schema_id = %metadata.schema_id,
+                "No evaluators available for schema"
             );
 
             return Err(RequestManagerError::NoEvaluatorsAvailable {
@@ -363,7 +361,6 @@ impl RequestManager {
         init_state: Option<ValueWrapper>,
         signers: HashSet<PublicKey>,
     ) -> Result<(), RequestManagerError> {
-        info!(TARGET_MANAGER, "Init evaluation {}", self.id);
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
@@ -450,9 +447,9 @@ impl RequestManager {
 
         if signers.is_empty() {
             warn!(
-                TARGET_MANAGER,
-                "Create, There are no approvers available for the {} scheme",
-                SchemaType::Governance
+                request_id = %self.id,
+                schema_id = %SchemaType::Governance,
+                "No approvers available for schema"
             );
 
             return Err(RequestManagerError::NoApproversAvailable {
@@ -471,7 +468,6 @@ impl RequestManager {
         quorum: Quorum,
         signers: HashSet<PublicKey>,
     ) -> Result<(), RequestManagerError> {
-        info!(TARGET_MANAGER, "Init approval {}", self.id);
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
@@ -531,9 +527,9 @@ impl RequestManager {
 
         if signers.is_empty() {
             warn!(
-                TARGET_MANAGER,
-                "Create, There are no validators available for the {} scheme",
-                schema_id
+                request_id = %self.id,
+                schema_id = %schema_id,
+                "No validators available for schema"
             );
 
             return Err(RequestManagerError::NoValidatorsAvailable {
@@ -722,7 +718,6 @@ impl RequestManager {
         signers: HashSet<PublicKey>,
         init_state: Option<ValueWrapper>,
     ) -> Result<(), RequestManagerError> {
-        info!(TARGET_MANAGER, "Init validation {}", self.id);
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
@@ -858,7 +853,10 @@ impl RequestManager {
         };
 
         if witnesses.is_empty() {
-            warn!("");
+            warn!(
+                request_id = %self.id,
+                "No witnesses available for distribution"
+            );
             return Ok(false);
         }
 
@@ -930,7 +928,6 @@ impl RequestManager {
         witnesses: HashSet<PublicKey>,
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
-        info!(TARGET_MANAGER, "Init distribution {}", self.id);
         let Some((.., network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
@@ -1173,8 +1170,6 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), RequestManagerError> {
         self.on_event(RequestManagerEvent::Finish, ctx).await;
-        self.end_request(ctx).await?;
-
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
@@ -1184,6 +1179,8 @@ impl RequestManager {
             },
         )
         .await?;
+
+        self.end_request(ctx).await?;
 
         Ok(())
     }
@@ -1354,20 +1351,45 @@ impl RequestManager {
         }
     }
 
-    ////////////////////////////////////////////////
-    ////////////////////////////////////////////////
-    ////////////////////////////////////////////////
+    async fn abort_request(
+        &mut self,
+        ctx: &mut ActorContext<RequestManager>,
+        error: String,
+        sn: u64,
+        who: PublicKey,
+    ) -> Result<(), RequestManagerError> {
+        self.stops_childs(ctx).await;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: self.id.to_string(),
+                state: RequestState::Abort,
+                error: Some(error.clone()),
+            },
+        )
+        .await?;
+
+        self.on_event(
+            RequestManagerEvent::Abort {
+                request_id: self.id.clone(),
+                subject_id: self.subject_id.clone(),
+                who,
+                reason: error,
+                sn,
+            },
+            ctx,
+        )
+        .await;
+
+        self.end_request(ctx).await?;
+
+        Ok(())
+    }
+
     async fn end_request(
         &self,
         ctx: &mut ActorContext<RequestManager>,
-    ) -> Result<(), RequestManagerError> {
-        todo!()
-    }
-
-    async fn abort_request(
-        &self,
-        ctx: &mut ActorContext<RequestManager>,
-        error: &str,
     ) -> Result<(), RequestManagerError> {
         todo!()
     }
@@ -1387,6 +1409,7 @@ pub enum RequestManagerMessage {
         request_id: DigestIdentifier,
         who: PublicKey,
         reason: String,
+        sn: u64,
     },
     Reboot {
         request_id: DigestIdentifier,
@@ -1429,6 +1452,13 @@ impl Message for RequestManagerMessage {}
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RequestManagerEvent {
+    Abort {
+        request_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        who: PublicKey,
+        reason: String,
+        sn: u64,
+    },
     Finish,
     UpdateState {
         state: Box<RequestManagerState>,
@@ -1462,14 +1492,32 @@ impl Actor for RequestManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("request_manager", None, false, ctx).await
+        if let Err(e) =
+            self.init_store("request_manager", None, false, ctx).await
+        {
+            error!(
+                error = %e,
+                subject_id = %self.subject_id,
+                "Failed to initialize store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                subject_id = %self.subject_id,
+                "Failed to stop store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -1487,10 +1535,22 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
-                    info!(TARGET_MANAGER, "Init reboot update {}", self.id);
+                    debug!(
+                        msg_type = "RebootUpdate",
+                        request_id = %self.id,
+                        governance_id = %governance_id,
+                        "Initializing reboot update"
+                    );
 
                     if let Err(e) = self.init_update(ctx, &governance_id).await
                     {
+                        error!(
+                            msg_type = "RebootUpdate",
+                            request_id = %self.id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to initialize reboot update"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     }
@@ -1501,9 +1561,21 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
-                    info!(TARGET_MANAGER, "Init reboot wait {}", self.id);
+                    debug!(
+                        msg_type = "RebootWait",
+                        request_id = %self.id,
+                        governance_id = %governance_id,
+                        "Initializing reboot wait"
+                    );
 
                     if let Err(e) = self.init_wait(ctx, &governance_id).await {
+                        error!(
+                            msg_type = "RebootWait",
+                            request_id = %self.id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to initialize reboot wait"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     }
@@ -1516,11 +1588,32 @@ impl Handler<RequestManager> for RequestManager {
             } => {
                 if request_id == self.id {
                     if let RequestManagerState::Reboot = self.state {
+                        debug!(
+                            msg_type = "Reboot",
+                            request_id = %self.id,
+                            governance_id = %governance_id,
+                            reboot_type = ?reboot_type,
+                            "Already in reboot state, ignoring"
+                        );
                     } else {
+                        debug!(
+                            msg_type = "Reboot",
+                            request_id = %self.id,
+                            governance_id = %governance_id,
+                            reboot_type = ?reboot_type,
+                            "Initiating reboot"
+                        );
                         self.stops_childs(ctx).await;
                         if let Err(e) =
-                            self.reboot(ctx, reboot_type, governance_id).await
+                            self.reboot(ctx, reboot_type, governance_id.clone()).await
                         {
+                            error!(
+                                msg_type = "Reboot",
+                                request_id = %self.id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to initiate reboot"
+                            );
                             self.match_error(ctx, e).await;
                             return Ok(());
                         }
@@ -1529,7 +1622,12 @@ impl Handler<RequestManager> for RequestManager {
             }
             RequestManagerMessage::FinishReboot { request_id } => {
                 if request_id == self.id {
-                    info!(TARGET_MANAGER, "Finish reboot {}", self.id);
+                    debug!(
+                        msg_type = "FinishReboot",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Reboot completed, resuming request"
+                    );
                     self.on_event(
                         RequestManagerEvent::UpdateVersion {
                             version: self.version + 1,
@@ -1547,10 +1645,23 @@ impl Handler<RequestManager> for RequestManager {
                     )
                     .await
                     {
-                        return Err(emit_fail(ctx, e.into()).await);
+                        error!(
+                            msg_type = "FinishReboot",
+                            request_id = %self.id,
+                            version = self.version,
+                            error = %e,
+                            "Failed to send version update to tracking"
+                        );
+                        return Err(emit_fail(ctx, e).await);
                     }
 
                     if let Err(e) = self.match_command(ctx).await {
+                        error!(
+                            msg_type = "FinishReboot",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to execute command after reboot"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     }
@@ -1560,27 +1671,29 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
                 who,
                 reason,
+                sn,
             } => {
                 if request_id == self.id {
-                    self.stops_childs(ctx).await;
-
-                    todo!(
-                        "Guardar en la base de datos y pasar a la siguiente request, enviar al tracking"
-                    )
-                    /*
-                                        send_to_tracking(
-                        ctx,
-                        RequestTrackingMessage::UpdateState {
-                            request_id: self.id.to_string(),
-                            state: RequestState::Abort {
-                                seconds,
-                                count: self.retry_timeout,
-                            },
-                            error: None,
-                        },
-                    )
-                    .await?;
-                         */
+                    warn!(
+                        msg_type = "Abort",
+                        request_id = %self.id,
+                        who = %who,
+                        reason = %reason,
+                        sn = sn,
+                        "Request abort received"
+                    );
+                    if let Err(e) =
+                        self.abort_request(ctx, reason, sn, who).await
+                    {
+                        error!(
+                            msg_type = "Abort",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to abort request"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    }
                 }
             }
             RequestManagerMessage::FirstRun {
@@ -1588,7 +1701,13 @@ impl Handler<RequestManager> for RequestManager {
                 request,
                 request_id,
             } => {
-                self.id = request_id;
+                self.id = request_id.clone();
+                debug!(
+                    msg_type = "FirstRun",
+                    request_id = %request_id,
+                    command = ?command,
+                    "First run of request manager"
+                );
                 self.on_event(
                     RequestManagerEvent::SafeState { command, request },
                     ctx,
@@ -1596,6 +1715,12 @@ impl Handler<RequestManager> for RequestManager {
                 .await;
 
                 if let Err(e) = self.match_command(ctx).await {
+                    error!(
+                        msg_type = "FirstRun",
+                        request_id = %self.id,
+                        error = %e,
+                        "Failed to execute initial command"
+                    );
                     self.match_error(ctx, e).await;
                     return Ok(());
                 };
@@ -1603,17 +1728,37 @@ impl Handler<RequestManager> for RequestManager {
             RequestManagerMessage::Run { request_id } => {
                 self.id = request_id;
 
-                info!(TARGET_MANAGER, "Running {}", self.id);
+                debug!(
+                    msg_type = "Run",
+                    request_id = %self.id,
+                    state = ?self.state,
+                    version = self.version,
+                    "Running request manager"
+                );
                 match self.state.clone() {
                     RequestManagerState::Starting
                     | RequestManagerState::Reboot => {
                         if let Err(e) = self.match_command(ctx).await {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Starting/Reboot",
+                                error = %e,
+                                "Failed to execute command"
+                            );
                             self.match_error(ctx, e).await;
                         return Ok(())
                         };
                     }
                     RequestManagerState::Evaluation => {
                         if let Err(e) = self.build_evaluation(ctx).await {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Evaluation",
+                                error = %e,
+                                "Failed to build evaluation"
+                            );
                             self.match_error(ctx, e).await;
                         return Ok(())
                         }
@@ -1627,6 +1772,13 @@ impl Handler<RequestManager> for RequestManager {
                                 .build_approval(ctx, eval_req, eval_res.evaluator_res().expect("If the status is approval, it means that the evaluator's response is valid."))
                                 .await
                             {
+                                error!(
+                                    msg_type = "Run",
+                                    request_id = %self.id,
+                                    state = "Approval",
+                                    error = %e,
+                                    "Failed to build approval"
+                                );
                                 self.match_error(ctx, e).await;
                         return Ok(())
                             }
@@ -1643,6 +1795,13 @@ impl Handler<RequestManager> for RequestManager {
                             )
                             .await
                         {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Validation",
+                                error = %e,
+                                "Failed to run validation"
+                            );
                             self.match_error(ctx, e).await;
                         return Ok(())
                         };
@@ -1651,6 +1810,13 @@ impl Handler<RequestManager> for RequestManager {
                         if let Err(e) =
                             self.update_subject(ctx, ledger.clone()).await
                         {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "UpdateSubject",
+                                error = %e,
+                                "Failed to update subject"
+                            );
                             self.match_error(ctx, e).await;
                         return Ok(())
                         };
@@ -1661,12 +1827,26 @@ impl Handler<RequestManager> for RequestManager {
                                     if let Err(e) =
                                         self.finish_request(ctx).await
                                     {
+                                        error!(
+                                            msg_type = "Run",
+                                            request_id = %self.id,
+                                            state = "UpdateSubject",
+                                            error = %e,
+                                            "Failed to finish request after build distribution"
+                                        );
                                         self.match_error(ctx, e).await;
                         return Ok(())
                                     }
                                 }
                             }
                             Err(e) => {
+                                error!(
+                                    msg_type = "Run",
+                                    request_id = %self.id,
+                                    state = "UpdateSubject",
+                                    error = %e,
+                                    "Failed to build distribution"
+                                );
                                 self.match_error(ctx, e).await;
                         return Ok(())
                             }
@@ -1679,12 +1859,26 @@ impl Handler<RequestManager> for RequestManager {
                                     if let Err(e) =
                                         self.finish_request(ctx).await
                                     {
+                                        error!(
+                                            msg_type = "Run",
+                                            request_id = %self.id,
+                                            state = "Distribution",
+                                            error = %e,
+                                            "Failed to finish request after build distribution"
+                                        );
                                         self.match_error(ctx, e).await;
                         return Ok(())
                                     }
                                 }
                             }
                             Err(e) => {
+                                error!(
+                                    msg_type = "Run",
+                                    request_id = %self.id,
+                                    state = "Distribution",
+                                    error = %e,
+                                    "Failed to build distribution"
+                                );
                                 self.match_error(ctx, e).await;
                         return Ok(())
                             }
@@ -1692,8 +1886,15 @@ impl Handler<RequestManager> for RequestManager {
                     }
                     RequestManagerState::End => {
                         if let Err(e) = self.end_request(ctx).await {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "End",
+                                error = %e,
+                                "Failed to end request"
+                            );
                             self.match_error(ctx, e).await;
-                        return Ok(())
+                            return Ok(())
                         }
                     }
                 };
@@ -1704,11 +1905,22 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    debug!(
+                        msg_type = "EvaluationRes",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Evaluation result received"
+                    );
                     self.stops_childs(ctx).await;
 
                     if let Some(evaluator_res) = eval_res.evaluator_res()
                         && evaluator_res.appr_required
                     {
+                        debug!(
+                            msg_type = "EvaluationRes",
+                            request_id = %self.id,
+                            "Approval required, proceeding to approval phase"
+                        );
                         self.on_event(
                             RequestManagerEvent::UpdateState {
                                 state: Box::new(
@@ -1726,10 +1938,21 @@ impl Handler<RequestManager> for RequestManager {
                             .build_approval(ctx, eval_req, evaluator_res)
                             .await
                         {
+                            error!(
+                                msg_type = "EvaluationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build approval"
+                            );
                             self.match_error(ctx, e).await;
                             return Ok(());
                         }
                     } else {
+                        debug!(
+                            msg_type = "EvaluationRes",
+                            request_id = %self.id,
+                            "Approval not required, proceeding to validation phase"
+                        );
                         let (request, quorum, signers, init_state) = match self
                             .build_validation_req(
                                 ctx,
@@ -1740,6 +1963,12 @@ impl Handler<RequestManager> for RequestManager {
                         {
                             Ok(data) => data,
                             Err(e) => {
+                                error!(
+                                    msg_type = "EvaluationRes",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to build validation request"
+                                );
                                 self.match_error(ctx, e).await;
                                 return Ok(());
                             }
@@ -1751,6 +1980,12 @@ impl Handler<RequestManager> for RequestManager {
                             )
                             .await
                         {
+                            error!(
+                                msg_type = "EvaluationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to run validation"
+                            );
                             self.match_error(ctx, e).await;
                             return Ok(());
                         };
@@ -1762,11 +1997,23 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    debug!(
+                        msg_type = "ApprovalRes",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Approval result received"
+                    );
                     self.stops_childs(ctx).await;
 
                     let RequestManagerState::Approval { eval_req, eval_res } =
                         self.state.clone()
                     else {
+                        error!(
+                            msg_type = "ApprovalRes",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Invalid state for approval response"
+                        );
                         let e = ActorError::FunctionalCritical {
                             description: "Invalid request state".to_owned(),
                         };
@@ -1782,6 +2029,12 @@ impl Handler<RequestManager> for RequestManager {
                     {
                         Ok(data) => data,
                         Err(e) => {
+                            error!(
+                                msg_type = "ApprovalRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build validation request"
+                            );
                             self.match_error(ctx, e).await;
                             return Ok(());
                         }
@@ -1793,6 +2046,12 @@ impl Handler<RequestManager> for RequestManager {
                         )
                         .await
                     {
+                        error!(
+                            msg_type = "ApprovalRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to run validation"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     };
@@ -1804,12 +2063,24 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    debug!(
+                        msg_type = "ValidationRes",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Validation result received"
+                    );
                     self.stops_childs(ctx).await;
 
                     let signed_ledger =
                         match self.build_ledger(ctx, val_req, val_res).await {
                             Ok(signed_ledger) => signed_ledger,
                             Err(e) => {
+                                error!(
+                                    msg_type = "ValidationRes",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to build ledger"
+                                );
                                 self.match_error(ctx, e).await;
                                 return Ok(());
                             }
@@ -1818,6 +2089,12 @@ impl Handler<RequestManager> for RequestManager {
                     if let Err(e) =
                         self.update_subject(ctx, signed_ledger.clone()).await
                     {
+                        error!(
+                            msg_type = "ValidationRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to update subject"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     };
@@ -1826,12 +2103,24 @@ impl Handler<RequestManager> for RequestManager {
                         Ok(in_distribution) => {
                             if !in_distribution {
                                 if let Err(e) = self.finish_request(ctx).await {
+                                    error!(
+                                        msg_type = "ValidationRes",
+                                        request_id = %self.id,
+                                        error = %e,
+                                        "Failed to finish request after build distribution"
+                                    );
                                     self.match_error(ctx, e).await;
                                     return Ok(());
                                 }
                             }
                         }
                         Err(e) => {
+                            error!(
+                                msg_type = "ValidationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build distribution"
+                            );
                             self.match_error(ctx, e).await;
                             return Ok(());
                         }
@@ -1840,10 +2129,21 @@ impl Handler<RequestManager> for RequestManager {
             }
             RequestManagerMessage::FinishRequest { request_id } => {
                 if request_id == self.id {
-                    info!(TARGET_MANAGER, "Finish request {}", self.id);
+                    debug!(
+                        msg_type = "FinishRequest",
+                        request_id = %self.id,
+                        version = self.version,
+                        "Finishing request"
+                    );
 
                     self.stops_childs(ctx).await;
                     if let Err(e) = self.finish_request(ctx).await {
+                        error!(
+                            msg_type = "FinishRequest",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to finish request"
+                        );
                         self.match_error(ctx, e).await;
                         return Ok(());
                     }
@@ -1859,13 +2159,35 @@ impl Handler<RequestManager> for RequestManager {
         event: RequestManagerEvent,
         ctx: &mut ActorContext<RequestManager>,
     ) {
-        if let Err(e) = self.persist(&event, ctx).await {
-            error!(
-                TARGET_MANAGER,
-                "OnEvent, can not persist information: {}", e
-            );
-            emit_fail(ctx, e).await;
+        let event_type = match &event {
+            RequestManagerEvent::Abort { .. } => "Abort",
+            RequestManagerEvent::Finish => "Finish",
+            RequestManagerEvent::UpdateState { .. } => "UpdateState",
+            RequestManagerEvent::UpdateVersion { .. } => "UpdateVersion",
+            RequestManagerEvent::SafeState { .. } => "SafeState",
         };
+
+        if let RequestManagerEvent::Abort { .. } = event {
+            if let Err(e) = ctx.publish_event(event).await {
+                error!(
+                    event_type = event_type,
+                    request_id = %self.id,
+                    error = %e,
+                    "Failed to publish abort event"
+                );
+                emit_fail(ctx, e).await;
+            }
+        } else {
+            if let Err(e) = self.persist(&event, ctx).await {
+                error!(
+                    event_type = event_type,
+                    request_id = %self.id,
+                    error = %e,
+                    "Failed to persist event"
+                );
+                emit_fail(ctx, e).await;
+            };
+        }
     }
 
     async fn on_child_fault(
@@ -1873,7 +2195,13 @@ impl Handler<RequestManager> for RequestManager {
         error: ActorError,
         ctx: &mut ActorContext<RequestManager>,
     ) -> ChildAction {
-        error!(TARGET_MANAGER, "OnChildFault, {}", error);
+        error!(
+            request_id = %self.id,
+            version = self.version,
+            state = ?self.state,
+            error = %error,
+            "Child fault in request manager"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
@@ -1910,23 +2238,65 @@ impl PersistentActor for RequestManager {
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
             RequestManagerEvent::Finish => {
+                debug!(
+                    event_type = "Finish",
+                    request_id = %self.id,
+                    "Applying finish event"
+                );
                 self.state = RequestManagerState::End;
                 self.request = None;
                 self.id = DigestIdentifier::default();
             }
             RequestManagerEvent::UpdateState { state } => {
+                debug!(
+                    event_type = "UpdateState",
+                    request_id = %self.id,
+                    old_state = ?self.state,
+                    new_state = ?state,
+                    "Applying state update"
+                );
                 self.state = *state.clone()
             }
             RequestManagerEvent::UpdateVersion { version } => {
+                debug!(
+                    event_type = "UpdateVersion",
+                    request_id = %self.id,
+                    old_version = self.version,
+                    new_version = version,
+                    "Applying version update"
+                );
                 self.version = *version
             }
             RequestManagerEvent::SafeState { command, request } => {
+                debug!(
+                    event_type = "SafeState",
+                    request_id = %self.id,
+                    command = ?command,
+                    "Applying safe state"
+                );
                 self.version = 0;
                 self.retry_diff = 0;
                 self.retry_timeout = 0;
                 self.state = RequestManagerState::Starting;
                 self.request = Some(request.clone());
                 self.command = command.clone();
+            }
+            RequestManagerEvent::Abort {
+                request_id,
+                subject_id,
+                who,
+                reason,
+                sn,
+            } => {
+                debug!(
+                    event_type = "Abort",
+                    request_id = %request_id,
+                    subject_id = %subject_id,
+                    who = %who,
+                    reason = %reason,
+                    sn = sn,
+                    "Applying abort event"
+                );
             }
         };
 

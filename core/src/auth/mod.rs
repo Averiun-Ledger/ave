@@ -105,8 +105,16 @@ impl Auth {
                                     namespace.to_owned(),
                                 ),
                             })
-                            .map_err(|e| ActorError::Functional {
-                                description: e.to_string(),
+                            .map_err(|e| {
+                                error!(
+                                    subject_id = %subject_id,
+                                    governance_id = %governance_id,
+                                    error = %e,
+                                    "Failed to get witnesses for tracker schema"
+                                );
+                                ActorError::Functional {
+                                    description: e.to_string(),
+                                }
                             })?;
 
                         (witnesses, Some(sn))
@@ -118,8 +126,15 @@ impl Auth {
                     let gov = get_gov(ctx, subject_id).await?;
                     let witnesses = gov
                         .get_witnesses(WitnessesData::Gov)
-                        .map_err(|e| ActorError::Functional {
-                            description: e.to_string(),
+                        .map_err(|e| {
+                            error!(
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to get witnesses for governance"
+                            );
+                            ActorError::Functional {
+                                description: e.to_string(),
+                            }
                         })?;
 
                     let sn = get_gov_sn(ctx, subject_id).await?;
@@ -389,11 +404,29 @@ impl Handler<Auth> for Auth {
                     };
 
                     let updater = Update::new(data);
-                    let child = ctx
+                    let child = match ctx
                         .create_child(&subject_id.to_string(), updater)
-                        .await?;
+                        .await
+                    {
+                        Ok(child) => child,
+                        Err(e) => {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to create update child actor"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    };
 
                     if let Err(e) = child.tell(UpdateMessage::Run).await {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to send Run message to update actor"
+                        );
                         return Err(emit_fail(ctx, e).await);
                     }
 
@@ -416,12 +449,11 @@ impl Handler<Auth> for Auth {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
+                event = ?event,
                 error = %e,
                 "Failed to persist auth event"
             );
             emit_fail(ctx, e).await;
-        } else {
-            debug!("Auth event persisted successfully");
         }
     }
 
@@ -432,7 +464,7 @@ impl Handler<Auth> for Auth {
     ) -> ChildAction {
         error!(
             error = %error,
-            "Child actor fault"
+            "Child actor fault in auth"
         );
         emit_fail(ctx, error).await;
         ChildAction::Stop

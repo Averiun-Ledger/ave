@@ -8,9 +8,7 @@ use ave_actors::{
 use ave_common::{response::{RequestInfo, RequestState}};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, error, info_span};
-
-const TARGET_TRACKING: &str = "Ave-Request-RequestTracking";
+use tracing::{Span, debug, info_span, warn};
 
 #[derive(Clone, Debug)]
 pub struct RequestTracking {
@@ -81,6 +79,12 @@ impl Handler<RequestTracking> for RequestTracking {
     ) -> Result<RequestTrackingResponse, ActorError> {
         match msg {
             RequestTrackingMessage::AllRequests => {
+                let count = self.cache.len();
+                debug!(
+                    msg_type = "AllRequests",
+                    requests_count = count,
+                    "Retrieving all tracked requests"
+                );
                 Ok(RequestTrackingResponse::AllInfo(
                     self.cache.iter().map(|x| x.1.clone()).collect(),
                 ))
@@ -91,11 +95,44 @@ impl Handler<RequestTracking> for RequestTracking {
                 error,
             } => {
                 if let Some(info) = self.cache.get_mut(&request_id) {
-                    info.state = state;
-                    if error.is_some() {
-                        info.error = error;
+                    let old_state = info.state.clone();
+                    info.state = state.clone();
+                    if let Some(ref err) = error {
+                        info.error = error.clone();
+                        warn!(
+                            msg_type = "UpdateState",
+                            request_id = %request_id,
+                            old_state = ?old_state,
+                            new_state = ?state,
+                            error = %err,
+                            "Request state updated with error"
+                        );
+                    } else {
+                        debug!(
+                            msg_type = "UpdateState",
+                            request_id = %request_id,
+                            old_state = ?old_state,
+                            new_state = ?state,
+                            "Request state updated"
+                        );
                     }
                 } else {
+                    if let Some(ref err) = error {
+                        warn!(
+                            msg_type = "UpdateState",
+                            request_id = %request_id,
+                            state = ?state,
+                            error = %err,
+                            "New request tracked with error"
+                        );
+                    } else {
+                        debug!(
+                            msg_type = "UpdateState",
+                            request_id = %request_id,
+                            state = ?state,
+                            "New request tracked"
+                        );
+                    }
                     self.cache.put(
                         request_id,
                         RequestInfo {
@@ -113,12 +150,21 @@ impl Handler<RequestTracking> for RequestTracking {
                 version,
             } => {
                 if let Some(info) = self.cache.get_mut(&request_id) {
+                    let old_version = info.version;
                     info.version = version;
+                    debug!(
+                        msg_type = "UpdateVersion",
+                        request_id = %request_id,
+                        old_version = old_version,
+                        new_version = version,
+                        "Request version updated"
+                    );
                 } else {
-                    error!(
-                        TARGET_TRACKING,
-                        "An attempt was made to update the version of a request that is not registered. {}",
-                        request_id
+                    warn!(
+                        msg_type = "UpdateVersion",
+                        request_id = %request_id,
+                        version = version,
+                        "Request not found in cache"
                     );
                 };
 
@@ -126,8 +172,20 @@ impl Handler<RequestTracking> for RequestTracking {
             }
             RequestTrackingMessage::SearchRequest(request_id) => {
                 if let Some(info) = self.cache.get(&request_id) {
+                    debug!(
+                        msg_type = "SearchRequest",
+                        request_id = %request_id,
+                        state = ?info.state,
+                        version = info.version,
+                        "Request found in cache"
+                    );
                     Ok(RequestTrackingResponse::Info(info.clone()))
                 } else {
+                    debug!(
+                        msg_type = "SearchRequest",
+                        request_id = %request_id,
+                        "Request not found in cache"
+                    );
                     Ok(RequestTrackingResponse::NotFound)
                 }
             }

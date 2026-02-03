@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
     NotPersistentActor,
 };
 use ave_common::{
@@ -265,5 +265,21 @@ impl Handler<ValidationSchema> for ValidationSchema {
             }
         };
         Ok(())
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        error: ActorError,
+        ctx: &mut ActorContext<ValidationSchema>,
+    ) -> ChildAction {
+        error!(
+            governance_id = %self.governance_id,
+            schema_id = ?self.schema_id,
+            gov_version = self.gov_version,
+            error = %error,
+            "Child fault in validation schema"
+        );
+        emit_fail(ctx, error).await;
+        ChildAction::Stop
     }
 }

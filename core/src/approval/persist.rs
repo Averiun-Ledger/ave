@@ -16,6 +16,7 @@ use crate::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    Response,
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::{
@@ -111,17 +112,27 @@ impl ApprPersist {
         governance_id: &DigestIdentifier,
         gov_version: u64,
     ) -> Result<(), ActorError> {
+        let Some((.., network)) = &self.helpers else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Helpers are None".to_owned(),
+            });
+        };
+
         let metadata = get_metadata(ctx, &governance_id).await?;
         let governance =
             match GovernanceData::try_from(metadata.properties.clone()) {
                 Ok(gov) => gov,
                 Err(e) => {
-                    let e = format!(
-                        "can not convert governance from properties: {}",
-                        e
+                    error!(
+                        governance_id = %governance_id,
+                        error = %e,
+                        "Failed to convert governance from properties"
                     );
                     return Err(ActorError::FunctionalCritical {
-                        description: e,
+                        description: format!(
+                            "can not convert governance from properties: {}",
+                            e
+                        ),
                     });
                 }
             };
@@ -138,7 +149,7 @@ impl ApprPersist {
                     subject_id: governance_id.clone(),
                     other_node: self.node_key.clone(),
                 };
-                update_ledger_network(ctx, data).await?;
+                update_ledger_network(data, network.clone()).await?;
             }
             std::cmp::Ordering::Less => {
                 // TODO Por ahora no vamos hacer nada, pero esto quiere decir que el owner perdió el ledger
@@ -268,6 +279,9 @@ pub enum ApprPersistMessage {
         info: ComunicateInfo,
         sender: PublicKey,
     },
+    GetApproval {
+        state: Option<ApprovalState>,
+    },
     ChangeResponse {
         response: ApprovalStateRes,
     }, // Necesito poder emitir un evento de aprobación, no solo el automático
@@ -293,11 +307,21 @@ pub enum ApprPersistEvent {
 
 impl Event for ApprPersistEvent {}
 
+pub enum ApprPersistResponse {
+    Ok,
+    Approval {
+        request: ApprovalReq,
+        state: ApprovalState,
+    },
+}
+
+impl Response for ApprPersistResponse {}
+
 #[async_trait]
 impl Actor for ApprPersist {
     type Event = ApprPersistEvent;
     type Message = ApprPersistMessage;
-    type Response = ();
+    type Response = ApprPersistResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
@@ -347,13 +371,38 @@ impl Handler<ApprPersist> for ApprPersist {
         _sender: ActorPath,
         msg: ApprPersistMessage,
         ctx: &mut ActorContext<ApprPersist>,
-    ) -> Result<(), ActorError> {
+    ) -> Result<ApprPersistResponse, ActorError> {
         match msg {
+            ApprPersistMessage::GetApproval { state } => {
+                let res = if let Some(req) = &self.request
+                    && let Some(req_state) = &self.state
+                {
+                    if let Some(query) = state {
+                        if &query == req_state {
+                            ApprPersistResponse::Approval {
+                                request: req.content().clone(),
+                                state: query,
+                            }
+                        } else {
+                            ApprPersistResponse::Ok
+                        }
+                    } else {
+                        ApprPersistResponse::Approval {
+                            request: req.content().clone(),
+                            state: req_state.clone(),
+                        }
+                    }
+                } else {
+                    ApprPersistResponse::Ok
+                };
+
+                return Ok(res);
+            }
             ApprPersistMessage::MakeObsolete => {
                 let state = if let Some(state) = self.state.clone() {
                     state
                 } else {
-                    return Ok(());
+                    return Ok(ApprPersistResponse::Ok);
                 };
 
                 if state == ApprovalState::Pending {
@@ -519,7 +568,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         } else if state == ApprovalState::RespondedRejected {
                             false
                         } else {
-                            return Ok(());
+                            return Ok(ApprPersistResponse::Ok);
                         };
 
                         if let Err(e) = self
@@ -563,7 +612,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         received_sender = %sender,
                         "Unexpected sender"
                     );
-                    return Ok(());
+                    return Ok(ApprPersistResponse::Ok);
                 }
 
                 if info.request_id != self.request_id.to_string()
@@ -684,7 +733,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     } else if ApprovalState::RespondedRejected == state {
                         false
                     } else {
-                        return Ok(());
+                        return Ok(ApprPersistResponse::Ok);
                     };
 
                     let approval_req =
@@ -729,7 +778,7 @@ impl Handler<ApprPersist> for ApprPersist {
                 }
             }
         }
-        Ok(())
+        Ok(ApprPersistResponse::Ok)
     }
 
     async fn on_event(
@@ -787,6 +836,11 @@ impl PersistentActor for ApprPersist {
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
             ApprPersistEvent::ChangeState { state, .. } => {
+                debug!(
+                    event_type = "ChangeState",
+                    new_state = ?state,
+                    "Approval state changed"
+                );
                 self.state = Some(state.clone());
             }
             ApprPersistEvent::SafeState {
@@ -796,6 +850,13 @@ impl PersistentActor for ApprPersist {
                 version,
                 ..
             } => {
+                debug!(
+                    event_type = "SafeState",
+                    request_id = %request_id,
+                    version = version,
+                    new_state = ?state,
+                    "Approval state saved"
+                );
                 self.version = *version;
                 self.request_id.clone_from(request_id);
                 self.request = Some(*request.clone());

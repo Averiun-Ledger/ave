@@ -69,7 +69,6 @@ pub struct ValiWorker {
 impl ValiWorker {
     async fn check_governance(
         &self,
-        ctx: &mut ActorContext<ValiWorker>,
         gov_version: u64,
     ) -> Result<bool, ActorError> {
         match gov_version.cmp(&self.gov_version) {
@@ -84,7 +83,7 @@ impl ValiWorker {
                     subject_id: self.governance_id.clone(),
                     other_node: self.node_key.clone(),
                 };
-                update_ledger_network(ctx, data).await?;
+                update_ledger_network(data, self.network.clone()).await?;
                 let e = ActorError::Functional {
                     description: "Abort Validation, update is required"
                         .to_owned(),
@@ -1041,7 +1040,6 @@ impl Handler<ValiWorker> for ValiWorker {
                 // TODO MUCHO CUIDADO COn esto
                 let reboot = match self
                     .check_governance(
-                        ctx,
                         validation_req.content().get_gov_version(),
                     )
                     .await
@@ -1168,7 +1166,14 @@ impl Handler<ValiWorker> for ValiWorker {
         error: ActorError,
         ctx: &mut ActorContext<ValiWorker>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            node_key = %self.node_key,
+            governance_id = %self.governance_id,
+            gov_version = self.gov_version,
+            sn = self.sn,
+            error = %error,
+            "Child fault in validation worker"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

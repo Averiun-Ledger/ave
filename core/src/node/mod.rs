@@ -30,7 +30,7 @@ use crate::{
 };
 
 use ave_common::{
-    Namespace, SchemaType,
+    SchemaType,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
@@ -66,7 +66,7 @@ pub struct TransferData {
 }
 
 #[derive(
-    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Eq, PartialEq
 )]
 pub enum SubjectData {
     Tracker {
@@ -397,6 +397,7 @@ impl Node {
 /// Node message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeMessage {
+    GetGovernances,
     SignRequest(SignTypesNode),
     PendingTransfers,
     UpSubject {
@@ -418,12 +419,13 @@ impl Message for NodeMessage {}
 /// Node response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
+    Governances(Vec<DigestIdentifier>),
     SubjectData(Option<SubjectData>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
     IOwnerNewOwner {
         i_owner: bool,
-        i_new_owner: bool,
+        i_new_owner: Option<bool>,
     },
     AuthData {
         auth: bool,
@@ -586,6 +588,13 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
+            NodeMessage::GetGovernances => {
+                let mut gov_know = self.known_subjects.iter().filter(|x| x.1 == &SubjectData::Governance).map(|x| x.0.clone()).collect::<Vec<DigestIdentifier>>();
+                let gov_owned = self.owned_subjects.iter().filter(|x| x.1 == &SubjectData::Governance).map(|x| x.0.clone()).collect::<Vec<DigestIdentifier>>();
+                gov_know.append(&mut gov_owned);
+
+                return Ok(NodeResponse::Governances(gov_know));
+            }
             NodeMessage::ICanSendLastLedger(subject_id) => {
                 let subject_data = if self.reject_subjects.contains(&subject_id)
                 {
@@ -987,9 +996,9 @@ impl Handler<Node> for Node {
                 let i_new_owner = if let Some(data) =
                     self.transfer_subjects.get(&subject_id)
                 {
-                    data.new_owner == *self.our_key
+                    Some(data.new_owner == *self.our_key)
                 } else {
-                    false
+                    None
                 };
 
                 debug!(

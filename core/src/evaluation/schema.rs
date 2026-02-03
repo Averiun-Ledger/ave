@@ -229,4 +229,21 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
         };
         Ok(())
     }
+
+    async fn on_child_fault(
+        &mut self,
+        error: ActorError,
+        ctx: &mut ActorContext<EvaluationSchema>,
+    ) -> ave_actors::ChildAction {
+        error!(
+            governance_id = %self.governance_id,
+            schema_id = ?self.schema_id,
+            gov_version = self.gov_version,
+            sn = self.sn,
+            error = %error,
+            "Child fault in evaluation schema actor"
+        );
+        emit_fail(ctx, error).await;
+        ave_actors::ChildAction::Stop
+    }
 }

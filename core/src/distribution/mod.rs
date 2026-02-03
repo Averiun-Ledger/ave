@@ -6,7 +6,7 @@ use ave_actors::{
     NotPersistentActor,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use tracing::{Span, error, info_span};
+use tracing::{Span, debug, error, info_span};
 
 use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
@@ -19,8 +19,6 @@ use crate::{
 pub mod coordinator;
 pub mod error;
 pub mod worker;
-
-const TARGET_DISTRIBUTION: &str = "Ave-Distribution";
 
 #[derive(Debug, Clone)]
 pub enum DistributionType {
@@ -72,7 +70,15 @@ impl Distribution {
             .await;
         let distributor_actor = match child {
             Ok(child) => child,
-            Err(e) => return Err(e),
+            Err(e) => {
+                error!(
+                    subject_id = %self.subject_id,
+                    witness = %signer,
+                    error = %e,
+                    "Failed to create distributor coordinator"
+                );
+                return Err(e);
+            }
         };
 
         let request_id = match self.distribution_type {
@@ -155,6 +161,14 @@ impl Handler<Distribution> for Distribution {
                 self.subject_id =
                     ledger.content().event_request.content().get_subject_id();
 
+                debug!(
+                    msg_type = "Create",
+                    subject_id = %self.subject_id,
+                    witnesses_count = witnesses.len(),
+                    distribution_type = ?self.distribution_type,
+                    "Starting distribution to witnesses"
+                );
+
                 for witness in witnesses.iter() {
                     self.create_distributors(
                         ctx,
@@ -163,13 +177,37 @@ impl Handler<Distribution> for Distribution {
                     )
                     .await?
                 }
+
+                debug!(
+                    msg_type = "Create",
+                    subject_id = %self.subject_id,
+                    "All distributor coordinators created"
+                );
             }
             DistributionMessage::Response { sender } => {
-                if self.check_witness(sender) && self.witnesses.is_empty() {
+                debug!(
+                    msg_type = "Response",
+                    subject_id = %self.subject_id,
+                    sender = %sender,
+                    remaining_witnesses = self.witnesses.len(),
+                    "Distribution response received"
+                );
+
+                if self.check_witness(sender.clone()) && self.witnesses.is_empty()
+                {
+                    debug!(
+                        msg_type = "Response",
+                        subject_id = %self.subject_id,
+                        "All witnesses responded, ending distribution"
+                    );
+
                     if let Err(e) = self.end_request(ctx).await {
                         error!(
-                            TARGET_DISTRIBUTION,
-                            "Response, can not end distribution: {}", e
+                            msg_type = "Response",
+                            subject_id = %self.subject_id,
+                            request_id = %self.request_id,
+                            error = %e,
+                            "Failed to end distribution request"
                         );
                         return Err(emit_fail(ctx, e).await);
                     };
@@ -185,7 +223,13 @@ impl Handler<Distribution> for Distribution {
         error: ActorError,
         ctx: &mut ActorContext<Distribution>,
     ) -> ChildAction {
-        error!(TARGET_DISTRIBUTION, "OnChildFault, {}", error);
+        error!(
+            subject_id = %self.subject_id,
+            request_id = %self.request_id,
+            distribution_type = ?self.distribution_type,
+            error = %error,
+            "Child fault in distribution actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

@@ -879,9 +879,10 @@ impl Handler<Tracker> for Tracker {
         ctx: &mut ActorContext<Tracker>,
     ) -> ChildAction {
         error!(
-            error = %error,
             subject_id = %self.subject_metadata.subject_id,
-            "Child fault occurred"
+            sn = self.subject_metadata.sn,
+            error = %error,
+            "Child fault in tracker"
         );
         emit_fail(ctx, error).await;
         ChildAction::Stop

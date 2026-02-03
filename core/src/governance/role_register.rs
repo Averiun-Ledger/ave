@@ -189,15 +189,31 @@ impl Actor for RoleRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let prefix = ctx.path().parent().key();
-        self.init_store("role_register", Some(prefix), true, ctx)
+        if let Err(e) = self
+            .init_store("role_register", Some(prefix), true, ctx)
             .await
+        {
+            error!(
+                error = %e,
+                "Failed to initialize role_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop role_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -480,13 +496,15 @@ impl Handler<RoleRegister> for RoleRegister {
         ctx: &mut ActorContext<RoleRegister>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
+            let version = match &event {
+                RoleRegisterEvent::Update { version, .. } => *version,
+            };
             error!(
+                version = version,
                 error = %e,
-                "Failed to persist roles register event"
+                "Failed to persist role register event"
             );
             emit_fail(ctx, e).await;
-        } else {
-            debug!("Roles register event persisted successfully");
         }
     }
 }
@@ -592,6 +610,18 @@ impl PersistentActor for RoleRegister {
                         }
                     }
                 }
+
+                debug!(
+                    event_type = "Update",
+                    version = version,
+                    new_approvers_count = new_approvers.len(),
+                    remove_approvers_count = remove_approvers.len(),
+                    new_evaluators_count = new_evaluators.len(),
+                    remove_evaluators_count = remove_evaluators.len(),
+                    new_validators_count = new_validators.len(),
+                    remove_validators_count = remove_validators.len(),
+                    "Role register state updated"
+                );
             }
         }
         Ok(())

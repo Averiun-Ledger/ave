@@ -14,19 +14,31 @@ pub struct LedgerDB {
     pub sn: u64,
     pub event_request_timestamp: u64,
     pub event_ledger_timestamp: u64,
-    pub sink_timeout: u64,
+    pub sink_timestamp: u64,
     pub event: RequestEventDB,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AbortDB {
+    pub request_id: String,
+    pub subject_id: String,
+    pub sn: u64,
+    pub error: String,
+    pub who: String,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum RequestEventDB {
     Create,
     TrackerFact {
         payload: Value,
         evaluation_error: Option<String>,
     },
-    GovFact {
+    GovernanceFact {
         payload: Value,
         evaluation_error: Option<String>,
         approval_success: Option<bool>,
@@ -36,7 +48,7 @@ pub enum RequestEventDB {
         new_owner: String,
     },
     TrackerConfirm,
-    GovConfirm {
+    GovernanceConfirm {
         name_old_owner: Option<String>,
         evaluation_error: Option<String>,
     },
@@ -68,6 +80,14 @@ pub struct SubjectDB {
 pub struct PaginatorEvents {
     pub paginator: Paginator,
     pub events: Vec<LedgerDB>,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct PaginatorAborts {
+    pub paginator: Paginator,
+    pub events: Vec<AbortDB>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,4 +153,15 @@ impl Display for RequestState {
 pub struct RequestData {
     pub request_id: String,
     pub subject_id: String,
+}
+
+/// Time range filter for querying events by timestamp.
+/// Both `from` and `to` are optional and should be ISO 8601 strings (e.g., "2024-01-15T14:30:00Z").
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TimeRange {
+    /// Start of the range (inclusive). ISO 8601 format.
+    pub from: Option<String>,
+    /// End of the range (inclusive). ISO 8601 format.
+    pub to: Option<String>,
 }

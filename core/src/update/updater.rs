@@ -234,7 +234,11 @@ impl Handler<Updater> for Updater {
                 ctx.stop(None).await;
             }
             _ => {
-                error!(error = %error, "Unexpected child error");
+                error!(
+                    node = %self.node,
+                    error = %error,
+                    "Unexpected child error"
+                );
             }
         };
     }
@@ -244,7 +248,11 @@ impl Handler<Updater> for Updater {
         error: ActorError,
         ctx: &mut ActorContext<Updater>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            node = %self.node,
+            error = %error,
+            "Child fault in updater actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

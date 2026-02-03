@@ -458,13 +458,14 @@ pub async fn abort_req<A>(
     request_id: DigestIdentifier,
     who: PublicKey,
     reason: String,
+    sn: u64
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
 {
     let req_actor = ctx.get_parent::<RequestManager>().await?;
     req_actor
-        .tell(RequestManagerMessage::Abort { request_id, who, reason })
+        .tell(RequestManagerMessage::Abort { request_id, who, reason, sn })
         .await
 }
 

@@ -394,7 +394,7 @@ impl Actor for WitnessesRegister {
         {
             error!(
                 error = %e,
-                "Failed to initialize transfer register store"
+                "Failed to initialize witnesses_register store"
             );
             return Err(e);
         }
@@ -408,7 +408,7 @@ impl Actor for WitnessesRegister {
         if let Err(e) = self.stop_store(ctx).await {
             error!(
                 error = %e,
-                "Failed to stop transfer register store"
+                "Failed to stop witnesses_register store"
             );
             return Err(e);
         }
@@ -432,16 +432,34 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
                     None
                 };
 
+                debug!(
+                    msg_type = "GetTrackerSnCreator",
+                    subject_id = %subject_id,
+                    found = data.is_some(),
+                    "Tracker sn creator lookup completed"
+                );
+
                 return Ok(WitnessesRegisterResponse::TrackerCreatorSn {
                     data,
                 });
             }
             WitnessesRegisterMessage::GetSnGov => {
+                debug!(
+                    msg_type = "GetSnGov",
+                    sn = self.gov_sn,
+                    "Governance sn retrieved"
+                );
                 return Ok(WitnessesRegisterResponse::GovSn { sn: self.gov_sn });
             }
             WitnessesRegisterMessage::UpdateSnGov { sn } => {
                 self.on_event(WitnessesRegisterEvent::UpdateSnGov { sn }, ctx)
                     .await;
+
+                debug!(
+                    msg_type = "UpdateSnGov",
+                    sn = sn,
+                    "Governance sn updated"
+                );
             }
             WitnessesRegisterMessage::UpdateCreatorsWitnesses {
                 version,
@@ -451,6 +469,8 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
                 new_witnesses,
                 remove_witnesses,
             } => {
+                let new_creator_count = new_creator.len();
+                let remove_creator_count = remove_creator.len();
                 self.on_event(
                     WitnessesRegisterEvent::UpdateCreatorsWitnesses {
                         version,
@@ -463,6 +483,14 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "UpdateCreatorsWitnesses",
+                    version = version,
+                    new_creator_count = new_creator_count,
+                    remove_creator_count = remove_creator_count,
+                    "Creators and witnesses updated"
+                );
             }
             WitnessesRegisterMessage::UpdateSn { sn, subject_id } => {
                 self.on_event(
@@ -652,7 +680,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
             error!(
                 event = ?event,
                 error = %e,
-                "Failed to persist transfer register event"
+                "Failed to persist witnesses register event"
             );
             emit_fail(ctx, e).await;
         }
@@ -672,6 +700,12 @@ impl PersistentActor for WitnessesRegister {
         match event {
             WitnessesRegisterEvent::UpdateSnGov { sn } => {
                 self.gov_sn = *sn;
+
+                debug!(
+                    event_type = "UpdateSnGov",
+                    sn = sn,
+                    "Governance sn updated in state"
+                );
             }
             WitnessesRegisterEvent::UpdateCreatorsWitnesses {
                 version,
@@ -771,6 +805,14 @@ impl PersistentActor for WitnessesRegister {
                         }
                     }
                 }
+
+                debug!(
+                    event_type = "UpdateCreatorsWitnesses",
+                    version = version,
+                    new_creator_count = new_creator.len(),
+                    remove_creator_count = remove_creator.len(),
+                    "Creators and witnesses updated in state"
+                );
             }
             WitnessesRegisterEvent::UpdateSn { subject_id, sn } => {
                 if let Some(data) = self.subjects.get_mut(subject_id) {

@@ -358,7 +358,12 @@ impl Handler<Approval> for Approval {
         error: ActorError,
         ctx: &mut ActorContext<Approval>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            error = %error,
+            "Child fault in approval actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

@@ -109,15 +109,31 @@ impl Actor for SnRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let prefix = ctx.path().parent().key();
-        self.init_store("sn_register", Some(prefix), false, ctx)
+        if let Err(e) = self
+            .init_store("sn_register", Some(prefix), false, ctx)
             .await
+        {
+            error!(
+                error = %e,
+                "Failed to initialize sn_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn pre_stop(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop sn_register store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -134,22 +150,31 @@ impl Handler<SnRegister> for SnRegister {
                 subject_id,
                 gov_version,
             } => {
-                if let Some(gov_version_register) =
+                let response = if let Some(gov_version_register) =
                     self.register.get(&subject_id)
                     && let Some(last) = gov_version_register.last()
                 {
                     if gov_version > *last.0 {
-                        return Ok(SnRegisterResponse::Sn(SnLimit::LastSn));
+                        SnRegisterResponse::Sn(SnLimit::LastSn)
                     } else if let Some(sn) =
                         gov_version_register.get_prev_or_equal(gov_version)
                     {
-                        return Ok(SnRegisterResponse::Sn(SnLimit::Sn(sn)));
+                        SnRegisterResponse::Sn(SnLimit::Sn(sn))
                     } else {
-                        return Ok(SnRegisterResponse::Sn(SnLimit::NotSn));
+                        SnRegisterResponse::Sn(SnLimit::NotSn)
                     }
                 } else {
-                    return Ok(SnRegisterResponse::Sn(SnLimit::NotSn));
-                }
+                    SnRegisterResponse::Sn(SnLimit::NotSn)
+                };
+
+                debug!(
+                    msg_type = "GetSn",
+                    subject_id = %subject_id,
+                    gov_version = gov_version,
+                    "Sn lookup completed"
+                );
+
+                Ok(response)
             }
             SnRegisterMessage::RegisterSn {
                 subject_id,
@@ -158,13 +183,21 @@ impl Handler<SnRegister> for SnRegister {
             } => {
                 self.on_event(
                     SnRegisterEvent::RegisterSn {
-                        subject_id,
+                        subject_id: subject_id.clone(),
                         gov_version,
                         sn,
                     },
                     ctx,
                 )
                 .await;
+
+                debug!(
+                    msg_type = "RegisterSn",
+                    subject_id = %subject_id,
+                    gov_version = gov_version,
+                    sn = sn,
+                    "Sn registered"
+                );
 
                 Ok(SnRegisterResponse::Ok)
             }
@@ -178,12 +211,11 @@ impl Handler<SnRegister> for SnRegister {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
+                event = ?event,
                 error = %e,
-                "Failed to persist event"
+                "Failed to persist sn register event"
             );
             emit_fail(ctx, e).await;
-        } else {
-            debug!("Event persisted successfully");
         }
     }
 }
@@ -209,6 +241,14 @@ impl PersistentActor for SnRegister {
                     .entry(subject_id.to_owned())
                     .or_default()
                     .insert(*gov_version, *sn);
+
+                debug!(
+                    event_type = "RegisterSn",
+                    subject_id = %subject_id,
+                    gov_version = gov_version,
+                    sn = sn,
+                    "Sn register state updated"
+                );
             }
         };
 

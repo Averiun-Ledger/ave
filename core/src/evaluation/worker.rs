@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    Error,
     evaluation::{
         request::EvaluateData,
         response::{
@@ -129,7 +128,6 @@ impl EvalWorker {
 
     async fn check_governance(
         &self,
-        ctx: &mut ActorContext<EvalWorker>,
         gov_version: u64,
     ) -> Result<bool, ActorError> {
         match gov_version.cmp(&self.gov_version) {
@@ -144,7 +142,7 @@ impl EvalWorker {
                     subject_id: self.governance_id.clone(),
                     other_node: self.node_key.clone(),
                 };
-                update_ledger_network(ctx, data).await?;
+                update_ledger_network(data, self.network.clone()).await?;
                 let e = ActorError::Functional {
                     description: "Abort evaluation, update is required"
                         .to_owned(),
@@ -237,10 +235,10 @@ impl EvalWorker {
     fn generate_json_patch(
         prev_state: &Value,
         new_state: &Value,
-    ) -> Result<Value, Error> {
+    ) -> Result<Value, EvaluatorError> {
         let patch = diff(prev_state, new_state);
         serde_json::to_value(patch).map_err(|e| {
-            Error::JSONPatch(format!("Can not generate json patch {}", e))
+            EvaluatorError::InternalError(format!("Can not generate json patch {}", e))
         })
     }
 
@@ -290,8 +288,7 @@ impl EvalWorker {
                 let patch = Self::generate_json_patch(
                     &state.0,
                     &evaluation.final_state.0,
-                )
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+                )?;
 
                 (ValueWrapper(patch), properties_hash)
             }
@@ -305,8 +302,7 @@ impl EvalWorker {
                 let patch = Self::generate_json_patch(
                     &state.0,
                     &evaluation.final_state.0,
-                )
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+                )?;
 
                 (ValueWrapper(patch), properties_hash)
             }
@@ -329,8 +325,7 @@ impl EvalWorker {
                 let patch = Self::generate_json_patch(
                     &state.0,
                     &evaluation.final_state.0,
-                )
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+                )?;
 
                 (ValueWrapper(patch), properties_hash)
             }
@@ -619,7 +614,7 @@ impl Handler<EvalWorker> for EvalWorker {
 
                 // TODO MUCHO CUIDADO COn esto
                 let reboot = match self
-                    .check_governance(ctx, evaluation_req.content().gov_version)
+                    .check_governance(evaluation_req.content().gov_version)
                     .await
                 {
                     Ok(reboot) => reboot,
@@ -758,7 +753,14 @@ impl Handler<EvalWorker> for EvalWorker {
         error: ActorError,
         ctx: &mut ActorContext<EvalWorker>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            governance_id = %self.governance_id,
+            gov_version = self.gov_version,
+            sn = self.sn,
+            node_key = %self.node_key,
+            error = %error,
+            "Child fault in evaluation worker"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

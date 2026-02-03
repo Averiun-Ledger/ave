@@ -636,7 +636,7 @@ impl Handler<DistriWorker> for DistriWorker {
                             }
                         };
 
-                    if !i_new_owner
+                    if !i_new_owner.unwrap_or_default()
                         && !i_owner
                         && !is_gov
                         && let Err(e) =
@@ -888,6 +888,7 @@ impl Handler<DistriWorker> for DistriWorker {
                             }
                         };
 
+                    let i_new_owner = i_new_owner.unwrap_or_default();
                     if !i_new_owner
                         && !i_owner
                         && !is_gov

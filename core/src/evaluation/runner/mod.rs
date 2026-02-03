@@ -1246,6 +1246,7 @@ impl Handler<Runner> for Runner {
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
             Ok((result, compilations)) => {
                 debug!(
+                    msg_type = "Execute",
                     approval_required = result.approval_required,
                     compilations_count = compilations.len(),
                     is_owner = msg.is_owner,
@@ -1258,6 +1259,7 @@ impl Handler<Runner> for Runner {
             }
             Err(e) => {
                 error!(
+                    msg_type = "Execute",
                     error = %e,
                     is_owner = msg.is_owner,
                     "Contract execution failed"

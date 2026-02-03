@@ -309,7 +309,12 @@ impl Handler<ApprLight> for ApprLight {
                             emit_fail(ctx, e).await;
                         }
 
-                        debug!("Timeout response sent to approval actor");
+                        debug!(
+                            request_id = %self.request_id,
+                            version = self.version,
+                            node_key = %self.node_key,
+                            "Timeout response sent to approval actor"
+                        );
                     }
                     Err(e) => {
                         error!(
@@ -324,7 +329,13 @@ impl Handler<ApprLight> for ApprLight {
                 ctx.stop(None).await;
             }
             _ => {
-                error!(error = ?error, "Unexpected child error");
+                error!(
+                    request_id = %self.request_id,
+                    version = self.version,
+                    node_key = %self.node_key,
+                    error = ?error,
+                    "Unexpected child error"
+                );
             }
         };
     }
@@ -334,7 +345,13 @@ impl Handler<ApprLight> for ApprLight {
         error: ActorError,
         ctx: &mut ActorContext<ApprLight>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            node_key = %self.node_key,
+            error = %error,
+            "Child fault in approval light actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }

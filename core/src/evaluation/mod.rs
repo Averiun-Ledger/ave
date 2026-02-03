@@ -379,14 +379,32 @@ impl Handler<Evaluation> for Evaluation {
                                 if let Err(e) = abort_req(
                                     ctx,
                                     self.request_id.clone(),
-                                    sender,
-                                    error,
+                                    sender.clone(),
+                                    error.clone(),
+                                    self.request.content().sn
                                 )
                                 .await
                                 {
-                                    error!("");
+                                    error!(
+                                        msg_type = "Response",
+                                        request_id = %self.request_id,
+                                        sender = %sender,
+                                        abort_reason = %error,
+                                        error = %e,
+                                        "Failed to abort request"
+                                    );
                                     return Err(emit_fail(ctx, e).await);
                                 };
+
+                                debug!(
+                                    msg_type = "Response",
+                                    request_id = %self.request_id,
+                                    sender = %sender,
+                                    abort_reason = %error,
+                                    "Evaluation aborted"
+                                );
+
+                                return Ok(());
                             }
                             EvaluationRes::Error {
                                 error,
@@ -576,7 +594,12 @@ impl Handler<Evaluation> for Evaluation {
         error: ActorError,
         ctx: &mut ActorContext<Evaluation>,
     ) -> ChildAction {
-        error!(error = %error, "Child fault occurred");
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            error = %error,
+            "Child fault in evaluation actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
