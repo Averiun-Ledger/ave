@@ -1,4 +1,6 @@
-use ave_actors::{Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler};
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
+};
 
 use ave_common::{
     identity::{DigestIdentifier, PublicKey},
@@ -6,9 +8,19 @@ use ave_common::{
 };
 
 use crate::{
-    approval::persist::{ApprPersist, ApprPersistMessage}, governance::{
-        Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData, witnesses_register::{WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse},
-    }, model::common::check_subject_creation, node::{Node, NodeMessage}, subject::{Metadata, SignedLedger}, tracker::{Tracker, TrackerMessage, TrackerResponse}
+    approval::persist::{ApprPersist, ApprPersistMessage},
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse,
+        data::GovernanceData,
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
+    },
+    model::common::check_subject_creation,
+    node::{Node, NodeMessage},
+    subject::{Metadata, SignedLedger},
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 pub async fn get_gov<A>(
@@ -82,6 +94,25 @@ where
     }
 }
 
+pub async fn get_version<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<u64, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!("/user/node/{}", governance_id));
+    let actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = actor.ask(GovernanceMessage::GetVersion).await?;
+
+    match response {
+        GovernanceResponse::Version(version) => Ok(version),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Version".to_owned(),
+            path,
+        }),
+    }
+}
 
 pub async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,
@@ -223,8 +254,8 @@ where
 pub async fn get_tracker_sn_creator<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier
-) -> Result< Option<(PublicKey, u64)>, ActorError>
+    subject_id: &DigestIdentifier,
+) -> Result<Option<(PublicKey, u64)>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -236,7 +267,11 @@ where
     let actor: ActorRef<WitnessesRegister> =
         ctx.system().get_actor(&actor_path).await?;
 
-    let response = actor.ask(WitnessesRegisterMessage::GetTrackerSnCreator { subject_id: subject_id.clone() } ).await?;
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerSnCreator {
+            subject_id: subject_id.clone(),
+        })
+        .await?;
 
     match response {
         WitnessesRegisterResponse::TrackerCreatorSn { data } => Ok(data),
@@ -254,10 +289,8 @@ pub async fn make_obsolete<A>(
 where
     A: Actor + Handler<A>,
 {
-    let actor_path = ActorPath::from(format!(
-        "/user/node/{}/approver",
-        governance_id
-    ));
+    let actor_path =
+        ActorPath::from(format!("/user/node/{}/approver", governance_id));
 
     let actor: ActorRef<ApprPersist> =
         ctx.system().get_actor(&actor_path).await?;

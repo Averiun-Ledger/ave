@@ -185,6 +185,18 @@ impl Subject for Governance {
             .await
     }
 
+    async fn eol(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::EOLSubject {
+            subject_id: self.subject_metadata.subject_id.clone(),
+            i_owner: *self.our_key == self.subject_metadata.owner,
+        })
+        .await
+    }
+
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1610,6 +1622,8 @@ impl Governance {
                             .await?;
                     }
                     EventRequest::EOL(..) => {
+                        self.eol(ctx).await?;
+
                         Self::register(
                             ctx,
                             RegisterMessage::EOLGov {
@@ -1750,6 +1764,7 @@ pub enum GovernanceMessage {
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
+    GetVersion
 }
 
 impl Message for GovernanceMessage {}
@@ -1769,6 +1784,7 @@ pub enum GovernanceResponse {
     Governance(Box<GovernanceData>),
     NewCompilers(Vec<SchemaType>),
     Sn(u64),
+    Version(u64),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -1949,6 +1965,9 @@ impl Handler<Governance> for Governance {
         ctx: &mut ActorContext<Governance>,
     ) -> Result<GovernanceResponse, ActorError> {
         match msg {
+            GovernanceMessage::GetVersion => {
+                Ok(GovernanceResponse::Version(self.properties.version))
+            }
             GovernanceMessage::CreateCompilers(compilers) => {
                 let new_compilers =
                     match Self::create_compilers(ctx, &compilers).await {

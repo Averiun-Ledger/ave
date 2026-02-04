@@ -161,11 +161,12 @@ impl DistriWorker {
                     governance_id,
                     schema_id,
                     namespace,
+                    ..
                 } => {
                     let namespace = Namespace::from(namespace.clone());
                     (schema_id.clone(), namespace, Some(governance_id.clone()))
                 }
-                SubjectData::Governance => {
+                SubjectData::Governance { .. } => {
                     (SchemaType::Governance, Namespace::new(), None)
                 }
             }
@@ -260,6 +261,7 @@ impl DistriWorker {
                 governance_id,
                 schema_id,
                 namespace,
+                ..
             } => {
                 let Some(sn) = check_witness_access(
                     ctx,
@@ -276,7 +278,7 @@ impl DistriWorker {
 
                 Ok((sn, false))
             }
-            SubjectData::Governance => {
+            SubjectData::Governance { .. }=> {
                 let gov = get_gov(ctx, &subject_id).await.map_err(|e| {
                     DistributorError::GetGovernanceFailed {
                         details: e.to_string(),

@@ -854,6 +854,11 @@ where
         gov_version: u64,
     ) -> Result<(), ActorError>;
 
+    async fn eol(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError>;
+
     fn apply_patch(
         &mut self,
         json_patch: ValueWrapper,

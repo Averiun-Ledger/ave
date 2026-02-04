@@ -146,6 +146,18 @@ impl Subject for Tracker {
             .await
     }
 
+    async fn eol(
+        &self,
+    ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::EOLSubject {
+            subject_id:self.subject_metadata.subject_id.clone(),
+            i_owner: *self.our_key == self.subject_metadata.owner
+        })
+        .await
+    }
+
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -610,6 +622,8 @@ impl Tracker {
                         .await;
                     }
                     EventRequest::EOL(..) => {
+                        self.eol(ctx).await?;
+
                         Self::register(
                             ctx,
                             RegisterMessage::EOLSubj {

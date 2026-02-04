@@ -207,20 +207,10 @@ impl ValiWorker {
             });
         }
 
-        match &metadata.schema_id {
-            SchemaType::Type(schema_id) => {
-                if schema_id.is_empty() {
-                    return Err(ValidatorError::InvalidData {
-                        value: "metadata schema_id",
-                    });
-                }
-            }
-            SchemaType::AllSchemas => {
-                return Err(ValidatorError::InvalidData {
-                    value: "metadata schema_id",
-                });
-            }
-            _ => {}
+        if !metadata.schema_id.is_valid_in_request() {
+            return Err(ValidatorError::InvalidData {
+                value: "metadata schema_id",
+            });
         };
 
         if is_gov && !metadata.namespace.is_empty() {
@@ -803,6 +793,32 @@ impl ValiWorker {
                             return Err(ValidatorError::InvalidData {
                                 value: "create event description",
                             });
+                        }
+
+                        if !create.schema_id.is_valid_in_request() {
+                            return Err(ValidatorError::InvalidData {
+                                value: "create event schema_id",
+                            });
+                        }
+
+                        if create.schema_id.is_gov() {
+                            if !create.governance_id.is_empty() {
+                                return Err(ValidatorError::InvalidData {
+                                    value: "create event governance_id",
+                                });
+                            }
+
+                            if !create.namespace.is_empty() {
+                                return Err(ValidatorError::InvalidData {
+                                    value: "create event namespace",
+                                });
+                            }
+                        } else {
+                            if create.governance_id.is_empty() {
+                                return Err(ValidatorError::InvalidData {
+                                    value: "create event governance_id",
+                                });
+                            }
                         }
 
                         let subject_id =

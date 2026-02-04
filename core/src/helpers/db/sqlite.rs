@@ -17,6 +17,7 @@ use tracing::{debug, error};
 use super::{DatabaseError, Querys};
 use crate::external_db::{DBManager, DBManagerMessage};
 use crate::request::manager::RequestManagerEvent;
+use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};
 
@@ -146,7 +147,7 @@ impl Querys for SqliteLocal {
 
         let sql = format!(
             r#"
-            SELECT request_id, subject_id, sn, error, who
+            SELECT request_id, subject_id, sn, error, who, abort_type
             FROM aborts
             WHERE {}
             ORDER BY {}
@@ -166,14 +167,18 @@ impl Querys for SqliteLocal {
 
         let aborts: Vec<AbortDB> = stmt
             .query_map(params_refs.as_slice(), |row| {
-                let sn =
-                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            Type::Integer,
-                            Box::new(e),
-                        )
-                    })?;
+                let sn_opt: Option<i64> = row.get(2)?;
+                let sn = sn_opt
+                    .map(|v| {
+                        u64::try_from(v).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                Type::Integer,
+                                Box::new(e),
+                            )
+                        })
+                    })
+                    .transpose()?;
 
                 Ok(AbortDB {
                     request_id: row.get(0)?,
@@ -181,6 +186,7 @@ impl Querys for SqliteLocal {
                     sn,
                     error: row.get(3)?,
                     who: row.get(4)?,
+                    abort_type: row.get(5)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -836,28 +842,33 @@ impl SqliteLocal {
         &self,
         request_id: String,
         subject_id: String,
-        sn: u64,
+        sn: Option<u64>,
         error: String,
         who: String,
+        abort_type: String
     ) -> Result<(), DatabaseError> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
-        let sn_i64 = i64::try_from(sn).map_err(|_| {
+        let sn_i64 = if let Some(sn) = sn {
+            Some(i64::try_from(sn).map_err(|_| {
             DatabaseError::IntegerConversion(format!(
                 "sn out of range for SQLite INTEGER (i64): {}",
                 sn
             ))
-        })?;
+        })?)
+        } else {
+            None
+        };
 
         conn.execute(
             r#"
         INSERT OR REPLACE INTO aborts (
-            request_id, subject_id, sn, error, who
+            request_id, subject_id, sn, error, who, abort_type
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5
+            ?1, ?2, ?3, ?4, ?5, ?6
         )
         "#,
-            params![request_id, subject_id, sn_i64, error, who],
+            params![request_id, subject_id, sn_i64, error, who, abort_type],
         )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -939,33 +950,28 @@ impl Subscriber<SinkDataEvent> for SqliteLocal {
 }
 
 #[async_trait]
-impl Subscriber<RequestManagerEvent> for SqliteLocal {
-    async fn notify(&self, event: RequestManagerEvent) {
-        let RequestManagerEvent::Abort {
-            request_id,
-            subject_id,
-            who,
-            reason,
-            sn,
-        } = event
-        else {
-            return;
-        };
+impl Subscriber<RequestTrackingEvent> for SqliteLocal {
+    async fn notify(&self, event: RequestTrackingEvent) {
+        let request_id = event.request_id.clone();
+        let subject_id = event.subject_id.clone();
+        let sn = event.sn;
+        let who = event.who.clone();
 
         if let Err(e) = self
             .save_abort(
-                request_id.to_string(),
-                subject_id.to_string(),
-                sn,
-                reason.to_string(),
-                who.to_string(),
+                event.request_id,
+                event.subject_id,
+                event.sn,
+                event.error,
+                event.who,
+                event.abort_type,
             )
             .await
         {
             error!(
                 subject_id = %subject_id,
                 request_id = %request_id,
-                sn = sn,
+                sn = ?sn,
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
@@ -974,7 +980,7 @@ impl Subscriber<RequestManagerEvent> for SqliteLocal {
                 error!(
                     subject_id = %subject_id,
                     request_id = %request_id,
-                    sn = sn,
+                    sn = ?sn,
                     error = %e,
                     "Failed to notify DBManager about abort save error"
                 );
@@ -983,7 +989,7 @@ impl Subscriber<RequestManagerEvent> for SqliteLocal {
             debug!(
                 subject_id = %subject_id,
                 request_id = %request_id,
-                sn = sn,
+                sn = ?sn,
                 who = %who,
                 "Abort record saved to SQLite successfully"
             );

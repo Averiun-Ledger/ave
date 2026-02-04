@@ -88,6 +88,19 @@ impl SchemaType {
             }
         }
     }
+
+    pub fn is_valid_in_request(&self) -> bool {
+        match self {
+            SchemaType::Governance => true,
+            SchemaType::AllSchemas => false,
+            SchemaType::Type(schema_id) => {
+                !schema_id.is_empty()
+                    && schema_id != &ReservedWords::Governance.to_string()
+                    && schema_id != &ReservedWords::AllSchemas.to_string()
+                    && schema_id.trim().len() == schema_id.len()
+            }
+        }
+    }
 }
 
 impl Display for SchemaType {

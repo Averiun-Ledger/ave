@@ -91,6 +91,7 @@ impl Auth {
                     governance_id,
                     schema_id,
                     namespace,
+                    ..
                 } => {
                     if let Some((creator, sn)) =
                         get_tracker_sn_creator(ctx, governance_id, subject_id)
@@ -122,7 +123,7 @@ impl Auth {
                         (HashSet::default(), None)
                     }
                 }
-                SubjectData::Governance => {
+                SubjectData::Governance { .. } => {
                     let gov = get_gov(ctx, subject_id).await?;
                     let witnesses = gov
                         .get_witnesses(WitnessesData::Gov)

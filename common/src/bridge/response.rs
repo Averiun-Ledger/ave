@@ -23,9 +23,10 @@ pub struct LedgerDB {
 pub struct AbortDB {
     pub request_id: String,
     pub subject_id: String,
-    pub sn: u64,
+    pub sn: Option<u64>,
     pub error: String,
     pub who: String,
+    pub abort_type: String
 }
 
 
@@ -103,7 +104,6 @@ pub struct Paginator {
 pub struct RequestInfo {
     pub state: RequestState,
     pub version: u64,
-    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -111,9 +111,20 @@ pub struct RequestInfo {
 pub enum RequestState {
     // Handler
     InQueue,
-    Invalid,
+    Handling,
+    Invalid {
+        subject_id: String,
+        who: String,
+        sn: Option<u64>,
+        error: String
+    },
     // Manager
-    Abort,
+    Abort {
+        subject_id: String,
+        who: String,
+        sn: Option<u64>,
+        error: String
+    },
     Reboot,
     RebootDiff { seconds: u64, count: u64 },
     RebootTimeOut { seconds: u64, count: u64 },
@@ -127,9 +138,26 @@ pub enum RequestState {
 impl Display for RequestState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestState::Abort => write!(f, "Abort"),
+            RequestState::Handling => write!(f, "Handling"),
+            RequestState::Abort { subject_id, who, sn, error } => {
+                let sn_text = if let Some(sn) = sn {
+                    format!("{sn}")
+                } else {
+                    "None".to_string()
+                };
+
+                write!(f, "Abort, subject_id: {}, who: {}, sn: {}, error: {}",subject_id, who, sn_text, error )
+            },
             RequestState::InQueue => write!(f, "In Queue"),
-            RequestState::Invalid => write!(f, "Invalid"),
+            RequestState::Invalid{ subject_id, who, sn, error } => {
+                let sn_text = if let Some(sn) = sn {
+                    format!("{sn}")
+                } else {
+                    "None".to_string()
+                };
+
+                write!(f, "Abort, subject_id: {}, who: {}, sn: {}, error: {}",subject_id, who, sn_text, error )
+            },
             RequestState::Finish => write!(f, "Finish"),
             RequestState::Reboot => write!(f, "Reboot"),
             RequestState::RebootDiff { seconds, count } => {

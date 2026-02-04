@@ -47,9 +47,10 @@ CREATE TABLE IF NOT EXISTS subjects (
 CREATE TABLE IF NOT EXISTS aborts (
     request_id TEXT NOT NULL,
     subject_id TEXT NOT NULL,
-    sn INTEGER NOT NULL,
+    sn INTEGER,
     error TEXT NOT NULL,
     who TEXT NOT NULL,
+    abort_type TEXT NOT NULL,
     PRIMARY KEY (request_id)
 );
 -- =============================================================================

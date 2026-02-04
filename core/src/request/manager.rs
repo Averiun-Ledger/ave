@@ -40,6 +40,7 @@ use crate::model::request::EventRequestType;
 use crate::node::SubjectData;
 use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;
+use crate::request::{RequestHandler, RequestHandlerMessage};
 use crate::subject::{Metadata, SignedLedger};
 
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
@@ -86,9 +87,9 @@ pub enum RebootType {
 }
 
 pub struct InitRequestManager {
-    our_key: Arc<PublicKey>,
-    subject_id: DigestIdentifier,
-    helpers: (HashAlgorithm, Arc<NetworkSender>),
+    pub our_key: Arc<PublicKey>,
+    pub subject_id: DigestIdentifier,
+    pub helpers: (HashAlgorithm, Arc<NetworkSender>),
 }
 
 impl BorshSerialize for RequestManager {
@@ -390,9 +391,8 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
+                request_id: self.id.clone(),
                 state: RequestState::Evaluation,
-                error: None,
             },
         )
         .await?;
@@ -496,9 +496,8 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
+                request_id: self.id.clone(),
                 state: RequestState::Approval,
-                error: None,
             },
         )
         .await?;
@@ -747,9 +746,8 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
+                request_id: self.id.clone(),
                 state: RequestState::Validation,
-                error: None,
             },
         )
         .await?;
@@ -902,7 +900,7 @@ impl RequestManager {
             let governance_data = get_gov(ctx, &self.subject_id).await?;
 
             let witnesses = match data {
-                SubjectData::Governance => {
+                SubjectData::Governance { .. } => {
                     governance_data.get_witnesses(WitnessesData::Gov)?
                 }
                 SubjectData::Tracker {
@@ -953,9 +951,8 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
+                request_id: self.id.clone(),
                 state: RequestState::Distribution,
-                error: None,
             },
         )
         .await?;
@@ -1130,7 +1127,7 @@ impl RequestManager {
     }
 
     async fn match_error(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<RequestManager>,
         error: RequestManagerError,
     ) {
@@ -1150,8 +1147,24 @@ impl RequestManager {
                     emit_fail(ctx, e).await;
                 }
             }
-            RequestManagerError::Governance(..) => {
-                todo!("Abort")
+            RequestManagerError::Governance(e) => {
+                if let Err(e) = self
+                    .abort_request(
+                        ctx,
+                        e.to_string(),
+                        None,
+                        (*self.our_key).clone(),
+                    )
+                    .await
+                {
+                    emit_fail(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
             _ => {
                 emit_fail(
@@ -1173,9 +1186,8 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
+                request_id: self.id.clone(),
                 state: RequestState::Finish,
-                error: None,
             },
         )
         .await?;
@@ -1210,9 +1222,8 @@ impl RequestManager {
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
-                        request_id: self.id.to_string(),
+                        request_id: self.id.clone(),
                         state: RequestState::Reboot,
-                        error: None,
                     },
                 )
                 .await?;
@@ -1237,12 +1248,11 @@ impl RequestManager {
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
-                        request_id: self.id.to_string(),
+                        request_id: self.id.clone(),
                         state: RequestState::RebootDiff {
                             seconds,
                             count: self.retry_diff,
                         },
-                        error: None,
                     },
                 )
                 .await?;
@@ -1270,12 +1280,11 @@ impl RequestManager {
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
-                        request_id: self.id.to_string(),
+                        request_id: self.id.clone(),
                         state: RequestState::RebootTimeOut {
                             seconds,
                             count: self.retry_timeout,
                         },
-                        error: None,
                     },
                 )
                 .await?;
@@ -1355,7 +1364,7 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<RequestManager>,
         error: String,
-        sn: u64,
+        sn: Option<u64>,
         who: PublicKey,
     ) -> Result<(), RequestManagerError> {
         self.stops_childs(ctx).await;
@@ -1363,24 +1372,18 @@ impl RequestManager {
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
-                request_id: self.id.to_string(),
-                state: RequestState::Abort,
-                error: Some(error.clone()),
+                request_id: self.id.clone(),
+                state: RequestState::Abort {
+                    subject_id: self.subject_id.to_string(),
+                    error,
+                    sn,
+                    who: who.to_string()
+                },
             },
         )
         .await?;
 
-        self.on_event(
-            RequestManagerEvent::Abort {
-                request_id: self.id.clone(),
-                subject_id: self.subject_id.clone(),
-                who,
-                reason: error,
-                sn,
-            },
-            ctx,
-        )
-        .await;
+        self.on_event(RequestManagerEvent::Finish, ctx).await;
 
         self.end_request(ctx).await?;
 
@@ -1391,7 +1394,14 @@ impl RequestManager {
         &self,
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), RequestManagerError> {
-        todo!()
+        let actor = ctx.get_parent::<RequestHandler>().await?;
+        actor
+            .tell(RequestHandlerMessage::EndHandling {
+                subject_id: self.subject_id.clone(),
+            })
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -1452,13 +1462,6 @@ impl Message for RequestManagerMessage {}
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RequestManagerEvent {
-    Abort {
-        request_id: DigestIdentifier,
-        subject_id: DigestIdentifier,
-        who: PublicKey,
-        reason: String,
-        sn: u64,
-    },
     Finish,
     UpdateState {
         state: Box<RequestManagerState>,
@@ -1471,6 +1474,16 @@ pub enum RequestManagerEvent {
         request: Signed<EventRequest>,
     },
 }
+
+/*
+    Abort {
+        request_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        who: PublicKey,
+        reason: String,
+        sn: u64,
+    },
+*/
 
 impl Event for RequestManagerEvent {}
 
@@ -1604,8 +1617,9 @@ impl Handler<RequestManager> for RequestManager {
                             "Initiating reboot"
                         );
                         self.stops_childs(ctx).await;
-                        if let Err(e) =
-                            self.reboot(ctx, reboot_type, governance_id.clone()).await
+                        if let Err(e) = self
+                            .reboot(ctx, reboot_type, governance_id.clone())
+                            .await
                         {
                             error!(
                                 msg_type = "Reboot",
@@ -1639,7 +1653,7 @@ impl Handler<RequestManager> for RequestManager {
                     if let Err(e) = send_to_tracking(
                         ctx,
                         RequestTrackingMessage::UpdateVersion {
-                            request_id: self.id.to_string(),
+                            request_id: self.id.clone(),
                             version: self.version,
                         },
                     )
@@ -1683,7 +1697,7 @@ impl Handler<RequestManager> for RequestManager {
                         "Request abort received"
                     );
                     if let Err(e) =
-                        self.abort_request(ctx, reason, sn, who).await
+                        self.abort_request(ctx, reason, Some(sn), who).await
                     {
                         error!(
                             msg_type = "Abort",
@@ -2160,34 +2174,21 @@ impl Handler<RequestManager> for RequestManager {
         ctx: &mut ActorContext<RequestManager>,
     ) {
         let event_type = match &event {
-            RequestManagerEvent::Abort { .. } => "Abort",
             RequestManagerEvent::Finish => "Finish",
             RequestManagerEvent::UpdateState { .. } => "UpdateState",
             RequestManagerEvent::UpdateVersion { .. } => "UpdateVersion",
             RequestManagerEvent::SafeState { .. } => "SafeState",
         };
 
-        if let RequestManagerEvent::Abort { .. } = event {
-            if let Err(e) = ctx.publish_event(event).await {
-                error!(
-                    event_type = event_type,
-                    request_id = %self.id,
-                    error = %e,
-                    "Failed to publish abort event"
-                );
-                emit_fail(ctx, e).await;
-            }
-        } else {
-            if let Err(e) = self.persist(&event, ctx).await {
-                error!(
-                    event_type = event_type,
-                    request_id = %self.id,
-                    error = %e,
-                    "Failed to persist event"
-                );
-                emit_fail(ctx, e).await;
-            };
-        }
+        if let Err(e) = self.persist(&event, ctx).await {
+            error!(
+                event_type = event_type,
+                request_id = %self.id,
+                error = %e,
+                "Failed to persist event"
+            );
+            emit_fail(ctx, e).await;
+        };
     }
 
     async fn on_child_fault(
@@ -2280,23 +2281,6 @@ impl PersistentActor for RequestManager {
                 self.state = RequestManagerState::Starting;
                 self.request = Some(request.clone());
                 self.command = command.clone();
-            }
-            RequestManagerEvent::Abort {
-                request_id,
-                subject_id,
-                who,
-                reason,
-                sn,
-            } => {
-                debug!(
-                    event_type = "Abort",
-                    request_id = %request_id,
-                    subject_id = %subject_id,
-                    who = %who,
-                    reason = %reason,
-                    sn = sn,
-                    "Applying abort event"
-                );
             }
         };
 

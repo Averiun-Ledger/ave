@@ -2,17 +2,21 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    NotPersistentActor, Response,
 };
-use ave_common::{response::{RequestInfo, RequestState}};
+use ave_common::{
+    identity::DigestIdentifier,
+    response::{RequestInfo, RequestState},
+};
+use borsh::{BorshDeserialize, BorshSerialize};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, info_span, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 #[derive(Clone, Debug)]
 pub struct RequestTracking {
-    cache: LruCache<String, RequestInfo>,
+    cache: LruCache<DigestIdentifier, RequestInfo>,
 }
 
 impl RequestTracking {
@@ -30,16 +34,15 @@ impl NotPersistentActor for RequestTracking {}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RequestTrackingMessage {
     UpdateState {
-        request_id: String,
+        request_id: DigestIdentifier,
         state: RequestState,
-        error: Option<String>,
     },
     UpdateVersion {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
     },
     AllRequests,
-    SearchRequest(String),
+    SearchRequest(DigestIdentifier),
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +60,7 @@ impl Message for RequestTrackingMessage {}
 #[async_trait]
 impl Actor for RequestTracking {
     type Message = RequestTrackingMessage;
-    type Event = ();
+    type Event = RequestTrackingEvent;
     type Response = RequestTrackingResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
@@ -69,13 +72,27 @@ impl Actor for RequestTracking {
     }
 }
 
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct RequestTrackingEvent {
+    pub request_id: String,
+    pub subject_id: String,
+    pub sn: Option<u64>,
+    pub error: String,
+    pub who: String,
+    pub abort_type: String,
+}
+
+impl Event for RequestTrackingEvent {}
+
 #[async_trait]
 impl Handler<RequestTracking> for RequestTracking {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RequestTrackingMessage,
-        _ctx: &mut ave_actors::ActorContext<RequestTracking>,
+        ctx: &mut ave_actors::ActorContext<RequestTracking>,
     ) -> Result<RequestTrackingResponse, ActorError> {
         match msg {
             RequestTrackingMessage::AllRequests => {
@@ -89,59 +106,67 @@ impl Handler<RequestTracking> for RequestTracking {
                     self.cache.iter().map(|x| x.1.clone()).collect(),
                 ))
             }
-            RequestTrackingMessage::UpdateState {
-                request_id,
-                state,
-                error,
-            } => {
+            RequestTrackingMessage::UpdateState { request_id, state } => {
                 if let Some(info) = self.cache.get_mut(&request_id) {
                     let old_state = info.state.clone();
                     info.state = state.clone();
-                    if let Some(ref err) = error {
-                        info.error = error.clone();
-                        warn!(
-                            msg_type = "UpdateState",
-                            request_id = %request_id,
-                            old_state = ?old_state,
-                            new_state = ?state,
-                            error = %err,
-                            "Request state updated with error"
-                        );
-                    } else {
-                        debug!(
-                            msg_type = "UpdateState",
-                            request_id = %request_id,
-                            old_state = ?old_state,
-                            new_state = ?state,
-                            "Request state updated"
-                        );
-                    }
+                    debug!(
+                        msg_type = "UpdateState",
+                        request_id = %request_id,
+                        old_state = ?old_state,
+                        new_state = ?state,
+                        "Request state updated"
+                    );
                 } else {
-                    if let Some(ref err) = error {
-                        warn!(
-                            msg_type = "UpdateState",
-                            request_id = %request_id,
-                            state = ?state,
-                            error = %err,
-                            "New request tracked with error"
-                        );
-                    } else {
-                        debug!(
-                            msg_type = "UpdateState",
-                            request_id = %request_id,
-                            state = ?state,
-                            "New request tracked"
-                        );
-                    }
                     self.cache.put(
-                        request_id,
+                        request_id.clone(),
                         RequestInfo {
-                            state,
+                            state: state.clone(),
                             version: 0,
-                            error,
                         },
                     );
+
+                    debug!(
+                        msg_type = "UpdateState",
+                        request_id = %request_id,
+                        state = ?state,
+                        "New request tracked"
+                    );
                 };
+
+                let event = match state {
+                    RequestState::Invalid {
+                        subject_id,
+                        who,
+                        sn,
+                        error,
+                    } => Some(RequestTrackingEvent {
+                        request_id: request_id.to_string(),
+                        abort_type: "Invalid".to_string(),
+                        error,
+                        sn,
+                        subject_id,
+                        who,
+                    }),
+                    RequestState::Abort {
+                        subject_id,
+                        who,
+                        sn,
+                        error,
+                    } => Some(RequestTrackingEvent {
+                        request_id: request_id.to_string(),
+                        abort_type: "Abort".to_string(),
+                        error,
+                        sn,
+                        subject_id,
+                        who,
+                    }),
+                    _ => None,
+                };
+
+                if let Some(event) = event {
+                    self.on_event(event, ctx).await;
+                }
 
                 Ok(RequestTrackingResponse::Ok)
             }
@@ -190,5 +215,19 @@ impl Handler<RequestTracking> for RequestTracking {
                 }
             }
         }
+    }
+
+    async fn on_event(
+        &mut self,
+        event: RequestTrackingEvent,
+        ctx: &mut ActorContext<RequestTracking>,
+    ) {
+        if let Err(e) = ctx.publish_event(event).await {
+            error!(
+                error = %e,
+                "Failed to publish event"
+            );
+            ctx.system().stop_system();
+        };
     }
 }

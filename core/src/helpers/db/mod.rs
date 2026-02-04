@@ -2,7 +2,7 @@ mod error;
 
 use crate::{
     external_db::DBManager,
-    request::manager::RequestManagerEvent,
+    request::{manager::RequestManagerEvent, tracking::{RequestTracking, RequestTrackingEvent}},
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 
@@ -122,7 +122,7 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_request_manager(&self) -> impl Subscriber<RequestManagerEvent> {
+    pub fn get_request_tracking(&self) -> impl Subscriber<RequestTrackingEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),

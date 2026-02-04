@@ -66,22 +66,32 @@ pub struct TransferData {
 }
 
 #[derive(
-    Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Eq, PartialEq
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+    Eq,
+    PartialEq,
 )]
 pub enum SubjectData {
     Tracker {
         governance_id: DigestIdentifier,
         schema_id: SchemaType,
         namespace: String,
+        active: bool,
     },
-    Governance,
+    Governance {
+        active: bool,
+    },
 }
 
 impl SubjectData {
     pub fn get_schema_id(&self) -> SchemaType {
         match self {
             SubjectData::Tracker { schema_id, .. } => schema_id.clone(),
-            SubjectData::Governance => SchemaType::Governance,
+            SubjectData::Governance { .. } => SchemaType::Governance,
         }
     }
 
@@ -90,15 +100,29 @@ impl SubjectData {
             SubjectData::Tracker { governance_id, .. } => {
                 Some(governance_id.clone())
             }
-            SubjectData::Governance => None,
+            SubjectData::Governance { .. } => None,
         }
     }
 
     pub fn get_namespace(&self) -> String {
         match self {
             SubjectData::Tracker { namespace, .. } => namespace.clone(),
-            SubjectData::Governance => String::default(),
+            SubjectData::Governance { .. } => String::default(),
         }
+    }
+
+    pub fn get_active(&self) -> bool {
+        match self {
+            SubjectData::Tracker { active, .. } => *active,
+            SubjectData::Governance { active } => *active,
+        }
+    }
+
+    pub fn eol(&mut self) {
+        match self {
+            SubjectData::Tracker { active, .. } => *active = false,
+            SubjectData::Governance { active } => *active = false,
+        };
     }
 }
 
@@ -199,7 +223,7 @@ impl Node {
         }
     }
 
-    pub fn confirm_transfer_owner(&mut self, subject_id: DigestIdentifier) {
+    pub fn confirm_transfer(&mut self, subject_id: DigestIdentifier) {
         self.our_key.to_string();
 
         if let Some(data) = self.transfer_subjects.remove(&subject_id) {
@@ -213,6 +237,18 @@ impl Node {
                 };
             }
         };
+    }
+
+    pub fn eol(&mut self, subject_id: DigestIdentifier, i_owner: bool) {
+        if i_owner {
+            if let Some(data) = self.owned_subjects.get_mut(&subject_id) {
+                data.eol();
+            }
+        } else {
+            if let Some(data) = self.known_subjects.get_mut(&subject_id) {
+                data.eol();
+            }
+        }
     }
 
     pub fn register_subject(
@@ -288,7 +324,7 @@ impl Node {
         };
 
         for (subject, data) in self.owned_subjects.clone() {
-            if let SubjectData::Governance = data {
+            if let SubjectData::Governance { .. } = data {
                 let governance_actor = ctx
                     .create_child(
                         &subject.to_string(),
@@ -343,7 +379,7 @@ impl Node {
                     false
                 };
 
-            if let SubjectData::Governance = data {
+            if let SubjectData::Governance { .. } = data {
                 let governance_actor = ctx
                     .create_child(
                         &subject.to_string(),
@@ -412,6 +448,10 @@ pub enum NodeMessage {
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
+    EOLSubject {
+        subject_id: DigestIdentifier,
+        i_owner: bool,
+    },
 }
 
 impl Message for NodeMessage {}
@@ -449,6 +489,10 @@ pub enum NodeEvent {
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
+    EOLSubject {
+        subject_id: DigestIdentifier,
+        i_owner: bool,
+    },
 }
 
 impl Event for NodeEvent {}
@@ -588,9 +632,53 @@ impl Handler<Node> for Node {
         ctx: &mut ave_actors::ActorContext<Node>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
+            NodeMessage::EOLSubject {
+                subject_id,
+                i_owner,
+            } => {
+                self.on_event(
+                    NodeEvent::EOLSubject {
+                        subject_id: subject_id.clone(),
+                        i_owner,
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "EOLSubject",
+                    subject_id = %subject_id,
+                    i_owner = %i_owner,
+                    "EOL confirmed"
+                );
+
+                Ok(NodeResponse::Ok)
+            }
             NodeMessage::GetGovernances => {
-                let mut gov_know = self.known_subjects.iter().filter(|x| x.1 == &SubjectData::Governance).map(|x| x.0.clone()).collect::<Vec<DigestIdentifier>>();
-                let gov_owned = self.owned_subjects.iter().filter(|x| x.1 == &SubjectData::Governance).map(|x| x.0.clone()).collect::<Vec<DigestIdentifier>>();
+                let mut gov_know = self
+                    .known_subjects
+                    .iter()
+                    .filter(|x| {
+                        if let SubjectData::Governance { .. } = x.1 {
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|x| x.0.clone())
+                    .collect::<Vec<DigestIdentifier>>();
+                let gov_owned = self
+                    .owned_subjects
+                    .iter()
+                    .filter(|x| {
+                        if let SubjectData::Governance { .. } = x.1 {
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|x| x.0.clone())
+                    .collect::<Vec<DigestIdentifier>>();
                 gov_know.append(&mut gov_owned);
 
                 return Ok(NodeResponse::Governances(gov_know));
@@ -857,7 +945,7 @@ impl Handler<Node> for Node {
                         "Governance subject created successfully"
                     );
 
-                    SubjectData::Governance
+                    SubjectData::Governance { active: true }
                 } else {
                     let tracker_init = TrackerInit::from(&metadata);
 
@@ -903,6 +991,7 @@ impl Handler<Node> for Node {
                         governance_id: metadata.governance_id.clone(),
                         schema_id: metadata.schema_id.clone(),
                         namespace: metadata.namespace.to_string(),
+                        active: true,
                     }
                 };
 
@@ -1139,8 +1228,20 @@ impl PersistentActor for Node {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
+            NodeEvent::EOLSubject {
+                subject_id,
+                i_owner,
+            } => {
+                self.eol(subject_id.clone(), *i_owner);
+                debug!(
+                    event_type = "EOLSubject",
+                    subject_id = %subject_id,
+                    i_owner = &i_owner,
+                    "Applied eol"
+                );
+            }
             NodeEvent::ConfirmTransfer(subject_id) => {
-                self.confirm_transfer_owner(subject_id.clone());
+                self.confirm_transfer(subject_id.clone());
                 debug!(
                     event_type = "ConfirmTransfer",
                     subject_id = %subject_id,
