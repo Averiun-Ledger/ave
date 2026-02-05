@@ -2,7 +2,7 @@ mod error;
 
 use crate::{
     external_db::DBManager,
-    request::{manager::RequestManagerEvent, tracking::{RequestTracking, RequestTrackingEvent}},
+    request::{tracking::{RequestTrackingEvent}},
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 

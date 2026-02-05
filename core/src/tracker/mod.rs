@@ -734,7 +734,7 @@ impl Actor for Tracker {
         let our_key = self.our_key.clone();
 
         if self.subject_metadata.active {
-            let Some(ext_db): Option<ExternalDB> =
+            let Some(ext_db): Option<Arc<ExternalDB>> =
                 ctx.system().get_helper("ext_db").await
             else {
                 error!("External database helper not found");
@@ -903,11 +903,17 @@ impl Handler<Tracker> for Tracker {
     }
 }
 
+pub struct InitParamsTracker {
+    pub data: Option<TrackerInit>,
+    pub public_key: Arc<PublicKey>,
+    pub hash: HashAlgorithm,
+    pub is_service: bool
+}
+
 #[async_trait]
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
-    type InitParams =
-        (Option<TrackerInit>, Arc<PublicKey>, HashAlgorithm, bool);
+    type InitParams = InitParamsTracker;
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
@@ -918,12 +924,12 @@ impl PersistentActor for Tracker {
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        let init = params.0.unwrap_or_default();
+        let init = params.data.unwrap_or_default();
 
         Self {
-            service: params.3,
-            hash: Some(params.2),
-            our_key: params.1,
+            service: params.is_service,
+            hash: Some(params.hash),
+            our_key: params.public_key,
             subject_metadata: init.subject_metadata,
             properties: init.properties,
             genesis_gov_version: init.genesis_gov_version,

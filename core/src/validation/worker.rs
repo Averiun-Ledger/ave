@@ -31,7 +31,7 @@ use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
-    SchemaType, ValueWrapper,
+    ValueWrapper,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },

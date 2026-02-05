@@ -4,8 +4,6 @@ use wasmtime::{Caller, Config, Engine, Linker};
 
 use tracing::error;
 
-const TARGET_CONTRACT: &str = "Ave-Model-Contract";
-
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
@@ -178,7 +176,7 @@ pub fn generate_linker(
                     .alloc(len as usize)
                     .map(|ptr| ptr as u32)
                     .unwrap_or_else(|e| {
-                        error!(TARGET_CONTRACT, "Allocation failed: {}", e);
+                        error!(error = %e, "Allocation failed");
                         0 // Return 0 to indicate allocation failure
                     })
             },
@@ -200,7 +198,7 @@ pub fn generate_linker(
                     .data_mut()
                     .write_byte(ptr as usize, offset as usize, data as u8)
                     .unwrap_or_else(|e| {
-                        error!(TARGET_CONTRACT, "Write failed: {}", e);
+                        error!(error = %e, "Write byte failed");
                     });
             },
         )

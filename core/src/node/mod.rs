@@ -13,7 +13,6 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    Error,
     auth::{Auth, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
@@ -26,7 +25,7 @@ use crate::{
     },
     subject::{SignedLedger, SubjectMetadata},
     system::ConfigHelper,
-    tracker::{Tracker, TrackerInit, TrackerMessage},
+    tracker::{InitParamsTracker, Tracker, TrackerInit, TrackerMessage},
 };
 
 use ave_common::{
@@ -136,6 +135,8 @@ pub struct Node {
     our_key: Arc<PublicKey>,
     #[serde(skip)]
     hash: Option<HashAlgorithm>,
+    #[serde(skip)]
+    is_service: bool,
     /// The node's owned subjects.
     owned_subjects: HashMap<DigestIdentifier, SubjectData>,
     /// The node's known subjects.
@@ -194,6 +195,7 @@ impl BorshDeserialize for Node {
             known_subjects,
             transfer_subjects,
             reject_subjects,
+            is_service: false
         })
     }
 }
@@ -264,9 +266,9 @@ impl Node {
         }
     }
 
-    fn sign<T: BorshSerialize>(&self, content: &T) -> Result<Signature, Error> {
+    fn sign<T: BorshSerialize>(&self, content: &T) -> Result<Signature, ActorError> {
         Signature::new(content, &self.owner)
-            .map_err(|e| Error::Signature(format!("{}", e)))
+            .map_err(|e| ActorError::Functional { description: format!("{}", e) })
     }
 
     async fn build_compilation_dir(
@@ -306,7 +308,7 @@ impl Node {
         ctx: &mut ActorContext<Self>,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let Some(ext_db): Option<ExternalDB> =
+        let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
             error!("External database helper not found");
@@ -351,7 +353,12 @@ impl Node {
                 let tracker_actor = ctx
                     .create_child(
                         &subject.to_string(),
-                        Tracker::initial((None, self.our_key.clone(), hash)),
+                        Tracker::initial(InitParamsTracker {
+                            data: None,
+                            hash,
+                            is_service: self.is_service,
+                            public_key: self.our_key.clone()
+                        }),
                     )
                     .await?;
 
@@ -402,11 +409,16 @@ impl Node {
                     },
                 )
                 .await?;
-            } else {
+            } else if i_new_owner {
                 let tracker_actor = ctx
                     .create_child(
                         &subject.to_string(),
-                        Tracker::initial((None, self.our_key.clone(), hash)),
+                        Tracker::initial(InitParamsTracker {
+                            data: None,
+                            hash,
+                            is_service: self.is_service,
+                            public_key: self.our_key.clone()
+                        }),
                     )
                     .await?;
 
@@ -667,7 +679,7 @@ impl Handler<Node> for Node {
                     })
                     .map(|x| x.0.clone())
                     .collect::<Vec<DigestIdentifier>>();
-                let gov_owned = self
+                let mut gov_owned = self
                     .owned_subjects
                     .iter()
                     .filter(|x| {
@@ -694,7 +706,7 @@ impl Handler<Node> for Node {
                 Ok(NodeResponse::SubjectData(subject_data))
             }
             NodeMessage::UpSubject { subject_id, light } => {
-                let Some(ext_db): Option<ExternalDB> =
+                let Some(ext_db): Option<Arc<ExternalDB>> =
                     ctx.system().get_helper("ext_db").await
                 else {
                     error!(
@@ -721,8 +733,13 @@ impl Handler<Node> for Node {
 
                 let tracker_actor = ctx
                     .create_child(
-                        &subject_id,
-                        Tracker::initial((None, self.our_key.clone(), hash)),
+                        &subject_id.to_string(),
+                        Tracker::initial(InitParamsTracker {
+                            data: None,
+                            hash,
+                            is_service: self.is_service,
+                            public_key: self.our_key.clone()
+                        }),
                     )
                     .await?;
                 if !light {
@@ -831,7 +848,7 @@ impl Handler<Node> for Node {
                 Ok(NodeResponse::Ok)
             }
             NodeMessage::CreateNewSubject(ledger) => {
-                let Some(ext_db): Option<ExternalDB> =
+                let Some(ext_db): Option<Arc<ExternalDB>> =
                     ctx.system().get_helper("ext_db").await
                 else {
                     error!(
@@ -949,11 +966,13 @@ impl Handler<Node> for Node {
                 } else {
                     let tracker_init = TrackerInit::from(&metadata);
 
-                    let tracker = Tracker::initial((
-                        Some(tracker_init),
-                        self.our_key.clone(),
-                        hash,
-                    ));
+                    let tracker = Tracker::initial(
+                        InitParamsTracker {
+                            data: Some(tracker_init),
+                            hash,
+                            is_service: self.is_service,
+                            public_key: self.our_key.clone()
+                        });
 
                     let tracker_actor =
                         ctx.create_child(&subject_id, tracker).await?;
@@ -1201,10 +1220,17 @@ impl Handler<Node> for Node {
     }
 }
 
+pub struct InitParamsNode {
+    pub key_pair: KeyPair,
+    pub public_key: Arc<PublicKey>,
+    pub hash: HashAlgorithm,
+    pub is_service: bool
+}
+
 #[async_trait]
 impl PersistentActor for Node {
     type Persistence = LightPersistence;
-    type InitParams = (KeyPair, Arc<PublicKey>, HashAlgorithm);
+    type InitParams = InitParamsNode;
 
     fn update(&mut self, state: Self) {
         self.owned_subjects = state.owned_subjects;
@@ -1215,9 +1241,10 @@ impl PersistentActor for Node {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            hash: Some(params.2),
-            owner: params.0,
-            our_key: params.1,
+            hash: Some(params.hash),
+            owner: params.key_pair,
+            our_key: params.public_key,
+            is_service: params.is_service,
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),

@@ -16,7 +16,7 @@ use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::{Span, error, info, info_span};
+use tracing::{Span, error, info_span};
 use types::ReqManInitMessage;
 
 use crate::approval::persist::{
@@ -675,6 +675,16 @@ impl RequestHandler {
             .await?;
         actor.ask_stop().await
     }
+
+    async fn manual_abort_request(&self, ctx: &mut ActorContext<RequestHandler>, subject_id: &DigestIdentifier) -> Result<(), ActorError> {
+
+        let actor = ctx
+            .get_child::<RequestManager>(&subject_id.to_string())
+            .await?;
+
+
+        actor.tell(RequestManagerMessage::ManualAbort).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -699,6 +709,9 @@ pub enum RequestHandlerMessage {
     EndHandling {
         subject_id: DigestIdentifier,
     },
+    AbortRequest {
+        subject_id: DigestIdentifier,
+    }
 }
 
 impl Message for RequestHandlerMessage {}
@@ -763,7 +776,7 @@ impl Actor for RequestHandler {
             return Err(e);
         }
 
-        let Some(ext_db): Option<ExternalDB> =
+        let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
             error!("External database helper not found");
@@ -843,7 +856,7 @@ impl Actor for RequestHandler {
             };
 
             if let Err(e) = request_manager_actor
-                .tell(RequestManagerMessage::Run { request_id })
+                .tell(RequestManagerMessage::Run { request_id: request_id.clone() })
                 .await
             {
                 error!(
@@ -883,6 +896,10 @@ impl Handler<RequestHandler> for RequestHandler {
         ctx: &mut ave_actors::ActorContext<RequestHandler>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
+            RequestHandlerMessage::AbortRequest { subject_id } => {
+                self.manual_abort_request(ctx, &subject_id).await?;
+                Ok(RequestHandlerResponse::None)
+            }
             RequestHandlerMessage::ChangeApprovalState {
                 subject_id,
                 state,

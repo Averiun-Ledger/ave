@@ -13,8 +13,6 @@ use crate::{NetworkMessage, helpers::network::service::NetworkSender};
 
 use super::common::emit_fail;
 
-const TARGET_NETWORK: &str = "Ave-Model-Network";
-
 #[derive(
     Debug,
     Clone,
@@ -75,7 +73,10 @@ impl Handler<RetryNetwork> for RetryNetwork {
             .send_command(network::CommandHelper::SendMessage { message: msg })
             .await
         {
-            error!(TARGET_NETWORK, "Can not send message to network helper");
+            error!(
+                error = %e,
+                "Failed to send message to network helper"
+            );
             return Err(emit_fail(ctx, e).await);
         };
         Ok(())

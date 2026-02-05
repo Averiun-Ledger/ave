@@ -366,6 +366,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        info!("Init evaluation {}", self.id);
         let child = ctx
             .create_child(
                 "evaluation",
@@ -472,6 +473,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        info!("Init approval {}", self.id);
         let child = ctx
             .create_child(
                 "approval",
@@ -721,6 +723,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        info!("Init validation {}", self.id);
         let child = ctx
             .create_child(
                 "validation",
@@ -930,6 +933,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        info!("Init distribution {}", self.id);
         let child = ctx
             .create_child(
                 "distribution",
@@ -1182,6 +1186,7 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), RequestManagerError> {
+        info!("Ending {}", self.id);
         self.on_event(RequestManagerEvent::Finish, ctx).await;
         send_to_tracking(
             ctx,
@@ -1369,6 +1374,7 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         self.stops_childs(ctx).await;
 
+        info!("Aborting {}", self.id);
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
@@ -1421,6 +1427,7 @@ pub enum RequestManagerMessage {
         reason: String,
         sn: u64,
     },
+    ManualAbort,
     Reboot {
         request_id: DigestIdentifier,
         governance_id: DigestIdentifier,
@@ -1474,16 +1481,6 @@ pub enum RequestManagerEvent {
         request: Signed<EventRequest>,
     },
 }
-
-/*
-    Abort {
-        request_id: DigestIdentifier,
-        subject_id: DigestIdentifier,
-        who: PublicKey,
-        reason: String,
-        sn: u64,
-    },
-*/
 
 impl Event for RequestManagerEvent {}
 
@@ -1601,6 +1598,7 @@ impl Handler<RequestManager> for RequestManager {
             } => {
                 if request_id == self.id {
                     if let RequestManagerState::Reboot = self.state {
+                        info!("Init reboot {}", self.id);
                         debug!(
                             msg_type = "Reboot",
                             request_id = %self.id,
@@ -1709,6 +1707,32 @@ impl Handler<RequestManager> for RequestManager {
                         return Ok(());
                     }
                 }
+            }
+            RequestManagerMessage::ManualAbort => {
+                match &self.state{
+                    RequestManagerState::Reboot
+                    | RequestManagerState::Starting
+                    | RequestManagerState::Evaluation
+                    | RequestManagerState::Approval { .. }
+                    | RequestManagerState::Validation { .. } => {
+                    if let Err(e) =
+                        self.abort_request(ctx, "The user manually aborted the request".to_owned(), None, (*self.our_key).clone()).await
+                    {
+                        error!(
+                            msg_type = "Abort",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to abort request"
+                        );
+                        self.match_error(ctx, e).await;
+                    }
+                    }
+                    _ => {
+                        info!("The request is in a state that cannot be aborted {}, state: {}", self.id, self.state);
+                    }
+                }
+
+               return Ok(()); 
             }
             RequestManagerMessage::FirstRun {
                 command,

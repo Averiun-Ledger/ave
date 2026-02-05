@@ -16,7 +16,6 @@ use tracing::{debug, error};
 
 use super::{DatabaseError, Querys};
 use crate::external_db::{DBManager, DBManagerMessage};
-use crate::request::manager::RequestManagerEvent;
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};

@@ -12,7 +12,7 @@ use ave_actors::{
 };
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, hash_borsh},
+    identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
@@ -41,12 +41,17 @@ pub struct ContractResult {
     pub error: String,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Compiler {
-    pub contract: DigestIdentifier,
+    contract: DigestIdentifier,
+    hash: HashAlgorithm
 }
 
 impl Compiler {
+    pub fn new(hash: HashAlgorithm) -> Self {
+        Self { contract: DigestIdentifier::default(), hash }
+    }
+
     fn compilation_toml() -> String {
         r#"
     [package]
@@ -360,19 +365,8 @@ impl Handler<Compiler> for Compiler {
                 contract_path,
                 initial_value,
             } => {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await
-                {
-                    config.hash_algorithm
-                } else {
-                    error!(msg_type = "Compile", "Config helper not found");
-                    return Err(ActorError::Helper {
-                        name: "config".to_owned(),
-                        reason: "Not found".to_owned(),
-                    });
-                };
-
-                let contract_hash = match hash_borsh(&*hash.hasher(), &contract)
+                
+                let contract_hash = match hash_borsh(&*self.hash.hasher(), &contract)
                 {
                     Ok(hash) => hash,
                     Err(e) => {

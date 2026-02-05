@@ -321,15 +321,8 @@ impl Subject for Governance {
             });
         };
 
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_owned(),
-                reason: "Not found".to_owned(),
-            });
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
         };
 
         let current_sn = self.subject_metadata.sn;
@@ -632,15 +625,9 @@ impl Governance {
                 reason: "Not found".to_owned(),
             });
         };
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_owned(),
-                reason: "Not found".to_owned(),
-            });
+
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
         };
 
         let (old_schemas_eval, new_schemas_eval) = {
@@ -673,6 +660,7 @@ impl Governance {
                 ctx,
                 &up,
                 self.subject_metadata.subject_id.clone(),
+                &hash
             )
             .await?;
 
@@ -822,6 +810,7 @@ impl Governance {
                 ctx,
                 &schemas,
                 self.subject_metadata.subject_id.clone(),
+                hash
             )
             .await?;
 
@@ -1164,6 +1153,7 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
+        hash: &HashAlgorithm
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
@@ -1183,7 +1173,7 @@ impl Governance {
                 if let Ok(compiler) = ctx.get_child(&actor_name).await {
                     compiler
                 } else {
-                    ctx.create_child(&actor_name, Compiler::default()).await?
+                    ctx.create_child(&actor_name, Compiler::new(*hash)).await?
                 };
 
             let Schema {
@@ -1730,9 +1720,14 @@ impl Governance {
     }
 
     async fn create_compilers(
+        &self,
         ctx: &mut ActorContext<Self>,
         compilers: &[SchemaType],
     ) -> Result<Vec<SchemaType>, ActorError> {
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+        };
+
         let mut new_compilers = vec![];
 
         for compiler in compilers {
@@ -1745,7 +1740,7 @@ impl Governance {
 
                 ctx.create_child(
                     &format!("{}_compiler", compiler),
-                    Compiler::default(),
+                    Compiler::new(hash),
                 )
                 .await?;
             }
@@ -1815,7 +1810,12 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        let Some(ext_db): Option<ExternalDB> =
+        let Some(hash) = self.hash else {
+            error!("Hash algorithm not found");
+            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+        };
+
+        let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
             error!("External database helper not found");
@@ -1843,18 +1843,6 @@ impl Actor for Governance {
             error!("Network helper not found");
             return Err(ActorError::Helper {
                 name: "network".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
-        let hash = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.hash_algorithm
-        } else {
-            error!("Config helper not found");
-            return Err(ActorError::Helper {
-                name: "config".to_owned(),
                 reason: "Not found".to_owned(),
             });
         };
@@ -1970,7 +1958,7 @@ impl Handler<Governance> for Governance {
             }
             GovernanceMessage::CreateCompilers(compilers) => {
                 let new_compilers =
-                    match Self::create_compilers(ctx, &compilers).await {
+                    match self.create_compilers(ctx, &compilers).await {
                         Ok(new_compilers) => new_compilers,
                         Err(e) => {
                             warn!(
