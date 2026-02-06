@@ -29,7 +29,6 @@ use super::{
 #[derive(Clone, Debug)]
 pub struct ApprLight {
     network: Arc<NetworkSender>,
-    our_key: Arc<PublicKey>,
     node_key: PublicKey,
     request_id: DigestIdentifier,
     version: u64,
@@ -38,14 +37,12 @@ pub struct ApprLight {
 impl ApprLight {
     pub fn new(
         network: Arc<NetworkSender>,
-        our_key: Arc<PublicKey>,
         node_key: PublicKey,
         request_id: DigestIdentifier,
         version: u64,
     ) -> Self {
         Self {
             network,
-            our_key,
             node_key,
             request_id,
             version,
@@ -89,9 +86,9 @@ impl Actor for ApprLight {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ApprLight", id = id)
+            info_span!(parent: parent_span, "ApprLight", id)
         } else {
-            info_span!("ApprLight", id = id)
+            info_span!("ApprLight", id)
         }
     }
 }

@@ -32,8 +32,6 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Auth {
     #[serde(skip)]
-    our_key: Arc<PublicKey>,
-    #[serde(skip)]
     network: Option<Arc<NetworkSender>>,
 
     auth: HashMap<DigestIdentifier, HashSet<PublicKey>>,
@@ -66,13 +64,10 @@ impl BorshDeserialize for Auth {
     ) -> std::io::Result<Self> {
         // Deserialize the persisted fields
         let auth = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
-
-        let our_key = Arc::new(PublicKey::default());
         let network = None;
 
         Ok(Self {
             network,
-            our_key,
             auth,
         })
     }
@@ -202,11 +197,11 @@ impl Actor for Auth {
     type Message = AuthMessage;
     type Response = AuthResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Auth", id = id)
+            info_span!(parent: parent_span, "Auth")
         } else {
-            info_span!("Auth", id = id)
+            info_span!("Auth")
         }
     }
 
@@ -475,7 +470,7 @@ impl Handler<Auth> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
-    type InitParams = (Arc<PublicKey>, Arc<NetworkSender>);
+    type InitParams = Arc<NetworkSender>;
 
     fn update(&mut self, state: Self) {
         self.auth = state.auth;
@@ -483,8 +478,7 @@ impl PersistentActor for Auth {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            network: Some(params.1),
-            our_key: params.0,
+            network: Some(params),
             auth: HashMap::new(),
         }
     }

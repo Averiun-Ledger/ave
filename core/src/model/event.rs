@@ -165,9 +165,22 @@ impl Protocols {
     pub fn buidl_event_db(
         &self,
         event_request: &EventRequest,
-    ) -> RequestEventDB {
+    ) -> (RequestEventDB, DigestIdentifier) {
         match (self, event_request) {
-            (Protocols::Create { .. }, ..) => RequestEventDB::Create,
+            (Protocols::Create { validation }, EventRequest::Create( create)) => {
+                let ValidationMetadata::Metadata(metadata) = &validation.validation_metadata else {
+                    unreachable!(
+                        "Unreachable combination is a create event request"
+                    )
+                };
+
+                (RequestEventDB::Create {
+                name: create.name.clone(),
+                description: create.description.clone(),
+                schema_id: create.schema_id.to_string(),
+                namespace: create.namespace.to_string(),
+            }, metadata.subject_id.clone())
+            },
             (
                 Protocols::TrackerFact { evaluation, .. },
                 EventRequest::Fact(fact_request),
@@ -176,10 +189,11 @@ impl Protocols {
                     EvaluationResponse::Ok(_) => None,
                     EvaluationResponse::Error(e) => Some(e.to_string()),
                 };
-                RequestEventDB::TrackerFact {
+                
+                (RequestEventDB::TrackerFact {
                     payload: fact_request.payload.0.clone(),
                     evaluation_error,
-                }
+                }, event_request.get_subject_id())
             }
             (
                 Protocols::GovFact {
@@ -204,11 +218,11 @@ impl Protocols {
                     }
                     EvaluationResponse::Error(e) => (Some(e.to_string()), None),
                 };
-                RequestEventDB::GovernanceFact {
+                (RequestEventDB::GovernanceFact {
                     payload: fact_request.payload.0.clone(),
                     evaluation_error,
                     approval_success,
-                }
+                }, event_request.get_subject_id())
             }
             (
                 Protocols::Transfer { evaluation, .. },
@@ -218,13 +232,13 @@ impl Protocols {
                     EvaluationResponse::Ok(_) => None,
                     EvaluationResponse::Error(e) => Some(e.to_string()),
                 };
-                RequestEventDB::Transfer {
+                (RequestEventDB::Transfer {
                     new_owner: transfer_request.new_owner.to_string(),
                     evaluation_error,
-                }
+                }, event_request.get_subject_id())
             }
-            (Protocols::TrackerConfirm { .. }, ..) => {
-                RequestEventDB::TrackerConfirm
+            (Protocols::TrackerConfirm { .. }, EventRequest::Confirm(..)) => {
+                (RequestEventDB::TrackerConfirm, event_request.get_subject_id())
             }
             (
                 Protocols::GovConfirm { evaluation, .. },
@@ -234,13 +248,13 @@ impl Protocols {
                     EvaluationResponse::Ok(_) => None,
                     EvaluationResponse::Error(e) => Some(e.to_string()),
                 };
-                RequestEventDB::GovernanceConfirm {
+                (RequestEventDB::GovernanceConfirm {
                     name_old_owner: confirm_request.name_old_owner.clone(),
                     evaluation_error,
-                }
+                }, event_request.get_subject_id())
             }
-            (Protocols::Reject { .. }, ..) => RequestEventDB::Reject,
-            (Protocols::EOL { .. }, ..) => RequestEventDB::EOL,
+            (Protocols::Reject { .. }, EventRequest::Reject(..)) => (RequestEventDB::Reject, event_request.get_subject_id()),
+            (Protocols::EOL { .. }, EventRequest::EOL(..)) => (RequestEventDB::EOL, event_request.get_subject_id()),
             _ => unreachable!(
                 "Unreachable combination of protocol and event request"
             ),
@@ -473,11 +487,10 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
+        let (event, subject_id) = self.protocols.buidl_event_db(self.event_request.content());
+
         LedgerDB {
-            subject_id: self
-                .event_request
-                .content()
-                .get_subject_id()
+            subject_id: subject_id
                 .to_string(),
             sn: self.sn,
             event_request_timestamp: self
@@ -487,7 +500,7 @@ impl Ledger {
                 .as_nanos(),
             event_ledger_timestamp: signature_timestamp,
             sink_timestamp: TimeStamp::now().as_nanos(),
-            event: self.protocols.buidl_event_db(self.event_request.content()),
+            event,
         }
     }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {

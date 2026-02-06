@@ -63,11 +63,11 @@ impl Actor for RequestTracking {
     type Event = RequestTrackingEvent;
     type Response = RequestTrackingResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RequestTracking", id = id)
+            info_span!(parent: parent_span, "RequestTracking")
         } else {
-            info_span!("RequestTracking", id = id)
+            info_span!("RequestTracking")
         }
     }
 }

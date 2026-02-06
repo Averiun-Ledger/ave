@@ -23,7 +23,7 @@ ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["std"] }
+time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs"] }
 tracing = { workspace = true }
 network = { package = "ave-network", path = "../network" }

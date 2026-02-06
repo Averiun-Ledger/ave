@@ -108,10 +108,12 @@ impl Api {
         debug!("Creating Api");
 
         let (system, runner) =
-            system(config.clone(), sink_auth, password, token.clone()).await.map_err(|e| {
-                error!(error = %e, "Failed to create system");
-                e
-            })?;
+            system(config.clone(), sink_auth, password, token.clone())
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Failed to create system");
+                    e
+                })?;
 
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
@@ -793,7 +795,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetEvents {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id,
                 event_ledger_ts,
                 event_request_ts,
                 page,
@@ -838,7 +840,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetAborts {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id,
                 request_id,
                 sn,
                 quantity,
@@ -878,7 +880,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id.clone(),
                 sn,
             })
             .await
@@ -918,7 +920,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetFirstOrEndEvents {
-                subject_id: subject_id.to_string(),
+                subject_id,
                 quantity,
                 reverse,
             })
@@ -954,7 +956,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id.clone(),
             })
             .await
             .map_err(|e| {

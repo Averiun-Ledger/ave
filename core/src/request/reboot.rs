@@ -111,11 +111,11 @@ impl Actor for Reboot {
     type Event = ();
     type Response = ();
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Reboot", id = id)
+            info_span!(parent: parent_span, "Reboot")
         } else {
-            info_span!("Reboot", id = id)
+            info_span!("Reboot")
         }
     }
 }

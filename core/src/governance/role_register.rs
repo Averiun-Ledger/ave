@@ -176,11 +176,11 @@ impl Actor for RoleRegister {
     type Message = RoleRegisterMessage;
     type Response = RoleRegisterResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RoleRegister", id = id)
+            info_span!(parent: parent_span, "RoleRegister")
         } else {
-            info_span!("RoleRegister", id = id)
+            info_span!("RoleRegister")
         }
     }
 
@@ -456,8 +456,8 @@ impl Handler<RoleRegister> for RoleRegister {
                 new_validators,
                 remove_validators,
             } => {
-                if version > self.version {
-                    ctx.publish_event(RoleRegisterEvent::Update {
+                if version > self.version || self.version == 0 {
+                    self.on_event(RoleRegisterEvent::Update {
                         version,
                         appr_quorum,
                         eval_quorum,
@@ -468,8 +468,8 @@ impl Handler<RoleRegister> for RoleRegister {
                         remove_evaluators,
                         new_validators,
                         remove_validators,
-                    })
-                    .await?;
+                    }, ctx)
+                    .await;
 
                     debug!(
                         msg_type = "Update",

@@ -164,11 +164,11 @@ impl Actor for SubjectRegister {
     type Event = SubjectRegisterEvent;
     type Response = SubjectRegisterResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "SubjectRegister", id = id)
+            info_span!(parent: parent_span, "SubjectRegister")
         } else {
-            info_span!("SubjectRegister", id = id)
+            info_span!("SubjectRegister")
         }
     }
 

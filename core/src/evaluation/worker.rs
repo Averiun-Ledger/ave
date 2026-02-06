@@ -201,7 +201,7 @@ impl EvalWorker {
 
             self.compile_contracts(ctx, &compilations, governance_data.schemas)
                 .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()));
+                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
         }
 
         Ok(result)
@@ -500,9 +500,9 @@ impl Actor for EvalWorker {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "EvalWorker", id = id)
+            info_span!(parent: parent_span, "EvalWorker", id)
         } else {
-            info_span!("EvalWorker", id = id)
+            info_span!("EvalWorker", id)
         }
     }
 }

@@ -74,9 +74,9 @@ impl Actor for ValiCoordinator {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ValiCoordinator", id = id)
+            info_span!(parent: parent_span, "ValiCoordinator", id)
         } else {
-            info_span!("ValiCoordinator", id = id)
+            info_span!("ValiCoordinator", id)
         }
     }
 }

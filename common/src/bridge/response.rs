@@ -34,7 +34,12 @@ pub struct AbortDB {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum RequestEventDB {
-    Create,
+    Create {
+        name: Option<String>,
+        description: Option<String>,
+        schema_id: String,
+        namespace: String
+    },
     TrackerFact {
         payload: Value,
         evaluation_error: Option<String>,

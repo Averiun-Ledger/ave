@@ -110,7 +110,7 @@ impl Distribution {
                 })
                 .await?;
         } else {
-            ctx.stop(None);
+            ctx.stop(None).await;
         }
 
         Ok(())
@@ -125,9 +125,9 @@ impl Actor for Distribution {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Distribution", id = id)
+            info_span!(parent: parent_span, "Distribution", id)
         } else {
-            info_span!("Distribution", id = id)
+            info_span!("Distribution", id)
         }
     }
 }

@@ -515,11 +515,11 @@ impl Actor for Node {
     type Message = NodeMessage;
     type Response = NodeResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Node", id = id)
+            info_span!(parent: parent_span, "Node")
         } else {
-            info_span!("Node", id = id)
+            info_span!("Node")
         }
     }
 
@@ -589,7 +589,7 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "auth",
-                Auth::initial((self.our_key.clone(), network.clone())),
+                Auth::initial(network.clone()),
             )
             .await
         {

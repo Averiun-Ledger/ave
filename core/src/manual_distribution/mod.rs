@@ -48,11 +48,11 @@ impl Actor for ManualDistribution {
     type Event = ();
     type Response = ();
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ManualDistribution", id = id)
+            info_span!(parent: parent_span, "ManualDistribution")
         } else {
-            info_span!("ManualDistribution", id = id)
+            info_span!("ManualDistribution")
         }
     }
 }

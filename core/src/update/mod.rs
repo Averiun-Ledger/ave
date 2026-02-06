@@ -114,9 +114,9 @@ impl Actor for Update {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Update", id = id)
+            info_span!(parent: parent_span, "Update", id)
         } else {
-            info_span!("Update", id = id)
+            info_span!("Update", id)
         }
     }
 }

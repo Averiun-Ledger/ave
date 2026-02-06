@@ -51,7 +51,7 @@ pub mod tests {
 
     use super::*;
 
-    use ave_common::identity::{Signature, Signed, keys::KeyPair};
+    use ave_common::{Namespace, SchemaType, identity::{DigestIdentifier, Signature, Signed, keys::KeyPair}, request::CreateRequest};
 
     // Mocks
 

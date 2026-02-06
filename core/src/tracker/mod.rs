@@ -619,7 +619,7 @@ impl Tracker {
                             event.signature().signer.clone(),
                             event.content().gov_version,
                         )
-                        .await;
+                        .await?;
                     }
                     EventRequest::EOL(..) => {
                         self.eol(ctx).await?;
@@ -713,9 +713,9 @@ impl Actor for Tracker {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Tracker", id = id)
+            info_span!(parent: parent_span, "Tracker", id)
         } else {
-            info_span!("Tracker", id = id)
+            info_span!("Tracker", id)
         }
     }
 

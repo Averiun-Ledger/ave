@@ -112,7 +112,6 @@ impl Approval {
                     &signer.to_string(),
                     ApprLight::new(
                         self.network.clone(),
-                        self.our_key.clone(),
                         signer.clone(),
                         self.request_id.clone(),
                         self.version,
@@ -183,11 +182,11 @@ impl Actor for Approval {
     type Message = ApprovalMessage;
     type Response = ();
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Approval", id = id)
+            info_span!(parent: parent_span, "Approval")
         } else {
-            info_span!("Approval", id = id)
+            info_span!("Approval")
         }
     }
 }

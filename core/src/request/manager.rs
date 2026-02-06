@@ -670,9 +670,6 @@ impl RequestManager {
                 metadata.namespace.clone(),
             )?;
 
-            let init_state =
-                governance_data.get_init_state(&metadata.schema_id)?;
-
             let last_ledger_event =
                 get_last_ledger_event(ctx, &self.subject_id).await?;
 
@@ -705,7 +702,7 @@ impl RequestManager {
                 },
                 quorum,
                 signers,
-                Some(init_state),
+                None,
                 schema_id,
             ))
         }
@@ -1264,7 +1261,7 @@ impl RequestManager {
 
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    actor
+                    let _ = actor
                         .tell(RequestManagerMessage::RebootUpdate {
                             request_id,
                             governance_id,
@@ -1296,7 +1293,7 @@ impl RequestManager {
 
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(seconds)).await;
-                    actor
+                    let _ = actor
                         .tell(RequestManagerMessage::RebootUpdate {
                             request_id,
                             governance_id,
@@ -1325,44 +1322,49 @@ impl RequestManager {
         }
     }
 
-    async fn stops_childs(&self, ctx: &mut ActorContext<RequestManager>) {
+    async fn stops_childs(
+        &self,
+        ctx: &mut ActorContext<RequestManager>,
+    ) -> Result<(), RequestManagerError> {
         match self.state {
             RequestManagerState::Reboot => {
                 if let Ok(actor) = ctx.get_child::<Update>("update").await {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
                 if let Ok(actor) = ctx.get_child::<Reboot>("reboot").await {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
             }
             RequestManagerState::Evaluation => {
                 if let Ok(actor) =
                     ctx.get_child::<Evaluation>("evaluation").await
                 {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
             }
             RequestManagerState::Approval { .. } => {
                 if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
             }
             RequestManagerState::Validation { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Validation>("validation").await
                 {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
             }
             RequestManagerState::Distribution { .. } => {
                 if let Ok(actor) =
                     ctx.get_child::<Distribution>("distribution").await
                 {
-                    actor.ask_stop();
+                    actor.ask_stop().await?;
                 };
             }
             _ => {}
         }
+
+        Ok(())
     }
 
     async fn abort_request(
@@ -1372,7 +1374,7 @@ impl RequestManager {
         sn: Option<u64>,
         who: PublicKey,
     ) -> Result<(), RequestManagerError> {
-        self.stops_childs(ctx).await;
+        self.stops_childs(ctx).await?;
 
         info!("Aborting {}", self.id);
         send_to_tracking(
@@ -1383,7 +1385,7 @@ impl RequestManager {
                     subject_id: self.subject_id.to_string(),
                     error,
                     sn,
-                    who: who.to_string()
+                    who: who.to_string(),
                 },
             },
         )
@@ -1492,9 +1494,9 @@ impl Actor for RequestManager {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RequestManager", id = id)
+            info_span!(parent: parent_span, "RequestManager", id)
         } else {
-            info_span!("RequestManager", id = id)
+            info_span!("RequestManager", id)
         }
     }
 
@@ -1614,7 +1616,17 @@ impl Handler<RequestManager> for RequestManager {
                             reboot_type = ?reboot_type,
                             "Initiating reboot"
                         );
-                        self.stops_childs(ctx).await;
+                        if let Err(e) = self.stops_childs(ctx).await {
+                            error!(
+                                msg_type = "Reboot",
+                                request_id = %self.id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to stop childs"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        };
                         if let Err(e) = self
                             .reboot(ctx, reboot_type, governance_id.clone())
                             .await
@@ -1709,30 +1721,40 @@ impl Handler<RequestManager> for RequestManager {
                 }
             }
             RequestManagerMessage::ManualAbort => {
-                match &self.state{
+                match &self.state {
                     RequestManagerState::Reboot
                     | RequestManagerState::Starting
                     | RequestManagerState::Evaluation
                     | RequestManagerState::Approval { .. }
                     | RequestManagerState::Validation { .. } => {
-                    if let Err(e) =
-                        self.abort_request(ctx, "The user manually aborted the request".to_owned(), None, (*self.our_key).clone()).await
-                    {
-                        error!(
-                            msg_type = "Abort",
-                            request_id = %self.id,
-                            error = %e,
-                            "Failed to abort request"
-                        );
-                        self.match_error(ctx, e).await;
-                    }
+                        if let Err(e) = self
+                            .abort_request(
+                                ctx,
+                                "The user manually aborted the request"
+                                    .to_owned(),
+                                None,
+                                (*self.our_key).clone(),
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "Abort",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to abort request"
+                            );
+                            self.match_error(ctx, e).await;
+                        }
                     }
                     _ => {
-                        info!("The request is in a state that cannot be aborted {}, state: {}", self.id, self.state);
+                        info!(
+                            "The request is in a state that cannot be aborted {}, state: {}",
+                            self.id, self.state
+                        );
                     }
                 }
 
-               return Ok(()); 
+                return Ok(());
             }
             RequestManagerMessage::FirstRun {
                 command,
@@ -1949,7 +1971,16 @@ impl Handler<RequestManager> for RequestManager {
                         version = self.version,
                         "Evaluation result received"
                     );
-                    self.stops_childs(ctx).await;
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "EvaluationRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
 
                     if let Some(evaluator_res) = eval_res.evaluator_res()
                         && evaluator_res.appr_required
@@ -2041,7 +2072,16 @@ impl Handler<RequestManager> for RequestManager {
                         version = self.version,
                         "Approval result received"
                     );
-                    self.stops_childs(ctx).await;
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "ApprovalRes",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
 
                     let RequestManagerState::Approval { eval_req, eval_res } =
                         self.state.clone()
@@ -2107,7 +2147,16 @@ impl Handler<RequestManager> for RequestManager {
                         version = self.version,
                         "Validation result received"
                     );
-                    self.stops_childs(ctx).await;
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                                msg_type = "ValidationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
 
                     let signed_ledger =
                         match self.build_ledger(ctx, val_req, val_res).await {
@@ -2174,7 +2223,17 @@ impl Handler<RequestManager> for RequestManager {
                         "Finishing request"
                     );
 
-                    self.stops_childs(ctx).await;
+                    if let Err(e) = self.stops_childs(ctx).await {
+                        error!(
+                            msg_type = "FinishRequest",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to stop childs"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    };
+
                     if let Err(e) = self.finish_request(ctx).await {
                         error!(
                             msg_type = "FinishRequest",

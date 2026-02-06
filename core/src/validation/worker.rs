@@ -170,11 +170,11 @@ impl ValiWorker {
             });
         }
 
-        if is_gov && !metadata.governance_id.is_empty() {
+        if is_gov && metadata.governance_id != metadata.subject_id {
             return Err(ValidatorError::InvalidData {
                 value: "metadata governance_id",
             });
-        } else if !is_gov && metadata.governance_id.is_empty() {
+        } else if !is_gov && metadata.governance_id == metadata.subject_id {
             return Err(ValidatorError::InvalidData {
                 value: "metadata governance_id",
             });
@@ -838,11 +838,17 @@ impl ValiWorker {
                                 governance_data.to_value_wrapper()
                             };
 
+                        let governance_id = if create.schema_id.is_gov() {
+                            subject_id.clone()
+                        } else {
+                            create.governance_id.clone()
+                        };
+
                         let subject_metadata = Metadata {
                             name: create.name.clone(),
                             description: create.description.clone(),
                             subject_id: subject_id,
-                            governance_id: create.governance_id.clone(),
+                            governance_id: governance_id,
                             genesis_gov_version: *gov_version,
                             prev_ledger_event_hash: DigestIdentifier::default(),
                             schema_id: create.schema_id.clone(),
@@ -955,9 +961,9 @@ impl Actor for ValiWorker {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ValiWorker", id = id)
+            info_span!(parent: parent_span, "ValiWorker", id)
         } else {
-            info_span!("ValiWorker", id = id)
+            info_span!("ValiWorker", id)
         }
     }
 }

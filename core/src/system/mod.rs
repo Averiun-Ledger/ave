@@ -97,7 +97,7 @@ pub async fn system(
         .await
         .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?;
 
-    system.add_helper("ext_db", ext_db).await;
+    system.add_helper("ext_db", Arc::new(ext_db)).await;
 
     let runner = tokio::spawn(async move {
         runner.run().await;

@@ -446,7 +446,7 @@ impl Subject for Governance {
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
-            make_obsolete(ctx, &self.subject_metadata.subject_id).await;
+            let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
 
             Self::publish_sink(
                 ctx,
@@ -1792,9 +1792,9 @@ impl Actor for Governance {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Governance", id = id)
+            info_span!(parent: parent_span, "Governance", id)
         } else {
-            info_span!("Governance", id = id)
+            info_span!("Governance", id)
         }
     }
 

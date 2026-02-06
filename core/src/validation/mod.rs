@@ -228,11 +228,11 @@ impl Actor for Validation {
     type Message = ValidationMessage;
     type Response = ();
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Validation", id = id)
+            info_span!(parent: parent_span, "Validation")
         } else {
-            info_span!("Validation", id = id)
+            info_span!("Validation")
         }
     }
 }
@@ -395,7 +395,7 @@ impl Handler<Validation> for Validation {
                                     self.request_id.clone(),
                                     sender.clone(),
                                     error,
-                                    self.request.content().get_sn()
+                                    self.request.content().get_sn(),
                                 )
                                 .await
                                 {
@@ -561,35 +561,35 @@ impl Handler<Validation> for Validation {
 #[cfg(test)]
 pub mod tests {
     use core::panic;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
     use tempfile::TempDir;
     use test_log::test;
 
     use ave_actors::{ActorPath, ActorRef, PersistentActor, SystemRef};
     use ave_common::{
-        ValueWrapper,
+        Namespace, SchemaType,
         identity::{
-            Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh,
-            keys::Ed25519Signer,
+            DigestIdentifier, HashAlgorithm, KeyPair, keys::Ed25519Signer,
         },
+        request::{CreateRequest, EOLRequest},
+        response::RequestEventDB,
     };
+    use tokio::sync::mpsc;
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage,
-        NodeResponse, Signed,
+        EventRequest, Node, NodeMessage, NodeResponse, Signed,
         governance::{
             Governance, GovernanceMessage, GovernanceResponse,
             data::GovernanceData,
         },
-        model::{
-            Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
-        },
-        query::Query,
+        helpers::{db::ExternalDB, network::service::NetworkSender},
+        model::common::node::SignTypesNode,
+        node::InitParamsNode,
+        query::{Query, QueryMessage, QueryResponse},
         request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
             tracking::RequestTracking,
         },
-        subject::laststate::{LastState, LastStateMessage, LastStateResponse},
         system::tests::create_system,
     };
 
@@ -599,7 +599,6 @@ pub mod tests {
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Governance>,
-        ActorRef<LastState>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
@@ -607,21 +606,43 @@ pub mod tests {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
 
+        let (command_sender, _command_receiver) = mpsc::channel(10);
+        let network = Arc::new(NetworkSender::new(command_sender));
+
+        system.add_helper("network", network.clone()).await;
+
+        let public_key = Arc::new(node_keys.public_key());
         let node_actor = system
-            .create_root_actor("node", Node::initial(node_keys.clone()))
+            .create_root_actor(
+                "node",
+                Node::initial(InitParamsNode {
+                    key_pair: node_keys.clone(),
+                    public_key: public_key.clone(),
+                    hash: HashAlgorithm::Blake3,
+                    is_service: true,
+                }),
+            )
             .await
             .unwrap();
 
         let request_actor = system
             .create_root_actor(
                 "request",
-                RequestHandler::initial(node_keys.public_key()),
+                RequestHandler::initial((
+                    public_key.clone(),
+                    (HashAlgorithm::Blake3, network),
+                )),
             )
             .await
             .unwrap();
 
+        let ext_db = system
+            .get_helper::<Arc<ExternalDB>>("ext_db")
+            .await
+            .unwrap();
+
         let query_actor = system
-            .create_root_actor("query", Query::new(node_keys.public_key()))
+            .create_root_actor("query", Query::new(ext_db))
             .await
             .unwrap();
 
@@ -664,22 +685,6 @@ pub mod tests {
             .await
             .unwrap();
 
-        let last_state_actor: ActorRef<LastState> = system
-            .get_actor(&ActorPath::from(format!(
-                "/user/node/{}/last_state",
-                owned_subj
-            )))
-            .await
-            .unwrap();
-
-        let LastStateResponse::LastState { event, .. } = last_state_actor
-            .ask(LastStateMessage::GetLastState)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -687,49 +692,89 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: owned_subj.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        let last_event = *event;
-        assert_eq!(last_event.content().subject_id.to_string(), owned_subj);
-        assert_eq!(last_event.content().event_request, signed_event_req);
-        assert_eq!(last_event.content().sn, 0);
-        assert_eq!(last_event.content().gov_version, 0);
-        assert_eq!(
-            last_event.content().value,
-            LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                "[]".to_owned(),
-            ),))
-        );
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: owned_subj.clone(),
+                sn: 0,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        assert_eq!(
-            last_event.content().state_hash,
-            hash_borsh(&Blake3Hasher, &metadata.properties).unwrap()
-        );
-        assert!(last_event.content().eval_success.is_none());
-        assert!(!last_event.content().appr_required);
-        assert!(last_event.content().appr_success.is_none());
-        assert!(last_event.content().vali_success);
-        assert_eq!(
-            last_event.content().hash_prev_event,
-            DigestIdentifier::default()
-        );
-        assert!(last_event.content().validators.is_none());
-        assert!(last_event.content().approvers.is_none(),);
-        assert!(!last_event.content().validators.is_empty());
+        let RequestEventDB::Create {
+            name,
+            description,
+            schema_id,
+            namespace,
+        } = event.event
+        else {
+            panic!()
+        };
 
-        assert_eq!(metadata.subject_id.to_string(), owned_subj);
+        assert_eq!(metadata.name, name);
+        assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, description);
+        assert_eq!(metadata.description, subject_data.description);
         assert_eq!(metadata.description.unwrap(), "Description");
-        assert_eq!(metadata.governance_id.to_string(), "");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, owned_subj);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, owned_subj);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id.to_string(), "governance");
+
+        assert_eq!(metadata.schema_id.to_string(), schema_id);
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(metadata.namespace.to_string(), namespace);
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
         assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
         assert_eq!(metadata.sn, 0);
-        assert_eq!(metadata.owner, node_keys.public_key());
+
+        assert!(subject_data.active);
         assert!(metadata.active);
 
+        assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 0);
-        // TODO MEJORAR
+
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -748,7 +793,6 @@ pub mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            last_state_actor,
             tracking,
             metadata.subject_id,
             _dirs,
@@ -766,9 +810,8 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            _query_actor,
+            query_actor,
             subject_actor,
-            last_state_actor,
             _tracking,
             subject_id,
             _dirs,
@@ -800,15 +843,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        let LastStateResponse::LastState { event, .. } = last_state_actor
-            .ask(LastStateMessage::GetLastState)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -818,38 +853,79 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let last_event = *event;
-        assert_eq!(last_event.content().subject_id, subject_id);
-        assert_eq!(last_event.content().event_request, signed_event_req);
-        assert_eq!(last_event.content().sn, 1);
-        assert_eq!(last_event.content().gov_version, 0);
-        assert_eq!(
-            last_event.content().value,
-            LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                "[]".to_owned(),
-            ),))
-        );
-        assert!(last_event.content().eval_success.is_none());
-        assert!(!last_event.content().appr_required);
-        assert!(last_event.content().appr_success.is_none());
-        assert!(last_event.content().vali_success);
-        assert!(last_event.content().validators.is_none());
-        assert!(last_event.content().approvers.is_none(),);
-        assert!(!last_event.content().validators.is_empty());
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        assert_eq!(metadata.subject_id, subject_id);
-        assert_eq!(metadata.governance_id.to_string(), "");
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::EOL = event.event else {
+            panic!()
+        };
+
+        assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, subject_data.description);
         assert_eq!(metadata.description.unwrap(), "Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, subject_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id.to_string(), "governance");
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
         assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
         assert_eq!(metadata.sn, 1);
+
+        assert!(!subject_data.active);
         assert!(!metadata.active);
 
+        assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
+
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());

@@ -375,11 +375,11 @@ impl Actor for WitnessesRegister {
     type Message = WitnessesRegisterMessage;
     type Response = WitnessesRegisterResponse;
 
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "WitnessesRegister", id = id)
+            info_span!(parent: parent_span, "WitnessesRegister")
         } else {
-            info_span!("WitnessesRegister", id = id)
+            info_span!("WitnessesRegister")
         }
     }
 
