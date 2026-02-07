@@ -14,7 +14,7 @@ use ave_actors::ActorError;
 use ave_common::{
     identity::{DigestIdentifier, Signature, Signed, TimeStamp},
     request::EventRequest,
-    response::{LedgerDB, RequestEventDB},
+    response::{EvalResDB, LedgerDB, RequestEventDB},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -185,14 +185,14 @@ impl Protocols {
                 Protocols::TrackerFact { evaluation, .. },
                 EventRequest::Fact(fact_request),
             ) => {
-                let evaluation_error = match evaluation.response.clone() {
-                    EvaluationResponse::Ok(_) => None,
-                    EvaluationResponse::Error(e) => Some(e.to_string()),
+                let evaluation_response = match evaluation.response.clone() {
+                    EvaluationResponse::Ok(eval_res) => EvalResDB::Patch(eval_res.patch.0.clone()),
+                    EvaluationResponse::Error(e) => EvalResDB::Error(e.to_string()),
                 };
                 
                 (RequestEventDB::TrackerFact {
                     payload: fact_request.payload.0.clone(),
-                    evaluation_error,
+                    evaluation_response,
                 }, event_request.get_subject_id())
             }
             (
@@ -203,24 +203,24 @@ impl Protocols {
                 },
                 EventRequest::Fact(fact_request),
             ) => {
-                let (evaluation_error, approval_success) = match evaluation
+                let (evaluation_response, approval_success) = match evaluation
                     .response
                     .clone()
                 {
-                    EvaluationResponse::Ok(_) => {
+                    EvaluationResponse::Ok(eval_res) => {
                         if let Some(appr) = approval {
-                            (None, Some(appr.approved))
+                            (EvalResDB::Patch(eval_res.patch.0.clone()), Some(appr.approved))
                         } else {
                             unreachable!(
                                 "In a factual governance event, if the assessment is correct, there should be approval."
                             )
                         }
                     }
-                    EvaluationResponse::Error(e) => (Some(e.to_string()), None),
+                    EvaluationResponse::Error(e) => (EvalResDB::Error(e.to_string()), None),
                 };
                 (RequestEventDB::GovernanceFact {
                     payload: fact_request.payload.0.clone(),
-                    evaluation_error,
+                    evaluation_response,
                     approval_success,
                 }, event_request.get_subject_id())
             }
@@ -244,13 +244,13 @@ impl Protocols {
                 Protocols::GovConfirm { evaluation, .. },
                 EventRequest::Confirm(confirm_request),
             ) => {
-                let evaluation_error = match evaluation.response.clone() {
-                    EvaluationResponse::Ok(_) => None,
-                    EvaluationResponse::Error(e) => Some(e.to_string()),
+                let evaluation_response = match evaluation.response.clone() {
+                    EvaluationResponse::Ok(eval_res) => EvalResDB::Patch(eval_res.patch.0.clone()),
+                    EvaluationResponse::Error(e) => EvalResDB::Error(e.to_string()),
                 };
                 (RequestEventDB::GovernanceConfirm {
                     name_old_owner: confirm_request.name_old_owner.clone(),
-                    evaluation_error,
+                    evaluation_response,
                 }, event_request.get_subject_id())
             }
             (Protocols::Reject { .. }, EventRequest::Reject(..)) => (RequestEventDB::Reject, event_request.get_subject_id()),

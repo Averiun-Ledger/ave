@@ -593,7 +593,7 @@ pub mod tests {
         system::tests::create_system,
     };
 
-    pub async fn create_subject_gov() -> (
+    pub async fn create_gov() -> (
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
@@ -800,12 +800,12 @@ pub mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_create_req() {
-        let _ = create_subject_gov().await;
+    async fn test_create_gov() {
+        let _ = create_gov().await;
     }
 
     #[test(tokio::test)]
-    async fn test_eol_req() {
+    async fn test_eol_gov() {
         let (
             _system,
             node_actor,
@@ -815,7 +815,7 @@ pub mod tests {
             _tracking,
             subject_id,
             _dirs,
-        ) = create_subject_gov().await;
+        ) = create_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {
             subject_id: subject_id.clone(),

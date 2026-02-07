@@ -42,11 +42,11 @@ pub enum RequestEventDB {
     },
     TrackerFact {
         payload: Value,
-        evaluation_error: Option<String>,
+        evaluation_response: EvalResDB,
     },
     GovernanceFact {
         payload: Value,
-        evaluation_error: Option<String>,
+        evaluation_response: EvalResDB,
         approval_success: Option<bool>,
     },
     Transfer {
@@ -56,10 +56,17 @@ pub enum RequestEventDB {
     TrackerConfirm,
     GovernanceConfirm {
         name_old_owner: Option<String>,
-        evaluation_error: Option<String>,
+        evaluation_response: EvalResDB
     },
     Reject,
     EOL,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum EvalResDB {
+    Patch(Value),
+    Error(String)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -79,6 +79,7 @@ impl EvaluationReq {
                     governance_data,
                     namespace,
                     schema_id,
+                    ..
                 },
             ) => Ok(EvaluateInfo::AllSchemasTransfer {
                 governance_data: governance_data.clone(),
@@ -121,6 +122,7 @@ pub enum EvaluateData {
         state: ValueWrapper,
     },
     AllSchemasTransfer {
+        state: ValueWrapper,
         governance_data: GovernanceData,
         namespace: Namespace,
         schema_id: SchemaType,

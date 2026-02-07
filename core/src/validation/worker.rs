@@ -416,7 +416,7 @@ impl ValiWorker {
 
             if signed_res.verify().is_err() {
                 return Err(ValidatorError::InvalidSignature {
-                    data: "approval agrees signature",
+                    data: "approval agrees",
                 });
             }
         }
@@ -432,7 +432,7 @@ impl ValiWorker {
 
             if signed_res.verify().is_err() {
                 return Err(ValidatorError::InvalidSignature {
-                    data: "approval disagrees signature",
+                    data: "approval disagrees",
                 });
             }
         }
@@ -491,7 +491,7 @@ impl ValiWorker {
 
             if signed_res.verify().is_err() {
                 return Err(ValidatorError::InvalidSignature {
-                    data: "evaluation signature",
+                    data: "evaluation",
                 });
             }
         }
@@ -706,7 +706,7 @@ impl ValiWorker {
 
             if signed_res.verify().is_err() {
                 return Err(ValidatorError::InvalidSignature {
-                    data: "evaluation signature",
+                    data: "last validation",
                 });
             }
         }
@@ -718,9 +718,12 @@ impl ValiWorker {
         is_success: bool,
         event_request: &EventRequest,
         properties: Option<ValueWrapper>,
+        ledger_hash: DigestIdentifier,
         mut metadata: Metadata,
     ) -> Result<Metadata, ValidatorError> {
         metadata.sn += 1;
+
+        metadata.prev_ledger_event_hash = ledger_hash;
 
         if !is_success {
             return Ok(metadata);
@@ -755,6 +758,17 @@ impl ValiWorker {
             }
             EventRequest::Reject(..) => metadata.new_owner = None,
             EventRequest::EOL(..) => metadata.active = false,
+        }
+
+        if metadata.schema_id.is_gov() {
+            let mut gov_data =
+                serde_json::from_value::<GovernanceData>(metadata.properties.0)
+                    .map_err(|_| ValidatorError::InvalidData {
+                        value: "metadata properties",
+                    })?;
+                    
+            gov_data.version += 1;
+            metadata.properties = gov_data.to_value_wrapper();
         }
 
         Ok(metadata)
@@ -884,7 +898,7 @@ impl ValiWorker {
                     last_data,
                     gov_version,
                     sn,
-                    ..
+                    ledger_hash,
                 } => {
                     let signer = validation_req.signature().signer.clone();
                     Self::check_basic_data(
@@ -914,6 +928,7 @@ impl ValiWorker {
                         is_success,
                         &event_request.content(),
                         properties,
+                        ledger_hash.clone(),
                         metadata.clone(),
                     )?;
 

@@ -466,7 +466,8 @@ impl Handler<Evaluation> for Evaluation {
 
                         if self.quorum.check_quorum(
                             self.evaluators_quantity,
-                            self.evaluators_response.len() as u32,
+                            (self.evaluators_response.len() + self.errors.len())
+                                as u32,
                         ) {
                             let summary = self.check_responses();
                             if let ResponseSummary::Reboot = summary {
@@ -607,14 +608,14 @@ impl Handler<Evaluation> for Evaluation {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{str::FromStr, time::Duration};
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use ave_common::{
         Namespace, SchemaType, ValueWrapper,
-        identity::{DigestIdentifier, KeyPair, KeyPairAlgorithm, Signed},
+        identity::{DigestIdentifier, PublicKey, Signed},
         request::{CreateRequest, FactRequest, TransferRequest},
-        response::{RequestEventDB, RequestState},
+        response::{EvalResDB, RequestEventDB, RequestState},
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -638,7 +639,7 @@ mod tests {
             },
         },
         tracker::{Tracker, TrackerMessage, TrackerResponse},
-        validation::tests::create_subject_gov,
+        validation::tests::create_gov,
     };
 
     #[test(tokio::test)]
@@ -652,20 +653,21 @@ mod tests {
             tracking,
             subject_id,
             _dir,
-        ) = create_subject_gov().await;
+        ) = create_gov().await;
 
+        let payload = ValueWrapper(json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "AveNode1",
+                        "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                    }
+                ]
+            }
+        }));
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
-            payload: ValueWrapper(json!({
-                "members": {
-                    "add": [
-                        {
-                            "name": "AveNode1",
-                            "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
-                        }
-                    ]
-                }
-            })),
+            payload: payload.clone(),
         });
 
         let response = node_actor
@@ -766,15 +768,18 @@ mod tests {
         };
 
         let RequestEventDB::GovernanceFact {
-            payload,
-            evaluation_error,
+            payload: request_payload,
+            evaluation_response,
             approval_success,
         } = event.event
         else {
             panic!()
         };
 
-        assert!(evaluation_error.is_none());
+        let EvalResDB::Patch(_) = evaluation_response else {
+            panic!("");
+        };
+
         assert!(approval_success.unwrap());
 
         assert_eq!(metadata.name, subject_data.name);
@@ -821,7 +826,7 @@ mod tests {
         assert!(subject_data.active);
         assert!(metadata.active);
 
-        assert_eq!(metadata.properties.0, payload);
+        assert_eq!(payload.0, request_payload);
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
@@ -833,7 +838,175 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_transfer_req() {
+    async fn test_fact_fail_gov() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            query_actor,
+            subject_actor,
+            tracking,
+            subject_id,
+            _dir,
+        ) = create_gov().await;
+
+        let payload = ValueWrapper(json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Owner",
+                        "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                    }
+                ]
+            }
+        }));
+        let fact_request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: payload.clone(),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                fact_request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(fact_request, signature);
+
+        let RequestHandlerResponse::Ok(request_id) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let RequestTrackingResponse::Info(state) = tracking
+            .ask(RequestTrackingMessage::SearchRequest(
+                request_id.request_id.clone(),
+            ))
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(RequestState::Finish, state.state);
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::GovernanceFact {
+            payload: request_payload,
+            evaluation_response,
+            approval_success,
+        } = event.event
+        else {
+            panic!()
+        };
+
+        let EvalResDB::Error(e) = evaluation_response else {
+            panic!("");
+        };
+
+        assert_eq!(
+            "runner error: invalid event: [check_members] invalid event: member 'Owner' already exists",
+            e
+        );
+        assert!(approval_success.is_none());
+
+        assert_eq!(metadata.name, subject_data.name);
+        assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, subject_data.description);
+        assert_eq!(metadata.description.unwrap(), "Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, subject_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
+        assert_eq!(metadata.genesis_gov_version, 0);
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
+        assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
+        assert_eq!(metadata.sn, 1);
+
+        assert!(subject_data.active);
+        assert!(metadata.active);
+
+        assert_eq!(payload.0, request_payload);
+        assert_eq!(metadata.properties.0, subject_data.properties);
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
+        assert_eq!(gov.version, 0);
+        // TODO MEJORAR
+        assert!(!gov.members.is_empty());
+        assert!(gov.roles_schema.is_empty());
+        assert!(gov.schemas.is_empty());
+        assert!(gov.policies_schema.is_empty());
+    }
+
+    #[test(tokio::test)]
+    async fn test_transfer_gov() {
         let (
             _system,
             node_actor,
@@ -843,9 +1016,7 @@ mod tests {
             _tracking,
             subject_id,
             _dir,
-        ) = create_subject_gov().await;
-
-        let new_owner = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
+        ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
@@ -854,7 +1025,7 @@ mod tests {
                     "add": [
                         {
                             "name": "TestMember",
-                            "key": new_owner.public_key().to_string()
+                            "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
                         }
                     ]
                 }
@@ -906,7 +1077,10 @@ mod tests {
 
         let transfer_reques = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
-            new_owner: new_owner.public_key().clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
+            )
+            .unwrap(),
         });
 
         let response = node_actor
@@ -931,7 +1105,7 @@ mod tests {
             panic!("Invalid response")
         };
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -1006,12 +1180,18 @@ mod tests {
         );
         assert_eq!(metadata.namespace, Namespace::new());
 
-        assert_eq!(new_owner_transfer, new_owner.public_key().to_string());
+        assert_eq!(
+            new_owner_transfer,
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+        );
         assert_eq!(
             subject_data.new_owner.unwrap(),
-            new_owner.public_key().to_string()
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
         );
-        assert_eq!(metadata.new_owner.unwrap(), new_owner.public_key());
+        assert_eq!(
+            metadata.new_owner.unwrap().to_string(),
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+        );
 
         assert_eq!(metadata.sn, event.sn);
         assert_eq!(metadata.sn, subject_data.sn);
@@ -1040,7 +1220,209 @@ mod tests {
         }
     }
 
-    async fn init_gov_sub() -> (
+    #[test(tokio::test)]
+    async fn test_transfer_fail_gov() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            query_actor,
+            subject_actor,
+            _tracking,
+            subject_id,
+            _dir,
+        ) = create_gov().await;
+
+        let fact_request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(json!({
+                "members": {
+                    "add": [
+                        {
+                            "name": "TestMember",
+                            "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                        }
+                    ]
+                }
+            })),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                fact_request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(fact_request, signature);
+
+        let RequestHandlerResponse::Ok(_request_id) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(9)).await;
+
+        let RequestHandlerResponse::Response(res) = request_actor
+            .ask(RequestHandlerMessage::ChangeApprovalState {
+                subject_id: subject_id.clone(),
+                state: ApprovalStateRes::RespondedAccepted,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(
+            res,
+            format!(
+                "The approval request for subject {} has changed to RespondedAccepted",
+                subject_id.to_string()
+            )
+        );
+
+        let transfer_reques = EventRequest::Transfer(TransferRequest {
+            subject_id: subject_id.clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA",
+            )
+            .unwrap(),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                transfer_reques.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(transfer_reques, signature);
+
+        let RequestHandlerResponse::Ok(_response) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let GovernanceResponse::Metadata(metadata) = subject_actor
+            .ask(GovernanceMessage::GetMetadata)
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 2,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner: new_owner_transfer,
+        } = event.event
+        else {
+            panic!()
+        };
+
+        assert_eq!(
+            "runner error: invalid event: [execute_transfer_gov] invalid event: 'new owner EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA' is not a member of governance",
+            evaluation_error.unwrap()
+        );
+
+        assert_eq!(metadata.name, subject_data.name);
+        assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, subject_data.description);
+        assert_eq!(metadata.description.unwrap(), "Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, subject_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
+        assert_eq!(metadata.genesis_gov_version, 0);
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
+        assert_eq!(metadata.namespace, Namespace::new());
+
+        assert_eq!(
+            new_owner_transfer,
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA"
+        );
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
+        assert_eq!(metadata.sn, 2);
+
+        assert!(subject_data.active);
+        assert!(metadata.active);
+
+        assert_eq!(metadata.properties.0, subject_data.properties);
+        let gov = GovernanceData::try_from(metadata.properties).unwrap();
+        assert_eq!(gov.version, 1);
+        // TODO MEJORAR
+        assert!(!gov.members.is_empty());
+        assert!(gov.roles_schema.is_empty());
+        assert!(gov.schemas.is_empty());
+        assert!(gov.policies_schema.is_empty());
+    }
+
+    async fn init_gov_with_member_and_schema() -> (
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
@@ -1059,11 +1441,19 @@ mod tests {
             tracking,
             subject_id,
             _dir,
-        ) = create_subject_gov().await;
+        ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(json!({
+                "members": {
+                    "add": [
+                        {
+                            "name": "TestMember",
+                            "key": "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                        }
+                    ]
+                },
                 "schemas": {
                     "add": [
                         {
@@ -1108,6 +1498,11 @@ mod tests {
                                     "creator": [
                                         {
                                             "name": "Owner",
+                                            "namespace": [],
+                                            "quantity": 2
+                                        },
+                                        {
+                                            "name": "TestMember",
                                             "namespace": [],
                                             "quantity": 2
                                         }
@@ -1275,17 +1670,18 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_fact_sub() {
-        init_gov_sub().await;
+    async fn test_fact_gov_2() {
+        init_gov_with_member_and_schema().await;
     }
 
-    async fn create_subject() -> (
+    async fn create_tracker() -> (
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Tracker>,
         ActorRef<RequestTracking>,
+        DigestIdentifier,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
@@ -1298,7 +1694,7 @@ mod tests {
             tracking,
             gov_id,
             _dir,
-        ) = init_gov_sub().await;
+        ) = init_gov_with_member_and_schema().await;
 
         let create_request = EventRequest::Create(CreateRequest {
             name: Some("Subject Name".to_owned()),
@@ -1409,7 +1805,7 @@ mod tests {
             metadata.governance_id.to_string(),
             subject_data.governance_id
         );
-        assert_eq!(metadata.governance_id, subject_id);
+        assert_eq!(metadata.governance_id, gov_id);
 
         assert_eq!(
             metadata.genesis_gov_version,
@@ -1454,17 +1850,18 @@ mod tests {
             subject_actor,
             tracking,
             request_id.subject_id,
+            gov_id,
             _dir,
         )
     }
 
     #[test(tokio::test)]
-    async fn test_create_subject() {
-        let _ = create_subject().await;
+    async fn test_create_tracker() {
+        let _ = create_tracker().await;
     }
 
     #[test(tokio::test)]
-    async fn test_subject_events() {
+    async fn test_fact_tracker() {
         let (
             _system,
             node_actor,
@@ -1473,16 +1870,19 @@ mod tests {
             subject_actor,
             _tracking,
             subject_id,
+            gov_id,
             _dir,
-        ) = create_subject().await;
+        ) = create_tracker().await;
+
+        let payload = json!({
+            "ModOne": {
+                "data": 100
+            }
+        });
 
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
-            payload: ValueWrapper(json!({
-                "ModOne": {
-                    "data": 100
-                }
-            })),
+            payload: ValueWrapper(payload.clone()),
         });
 
         let response = node_actor
@@ -1538,14 +1938,16 @@ mod tests {
         };
 
         let RequestEventDB::TrackerFact {
-            payload,
-            evaluation_error,
+            payload: payload_db,
+            evaluation_response,
         } = event.event
         else {
             panic!()
         };
 
-        assert!(evaluation_error.is_none());
+        let EvalResDB::Patch(_) = evaluation_response else {
+            panic!("");
+        };
 
         assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Subject Name");
@@ -1561,7 +1963,7 @@ mod tests {
             metadata.governance_id.to_string(),
             subject_data.governance_id
         );
-        assert_eq!(metadata.governance_id, subject_id);
+        assert_eq!(metadata.governance_id, gov_id);
 
         assert_eq!(
             metadata.genesis_gov_version,
@@ -1591,9 +1993,450 @@ mod tests {
         assert!(subject_data.active);
         assert!(metadata.active);
 
-        assert_eq!(metadata.properties.0, payload);
+        assert_eq!(payload, payload_db);
         assert_eq!(metadata.properties.0, subject_data.properties);
         assert!(metadata.properties.0["one"].as_u64().unwrap() == 100);
+        assert!(metadata.properties.0["two"].as_u64().unwrap() == 0);
+        assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
+    }
+
+    #[test(tokio::test)]
+    async fn test_fact_fail_tracker() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            query_actor,
+            subject_actor,
+            _tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let payload = json!({
+            "ModOne": {
+                "not_exist": "error"
+            }
+        });
+
+        let fact_request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(payload.clone()),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                fact_request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(fact_request, signature);
+
+        let RequestHandlerResponse::Ok(request_id) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let TrackerResponse::Metadata(metadata) = subject_actor
+            .ask(TrackerMessage::GetMetadata)
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: request_id.subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::TrackerFact {
+            payload: payload_db,
+            evaluation_response,
+        } = event.event
+        else {
+            panic!()
+        };
+
+        let EvalResDB::Error(e) = evaluation_response else {
+            panic!("");
+        };
+
+        assert_eq!(
+            "runner error: contract failed: contract returned failure: Contract execution in running was not successful: Can not convert Event from value",
+            e
+        );
+        assert_eq!(metadata.name, subject_data.name);
+        assert_eq!(metadata.name.unwrap(), "Subject Name");
+
+        assert_eq!(metadata.description, subject_data.description);
+        assert_eq!(metadata.description.unwrap(), "Subject Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, gov_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
+        assert_eq!(metadata.genesis_gov_version, 1);
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Type("Example".to_string()));
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
+        assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
+        assert_eq!(metadata.sn, 1);
+
+        assert!(subject_data.active);
+        assert!(metadata.active);
+
+        assert_eq!(payload, payload_db);
+        assert_eq!(metadata.properties.0, subject_data.properties);
+        assert!(metadata.properties.0["one"].as_u64().unwrap() == 0);
+        assert!(metadata.properties.0["two"].as_u64().unwrap() == 0);
+        assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
+    }
+
+    #[test(tokio::test)]
+    async fn test_transfer_tracker() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            query_actor,
+            subject_actor,
+            _tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let transfer_reques = EventRequest::Transfer(TransferRequest {
+            subject_id: subject_id.clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
+            )
+            .unwrap(),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                transfer_reques.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(transfer_reques, signature);
+
+        let RequestHandlerResponse::Ok(_response) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let TrackerResponse::Metadata(metadata) = subject_actor
+            .ask(TrackerMessage::GetMetadata)
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner: new_owner_transfer,
+        } = event.event
+        else {
+            panic!()
+        };
+
+        assert!(evaluation_error.is_none());
+
+        assert_eq!(metadata.name, subject_data.name);
+        assert_eq!(metadata.name.unwrap(), "Subject Name");
+
+        assert_eq!(metadata.description, subject_data.description);
+        assert_eq!(metadata.description.unwrap(), "Subject Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, gov_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
+        assert_eq!(metadata.genesis_gov_version, 1);
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Type("Example".to_string()));
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
+        assert_eq!(metadata.namespace, Namespace::new());
+
+        assert_eq!(
+            new_owner_transfer,
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+        );
+        assert_eq!(
+            subject_data.new_owner.unwrap(),
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+        );
+        assert_eq!(
+            metadata.new_owner.unwrap().to_string(),
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+        );
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
+        assert_eq!(metadata.sn, 1);
+
+        assert!(subject_data.active);
+        assert!(metadata.active);
+
+        assert_eq!(metadata.properties.0, subject_data.properties);
+        assert!(metadata.properties.0["one"].as_u64().unwrap() == 0);
+        assert!(metadata.properties.0["two"].as_u64().unwrap() == 0);
+        assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
+
+        if !request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .is_err()
+        {
+            panic!("Invalid response")
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_transfer_fail_tracker() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            query_actor,
+            subject_actor,
+            _tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let transfer_reques = EventRequest::Transfer(TransferRequest {
+            subject_id: subject_id.clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA",
+            )
+            .unwrap(),
+        });
+
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                transfer_reques.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(transfer_reques, signature);
+
+        let RequestHandlerResponse::Ok(_response) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let TrackerResponse::Metadata(metadata) = subject_actor
+            .ask(TrackerMessage::GetMetadata)
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::Transfer {
+            evaluation_error,
+            new_owner: new_owner_transfer,
+        } = event.event
+        else {
+            panic!()
+        };
+
+        assert_eq!(
+            "runner error: invalid event: [execute_transfer_not_gov] invalid event: 'new owner EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA' is not a member of governance",
+            evaluation_error.unwrap()
+        );
+
+        assert_eq!(metadata.name, subject_data.name);
+        assert_eq!(metadata.name.unwrap(), "Subject Name");
+
+        assert_eq!(metadata.description, subject_data.description);
+        assert_eq!(metadata.description.unwrap(), "Subject Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, gov_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
+        assert_eq!(metadata.genesis_gov_version, 1);
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Type("Example".to_string()));
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
+        assert_eq!(metadata.namespace, Namespace::new());
+
+        assert_eq!(
+            new_owner_transfer,
+            "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA"
+        );
+        assert!(subject_data.new_owner.is_none(),);
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
+        assert_eq!(metadata.sn, 1);
+
+        assert!(subject_data.active);
+        assert!(metadata.active);
+
+        assert_eq!(metadata.properties.0, subject_data.properties);
+        assert!(metadata.properties.0["one"].as_u64().unwrap() == 0);
         assert!(metadata.properties.0["two"].as_u64().unwrap() == 0);
         assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
     }

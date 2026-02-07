@@ -14,7 +14,8 @@ use crate::{
         common::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
-        event::{Ledger, Protocols, ValidationMetadata}, request::EventRequestType,
+        event::{Ledger, Protocols, ValidationMetadata},
+        request::EventRequestType,
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -471,10 +472,26 @@ where
             }
         };
 
+        if modified_subject_metadata.schema_id.is_gov()
+            && new_actual_protocols.is_success()
+        {
+            let mut gov_data = serde_json::from_value::<GovernanceData>(
+                modified_subject_metadata.properties.0,
+            )
+            .map_err(|e| {
+                SubjectError::GovernanceDataConversionFailed {
+                    details: e.to_string(),
+                }
+            })?;
+
+            gov_data.version += 1;
+            modified_subject_metadata.properties = gov_data.to_value_wrapper();
+        }
+
         let validation_req = ValidationReq::Event {
             actual_protocols: new_actual_protocols,
             event_request: new_ledger_event.content().event_request.clone(),
-            ledger_hash: actual_ledger_event_hash,
+            ledger_hash: actual_ledger_event_hash.clone(),
             metadata: subject_metadata.clone(),
             last_data,
             gov_version: new_ledger_event.content().gov_version,
@@ -500,6 +517,9 @@ where
         if hash_signed_val_req != validation.validation_req_hash {
             return Err(SubjectError::ValidationRequestHashMismatch);
         }
+
+        modified_subject_metadata.prev_ledger_event_hash =
+            actual_ledger_event_hash;
 
         let modified_metadata_hash =
             hash_borsh(&*hash.hasher(), &modified_subject_metadata).map_err(
@@ -853,10 +873,8 @@ where
         gov_version: u64,
     ) -> Result<(), ActorError>;
 
-    async fn eol(
-        &self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError>;
+    async fn eol(&self, ctx: &mut ActorContext<Self>)
+    -> Result<(), ActorError>;
 
     fn apply_patch(
         &mut self,

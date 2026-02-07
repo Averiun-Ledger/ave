@@ -10,6 +10,9 @@ pub enum RequestHandlerError {
     #[error("helpers are not initialized")]
     HelpersNotInitialized,
 
+    #[error("the payload cannot be deserialized as a governance event")]
+    GovFactInvalidEvent,
+
     /// Attempted to mark an approval as obsolete.
     #[error("a user cannot mark a request approval as obsolete")]
     ObsoleteApproval,

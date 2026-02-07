@@ -25,6 +25,7 @@ use crate::approval::persist::{
 use crate::approval::request::ApprovalReq;
 use crate::approval::types::{ApprovalState, ApprovalStateRes};
 use crate::db::Storable;
+use crate::governance::events::GovernanceEvent;
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
@@ -356,9 +357,17 @@ impl RequestHandler {
                     }
                 }
             }
-            EventRequest::Reject(..)
-            | EventRequest::Fact(..)
-            | EventRequest::EOL(..) => {}
+            EventRequest::Fact(fact_request) => {
+                if is_gov
+                    && serde_json::from_value::<GovernanceEvent>(
+                        fact_request.payload.0.clone(),
+                    )
+                    .is_err()
+                {
+                    return Err(RequestHandlerError::GovFactInvalidEvent);
+                }
+            }
+            EventRequest::Reject(..) | EventRequest::EOL(..) => {}
         }
 
         Ok(())
@@ -676,12 +685,14 @@ impl RequestHandler {
         actor.ask_stop().await
     }
 
-    async fn manual_abort_request(&self, ctx: &mut ActorContext<RequestHandler>, subject_id: &DigestIdentifier) -> Result<(), ActorError> {
-
+    async fn manual_abort_request(
+        &self,
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
         let actor = ctx
             .get_child::<RequestManager>(&subject_id.to_string())
             .await?;
-
 
         actor.tell(RequestManagerMessage::ManualAbort).await
     }
@@ -711,7 +722,7 @@ pub enum RequestHandlerMessage {
     },
     AbortRequest {
         subject_id: DigestIdentifier,
-    }
+    },
 }
 
 impl Message for RequestHandlerMessage {}
@@ -856,7 +867,9 @@ impl Actor for RequestHandler {
             };
 
             if let Err(e) = request_manager_actor
-                .tell(RequestManagerMessage::Run { request_id: request_id.clone() })
+                .tell(RequestManagerMessage::Run {
+                    request_id: request_id.clone(),
+                })
                 .await
             {
                 error!(
@@ -964,8 +977,8 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(emit_fail(ctx, ActorError::from(err)).await);
                 };
 
-                if let Err(e) = Self::check_owner_new_owner(ctx, &request.content())
-                    .await
+                if let Err(e) =
+                    Self::check_owner_new_owner(ctx, &request.content()).await
                 {
                     error!(
                         msg_type = "NewRequest",
@@ -975,19 +988,20 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                let subject_data = match Self::build_subject_data(ctx, &request.content())
-                    .await
-                {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NewRequest",
-                            error = %e,
-                            "Failed to build subject data"
-                        );
-                        return Err(ActorError::from(e));
-                    }
-                };
+                let subject_data =
+                    match Self::build_subject_data(ctx, &request.content())
+                        .await
+                    {
+                        Ok(data) => data,
+                        Err(e) => {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Failed to build subject data"
+                            );
+                            return Err(ActorError::from(e));
+                        }
+                    };
                 let event_request_type =
                     EventRequestType::from(request.content());
                 let signer = request.signature().signer.clone();
@@ -1014,7 +1028,9 @@ impl Handler<RequestHandler> for RequestHandler {
                     ));
                 }
 
-                if let Err(e) = Self::check_event_request(&request.content(), is_gov) {
+                if let Err(e) =
+                    Self::check_event_request(&request.content(), is_gov)
+                {
                     error!(
                         msg_type = "NewRequest",
                         error = %e,
@@ -1058,26 +1074,28 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                let (request_id, subject_id) = match Self::build_request_id_subject_id(hash, &request) {
-                    Ok(ids) => ids,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NewRequest",
-                            error = %e,
-                            "Failed to build request ID and subject ID"
-                        );
-                        return Err(ActorError::from(e));
-                    }
-                };
+                let (request_id, subject_id) =
+                    match Self::build_request_id_subject_id(hash, &request) {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Failed to build request ID and subject ID"
+                            );
+                            return Err(ActorError::from(e));
+                        }
+                    };
 
-                if let Err(e) = self.handle_queue_request(
-                    ctx,
-                    request,
-                    &request_id,
-                    &subject_id,
-                    is_gov,
-                )
-                .await
+                if let Err(e) = self
+                    .handle_queue_request(
+                        ctx,
+                        request,
+                        &request_id,
+                        &subject_id,
+                        is_gov,
+                    )
+                    .await
                 {
                     error!(
                         msg_type = "NewRequest",

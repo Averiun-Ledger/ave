@@ -30,8 +30,7 @@ use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
-    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata,
-    update_ledger,
+    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata, make_obsolete, update_ledger
 };
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -296,6 +295,7 @@ impl RequestManager {
                         governance_data: governance_data.clone(),
                         namespace: metadata.namespace.clone(),
                         schema_id: metadata.schema_id.clone(),
+                        state: metadata.properties.clone()
                     },
                     governance_data,
                     None,
@@ -584,7 +584,7 @@ impl RequestManager {
         };
 
         if let EventRequest::Create(create) = request.content() {
-            if create.schema_id == SchemaType::Governance {
+            if create.schema_id.is_gov() {
                 let governance_data =
                     GovernanceData::new((*self.our_key).clone());
                 let (signers, quorum) = governance_data
@@ -605,7 +605,7 @@ impl RequestManager {
                     SchemaType::Governance,
                 ))
             } else {
-                let governance_data = get_gov(ctx, &self.subject_id).await?;
+                let governance_data = get_gov(ctx, &create.governance_id).await?;
 
                 let (signers, quorum) = governance_data
                     .get_quorum_and_signers(
@@ -846,9 +846,11 @@ impl RequestManager {
             .build_distribution_data(ctx, ledger.signature().signer.clone())
             .await?;
 
-        let Some(witnesses) = witnesses else {
+        let Some(mut witnesses) = witnesses else {
             return Ok(false);
         };
+
+        witnesses.remove(&self.our_key);
 
         if witnesses.is_empty() {
             warn!(
@@ -1184,7 +1186,6 @@ impl RequestManager {
         ctx: &mut ActorContext<RequestManager>,
     ) -> Result<(), RequestManagerError> {
         info!("Ending {}", self.id);
-        self.on_event(RequestManagerEvent::Finish, ctx).await;
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
@@ -1193,6 +1194,8 @@ impl RequestManager {
             },
         )
         .await?;
+
+        self.on_event(RequestManagerEvent::Finish, ctx).await;
 
         self.end_request(ctx).await?;
 
@@ -1346,6 +1349,7 @@ impl RequestManager {
                 if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
                     actor.ask_stop().await?;
                 };
+                let _ = make_obsolete(ctx, &self.subject_id).await;
             }
             RequestManagerState::Validation { .. } => {
                 if let Ok(actor) =
@@ -2066,6 +2070,7 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    let _ = make_obsolete(ctx, &self.subject_id).await;
                     debug!(
                         msg_type = "ApprovalRes",
                         request_id = %self.id,

@@ -221,16 +221,17 @@ impl ApprPersist {
             request.content().event_request.content().get_subject_id();
         if self.node_key == *self.our_key {
             // Approval actor.
-            let approval_actor = ctx.get_parent::<Approval>().await?;
-
-            // Send response of validation to parent
-            approval_actor
+            let subject_id = ctx.path().parent().key();
+            let approval_actor = ctx.system().get_actor::<Approval>(&ActorPath::from(&format!("/user/request/{}/approval", subject_id))).await;
+            if let Ok(approval_actor) = approval_actor {
+                approval_actor
                 .tell(ApprovalMessage::Response {
                     approval_res: res,
                     sender: (*self.our_key).clone(),
                     signature: Some(signature),
                 })
                 .await?;
+            }
         } else {
             let signed_response: Signed<ApprovalRes> =
                 Signed::from_parts(res, signature);

@@ -14,6 +14,7 @@ use ave_common::{
 };
 use borsh::{BorshDeserialize, to_vec};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{Span, debug, error, info_span};
 use types::{ContractResult, RunnerResult};
@@ -154,9 +155,7 @@ impl Runner {
         Ok((
             RunnerResult {
                 approval_required: false,
-                final_state: ValueWrapper(serde_json::Value::String(
-                    "[]".to_owned(),
-                )),
+                final_state: ValueWrapper(json!([])),
             },
             vec![],
         ))
@@ -208,9 +207,7 @@ impl Runner {
         Ok((
             RunnerResult {
                 approval_required: false,
-                final_state: ValueWrapper(serde_json::Value::String(
-                    "[]".to_owned(),
-                )),
+                final_state: ValueWrapper(json!([])),
             },
             vec![],
         ))

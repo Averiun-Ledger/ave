@@ -31,7 +31,7 @@ use ave_common::{
     },
 };
 
-use json_patch::diff;
+use json_patch::{diff};
 use network::ComunicateInfo;
 
 use ave_actors::{
@@ -307,11 +307,12 @@ impl EvalWorker {
                 (ValueWrapper(patch), properties_hash)
             }
             EvaluateData::GovTransfer { state } => {
+                let state = state.to_value_wrapper();   
                 let properties_hash = hash_borsh(&*self.hash.hasher(), &state)
                     .map_err(|e| {
                         EvaluatorError::InternalError(e.to_string())
                     })?;
-
+                    
                 (evaluation.final_state, properties_hash)
             }
             EvaluateData::GovConfirm { state } => {
@@ -330,10 +331,10 @@ impl EvalWorker {
                 (ValueWrapper(patch), properties_hash)
             }
             EvaluateData::AllSchemasTransfer {
-                governance_data, ..
+                state, ..
             } => {
                 let properties_hash =
-                    hash_borsh(&*self.hash.hasher(), &governance_data)
+                    hash_borsh(&*self.hash.hasher(), &state)
                         .map_err(|e| {
                             EvaluatorError::InternalError(e.to_string())
                         })?;
