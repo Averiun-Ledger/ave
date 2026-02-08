@@ -880,8 +880,6 @@ impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
         let subject_id = event
             .content()
-            .event_request
-            .content()
             .get_subject_id()
             .to_string();
         let sn = event.content().sn;

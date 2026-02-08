@@ -147,6 +147,7 @@ impl Validation {
                         sn: self.request.content().get_sn(),
                         hash: self.hash,
                         network: self.network.clone(),
+                        stop:true
                     },
                 )
                 .await?;

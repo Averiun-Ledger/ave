@@ -199,6 +199,7 @@ impl Handler<ValidationSchema> for ValidationSchema {
                             sn: self.sn,
                             hash: self.hash.clone(),
                             network: self.network.clone(),
+                            stop: true
                         },
                     )
                     .await;

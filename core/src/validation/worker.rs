@@ -64,6 +64,7 @@ pub struct ValiWorker {
     pub sn: u64,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
+    pub stop: bool
 }
 
 impl ValiWorker {
@@ -787,6 +788,7 @@ impl ValiWorker {
                 ValidationReq::Create {
                     event_request,
                     gov_version,
+                    subject_id
                 } => {
                     // todo Check is valid en check_data
                     if let EventRequest::Create(create) =
@@ -835,11 +837,17 @@ impl ValiWorker {
                             }
                         }
 
-                        let subject_id =
+                        let subject_id_worker =
                             hash_borsh(&*self.hash.hasher(), &event_request)
                                 .map_err(|e| ValidatorError::InternalError {
                                     problem: e.to_string(),
                                 })?;
+
+                        if subject_id != &subject_id_worker {
+                            return Err(ValidatorError::InvalidData {
+                                    value: "subject_id",
+                                });
+                        }
 
                         let init_state =
                             if let Some(init_state) = &self.init_state {
@@ -861,7 +869,7 @@ impl ValiWorker {
                         let subject_metadata = Metadata {
                             name: create.name.clone(),
                             description: create.description.clone(),
-                            subject_id: subject_id,
+                            subject_id: subject_id_worker,
                             governance_id: governance_id,
                             genesis_gov_version: *gov_version,
                             prev_ledger_event_hash: DigestIdentifier::default(),
@@ -1067,7 +1075,7 @@ impl Handler<ValiWorker> for ValiWorker {
                         signer = %validation_req.signature().signer,
                         "Unexpected sender"
                     );
-                    if self.init_state.is_some() {
+                    if self.stop {
                         ctx.stop(None).await;
                     }
 
@@ -1089,7 +1097,7 @@ impl Handler<ValiWorker> for ValiWorker {
                             "Failed to check governance"
                         );
                         if let ActorError::Functional { .. } = e {
-                            if self.init_state.is_some() {
+                            if self.stop {
                                 ctx.stop(None).await;
                             }
 
@@ -1153,8 +1161,6 @@ impl Handler<ValiWorker> for ValiWorker {
                         "/user/request/{}/validation/{}",
                         validation_req
                             .content()
-                            .get_signed_event_request()
-                            .content()
                             .get_subject_id(),
                         self.our_key.clone()
                     ),
@@ -1189,7 +1195,7 @@ impl Handler<ValiWorker> for ValiWorker {
                     );
                 }
 
-                if self.init_state.is_some() {
+                if self.stop {
                     ctx.stop(None).await;
                 }
             }

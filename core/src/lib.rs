@@ -21,7 +21,7 @@ pub mod tracker;
 pub mod update;
 pub mod validation;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
@@ -302,6 +302,76 @@ impl Api {
 
     ///////// Request
     ////////////////////////////
+
+    pub async fn get_handling_in_queue_requests(
+        &self,
+    ) -> Result<
+        (
+            HashMap<DigestIdentifier, DigestIdentifier>,
+            HashMap<DigestIdentifier, Vec<DigestIdentifier>>,
+        ),
+        Error,
+    > {
+        let response = self
+            .request
+            .ask(RequestHandlerMessage::RequestInManager)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Request processing failed");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestHandlerResponse::RequestInManager { handling, in_queue } => {
+                Ok((handling, in_queue))
+            }
+            _ => {
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "RequestInManager".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn get_handling_in_queue_requests_subject_id(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(Option<DigestIdentifier>, Option<Vec<DigestIdentifier>>), Error>
+    {
+        let response = self
+            .request
+            .ask(RequestHandlerMessage::RequestInManagerSubjectId {
+                subject_id,
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Request processing failed");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestHandlerResponse::RequestInManagerSubjectId {
+                handling,
+                in_queue,
+            } => Ok((handling, in_queue)),
+            _ => {
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "RequestInManagerSubjectId".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
     pub async fn external_request(
         &self,
         request: Signed<EventRequest>,

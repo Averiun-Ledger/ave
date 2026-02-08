@@ -409,11 +409,10 @@ impl RequestManager {
         evaluator_res: EvaluatorResponse,
     ) -> Result<Signed<ApprovalReq>, RequestManagerError> {
         let request = ApprovalReq {
-            event_request: eval_req.event_request,
+            subject_id: self.subject_id.clone(),
             sn: eval_req.sn,
             gov_version: eval_req.gov_version,
             patch: evaluator_res.patch,
-            properties_hash: evaluator_res.properties_hash,
             signer: eval_req.signer,
         };
 
@@ -436,7 +435,7 @@ impl RequestManager {
 
         let governance_data = get_gov(
             ctx,
-            &request.content().event_request.content().get_subject_id(),
+            &request.content().subject_id,
         )
         .await?;
 
@@ -598,6 +597,7 @@ impl RequestManager {
                     ValidationReq::Create {
                         event_request: request.clone(),
                         gov_version: 0,
+                        subject_id: self.subject_id.clone()
                     },
                     quorum,
                     signers,
@@ -621,6 +621,7 @@ impl RequestManager {
                     ValidationReq::Create {
                         event_request: request.clone(),
                         gov_version: governance_data.version,
+                        subject_id: self.subject_id.clone()
                     },
                     quorum,
                     signers,
@@ -766,6 +767,7 @@ impl RequestManager {
             ValidationReq::Create {
                 event_request,
                 gov_version,
+                ..
             } => Ledger {
                 event_request,
                 gov_version,

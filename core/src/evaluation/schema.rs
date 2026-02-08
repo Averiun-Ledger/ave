@@ -162,6 +162,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                             sn: self.sn,
                             hash: self.hash.clone(),
                             network: self.network.clone(),
+                            stop: true
                         },
                     )
                     .await;

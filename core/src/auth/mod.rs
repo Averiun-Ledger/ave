@@ -283,7 +283,8 @@ impl Handler<Auth> for Auth {
                 subject_id,
                 witness,
             } => {
-                self.on_event(
+                if !subject_id.is_empty() {
+                   self.on_event(
                     AuthEvent::NewAuth {
                         subject_id: subject_id.clone(),
                         witness,
@@ -296,7 +297,8 @@ impl Handler<Auth> for Auth {
                     msg_type = "NewAuth",
                     subject_id = %subject_id,
                     "New auth created successfully"
-                );
+                ); 
+                }
             }
             AuthMessage::GetAuths => {
                 let subjects: Vec<DigestIdentifier> =

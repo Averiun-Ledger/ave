@@ -61,6 +61,7 @@ pub struct EvalWorker {
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
+    pub stop: bool
 }
 
 impl EvalWorker {
@@ -606,7 +607,7 @@ impl Handler<EvalWorker> for EvalWorker {
                         signer = %evaluation_req.signature().signer,
                         "Unexpected sender"
                     );
-                    if self.init_state.is_some() {
+                    if self.stop {
                         ctx.stop(None).await;
                     }
 
@@ -626,7 +627,7 @@ impl Handler<EvalWorker> for EvalWorker {
                             "Failed to check governance"
                         );
                         if let ActorError::Functional { .. } = e {
-                            if self.init_state.is_some() {
+                            if self.stop {
                                 ctx.stop(None).await;
                             }
                             return Err(e);
@@ -740,7 +741,7 @@ impl Handler<EvalWorker> for EvalWorker {
                     "Network evaluation request processed successfully"
                 );
 
-                if self.init_state.is_some() {
+                if self.stop {
                     ctx.stop(None).await;
                 }
             }

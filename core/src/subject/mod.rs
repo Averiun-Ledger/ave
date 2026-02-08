@@ -630,6 +630,7 @@ where
         let validation_req = ValidationReq::Create {
             event_request: ledger_event.content().event_request.clone(),
             gov_version: ledger_event.content().gov_version,
+            subject_id: subject_metadata.subject_id.clone()
         };
 
         let signed_validation_req = Signed::from_parts(

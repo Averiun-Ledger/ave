@@ -159,7 +159,7 @@ impl Handler<Distribution> for Distribution {
             DistributionMessage::Create { ledger, witnesses } => {
                 self.witnesses.clone_from(&witnesses);
                 self.subject_id =
-                    ledger.content().event_request.content().get_subject_id();
+                    ledger.content().get_subject_id();
 
                 debug!(
                     msg_type = "Create",

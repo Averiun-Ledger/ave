@@ -144,9 +144,7 @@ impl DistriWorker {
         signer: PublicKey,
         ledger: Ledger,
     ) -> Result<bool, ActorError> {
-        let subject_id =
-            ledger.event_request.content().get_subject_id().clone();
-
+        let subject_id = ledger.get_subject_id();
         // Si está auth o si soy el dueño del sujeto.
         let (auth, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
@@ -278,7 +276,7 @@ impl DistriWorker {
 
                 Ok((sn, false))
             }
-            SubjectData::Governance { .. }=> {
+            SubjectData::Governance { .. } => {
                 let gov = get_gov(ctx, &subject_id).await.map_err(|e| {
                     DistributorError::GetGovernanceFailed {
                         details: e.to_string(),
@@ -575,8 +573,7 @@ impl Handler<DistriWorker> for DistriWorker {
                 info,
                 sender,
             } => {
-                let subject_id =
-                    ledger.content().event_request.content().get_subject_id();
+                let subject_id = ledger.content().get_subject_id();
                 let sn = ledger.content().sn;
 
                 let is_gov = match self
@@ -585,17 +582,25 @@ impl Handler<DistriWorker> for DistriWorker {
                 {
                     Ok(is_gov) => is_gov,
                     Err(e) => {
-                        error!(
-                            msg_type = "LastEventDistribution",
-                            subject_id = %subject_id,
-                            sn = sn,
-                            sender = %sender,
-                            error = %e,
-                            "Authorization check failed"
-                        );
                         if let ActorError::Functional { .. } = e {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                sender = %sender,
+                                error = %e,
+                                "Authorization check failed"
+                            );
                             return Err(e);
                         } else {
+                            error!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                sender = %sender,
+                                error = %e,
+                                "Authorization check failed"
+                            );
                             return Err(emit_fail(ctx, e).await);
                         }
                     }
@@ -817,12 +822,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     return Err(DistributorError::EmptyEvents.into());
                 }
 
-                let subject_id = ledger[0]
-                    .content()
-                    .event_request
-                    .content()
-                    .get_subject_id()
-                    .clone();
+                let subject_id = ledger[0].content().get_subject_id();
                 let ledger_count = ledger.len();
                 let first_sn = ledger[0].content().sn;
 

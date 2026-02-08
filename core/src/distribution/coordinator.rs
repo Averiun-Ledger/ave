@@ -71,7 +71,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
                 ledger,
             } => {
                 let subject_id =
-                    ledger.content().event_request.content().get_subject_id();
+                    ledger.content().get_subject_id();
                 let sn = ledger.content().sn;
 
                 let receiver_actor =

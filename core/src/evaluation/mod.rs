@@ -153,6 +153,7 @@ impl Evaluation {
                         sn: self.request.content().sn,
                         hash: self.hash,
                         network: self.network.clone(),
+                        stop: true
                     },
                 )
                 .await?;

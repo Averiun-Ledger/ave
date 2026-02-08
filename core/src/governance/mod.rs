@@ -879,6 +879,7 @@ impl Governance {
                 sn: self.subject_metadata.sn,
                 hash: *hash,
                 network: network.clone(),
+                stop: false
             };
             ctx.create_child("validator", validator).await?;
         }
@@ -897,6 +898,7 @@ impl Governance {
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
+                stop: false
             };
             ctx.create_child("evaluator", evaluator).await?;
         }
@@ -977,6 +979,7 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     hash: *hash,
                     network: network.clone(),
+                    stop: false
                 };
                 ctx.create_child("validator", validator).await?;
             }
@@ -1009,6 +1012,7 @@ impl Governance {
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),
+                    stop: false
                 };
                 ctx.create_child("evaluator", evaluator).await?;
             }

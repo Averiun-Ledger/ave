@@ -17,7 +17,6 @@ use ave_actors::{
 };
 use ave_common::{
     identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp},
-    request::EventRequest,
 };
 use network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
@@ -104,18 +103,7 @@ impl Handler<ApprLight> for ApprLight {
         match msg {
             ApprLightMessage::NetworkApproval { approval_req } => {
                 // Solo admitimos eventos FACT
-                let subject_id = if let EventRequest::Fact(event) =
-                    approval_req.content().event_request.content().clone()
-                {
-                    event.subject_id
-                } else {
-                    error!(
-                        msg_type = "NetworkApproval",
-                        "Event is not fact type"
-                    );
-                    let e = ActorError::FunctionalCritical { description: "An attempt is being made to approve an event that is not fact.".to_owned()};
-                    return Err(emit_fail(ctx, e).await);
-                };
+                let subject_id = approval_req.content().subject_id.clone();
 
                 let receiver_actor =
                     format!("/user/node/{}/approver", subject_id);

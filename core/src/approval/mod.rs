@@ -86,9 +86,7 @@ impl Approval {
         let subject_id = self
             .request
             .content()
-            .event_request
-            .content()
-            .get_subject_id()
+            .subject_id
             .to_string();
 
         if signer == *self.our_key {

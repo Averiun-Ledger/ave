@@ -190,14 +190,12 @@ impl ApprPersist {
             &RequestSubjectData {
                 subject_id: request
                     .content()
-                    .event_request
-                    .content()
-                    .get_subject_id(),
+                    .subject_id
+                    .clone(),
                 governance_id: request
                     .content()
-                    .event_request
-                    .content()
-                    .get_subject_id(),
+                    .subject_id
+                    .clone(),
                 sn: request.content().sn,
                 namespace: Namespace::new(),
                 schema_id: SchemaType::Governance,
@@ -218,7 +216,7 @@ impl ApprPersist {
         let signature = get_sign(ctx, sign_type).await?;
 
         let subject_id =
-            request.content().event_request.content().get_subject_id();
+            request.content().subject_id.clone();
         if self.node_key == *self.our_key {
             // Approval actor.
             let subject_id = ctx.path().parent().key();
@@ -500,22 +498,6 @@ impl Handler<ApprPersist> for ApprPersist {
                 if request_id.to_string() != self.request_id
                     || version != self.version
                 {
-                    if !approval_req
-                        .content()
-                        .event_request
-                        .content()
-                        .is_fact_event()
-                    {
-                        error!(
-                            msg_type = "LocalApproval",
-                            "Event is not fact type"
-                        );
-                        let e = ActorError::FunctionalCritical {
-                            description: "An attempt is being made to approve an event that is not fact.".to_owned(),
-                        };
-                        return Err(emit_fail(ctx, e).await);
-                    }
-
                     let state =
                         if self.pass_votation == VotationType::AlwaysAccept {
                             if let Err(e) = self
@@ -633,30 +615,12 @@ impl Handler<ApprPersist> for ApprPersist {
                         });
                     }
 
-                    if !approval_req
-                        .content()
-                        .event_request
-                        .content()
-                        .is_fact_event()
-                    {
-                        error!(
-                            msg_type = "NetworkRequest",
-                            "Event is not fact type"
-                        );
-                        return Err(ActorError::Functional {
-                            description: "Only can approve fact requests"
-                                .to_owned(),
-                        });
-                    }
-
                     if let Err(e) = self
                         .check_governance(
                             ctx,
                             &approval_req
                                 .content()
-                                .event_request
-                                .content()
-                                .get_subject_id(),
+                                .subject_id,
                             approval_req.content().gov_version,
                         )
                         .await

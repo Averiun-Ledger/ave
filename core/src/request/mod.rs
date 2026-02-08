@@ -703,6 +703,10 @@ pub enum RequestHandlerMessage {
     NewRequest {
         request: Signed<EventRequest>,
     },
+    RequestInManager,
+    RequestInManagerSubjectId {
+        subject_id: DigestIdentifier,
+    },
     ChangeApprovalState {
         subject_id: DigestIdentifier,
         state: ApprovalStateRes,
@@ -729,6 +733,14 @@ impl Message for RequestHandlerMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RequestHandlerResponse {
+    RequestInManager {
+        handling: HashMap<DigestIdentifier, DigestIdentifier>,
+        in_queue: HashMap<DigestIdentifier, Vec<DigestIdentifier>>,
+    },
+    RequestInManagerSubjectId {
+        handling: Option<DigestIdentifier>,
+        in_queue: Option<Vec<DigestIdentifier>>,
+    },
     Ok(RequestData),
     Response(String),
     Approval(Option<(ApprovalReq, ApprovalState)>),
@@ -909,6 +921,43 @@ impl Handler<RequestHandler> for RequestHandler {
         ctx: &mut ave_actors::ActorContext<RequestHandler>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
+            RequestHandlerMessage::RequestInManagerSubjectId { subject_id } => {
+                let handling = self.handling.get(&subject_id).cloned();
+                let in_queue = self.in_queue.get(&subject_id).cloned();
+
+                let in_queue = if let Some(in_queue) = in_queue {
+                    Some(
+                        in_queue
+                            .iter()
+                            .map(|x| x.1.clone())
+                            .collect::<Vec<DigestIdentifier>>(),
+                    )
+                } else {
+                    None
+                };
+
+                Ok(RequestHandlerResponse::RequestInManagerSubjectId {
+                    handling,
+                    in_queue,
+                })
+            }
+            RequestHandlerMessage::RequestInManager => {
+                Ok(RequestHandlerResponse::RequestInManager {
+                    handling: self.handling.clone(),
+                    in_queue: self
+                        .in_queue
+                        .iter()
+                        .map(|x| {
+                            (
+                                x.0.clone(),
+                                x.1.iter()
+                                    .map(|x| x.1.clone())
+                                    .collect::<Vec<DigestIdentifier>>(),
+                            )
+                        })
+                        .collect(),
+                })
+            }
             RequestHandlerMessage::AbortRequest { subject_id } => {
                 self.manual_abort_request(ctx, &subject_id).await?;
                 Ok(RequestHandlerResponse::None)

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 )]
 pub enum ValidationReq {
     Create {
+        subject_id: DigestIdentifier,
         event_request: Signed<EventRequest>,
         gov_version: u64,
     },
@@ -35,6 +36,13 @@ pub enum ValidationReq {
 }
 
 impl ValidationReq {
+    pub fn get_subject_id(&self) -> DigestIdentifier {
+        match self {
+            ValidationReq::Create { subject_id, .. } => subject_id.clone(),
+            ValidationReq::Event {  metadata, ..} => metadata.subject_id.clone(),
+        }
+    }
+
     pub fn is_valid(&self) -> bool {
         match self {
             ValidationReq::Create { event_request, .. } => {

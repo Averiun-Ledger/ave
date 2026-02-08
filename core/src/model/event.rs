@@ -486,6 +486,14 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    pub fn get_subject_id(&self) -> DigestIdentifier {
+        if let Protocols::Create { validation } = &self.protocols && let ValidationMetadata::Metadata(metadata) = &validation.validation_metadata {
+            metadata.subject_id.clone()
+        } else {
+            self.event_request.content().get_subject_id()
+        }
+    }
+
     pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
         let (event, subject_id) = self.protocols.buidl_event_db(self.event_request.content());
 
