@@ -84,7 +84,7 @@ compile_error!(
 #[derive(Clone)]
 pub struct Api {
     peer_id: String,
-    controller_id: String,
+    public_key: String,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
     auth: ActorRef<Auth>,
@@ -250,7 +250,7 @@ impl Api {
 
         Ok((
             Self {
-                controller_id: keys.public_key().to_string(),
+                public_key: keys.public_key().to_string(),
                 peer_id,
                 request: request_actor,
                 auth: auth_actor,
@@ -272,8 +272,8 @@ impl Api {
         &self.peer_id
     }
 
-    pub fn controller_id(&self) -> &str {
-        &self.controller_id
+    pub fn public_key(&self) -> &str {
+        &self.public_key
     }
 
     ///////// Network

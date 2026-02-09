@@ -13,7 +13,7 @@ use crate::{model::common::emit_fail, subject::Metadata};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
-    pub controller_id: String,
+    pub public_key: String,
 }
 
 #[derive(
@@ -188,7 +188,7 @@ impl Handler<SinkData> for SinkData {
                 event_ledger_timestamp,
             } => SinkDataEvent::Event(DataToSink {
                 event,
-                controller_id: self.controller_id.clone(),
+                public_key: self.public_key.clone(),
                 event_request_timestamp,
                 event_ledger_timestamp,
                 sink_timestamp: TimeStamp::now().as_nanos(),
@@ -201,7 +201,7 @@ impl Handler<SinkData> for SinkData {
             msg_type = msg_type,
             subject_id = %subject_id,
             schema_id = %schema_id,
-            controller_id = %self.controller_id,
+            public_key = %self.public_key,
             "Sink data event processed"
         );
 
@@ -227,7 +227,7 @@ impl Handler<SinkData> for SinkData {
                 error = %e,
                 subject_id = %subject_id,
                 schema_id = %schema_id,
-                controller_id = %self.controller_id,
+                public_key = %self.public_key,
                 "Failed to publish sink data event"
             );
             emit_fail(ctx, e).await;

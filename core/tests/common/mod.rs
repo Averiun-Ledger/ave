@@ -221,7 +221,7 @@ pub async fn create_and_authorize_governance(
         node.auth_subject(
             governance_id.clone(),
             ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(&owner_node.controller_id()).unwrap(),
+                PublicKey::from_str(&owner_node.public_key()).unwrap(),
             ),
         )
         .await

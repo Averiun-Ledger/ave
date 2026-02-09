@@ -184,8 +184,8 @@ impl Bridge {
         self.api.peer_id()
     }
 
-    pub fn controller_id(&self) -> &str {
-        self.api.controller_id()
+    pub fn public_key(&self) -> &str {
+        self.api.public_key()
     }
 
     pub fn config(&self) -> Config {

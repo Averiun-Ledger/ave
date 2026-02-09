@@ -350,7 +350,12 @@ impl ValiWorker {
         workers: &HashSet<PublicKey>,
         approved: bool,
     ) -> bool {
-        quorum.check_quorum(workers.len() as u32, agrees + timeout) && approved
+        if approved {
+            quorum.check_quorum(workers.len() as u32, agrees + timeout)
+        } else {
+            !quorum.check_quorum(workers.len() as u32, agrees + timeout)
+        }
+        
     }
 
     fn check_approval(
@@ -397,6 +402,7 @@ impl ValiWorker {
         if !Self::check_approval_quorum(
             agrees.len() as u32,
             timeout.len() as u32,
+
             &appr_data.quorum,
             &appr_data.workers,
             approval.approved,
@@ -964,6 +970,9 @@ impl ValiWorker {
 
 #[derive(Debug, Clone)]
 pub enum ValiWorkerMessage {
+    UpdateGovVersion {
+        gov_version: u64   
+    },
     LocalValidation {
         validation_req: Signed<ValidationReq>,
     },
@@ -1002,6 +1011,9 @@ impl Handler<ValiWorker> for ValiWorker {
         ctx: &mut ActorContext<ValiWorker>,
     ) -> Result<(), ActorError> {
         match msg {
+            ValiWorkerMessage::UpdateGovVersion { gov_version } => {
+                self.gov_version = gov_version;
+            }
             ValiWorkerMessage::LocalValidation { validation_req } => {
                 let validation =
                     match self.create_res(ctx, false, &validation_req).await {

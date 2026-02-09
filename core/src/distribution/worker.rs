@@ -392,7 +392,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     Ok(sn) => sn,
                     Err(e) => {
                         if let ActorError::Functional { .. } = e {
-                            error!(
+                            warn!(
                                 msg_type = "GetLastSn",
                                 subject_id = %subject_id,
                                 sender = %sender,
@@ -400,16 +400,16 @@ impl Handler<DistriWorker> for DistriWorker {
                                 "Witness check failed"
                             );
                             return Err(e);
-                        };
-
-                        error!(
-                            msg_type = "GetLastSn",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Witness check failed critically"
-                        );
-                        return Err(emit_fail(ctx, e).await);
+                        } else {
+                            error!(
+                                msg_type = "GetLastSn",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                error = %e,
+                                "Witness check failed"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     }
                 };
 
@@ -464,7 +464,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     Ok(sn) => sn,
                     Err(e) => {
                         if let ActorError::Functional { .. } = e {
-                            error!(
+                            warn!(
                                 msg_type = "SendDistribution",
                                 subject_id = %subject_id,
                                 sender = %sender,
@@ -472,16 +472,16 @@ impl Handler<DistriWorker> for DistriWorker {
                                 "Witness check failed"
                             );
                             return Err(e);
-                        };
-
-                        error!(
-                            msg_type = "SendDistribution",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            error = %e,
-                            "Witness check failed critically"
-                        );
-                        return Err(emit_fail(ctx, e).await);
+                        } else {
+                            error!(
+                                msg_type = "SendDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                error = %e,
+                                "Witness check failed"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     }
                 };
 
@@ -613,16 +613,23 @@ impl Handler<DistriWorker> for DistriWorker {
                     .is_create_event()
                 {
                     if let Err(e) = create_subject(ctx, ledger.clone()).await {
-                        error!(
-                            msg_type = "LastEventDistribution",
-                            subject_id = %subject_id,
-                            sn = sn,
-                            error = %e,
-                            "Failed to create subject from create event"
-                        );
                         if let ActorError::Functional { .. } = e {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                error = %e,
+                                "Failed to create subject from create event"
+                            );
                             return Err(e);
                         } else {
+                            error!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                error = %e,
+                                "Failed to create subject from create event"
+                            );
                             return Err(emit_fail(ctx, e).await);
                         }
                     };
@@ -730,17 +737,23 @@ impl Handler<DistriWorker> for DistriWorker {
                         }
                         Ok((.., owner, new_owner)) => (owner, new_owner),
                         Err(e) => {
-                            error!(
-                                msg_type = "LastEventDistribution",
-                                subject_id = %subject_id,
-                                sn = sn,
-                                error = %e,
-                                "Failed to update subject ledger"
-                            );
-
                             if let ActorError::Functional { .. } = e.clone() {
+                                warn!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
                                 return Err(e);
                             } else {
+                                error!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
                                 return Err(emit_fail(ctx, e).await);
                             }
                         }
@@ -836,17 +849,25 @@ impl Handler<DistriWorker> for DistriWorker {
                 {
                     Ok(is_gov) => is_gov,
                     Err(e) => {
-                        error!(
-                            msg_type = "LedgerDistribution",
-                            subject_id = %subject_id,
-                            sender = %sender,
-                            ledger_count = ledger_count,
-                            error = %e,
-                            "Authorization check failed"
-                        );
                         if let ActorError::Functional { .. } = e {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                ledger_count = ledger_count,
+                                error = %e,
+                                "Authorization check failed"
+                            );
                             return Err(e);
                         } else {
+                            error!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                ledger_count = ledger_count,
+                                error = %e,
+                                "Authorization check failed"
+                            );
                             return Err(emit_fail(ctx, e).await);
                         }
                     }
@@ -860,15 +881,21 @@ impl Handler<DistriWorker> for DistriWorker {
                 {
                     if let Err(e) = create_subject(ctx, ledger[0].clone()).await
                     {
-                        error!(
-                            msg_type = "LedgerDistribution",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to create subject from ledger"
-                        );
                         if let ActorError::Functional { .. } = e {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to create subject from ledger"
+                            );
                             return Err(e);
                         } else {
+                            error!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to create subject from ledger"
+                            );
                             return Err(emit_fail(ctx, e).await);
                         }
                     };
@@ -967,18 +994,25 @@ impl Handler<DistriWorker> for DistriWorker {
                             (owner == *self.our_key, i_new_owner)
                         }
                         Err(e) => {
-                            error!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                first_sn = first_sn,
-                                ledger_count = ledger_count,
-                                error = %e,
-                                "Failed to update subject ledger"
-                            );
-
                             if let ActorError::Functional { .. } = e.clone() {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    first_sn = first_sn,
+                                    ledger_count = ledger_count,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
                                 return Err(e);
                             } else {
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    first_sn = first_sn,
+                                    ledger_count = ledger_count,
+                                    error = %e,
+                                    "Failed to update subject ledger"
+                                );
                                 return Err(emit_fail(ctx, e).await);
                             }
                         }

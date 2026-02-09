@@ -2,7 +2,7 @@
 //!
 
 use crate::governance::{
-    RolesUpdateRemove,
+    RolesUpdateConfirm, RolesUpdateRemove,
     error::GovernanceError,
     model::{
         HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
@@ -90,7 +90,176 @@ impl GovernanceData {
         }
     }
 
-    pub fn roles_update_remove(
+    pub fn roles_update_remove_confirm(
+        &self,
+        old_owner_key: &PublicKey,
+        new_owner_key: &PublicKey,
+    ) -> RolesUpdateConfirm {
+        let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
+            HashSet::new();
+
+        let mut new_approver = None;
+        let mut new_evaluator = None;
+        let mut new_validator = None;
+
+        let mut remove_witnesses: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let remove_approver: PublicKey = old_owner_key.clone();
+        let mut remove_evaluators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+        let mut remove_validators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let old_name = self
+            .members
+            .iter()
+            .find(|x| x.1 == new_owner_key)
+            .map(|x| x.0)
+            .cloned();
+
+        // gov
+        if let Some(old_name) = old_name {
+            if !self.roles_gov.approver.contains(&old_name) {
+                new_approver = Some(new_owner_key.clone());
+            }
+
+            if !self.roles_gov.evaluator.contains(&old_name) {
+                new_evaluator = Some(new_owner_key.clone());
+            }
+            remove_evaluators
+                .entry((SchemaType::Governance, old_owner_key.clone()))
+                .or_default()
+                .push(Namespace::new());
+            if !self.roles_gov.validator.contains(&old_name) {
+                new_validator = Some(new_owner_key.clone());
+            }
+
+            remove_validators
+                .entry((SchemaType::Governance, old_owner_key.clone()))
+                .or_default()
+                .push(Namespace::new());
+
+            // schema
+            for (schema_id, roles_schema) in self.roles_schema.iter() {
+                for evaluators in roles_schema.evaluator.iter() {
+                    if evaluators.name == ReservedWords::Owner.to_string() {
+                        remove_evaluators
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    } else if evaluators.name == old_name {
+                        remove_evaluators
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    }
+                }
+
+                for validators in roles_schema.validator.iter() {
+                    if validators.name == ReservedWords::Owner.to_string() {
+                        remove_validators
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    } else if validators.name == old_name {
+                        remove_validators
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    }
+                }
+
+                for creators in roles_schema.creator.iter() {
+                    if creators.name == ReservedWords::Owner.to_string() {
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            old_owner_key.clone(),
+                        ));
+                    } else if creators.name == old_name {
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            new_owner_key.clone(),
+                        ));
+                    }
+                }
+                for witness in roles_schema.witness.iter() {
+                    if witness.name == ReservedWords::Owner.to_string() {
+                        remove_witnesses
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    } else if witness.name == old_name {
+                        remove_witnesses
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    }
+                }
+            }
+
+            for evaluators in self.roles_all_schemas.evaluator.iter() {
+                if evaluators.name == ReservedWords::Owner.to_string() {
+                    remove_evaluators
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(evaluators.namespace.clone());
+                } else if evaluators.name == old_name {
+                    remove_evaluators
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(evaluators.namespace.clone());
+                }
+            }
+            for validators in self.roles_all_schemas.validator.iter() {
+                if validators.name == ReservedWords::Owner.to_string() {
+                    remove_validators
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(validators.namespace.clone());
+                } else if validators.name == old_name {
+                    remove_validators
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(validators.namespace.clone());
+                }
+            }
+            for witness in self.roles_all_schemas.witness.iter() {
+                if witness.name == ReservedWords::Owner.to_string() {
+                    remove_witnesses
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(witness.namespace.clone());
+                } else if witness.name == old_name {
+                    remove_witnesses
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(witness.namespace.clone());
+                }
+            }
+        }
+
+        RolesUpdateConfirm {
+            new_approver,
+            new_evaluator,
+            new_validator,
+            remove_approver,
+            remove_creator,
+            remove_evaluators,
+            remove_validators,
+            remove_witnesses,
+        }
+    }
+
+    pub fn roles_update_remove_fact(
         &self,
         remove_members: Option<HashSet<String>>,
         remove_schemas: Option<HashSet<SchemaType>>,
@@ -115,8 +284,8 @@ impl GovernanceData {
 
         let remove_schemas = remove_schemas.unwrap_or_default();
 
-        for (schema_id, roles_schema) in self.roles_schema.iter() {
-            if remove_schemas.contains(schema_id) {
+        for schema_id in remove_schemas.iter() {
+            if let Some(roles_schema) = self.roles_schema.get(schema_id) {
                 for evaluators in roles_schema.evaluator.iter() {
                     if let Some(user) = self.members.get(&evaluators.name) {
                         remove_evaluators
@@ -157,28 +326,20 @@ impl GovernanceData {
 
         if let Some(remove_members) = remove_members {
             // gov
-            for approvers in self.roles_gov.approver.iter() {
-                if remove_members.contains(approvers) {
-                    if let Some(user) = self.members.get(approvers) {
-                        remove_approvers.push(user.clone());
+            for user in remove_members.iter() {
+                if let Some(user_key) = self.members.get(user) {
+                    if self.roles_gov.approver.contains(user) {
+                        remove_approvers.push(user_key.clone());
                     }
-                }
-            }
-            for evaluators in self.roles_gov.evaluator.iter() {
-                if remove_members.contains(evaluators) {
-                    if let Some(user) = self.members.get(evaluators) {
+                    if self.roles_gov.evaluator.contains(user) {
                         remove_evaluators
-                            .entry((SchemaType::Governance, user.clone()))
+                            .entry((SchemaType::Governance, user_key.clone()))
                             .or_default()
                             .push(Namespace::new());
                     }
-                }
-            }
-            for validators in self.roles_gov.validator.iter() {
-                if remove_members.contains(validators) {
-                    if let Some(user) = self.members.get(validators) {
+                    if self.roles_gov.validator.contains(user) {
                         remove_validators
-                            .entry((SchemaType::Governance, user.clone()))
+                            .entry((SchemaType::Governance, user_key.clone()))
                             .or_default()
                             .push(Namespace::new());
                     }
@@ -307,15 +468,17 @@ impl GovernanceData {
         }
     }
 
-    pub fn change_name_role(
-        &mut self,
-        chang_name_members: &Vec<(String, String)>,
-    ) {
-        self.roles_gov.change_name_role(chang_name_members);
-        self.roles_all_schemas.change_name_role(chang_name_members);
+    pub fn update_name_role(&mut self, old_name: String) {
+        let old_name = vec![old_name];
+        let owner_name = vec![ReservedWords::Owner.to_string()];
+        self.roles_gov.remove_member_role(&old_name);
+
+        self.roles_all_schemas.remove_member_role(&old_name);
+        self.roles_all_schemas.remove_member_role(&owner_name);
 
         for (_, roles) in self.roles_schema.iter_mut() {
-            roles.change_name_role(chang_name_members);
+            roles.remove_member_role(&old_name);
+            roles.remove_member_role(&owner_name);
         }
     }
 
@@ -339,7 +502,9 @@ impl GovernanceData {
         schema_id: &SchemaType,
     ) -> Result<ValueWrapper, GovernanceError> {
         let Some(schema) = self.schemas.get(schema_id) else {
-            return Err(GovernanceError::SchemaDoesNotExist { schema_id: schema_id.to_string() });
+            return Err(GovernanceError::SchemaDoesNotExist {
+                schema_id: schema_id.to_string(),
+            });
         };
 
         Ok(schema.initial_value.clone())
@@ -582,8 +747,11 @@ impl GovernanceData {
         schema_id: &SchemaType,
         namespace: Namespace,
     ) -> Result<(HashSet<PublicKey>, Quorum), GovernanceError> {
-        let (signers, _not_members) =
-            self.get_signers(RoleTypes::from(role.clone()), schema_id, namespace);
+        let (signers, _not_members) = self.get_signers(
+            RoleTypes::from(role.clone()),
+            schema_id,
+            namespace,
+        );
 
         let Some(quorum) = self.get_quorum(role.clone(), schema_id) else {
             return Err(GovernanceError::QuorumNotFound {

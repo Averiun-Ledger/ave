@@ -1706,6 +1706,7 @@ impl Handler<RequestManager> for RequestManager {
                 if request_id == self.id {
                     warn!(
                         msg_type = "Abort",
+                        state = %self.state,
                         request_id = %self.id,
                         who = %who,
                         reason = %reason,

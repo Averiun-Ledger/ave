@@ -224,7 +224,7 @@ impl GovernanceEvent {
         }
     }
 
-    pub fn roles_update(
+    pub fn roles_update_fact(
         &self,
         members: &BTreeMap<MemberName, PublicKey>,
         rm_roles: Option<RolesUpdateRemove>,

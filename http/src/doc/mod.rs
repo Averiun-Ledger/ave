@@ -163,7 +163,7 @@ use utoipa::OpenApi;
         get_events,
         get_state,
         get_signatures,
-        get_controller_id,
+        get_public_key,
         get_peer_id,
         get_first_or_end_events,
         get_event_sn,

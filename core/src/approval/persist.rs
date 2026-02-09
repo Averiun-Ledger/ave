@@ -240,7 +240,7 @@ impl ApprPersist {
                 version: version,
                 receiver_actor: format!(
                     "/user/request/{}/approval/{}",
-                    subject_id, self.node_key
+                    subject_id, self.our_key
                 ),
             };
 

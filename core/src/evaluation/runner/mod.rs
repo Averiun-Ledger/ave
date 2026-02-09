@@ -261,10 +261,7 @@ impl Runner {
             .insert(ReservedWords::Owner.to_string(), new_owner.clone());
         governance.members.remove(&new_owner_member);
 
-        governance.change_name_role(&vec![(
-            new_owner_member,
-            ReservedWords::Owner.to_string(),
-        )]);
+        governance.update_name_role(new_owner_member);
 
         if let Some(mut old_owner_name) = old_owner_name {
             old_owner_name = old_owner_name.trim().to_owned();

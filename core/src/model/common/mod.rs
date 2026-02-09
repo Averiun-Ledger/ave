@@ -199,6 +199,10 @@ impl Interval {
             Self { lo: b, hi: a }
         }
     }
+
+    pub fn contains(&self, value: u64) -> bool {
+        value >= self.lo && value <= self.hi
+    }
 }
 
 #[derive(

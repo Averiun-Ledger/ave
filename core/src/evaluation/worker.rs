@@ -482,6 +482,9 @@ impl EvalWorker {
 
 #[derive(Debug, Clone)]
 pub enum EvalWorkerMessage {
+    UpdateGovVersion {
+        gov_version: u64   
+    },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,
     },
@@ -520,6 +523,9 @@ impl Handler<EvalWorker> for EvalWorker {
         ctx: &mut ActorContext<EvalWorker>,
     ) -> Result<(), ActorError> {
         match msg {
+            EvalWorkerMessage::UpdateGovVersion { gov_version } => {
+                self.gov_version = gov_version;
+            }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =
                     match self.create_res(ctx, false, &evaluation_req).await {

@@ -474,7 +474,14 @@ impl RolesSchema {
             self.validator.retain(|x| x.name != *remove);
             self.witness.retain(|x| x.name != *remove);
             self.issuer.signers.retain(|x| x.name != *remove);
-            self.creator.retain(|x| x.name != *remove);
+            self.creator = std::mem::take(&mut self.creator)
+                .into_iter()
+                .filter(|x| x.name != *remove)
+                .map(|mut c| {
+                    c.witnesses.remove(remove);
+                    c
+                })
+                .collect();
         }
     }
 

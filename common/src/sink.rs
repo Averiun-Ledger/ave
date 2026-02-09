@@ -7,7 +7,7 @@ use crate::SchemaType;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataToSink {
     pub event: DataToSinkEvent,
-    pub controller_id: String,
+    pub public_key: String,
     pub event_request_timestamp: u64,
     pub event_ledger_timestamp: u64,
     pub sink_timestamp: u64,

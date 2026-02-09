@@ -758,7 +758,7 @@ impl Actor for Tracker {
                 .create_child(
                     "sink_data",
                     SinkData {
-                        controller_id: our_key.to_string(),
+                        public_key: our_key.to_string(),
                     },
                 )
                 .await

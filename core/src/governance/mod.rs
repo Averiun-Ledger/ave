@@ -10,7 +10,7 @@ use crate::{
     evaluation::{
         compiler::{Compiler, CompilerMessage},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
-        worker::EvalWorker,
+        worker::{EvalWorker, EvalWorkerMessage},
     },
     governance::{
         data::GovernanceData,
@@ -41,7 +41,7 @@ use crate::{
     validation::{
         request::LastData,
         schema::{ValidationSchema, ValidationSchemaMessage},
-        worker::ValiWorker,
+        worker::{ValiWorker, ValiWorkerMessage},
     },
 };
 
@@ -97,6 +97,20 @@ pub struct RolesUpdate {
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 
     pub new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+}
+
+pub struct RolesUpdateConfirm {
+    pub new_approver: Option<PublicKey>,
+    pub remove_approver: PublicKey,
+
+    pub new_evaluator: Option<PublicKey>,
+    pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub new_validator: Option<PublicKey>,
+    pub remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
     pub remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 }
 
@@ -322,7 +336,9 @@ impl Subject for Governance {
         };
 
         let Some(hash) = self.hash else {
-            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
         };
 
         let current_sn = self.subject_metadata.sn;
@@ -428,7 +444,7 @@ impl Subject for Governance {
                 } else if up_owner {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
                         .await?;
-                    self.up_not_owner(ctx, &hash, &network).await?;
+                    self.up_owner(ctx, &hash, &network).await?;
                 }
 
                 // Seguimos sin ser owner ni new owner,
@@ -442,12 +458,13 @@ impl Subject for Governance {
                 }
 
                 self.manager_schemas_compilers(ctx, &old_gov).await?;
+                self.update_childs(ctx).await?;
             }
+
+            let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
-            let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
-
             Self::publish_sink(
                 ctx,
                 SinkDataMessage::UpdateState(Box::new(Metadata::from(
@@ -627,7 +644,9 @@ impl Governance {
         };
 
         let Some(hash) = self.hash else {
-            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
         };
 
         let (old_schemas_eval, new_schemas_eval) = {
@@ -660,7 +679,7 @@ impl Governance {
                 ctx,
                 &up,
                 self.subject_metadata.subject_id.clone(),
-                &hash
+                &hash,
             )
             .await?;
 
@@ -778,6 +797,29 @@ impl Governance {
         .await
     }
 
+    async fn update_childs(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
+            evaluator
+                .tell(EvalWorkerMessage::UpdateGovVersion {
+                    gov_version: self.properties.version,
+                })
+                .await?;
+        }
+
+        if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
+            validator
+                .tell(ValiWorkerMessage::UpdateGovVersion {
+                    gov_version: self.properties.version,
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
     async fn build_childs(
         &self,
         ctx: &mut ActorContext<Governance>,
@@ -810,7 +852,7 @@ impl Governance {
                 ctx,
                 &schemas,
                 self.subject_metadata.subject_id.clone(),
-                hash
+                hash,
             )
             .await?;
 
@@ -879,7 +921,7 @@ impl Governance {
                 sn: self.subject_metadata.sn,
                 hash: *hash,
                 network: network.clone(),
-                stop: false
+                stop: false,
             };
             ctx.create_child("validator", validator).await?;
         }
@@ -898,7 +940,7 @@ impl Governance {
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
-                stop: false
+                stop: false,
             };
             ctx.create_child("evaluator", evaluator).await?;
         }
@@ -979,7 +1021,7 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     hash: *hash,
                     network: network.clone(),
-                    stop: false
+                    stop: false,
                 };
                 ctx.create_child("validator", validator).await?;
             }
@@ -1012,7 +1054,7 @@ impl Governance {
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),
-                    stop: false
+                    stop: false,
                 };
                 ctx.create_child("evaluator", evaluator).await?;
             }
@@ -1157,7 +1199,7 @@ impl Governance {
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
-        hash: &HashAlgorithm
+        hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
@@ -1251,7 +1293,7 @@ impl Governance {
         Ok(())
     }
 
-    fn build_creators_register(
+    fn build_creators_register_fact(
         &self,
         new_creator: HashMap<
             (SchemaType, String, PublicKey),
@@ -1264,10 +1306,12 @@ impl Governance {
     ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
         let mut data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)> =
             vec![];
+
         let mut new_creator_data: HashMap<
             (SchemaType, String, PublicKey),
             Vec<WitnessesType>,
         > = HashMap::new();
+
         let mut update_creator_witnesses_data: HashSet<(
             SchemaType,
             String,
@@ -1374,12 +1418,42 @@ impl Governance {
                 gov_version: self.properties.version,
                 data,
             },
-            WitnessesRegisterMessage::UpdateCreatorsWitnesses {
+            WitnessesRegisterMessage::UpdateCreatorsWitnessesFact {
                 version: self.properties.version,
                 new_creator: new_creator_data,
                 remove_creator,
                 update_creator_witnesses: update_creator_witnesses_data,
                 new_witnesses,
+                remove_witnesses,
+            },
+        )
+    }
+
+    fn build_creators_register_confirm(
+        &self,
+        remove_creator: HashSet<(SchemaType, String, PublicKey)>,
+        remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
+        let data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)> =
+            remove_creator
+                .iter()
+                .map(|x| {
+                    (
+                        x.2.clone(),
+                        x.0.clone(),
+                        x.1.clone(),
+                        CreatorQuantity::Quantity(0),
+                    )
+                })
+                .collect();
+        (
+            SubjectRegisterMessage::RegisterData {
+                gov_version: self.properties.version,
+                data,
+            },
+            WitnessesRegisterMessage::UpdateCreatorsWitnessesConfirm {
+                version: self.properties.version,
+                remove_creator,
                 remove_witnesses,
             },
         )
@@ -1392,7 +1466,7 @@ impl Governance {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
 
         actor
-            .tell(RoleRegisterMessage::Update {
+            .tell(RoleRegisterMessage::UpdateFact {
                 version: 0,
                 appr_quorum: Some(Quorum::Majority),
                 eval_quorum: HashMap::from([(
@@ -1425,7 +1499,20 @@ impl Governance {
             .await
     }
 
-    async fn update_registers(
+    async fn update_gov_version(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+
+        actor
+            .tell(RoleRegisterMessage::UpdateVersion {
+                version: self.properties.version + 1,
+            })
+            .await
+    }
+
+    async fn update_registers_fact(
         &self,
         ctx: &mut ActorContext<Self>,
         update: RolesUpdate,
@@ -1449,7 +1536,7 @@ impl Governance {
 
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
         actor
-            .tell(RoleRegisterMessage::Update {
+            .tell(RoleRegisterMessage::UpdateFact {
                 version: self.properties.version,
                 appr_quorum,
                 eval_quorum,
@@ -1463,13 +1550,57 @@ impl Governance {
             })
             .await?;
 
-        let (subj_msg, wit_msg) = self.build_creators_register(
+        let (subj_msg, wit_msg) = self.build_creators_register_fact(
             new_creator,
             remove_creator,
             creator_update,
             new_witnesses,
             remove_witnesses,
         );
+
+        let actor =
+            ctx.get_child::<SubjectRegister>("subject_register").await?;
+
+        actor.tell(subj_msg).await?;
+
+        let actor = ctx
+            .get_child::<WitnessesRegister>("witnesses_register")
+            .await?;
+
+        actor.tell(wit_msg).await
+    }
+
+    async fn update_registers_confirm(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        update: RolesUpdateConfirm,
+    ) -> Result<(), ActorError> {
+        let RolesUpdateConfirm {
+            new_approver,
+            remove_approver,
+            new_evaluator,
+            remove_evaluators,
+            new_validator,
+            remove_validators,
+            remove_creator,
+            remove_witnesses,
+        } = update;
+
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+        actor
+            .tell(RoleRegisterMessage::UpdateConfirm {
+                version: self.properties.version,
+                new_approver,
+                remove_approver,
+                new_evaluator,
+                remove_evaluators,
+                new_validator,
+                remove_validators,
+            })
+            .await?;
+
+        let (subj_msg, wit_msg) = self
+            .build_creators_register_confirm(remove_creator, remove_witnesses);
 
         let actor =
             ctx.get_child::<SubjectRegister>("subject_register").await?;
@@ -1598,7 +1729,7 @@ impl Governance {
                     }
                 }
             };
-            if last_event_is_ok {
+            let (update_fact, update_confirm) = if last_event_is_ok {
                 match event.content().event_request.content().clone() {
                     EventRequest::Transfer(transfer_request) => {
                         self.transfer(
@@ -1607,13 +1738,13 @@ impl Governance {
                             0,
                         )
                         .await?;
+
+                        self.update_gov_version(ctx).await?;
                     }
                     EventRequest::Reject(..) => {
                         self.reject(ctx, 0).await?;
-                    }
-                    EventRequest::Confirm(..) => {
-                        self.confirm(ctx, event.signature().signer.clone(), 0)
-                            .await?;
+
+                        self.update_gov_version(ctx).await?;
                     }
                     EventRequest::EOL(..) => {
                         self.eol(ctx).await?;
@@ -1628,6 +1759,8 @@ impl Governance {
                             },
                         )
                         .await?;
+
+                        self.update_gov_version(ctx).await?;
                     }
                     _ => {}
                 };
@@ -1664,56 +1797,85 @@ impl Governance {
                     &event.content().event_request.content(),
                 )
                 .await?;
-            }
 
-            let update = if let EventRequest::Fact(fact_request) =
-                &event.content().event_request.content()
-            {
-                let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
-                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
-                        })?;
+                let update_confirm = if let EventRequest::Confirm(..) =
+                    &event.content().event_request.content()
+                {
+                    self.confirm(ctx, event.signature().signer.clone(), 0)
+                        .await?;
 
-                let rm_members =
-                    if let Some(members) = &governance_event.members {
-                        members.remove.clone()
+                    if let Some(new_owner_key) =
+                        &self.subject_metadata.new_owner
+                    {
+                        Some(self.properties.roles_update_remove_confirm(
+                            &self.subject_metadata.owner,
+                            new_owner_key,
+                        ))
                     } else {
                         None
-                    };
-
-                let rm_schemas =
-                    if let Some(schemas) = &governance_event.schemas {
-                        schemas.remove.clone()
-                    } else {
-                        None
-                    };
-
-                let rm_roles = if rm_members.is_some() || rm_schemas.is_some() {
-                    Some(
-                        self.properties
-                            .roles_update_remove(rm_members, rm_schemas),
-                    )
+                    }
                 } else {
                     None
                 };
 
-                let creator_update = governance_event.update_creator_change(
-                    &self.properties.members,
-                    &self.properties.roles_schema,
-                );
+                let update_fact = if let EventRequest::Fact(fact_request) =
+                    &event.content().event_request.content()
+                {
+                    let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
+                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
+                        })?;
 
-                Some((governance_event, creator_update, rm_roles))
+                    let rm_members =
+                        if let Some(members) = &governance_event.members {
+                            members.remove.clone()
+                        } else {
+                            None
+                        };
+
+                    let rm_schemas =
+                        if let Some(schemas) = &governance_event.schemas {
+                            schemas.remove.clone()
+                        } else {
+                            None
+                        };
+
+                    let rm_roles =
+                        if rm_members.is_some() || rm_schemas.is_some() {
+                            Some(self.properties.roles_update_remove_fact(
+                                rm_members, rm_schemas,
+                            ))
+                        } else {
+                            None
+                        };
+
+                    let creator_update = governance_event
+                        .update_creator_change(
+                            &self.properties.members,
+                            &self.properties.roles_schema,
+                        );
+
+                    Some((governance_event, creator_update, rm_roles))
+                } else {
+                    None
+                };
+                (update_fact, update_confirm)
             } else {
-                None
+                (None, None)
             };
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
 
-            if let Some((event, creator_update, rm_roles)) = update {
+            if let Some((event, creator_update, rm_roles)) = update_fact {
                 let update =
-                    event.roles_update(&self.properties.members, rm_roles);
+                    event.roles_update_fact(&self.properties.members, rm_roles);
 
-                self.update_registers(ctx, update, creator_update).await?;
+                self.update_registers_fact(ctx, update, creator_update)
+                    .await?;
+            }
+
+            if let Some(update_confirm) = update_confirm {
+                self.update_registers_confirm(ctx, update_confirm).await?;
             }
 
             // Acutalizar último evento.
@@ -1729,7 +1891,9 @@ impl Governance {
         compilers: &[SchemaType],
     ) -> Result<Vec<SchemaType>, ActorError> {
         let Some(hash) = self.hash else {
-            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
         };
 
         let mut new_compilers = vec![];
@@ -1763,7 +1927,7 @@ pub enum GovernanceMessage {
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
-    GetVersion
+    GetVersion,
 }
 
 impl Message for GovernanceMessage {}
@@ -1816,7 +1980,9 @@ impl Actor for Governance {
 
         let Some(hash) = self.hash else {
             error!("Hash algorithm not found");
-            return Err(ActorError::FunctionalCritical { description: "Hash algorithm is None".to_string() });
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
         };
 
         let Some(ext_db): Option<Arc<ExternalDB>> =
@@ -1864,7 +2030,7 @@ impl Actor for Governance {
                 .create_child(
                     "sink_data",
                     SinkData {
-                        controller_id: self.our_key.to_string(),
+                        public_key: self.our_key.to_string(),
                     },
                 )
                 .await

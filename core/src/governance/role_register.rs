@@ -113,7 +113,10 @@ pub enum RoleRegisterMessage {
         search: SearchRole,
         version: u64,
     },
-    Update {
+    UpdateVersion {
+        version: u64,
+    },
+    UpdateFact {
         version: u64,
 
         appr_quorum: Option<Quorum>,
@@ -127,6 +130,18 @@ pub enum RoleRegisterMessage {
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 
         new_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    },
+    UpdateConfirm {
+        version: u64,
+
+        new_approver: Option<PublicKey>,
+        remove_approver: PublicKey,
+
+        new_evaluator: Option<PublicKey>,
+        remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+        new_validator: Option<PublicKey>,
         remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
 }
@@ -150,7 +165,10 @@ impl Response for RoleRegisterResponse {}
     Debug, Clone, Deserialize, Serialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum RoleRegisterEvent {
-    Update {
+    UpdateVersion {
+        version: u64,
+    },
+    UpdateFact {
         version: u64,
 
         appr_quorum: Option<Quorum>,
@@ -164,6 +182,18 @@ pub enum RoleRegisterEvent {
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 
         new_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+        remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    },
+    UpdateConfirm {
+        version: u64,
+
+        new_approver: Option<PublicKey>,
+        remove_approver: PublicKey,
+
+        new_evaluator: Option<PublicKey>,
+        remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+        new_validator: Option<PublicKey>,
         remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
 }
@@ -444,7 +474,71 @@ impl Handler<RoleRegister> for RoleRegister {
                 );
                 Ok(RoleRegisterResponse::MissingData)
             }
-            RoleRegisterMessage::Update {
+            RoleRegisterMessage::UpdateVersion { version } => {
+                if version > self.version || self.version == 0 {
+                    self.on_event(
+                        RoleRegisterEvent::UpdateVersion { version },
+                        ctx,
+                    )
+                    .await;
+
+                    debug!(
+                        msg_type = "UpdateVersion",
+                        version = version,
+                        "Roles register updated successfully"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "UpdateVersion",
+                        version = version,
+                        current_version = self.version,
+                        "Update skipped, version not greater than current"
+                    );
+                }
+
+                Ok(RoleRegisterResponse::Ok)
+            }
+            RoleRegisterMessage::UpdateConfirm {
+                version,
+                new_approver,
+                remove_approver,
+                new_evaluator,
+                remove_evaluators,
+                new_validator,
+                remove_validators,
+            } => {
+                if version > self.version || self.version == 0 {
+                    self.on_event(
+                        RoleRegisterEvent::UpdateConfirm {
+                            version,
+                            new_approver,
+                            remove_approver,
+                            new_evaluator,
+                            remove_evaluators,
+                            new_validator,
+                            remove_validators,
+                        },
+                        ctx,
+                    )
+                    .await;
+
+                    debug!(
+                        msg_type = "UpdateConfirm",
+                        version = version,
+                        "Roles register updated successfully"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "UpdateConfirm",
+                        version = version,
+                        current_version = self.version,
+                        "Update skipped, version not greater than current"
+                    );
+                }
+
+                Ok(RoleRegisterResponse::Ok)
+            }
+            RoleRegisterMessage::UpdateFact {
                 version,
                 appr_quorum,
                 eval_quorum,
@@ -457,28 +551,31 @@ impl Handler<RoleRegister> for RoleRegister {
                 remove_validators,
             } => {
                 if version > self.version || self.version == 0 {
-                    self.on_event(RoleRegisterEvent::Update {
-                        version,
-                        appr_quorum,
-                        eval_quorum,
-                        vali_quorum,
-                        new_approvers,
-                        remove_approvers,
-                        new_evaluators,
-                        remove_evaluators,
-                        new_validators,
-                        remove_validators,
-                    }, ctx)
+                    self.on_event(
+                        RoleRegisterEvent::UpdateFact {
+                            version,
+                            appr_quorum,
+                            eval_quorum,
+                            vali_quorum,
+                            new_approvers,
+                            remove_approvers,
+                            new_evaluators,
+                            remove_evaluators,
+                            new_validators,
+                            remove_validators,
+                        },
+                        ctx,
+                    )
                     .await;
 
                     debug!(
-                        msg_type = "Update",
+                        msg_type = "UpdateFact",
                         version = version,
                         "Roles register updated successfully"
                     );
                 } else {
                     debug!(
-                        msg_type = "Update",
+                        msg_type = "UpdateFact",
                         version = version,
                         current_version = self.version,
                         "Update skipped, version not greater than current"
@@ -497,7 +594,9 @@ impl Handler<RoleRegister> for RoleRegister {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             let version = match &event {
-                RoleRegisterEvent::Update { version, .. } => *version,
+                RoleRegisterEvent::UpdateFact { version, .. } => *version,
+                RoleRegisterEvent::UpdateVersion { version } => *version,
+                RoleRegisterEvent::UpdateConfirm { version, .. } => *version,
             };
             error!(
                 version = version,
@@ -520,7 +619,84 @@ impl PersistentActor for RoleRegister {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RoleRegisterEvent::Update {
+            RoleRegisterEvent::UpdateVersion { version } => {
+                self.version = *version;
+            }
+            RoleRegisterEvent::UpdateConfirm {
+                version,
+                new_approver,
+                remove_approver,
+                new_evaluator,
+                remove_evaluators,
+                new_validator,
+                remove_validators,
+            } => {
+                self.version = *version;
+                if let Some(approver) = new_approver {
+                    self.approvers.insert(approver.clone());
+                }
+
+                if let Some(evaluator) = new_evaluator {
+                    self.evaluators
+                        .entry(SchemaType::Governance)
+                        .or_default()
+                        .insert((evaluator.clone(), Namespace::new()));
+                }
+
+                if let Some(validator) = new_validator {
+                    self.validators
+                        .entry(SchemaType::Governance)
+                        .or_default()
+                        .entry((validator.clone(), Namespace::new()))
+                        .or_default()
+                        .1 = Some(*version);
+                }
+
+                self.approvers.remove(remove_approver);
+
+                for ((schema_id, evaluator), namespaces) in
+                    remove_evaluators.iter()
+                {
+                    for ns in namespaces.iter() {
+                        self.evaluators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .remove(&(evaluator.clone(), ns.clone()));
+                    }
+                }
+
+                for ((schema_id, validator), namespaces) in
+                    remove_validators.iter()
+                {
+                    for ns in namespaces.iter() {
+                        let (interval, last) = self
+                            .validators
+                            .entry(schema_id.clone())
+                            .or_default()
+                            .entry((validator.clone(), ns.clone()))
+                            .or_default();
+                        if let Some(last) = last.take() {
+                            interval.insert(Interval {
+                                lo: last,
+                                hi: *version - 1,
+                            });
+                        }
+                    }
+                }
+
+                debug!(
+                    event_type = "UpdateFact",
+                    version = version,
+                    new_approver = new_approver.is_some(),
+                    remove_approvers_count = 1,
+                    new_evaluator = new_evaluator.is_some(),
+                    remove_evaluators_count = remove_evaluators.len(),
+                    new_validator = new_validator.is_some(),
+                    remove_validators_count = remove_validators.len(),
+                    "Role register state updated"
+                );
+            }
+            RoleRegisterEvent::UpdateFact {
                 version,
                 appr_quorum,
                 eval_quorum,
@@ -605,14 +781,14 @@ impl PersistentActor for RoleRegister {
                         if let Some(last) = last.take() {
                             interval.insert(Interval {
                                 lo: last,
-                                hi: *version,
+                                hi: *version - 1,
                             });
                         }
                     }
                 }
 
                 debug!(
-                    event_type = "Update",
+                    event_type = "UpdateFact",
                     version = version,
                     new_approvers_count = new_approvers.len(),
                     remove_approvers_count = remove_approvers.len(),
