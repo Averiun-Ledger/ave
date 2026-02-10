@@ -4,11 +4,12 @@ use ave_actors::{
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh,
 };
 use ave_common::request::EventRequest;
-use ave_common::response::RequestState;
+use ave_common::response::{RequestState, RequestsInManager, RequestsInManagerSubject};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use error::RequestHandlerError;
@@ -23,7 +24,6 @@ use crate::approval::persist::{
     ApprPersist, ApprPersistMessage, ApprPersistResponse,
 };
 use crate::approval::request::ApprovalReq;
-use crate::approval::types::{ApprovalState, ApprovalStateRes};
 use crate::db::Storable;
 use crate::governance::events::GovernanceEvent;
 use crate::helpers::db::ExternalDB;
@@ -733,14 +733,8 @@ impl Message for RequestHandlerMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RequestHandlerResponse {
-    RequestInManager {
-        handling: HashMap<DigestIdentifier, DigestIdentifier>,
-        in_queue: HashMap<DigestIdentifier, Vec<DigestIdentifier>>,
-    },
-    RequestInManagerSubjectId {
-        handling: Option<DigestIdentifier>,
-        in_queue: Option<Vec<DigestIdentifier>>,
-    },
+    RequestInManager(RequestsInManager),
+    RequestInManagerSubjectId(RequestsInManagerSubject),
     Ok(RequestData),
     Response(String),
     Approval(Option<(ApprovalReq, ApprovalState)>),
@@ -922,41 +916,31 @@ impl Handler<RequestHandler> for RequestHandler {
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
             RequestHandlerMessage::RequestInManagerSubjectId { subject_id } => {
-                let handling = self.handling.get(&subject_id).cloned();
-                let in_queue = self.in_queue.get(&subject_id).cloned();
+                let handling = self.handling.get(&subject_id).map(|x| x.to_string());
+                let in_queue = self.in_queue.get(&subject_id).map(|x| {
+                    x.iter()
+                            .map(|x| x.1.to_string())
+                            .collect::<Vec<String>>()
+                });
 
-                let in_queue = if let Some(in_queue) = in_queue {
-                    Some(
-                        in_queue
-                            .iter()
-                            .map(|x| x.1.clone())
-                            .collect::<Vec<DigestIdentifier>>(),
-                    )
-                } else {
-                    None
-                };
-
-                Ok(RequestHandlerResponse::RequestInManagerSubjectId {
-                    handling,
-                    in_queue,
-                })
+                Ok(RequestHandlerResponse::RequestInManagerSubjectId(RequestsInManagerSubject { handling, in_queue }))
             }
             RequestHandlerMessage::RequestInManager => {
-                Ok(RequestHandlerResponse::RequestInManager {
-                    handling: self.handling.clone(),
+                Ok(RequestHandlerResponse::RequestInManager(RequestsInManager {
+                    handling: self.handling.iter().map(|x| (x.0.to_string(), x.1.to_string())).collect(),
                     in_queue: self
                         .in_queue
                         .iter()
                         .map(|x| {
                             (
-                                x.0.clone(),
+                                x.0.to_string(),
                                 x.1.iter()
-                                    .map(|x| x.1.clone())
-                                    .collect::<Vec<DigestIdentifier>>(),
+                                    .map(|x| x.1.to_string())
+                                    .collect::<Vec<String>>(),
                             )
                         })
-                        .collect(),
-                })
+                        .collect()
+                }))
             }
             RequestHandlerMessage::AbortRequest { subject_id } => {
                 self.manual_abort_request(ctx, &subject_id).await?;

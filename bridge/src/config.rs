@@ -1,4 +1,4 @@
-use core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
+use ave_core::config::{Config as AveConfig, LoggingConfig, SinkConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
 

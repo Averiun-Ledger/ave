@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
 
 #[derive(
     Default,
@@ -15,6 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
     BorshSerialize,
     BorshDeserialize,
 )]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum SchemaType {
     #[default]
     Governance,

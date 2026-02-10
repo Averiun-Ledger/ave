@@ -10,9 +10,7 @@ use ave_identity::{DigestIdentifier, PublicKey, Signed};
 use crate::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::{
-        BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
-        BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
-        BridgeSignedEventRequest, BridgeTransferRequest,
+       BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest, BridgeTransferRequest
     },
     error::ConversionError,
     request::{
@@ -269,10 +267,6 @@ impl TryFrom<BridgeRejectRequest> for RejectRequest {
     }
 }
 
-// Note: These response types have simple conversions as they are primarily
-// used for responses and don't require validation when converting FROM core types.
-// The bridge response types in common/src/bridge/response.rs are identical to the
-// core types, so these conversions are straightforward data mapping.
 
 #[cfg(test)]
 mod tests {

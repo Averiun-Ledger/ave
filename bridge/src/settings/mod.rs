@@ -1,13 +1,11 @@
 use config::Config;
-use core::error::Error;
 use tracing::error;
 
 pub mod command;
 use crate::config::Config as BridgeConfig;
+use crate::error::BridgeError;
 
-const TARGET_SETTING: &str = "Ave-Bridge-Settings";
-
-pub fn build_config(file: &str) -> Result<BridgeConfig, Error> {
+pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
     // file configuration (json, yaml or toml)
     let mut bridge_config = BridgeConfig::default();
     if !file.is_empty() {
@@ -16,15 +14,13 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, Error> {
         config = config.add_source(config::File::with_name(file));
 
         let config = config.build().map_err(|e| {
-            let e = format!("Error building config: {}", e);
-            error!(TARGET_SETTING, e);
-            Error::Bridge(e)
+            error!(error = %e, "Failed to build configuration");
+            BridgeError::ConfigBuild(e.to_string())
         })?;
 
         bridge_config = config.try_deserialize().map_err(|e| {
-            let e = format!("Error try deserialize config: {}", e);
-            error!(TARGET_SETTING, e);
-            Error::Bridge(e)
+            error!(error = %e, "Failed to deserialize configuration");
+            BridgeError::ConfigDeserialize(e.to_string())
         })?;
     }
 
@@ -41,7 +37,7 @@ mod tests {
     };
 
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use core::{
+    use ave_core::{
         config::{
             AveDbConfig, ExternalDbConfig, LoggingOutput, LoggingRotation,
             SinkServer,
@@ -65,6 +61,7 @@ external_db = "/data/ext.db"
 contracts_path = "/contracts"
 always_accept = true
 tracking_size = 200
+is_service = true
 
 [node.network]
 node_type = "Addressable"
@@ -157,6 +154,7 @@ node:
   contracts_path: /contracts
   always_accept: true
   tracking_size: 200
+  is_service: true
   network:
     node_type: Addressable
     listen_addresses:
@@ -251,6 +249,7 @@ http:
     "contracts_path": "/contracts",
     "always_accept": true,
     "tracking_size": 200,
+    "is_service": true,
     "network": {
       "node_type": "Addressable",
       "listen_addresses": [
@@ -456,6 +455,7 @@ http:
         assert!(node.always_accept);
         assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(node.tracking_size, 200);
+        assert!(node.is_service);
         assert_eq!(
             node.ave_db,
             AveDbConfig::build(&PathBuf::from("/data/ave.db"))
@@ -626,6 +626,7 @@ http:
         assert_eq!(config.node.ave_db, AveDbConfig::default());
         assert_eq!(config.node.external_db, ExternalDbConfig::default());
         assert_eq!(config.node.tracking_size, 100);
+        assert!(!config.node.is_service);
         assert_eq!(config.node.network.node_type, NodeType::Bootstrap);
         assert!(config.node.network.listen_addresses.is_empty());
         assert!(config.node.network.external_addresses.is_empty());

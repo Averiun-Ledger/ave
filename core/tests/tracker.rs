@@ -4,7 +4,7 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
-    identity::{KeyPair, PublicKey, keys::Ed25519Signer}, request::{ConfirmRequest, EventRequest},
+    identity::{KeyPair, PublicKey, keys::Ed25519Signer}, request::{ConfirmRequest, EventRequest, FactRequest}, response::RequestState,
 };
 use ave_core::{
     auth::AuthWitness,
@@ -16,6 +16,8 @@ use common::{
 };
 use serde_json::json;
 use test_log::test;
+
+use crate::common::{get_abort_request, wait_request_state};
 
 #[test(tokio::test)]
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY
@@ -114,7 +116,7 @@ async fn test_limits_in_subjects() {
         .await
         .unwrap();
 
-    let subject_id_1 =
+    let (subject_id_1, ..)=
         create_subject(emit_events, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -167,7 +169,7 @@ async fn test_limits_in_subjects() {
         .unwrap();
 
     // create other subject
-    let subject_id_2 =
+    let (subject_id_2, ..)=
         create_subject(emit_events, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -472,7 +474,7 @@ async fn test_namespace_in_role_1() {
     .await;
     assert!(subject_id.is_err());
 
-    let subject_id = create_subject(
+    let (subject_id, ..) = create_subject(
         emit_events,
         governance_id.clone(),
         "Example",
@@ -731,7 +733,7 @@ async fn test_namespace_in_role_2() {
     assert!(subject_id.is_err());
 
     // create subject in namespace
-    let subject_id = create_subject(
+    let (subject_id, ..) = create_subject(
         emit_events,
         governance_id.clone(),
         "Example",
@@ -928,7 +930,7 @@ async fn test_subject_transfer_event_1() {
         .unwrap();
 
     // create subject
-    let subject_id = create_subject(
+    let (subject_id, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -1180,7 +1182,7 @@ async fn test_subject_transfer_event_2() {
         .unwrap();
 
     // create subject
-    let subject_id =
+    let (subject_id, ..)=
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1274,7 +1276,7 @@ async fn test_subject_transfer_event_2() {
 
     old_owner.update_subject(subject_id.clone()).await.unwrap();
 
-    let subject_id_2 =
+    let (subject_id_2, ..)=
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1498,7 +1500,7 @@ async fn test_subject_transfer_event_3() {
         .unwrap();
 
     // create subject
-    let subject_id_1 =
+    let (subject_id_1, ..)=
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1802,7 +1804,7 @@ async fn test_dynamic_witnesses_1() {
         .unwrap();
 
     // create subject
-    let subject_id =
+    let (subject_id, ..)=
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1936,7 +1938,6 @@ async fn test_dynamic_witnesses_1() {
     );
 }
 
-/*
 #[test(tokio::test)]
 // Un testigo nuevo le pide la copia a otro testigo viejo.
 async fn test_dynamic_witnesses_2() {
@@ -2051,7 +2052,7 @@ async fn test_dynamic_witnesses_2() {
         .unwrap();
 
     // create subject
-    let subject_id =
+    let (subject_id, ..)=
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -2217,7 +2218,7 @@ async fn test_dynamic_witnesses_2() {
 }
 
 #[test(tokio::test)]
-// EL Owner_governance es testigo pero no explicito, no recibe copia.
+// EL Owner_governance es testigo pero Witnesses no es testigo explicito, no recibe copia.
 // Un testigo nuevo reciba las copias de un sujeto que ya va por un sn != 0.
 async fn test_dynamic_witnesses_explicit_1() {
     let (nodes, _dirs) = create_nodes_and_connections(
@@ -2326,7 +2327,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         .unwrap();
 
     // create subject
-    let subject_id =
+    let (subject_id, ..)=
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -2341,6 +2342,18 @@ async fn test_dynamic_witnesses_explicit_1() {
     emit_fact(creator, subject_id.clone(), json.clone(), true)
         .await
         .unwrap();
+
+    owner_governance
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::One(
+                PublicKey::from_str(&creator.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    owner_governance.update_subject(subject_id.clone()).await.unwrap();
 
     let state = get_subject(creator, subject_id.clone(), None)
         .await
@@ -2382,7 +2395,7 @@ async fn test_dynamic_witnesses_explicit_1() {
     );
 
     owner_governance
-        .get_subject(subject_id.clone())
+        .get_subject_state(subject_id.clone())
         .await
         .unwrap_err();
 }
@@ -2503,12 +2516,12 @@ async fn test_dynamic_witnesses_explicit_2() {
         .unwrap();
 
     // create subject
-    let subject_id_1 =
+    let (subject_id_1, ..) =
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
 
-    let subject_id_2 = create_subject(
+    let (subject_id_2, ..) = create_subject(
         creator,
         governance_id.clone(),
         "Example",
@@ -2573,7 +2586,7 @@ async fn test_dynamic_witnesses_explicit_2() {
     );
 
     owner_governance
-        .get_subject(subject_id_1.clone())
+        .get_subject_state(subject_id_1.clone())
         .await
         .unwrap_err();
 
@@ -2616,200 +2629,12 @@ async fn test_dynamic_witnesses_explicit_2() {
         })
     );
 
-    witness.get_subject(subject_id_2.clone()).await.unwrap_err();
+    witness.get_subject_state(subject_id_2.clone()).await.unwrap_err();
 }
 
 #[test(tokio::test)]
-// Un Testigo implicito le pide la copia a otro explicito, pero no se la da
-async fn test_dynamic_witnesses_explicit_3() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-    )
-    .await;
-
-    let owner_governance = &nodes[0];
-    let creator = &nodes[1];
-    let witness = &nodes[2];
-
-    let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![creator, witness],
-        "",
-    )
-    .await;
-
-    // add member to governance
-    let json = json!({
-        "members": {
-            "add": [
-                {
-                    "name": "AveNode1",
-                    "key": creator.public_key()
-                },
-                                {
-                    "name": "AveNode2",
-                    "key": witness.public_key()
-                }
-            ]
-        },
-        "schemas": {
-            "add": [
-                {
-                    "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
-                    "initial_value": {
-                        "one": 0,
-                        "two": 0,
-                        "three": 0
-                    }
-                }
-            ]
-        },
-        "roles": {
-            "governance": {
-                "add": {
-                    "witness": [
-                        "AveNode1", "AveNode2"
-                    ]
-                }
-            },
-            "all_schemas": {
-                "add": {
-                    "evaluator": [
-                        {
-                            "name": "Owner",
-                            "namespace": []
-                            }
-                    ],
-                    "validator": [
-                        {
-                            "name": "Owner",
-                            "namespace": []
-                        }
-                    ],
-                    "witness": [
-                        {
-                            "name": "Owner",
-                            "namespace": []
-                        }
-                    ],
-                    "issuer": [
-                        {
-                            "name": "AveNode1",
-                            "namespace": []
-                        },
-                    ]
-                }
-            },
-            "schema": [
-                {
-                    "schema_id": "Example",
-
-                        "add": {
-                            "creator": [
-                                {
-                                    "name": "AveNode1",
-                                    "namespace": [],
-                                    "witnesses": ["AveNode2"],
-                                    "quantity": 1
-                                },
-                            ]
-                        }
-
-                }
-            ]
-        },
-    });
-    emit_fact(owner_governance, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    // create subject
-    let subject_id =
-        create_subject(creator, governance_id.clone(), "Example", "", true)
-            .await
-            .unwrap();
-
-    // emit event to subject
-    let json = json!({
-        "ModOne": {
-            "data": 100,
-        }
-    });
-
-    emit_fact(creator, subject_id.clone(), json.clone(), true)
-        .await
-        .unwrap();
-
-    let state = get_subject(creator, subject_id.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(state.subject_id, subject_id.to_string());
-    assert_eq!(state.governance_id, governance_id.to_string());
-    assert_eq!(state.genesis_gov_version, 1);
-    assert_eq!(state.namespace, "");
-    assert_eq!(state.schema_id, "Example");
-    assert_eq!(state.owner, creator.public_key());
-    assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
-    assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({
-            "one": 100, "three": 0, "two": 0
-        })
-    );
-    let state = get_subject(witness, subject_id.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(state.subject_id, subject_id.to_string());
-    assert_eq!(state.governance_id, governance_id.to_string());
-    assert_eq!(state.genesis_gov_version, 1);
-    assert_eq!(state.namespace, "");
-    assert_eq!(state.schema_id, "Example");
-    assert_eq!(state.owner, creator.public_key());
-    assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, creator.public_key());
-    assert_eq!(state.active, true);
-    assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({
-            "one": 100, "three": 0, "two": 0
-        })
-    );
-
-    owner_governance
-        .get_subject(subject_id.clone())
-        .await
-        .unwrap_err();
-
-    owner_governance
-        .auth_subject(
-            subject_id.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&witness.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
-    owner_governance
-        .update_subject(subject_id.clone())
-        .await
-        .unwrap();
-
-    owner_governance
-        .get_subject(subject_id.clone())
-        .await
-        .unwrap_err();
-}
-
-#[test(tokio::test)]
-// Un testigo nuevo le pide la copia a otro testigo viejo.
+// una red sin validadores ni evaluadores para el esquema,
+// Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_validator() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
@@ -2859,30 +2684,30 @@ async fn test_no_subject_validator() {
         .unwrap();
 
     // create subject
-    let subject_id = create_subject(
+    let (subject_id, request_id) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
         "",
-        true,
+        false,
     )
     .await
     .unwrap();
 
-    // emit event to subject
-    let json = json!({
-        "ModOne": {
-            "data": 100,
-        }
-    });
+    let _ = wait_request_state(owner_governance, request_id.clone(), Some(RequestState::RebootTimeOut { seconds: 0, count: 0 })).await.unwrap();
 
-    emit_fact(owner_governance, subject_id.clone(), json.clone(), true)
-        .await
-        .unwrap_err();
+    owner_governance.manual_request_abort(subject_id.clone()).await.unwrap();
+
+    wait_request_state(owner_governance, request_id.clone(), Some(RequestState::Abort { subject_id: String::default(), who:  String::default(), sn: None, error:  String::default() })).await.unwrap();
+
+    let aborts = get_abort_request(owner_governance, subject_id.clone(), request_id).await.unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(aborts.events[0].error, "The user manually aborted the request");
 }
 
 #[test(tokio::test)]
-// Un testigo nuevo le pide la copia a otro testigo viejo.
+// una red evaluadores para el esquema,
+// Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_evaluator() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
@@ -2911,7 +2736,6 @@ async fn test_no_subject_evaluator() {
             "schema": [
                 {
                     "schema_id": "Example",
-
                         "add": {
                             "validator": [
                                 {
@@ -2944,7 +2768,7 @@ async fn test_no_subject_evaluator() {
         .unwrap();
 
     // create subject
-    let subject_id = create_subject(
+    let (subject_id, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -2961,9 +2785,19 @@ async fn test_no_subject_evaluator() {
         }
     });
 
-    emit_fact(owner_governance, subject_id.clone(), json.clone(), true)
+    let request_id = emit_fact(owner_governance, subject_id.clone(), json.clone(), false)
         .await
         .unwrap();
+
+        let _ = wait_request_state(owner_governance, request_id.clone(), Some(RequestState::RebootTimeOut { seconds: 0, count: 0 })).await.unwrap();
+
+    owner_governance.manual_request_abort(subject_id.clone()).await.unwrap();
+
+    wait_request_state(owner_governance, request_id.clone(), Some(RequestState::Abort { subject_id: String::default(), who:  String::default(), sn: None, error:  String::default() })).await.unwrap();
+
+    let aborts = get_abort_request(owner_governance, subject_id.clone(), request_id).await.unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(aborts.events[0].error, "The user manually aborted the request");
 
     let state = get_subject(owner_governance, subject_id.clone(), None)
         .await
@@ -2978,7 +2812,7 @@ async fn test_no_subject_evaluator() {
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
-    assert_eq!(state.sn, 1);
+    assert_eq!(state.sn, 0);
     assert_eq!(
         state.properties,
         json!({
@@ -2988,7 +2822,7 @@ async fn test_no_subject_evaluator() {
 }
 
 #[test(tokio::test)]
-// Un testigo nuevo le pide la copia a otro testigo viejo.
+// No es issuer
 async fn test_no_subject_issuer() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
@@ -3043,7 +2877,7 @@ async fn test_no_subject_issuer() {
         .unwrap();
 
     // create subject
-    let subject_id = create_subject(
+    let (subject_id, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -3062,7 +2896,7 @@ async fn test_no_subject_issuer() {
 
     emit_fact(owner_governance, subject_id.clone(), json.clone(), true)
         .await
-        .unwrap();
+        .unwrap_err();
 
     let state = get_subject(owner_governance, subject_id.clone(), None)
         .await
@@ -3160,7 +2994,7 @@ async fn test_1000_events() {
         .await
         .unwrap();
 
-    let subject_id_1 = create_subject(
+    let (subject_id_1, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -3317,7 +3151,7 @@ async fn test_subj_no_all_validators() {
         .await
         .unwrap();
 
-    let subject_id_1 = create_subject(
+    let (subject_id_1, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -3472,7 +3306,7 @@ async fn test_subj_no_all_evaluators() {
         .await
         .unwrap();
 
-    let subject_id_1 = create_subject(
+    let (subject_id_1, ..) = create_subject(
         owner_governance,
         governance_id.clone(),
         "Example",
@@ -3516,5 +3350,3 @@ async fn test_subj_no_all_evaluators() {
         })
     );
 }
-
- */

@@ -613,10 +613,7 @@ mod tests {
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use ave_common::{
-        Namespace, SchemaType, ValueWrapper,
-        identity::{DigestIdentifier, PublicKey, Signed},
-        request::{CreateRequest, FactRequest, TransferRequest},
-        response::{EvalResDB, RequestEventDB, RequestState},
+        Namespace, SchemaType, ValueWrapper, bridge::request::{ApprovalState, ApprovalStateRes}, identity::{DigestIdentifier, PublicKey, Signed}, request::{CreateRequest, FactRequest, TransferRequest}, response::{EvalResDB, RequestEventDB, RequestState}
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -624,7 +621,6 @@ mod tests {
 
     use crate::{
         EventRequest, NodeMessage, NodeResponse,
-        approval::types::{ApprovalState, ApprovalStateRes},
         governance::{
             Governance, GovernanceMessage, GovernanceResponse,
             data::GovernanceData,

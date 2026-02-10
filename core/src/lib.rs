@@ -21,17 +21,17 @@ pub mod tracker;
 pub mod update;
 pub mod validation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
 use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use ave_common::request::EventRequest;
 use ave_common::response::{
-    LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo, SubjectDB,
-    TimeRange,
+    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange
 };
 use config::Config as AveBaseConfig;
 use error::Error;
@@ -40,10 +40,8 @@ use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 
-pub use network::MonitorNetworkState;
-
 use node::register::{
-    GovsData, Register, RegisterMessage, RegisterResponse, SubjsData,
+    Register, RegisterMessage, RegisterResponse,
 };
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
@@ -58,7 +56,6 @@ use tracing::{debug, error, warn};
 use validation::{Validation, ValidationMessage};
 
 use crate::approval::request::ApprovalReq;
-use crate::approval::types::{ApprovalState, ApprovalStateRes};
 use crate::config::SinkAuth;
 use crate::helpers::db::ExternalDB;
 use crate::model::common::node::SignTypesNode;
@@ -305,13 +302,7 @@ impl Api {
 
     pub async fn get_handling_in_queue_requests(
         &self,
-    ) -> Result<
-        (
-            HashMap<DigestIdentifier, DigestIdentifier>,
-            HashMap<DigestIdentifier, Vec<DigestIdentifier>>,
-        ),
-        Error,
-    > {
+    ) -> Result<RequestsInManager,Error> {
         let response = self
             .request
             .ask(RequestHandlerMessage::RequestInManager)
@@ -324,8 +315,8 @@ impl Api {
             })?;
 
         match response {
-            RequestHandlerResponse::RequestInManager { handling, in_queue } => {
-                Ok((handling, in_queue))
+            RequestHandlerResponse::RequestInManager(request) => {
+                Ok(request)
             }
             _ => {
                 warn!("Unexpected response from request handler");
@@ -341,7 +332,7 @@ impl Api {
     pub async fn get_handling_in_queue_requests_subject_id(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<(Option<DigestIdentifier>, Option<Vec<DigestIdentifier>>), Error>
+    ) -> Result<RequestsInManagerSubject, Error>
     {
         let response = self
             .request
@@ -357,10 +348,7 @@ impl Api {
             })?;
 
         match response {
-            RequestHandlerResponse::RequestInManagerSubjectId {
-                handling,
-                in_queue,
-            } => Ok((handling, in_queue)),
+            RequestHandlerResponse::RequestInManagerSubjectId(request) => Ok(request),
             _ => {
                 warn!("Unexpected response from request handler");
                 Err(Error::UnexpectedResponse {
@@ -550,7 +538,7 @@ impl Api {
     pub async fn manual_request_abort(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         self.request
             .tell(RequestHandlerMessage::AbortRequest { subject_id })
             .await
@@ -559,12 +547,14 @@ impl Api {
                 Error::ActorCommunication {
                     actor: "request".to_string(),
                 }
-            })
+            })?;
+
+        Ok("Trying to abort".to_string())
     }
 
     ///////// Tracking
     ////////////////////////////
-    pub async fn request_state(
+    pub async fn get_request_state(
         &self,
         request_id: DigestIdentifier,
     ) -> Result<RequestInfo, Error> {
@@ -783,7 +773,7 @@ impl Api {
                 Error::DistributionFailed(subject_id.to_string())
             })?;
 
-        Ok("Manual update in progress".to_owned())
+        Ok("Manual distribution in progress".to_owned())
     }
 
     ///////// Register
@@ -818,14 +808,14 @@ impl Api {
 
     pub async fn all_subjs(
         &self,
-        gov_id: DigestIdentifier,
+        governance_id: DigestIdentifier,
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, Error> {
         let response = self
             .register
             .ask(RegisterMessage::GetSubj {
-                gov_id: gov_id.to_string(),
+                gov_id: governance_id.to_string(),
                 active,
                 schema_id,
             })
@@ -901,7 +891,7 @@ impl Api {
     pub async fn get_aborts(
         &self,
         subject_id: DigestIdentifier,
-        request_id: Option<String>,
+        request_id: Option<DigestIdentifier>,
         sn: Option<u64>,
         quantity: Option<u64>,
         page: Option<u64>,

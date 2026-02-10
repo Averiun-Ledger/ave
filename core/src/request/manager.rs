@@ -1226,6 +1226,7 @@ impl RequestManager {
 
         match reboot_type {
             RebootType::Normal => {
+                info!("Launching Normal reboot {}", self.id);
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
@@ -1243,6 +1244,7 @@ impl RequestManager {
                     .await?;
             }
             RebootType::Diff => {
+                info!("Launching Diff reboot {}", self.id);
                 self.retry_diff += 1;
 
                 let seconds = match self.retry_diff {
@@ -1251,6 +1253,8 @@ impl RequestManager {
                     3 => 30,
                     _ => 60,
                 };
+
+                info!("Launching Diff reboot {}, try: {}, seconds: {}", self.id, self.retry_diff, seconds);
 
                 send_to_tracking(
                     ctx,
@@ -1284,6 +1288,7 @@ impl RequestManager {
                     _ => 300,
                 };
 
+                info!("Launching TimeOut reboot {}, try: {}, seconds: {}", self.id, self.retry_timeout, seconds);
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
@@ -1553,6 +1558,7 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    info!("Init reboot update {}", self.id);
                     debug!(
                         msg_type = "RebootUpdate",
                         request_id = %self.id,
@@ -1579,6 +1585,7 @@ impl Handler<RequestManager> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
+                    info!("Init reboot wait {}", self.id);
                     debug!(
                         msg_type = "RebootWait",
                         request_id = %self.id,
@@ -1606,7 +1613,6 @@ impl Handler<RequestManager> for RequestManager {
             } => {
                 if request_id == self.id {
                     if let RequestManagerState::Reboot = self.state {
-                        info!("Init reboot {}", self.id);
                         debug!(
                             msg_type = "Reboot",
                             request_id = %self.id,
@@ -1652,6 +1658,7 @@ impl Handler<RequestManager> for RequestManager {
             }
             RequestManagerMessage::FinishReboot { request_id } => {
                 if request_id == self.id {
+                    info!("Init reboot finish {}", self.id);
                     debug!(
                         msg_type = "FinishReboot",
                         request_id = %self.id,
@@ -2357,6 +2364,7 @@ impl PersistentActor for RequestManager {
                     new_version = version,
                     "Applying version update"
                 );
+                self.state = RequestManagerState::Starting;
                 self.version = *version
             }
             RequestManagerEvent::SafeState { command, request } => {

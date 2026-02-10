@@ -2,10 +2,67 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
+use crate::SchemaType;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SubjsData {
+    pub subject_id: String,
+    pub schema_id: SchemaType,
+    pub active: bool,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct GovsData {
+    pub governance_id: String,
+    pub active: bool,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TransferSubject {
+    pub name: Option<String>,
+    pub subject_id: String,
+    pub new_owner: String,
+    pub actual_owner: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ApprovalReq {
+    /// The signed event request.
+    pub subject_id: String,
+    /// The sequence number of the event.
+    pub sn: u64,
+    /// The version of the governance contract.
+    pub gov_version: u64,
+    /// The patch to apply to the state.
+    pub patch: Value,
+
+    pub signer: String,
+}
+
+/// Monitor network states
+#[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub enum MonitorNetworkState {
+    /// Connecting to others network nodes
+    #[default]
+    Connecting,
+    /// Connected to others netowrk nodes
+    Running,
+    /// Can not connect to others network nodes
+    Down,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -16,6 +73,20 @@ pub struct LedgerDB {
     pub event_ledger_timestamp: u64,
     pub sink_timestamp: u64,
     pub event: RequestEventDB,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct RequestsInManager {
+    pub handling: HashMap<String, String>,
+    pub in_queue: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct RequestsInManagerSubject {
+    pub handling: Option<String>,
+    pub in_queue: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

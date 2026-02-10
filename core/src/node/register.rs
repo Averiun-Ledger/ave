@@ -5,6 +5,7 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::SchemaType;
+use ave_common::response::{GovsData, SubjsData};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,22 +32,7 @@ pub struct RegisterDataGov {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GovsData {
-    pub governance_id: String,
-    pub active: bool,
-    pub name: Option<String>,
-    pub description: Option<String>,
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubjsData {
-    pub subject_id: String,
-    pub schema_id: SchemaType,
-    pub active: bool,
-    pub name: Option<String>,
-    pub description: Option<String>,
-}
 
 #[derive(
     Clone,

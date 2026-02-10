@@ -2,6 +2,7 @@ use ave_actors::{
     Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
     Response,
 };
+use ave_common::response::MonitorNetworkState;
 use tracing::{Span, info_span};
 
 use crate::{Event as NetworkEvent, NetworkState};
@@ -30,17 +31,7 @@ impl Default for Monitor {
     }
 }
 
-/// Monitor network states
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq)]
-pub enum MonitorNetworkState {
-    /// Connecting to others network nodes
-    #[default]
-    Connecting,
-    /// Connected to others netowrk nodes
-    Running,
-    /// Can not connect to others network nodes
-    Down,
-}
+
 
 /// Monitor actor messages
 #[derive(Debug, Clone)]

@@ -307,6 +307,148 @@ impl WitnessesRegister {
         }
     }
 
+    /// Busca en los testigos de schema para ambos tipos (específico y AllSchemas) usando search_in_schema_actual
+    async fn search_schemas_actual(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        parse_namespace: &Namespace,
+        gov_version: u64,
+        sn: u64,
+        better_gov_version: Option<u64>,
+    ) -> ActualSearch {
+        // el esquema específico
+        let better_gov_version = if let Some(witness_data) =
+            self.witnesses.get(&(node.clone(), schema_id.clone()))
+        {
+            match Self::search_in_schema_actual(
+                witness_data,
+                parse_namespace,
+                gov_version,
+                sn,
+                better_gov_version,
+            )
+            .await
+            {
+                ActualSearch::End(sn_limit) => {
+                    return ActualSearch::End(sn_limit)
+                }
+                ActualSearch::Continue { gov_version } => gov_version,
+            }
+        } else {
+            better_gov_version
+        };
+
+        // todos los esquemas
+        if let Some(witness_data) =
+            self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
+        {
+            return Self::search_in_schema_actual(
+                witness_data,
+                parse_namespace,
+                gov_version,
+                sn,
+                better_gov_version,
+            )
+            .await;
+        }
+
+        ActualSearch::Continue {
+            gov_version: better_gov_version,
+        }
+    }
+
+    /// Busca en los testigos de schema para ambos tipos (específico y AllSchemas) usando search_in_schema para old owners
+    fn search_schemas_old(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        parse_namespace: &Namespace,
+        data: &OldOwnerData,
+        better_gov_version: Option<u64>,
+        better_sn: Option<u64>,
+    ) -> (Option<u64>, Option<u64>) {
+        // el esquema específico
+        let (better_gov_version, better_sn) = if let Some(witness_data) =
+            self.witnesses.get(&(node.clone(), schema_id.clone()))
+        {
+            Self::search_in_schema(
+                witness_data,
+                parse_namespace,
+                data,
+                better_gov_version,
+                better_sn,
+            )
+        } else {
+            (better_gov_version, better_sn)
+        };
+
+        // todos los esquemas
+        if let Some(witness_data) =
+            self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
+        {
+            return Self::search_in_schema(
+                witness_data,
+                parse_namespace,
+                data,
+                better_gov_version,
+                better_sn,
+            );
+        }
+
+        (better_gov_version, better_sn)
+    }
+
+    /// Busca testigos para un owner actual (actual_owner o new_owner en transferencia)
+    async fn check_current_owner(
+        &self,
+        witnesses_creator: &HashMap<WitnessesType, (IntervalSet, Option<u64>)>,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        parse_namespace: &Namespace,
+        owner_gov_version: u64,
+        sn: u64,
+        better_gov_version: Option<u64>,
+    ) -> ActualSearch {
+        let mut better_gov_version = better_gov_version;
+
+        // Si el nodo es testigo explicito
+        if let Some((interval, actual_lo)) =
+            witnesses_creator.get(&WitnessesType::User(node.clone()))
+        {
+            // Actualmente soy testigo del owner
+            if actual_lo.is_some() {
+                return ActualSearch::End(SnLimit::Sn(sn));
+            }
+            // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
+            // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
+            if let Some(range) = interval.iter().last() {
+                if range.contains(owner_gov_version) {
+                    // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
+                    better_gov_version =
+                        better_gov_version.max(Some(owner_gov_version));
+                }
+            }
+        }
+
+        if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
+            return self
+                .search_schemas_actual(
+                    node,
+                    schema_id,
+                    parse_namespace,
+                    owner_gov_version,
+                    sn,
+                    better_gov_version,
+                )
+                .await;
+        }
+
+        ActualSearch::Continue {
+            gov_version: better_gov_version,
+        }
+    }
+
     async fn search_witnesses(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -326,62 +468,21 @@ impl WitnessesRegister {
             namespace.clone(),
             schema_id.clone(),
         )) {
-            // Si el nodo es testigo explicito
-            if let Some((interval, actual_lo)) =
-                witnesses_creator.get(&WitnessesType::User(node.clone()))
+            match self
+                .check_current_owner(
+                    witnesses_creator,
+                    node,
+                    &schema_id,
+                    &parse_namespace,
+                    data.gov_version,
+                    data.sn,
+                    better_gov_version,
+                )
+                .await
             {
-                // Actualmente soy testigo del owner
-                if actual_lo.is_some() {
-                    return Ok(SnLimit::Sn(data.sn));
-                }
-                // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
-                // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
-                if let Some(range) = interval.iter().last() {
-                    if range.contains(data.gov_version) {
-                        // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                        better_gov_version =
-                            better_gov_version.max(Some(data.gov_version));
-                    }
-                }
-            }
-
-            if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
-                if let Some(witness_data) =
-                    self.witnesses.get(&(node.clone(), schema_id.clone()))
-                {
-                    match Self::search_in_schema_actual(
-                        witness_data,
-                        &parse_namespace,
-                        data.gov_version,
-                        data.sn,
-                        better_gov_version,
-                    )
-                    .await
-                    {
-                        ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                        ActualSearch::Continue { gov_version } => {
-                            better_gov_version = gov_version;
-                        }
-                    }
-                }
-
-                if let Some(witness_data) =
-                    self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
-                {
-                    match Self::search_in_schema_actual(
-                        witness_data,
-                        &parse_namespace,
-                        data.gov_version,
-                        data.sn,
-                        better_gov_version,
-                    )
-                    .await
-                    {
-                        ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                        ActualSearch::Continue { gov_version } => {
-                            better_gov_version = gov_version;
-                        }
-                    }
+                ActualSearch::End(sn_limit) => return Ok(sn_limit),
+                ActualSearch::Continue { gov_version } => {
+                    better_gov_version = gov_version;
                 }
             }
         }
@@ -394,68 +495,27 @@ impl WitnessesRegister {
                 schema_id.clone(),
             ))
         {
-            // Si el nodo es testigo explicito
-            if let Some((interval, actual_lo)) =
-                witnesses_creator.get(&WitnessesType::User(node.clone()))
+            match self
+                .check_current_owner(
+                    witnesses_creator,
+                    node,
+                    &schema_id,
+                    &parse_namespace,
+                    *new_owner_gov_version,
+                    data.sn,
+                    better_gov_version,
+                )
+                .await
             {
-                // Actualmente soy testigo del owner
-                if actual_lo.is_some() {
-                    return Ok(SnLimit::Sn(data.sn));
-                }
-                // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
-                // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
-                if let Some(range) = interval.iter().last() {
-                    if range.contains(*new_owner_gov_version) {
-                        // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                        better_gov_version = better_gov_version
-                            .max(Some(*new_owner_gov_version));
-                    }
-                }
-            }
-
-            if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
-                if let Some(witness_data) =
-                    self.witnesses.get(&(node.clone(), schema_id.clone()))
-                {
-                    match Self::search_in_schema_actual(
-                        witness_data,
-                        &parse_namespace,
-                        *new_owner_gov_version,
-                        data.sn,
-                        better_gov_version,
-                    )
-                    .await
-                    {
-                        ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                        ActualSearch::Continue { gov_version } => {
-                            better_gov_version = gov_version;
-                        }
-                    }
-                }
-
-                if let Some(witness_data) =
-                    self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
-                {
-                    match Self::search_in_schema_actual(
-                        witness_data,
-                        &parse_namespace,
-                        *new_owner_gov_version,
-                        data.sn,
-                        better_gov_version,
-                    )
-                    .await
-                    {
-                        ActualSearch::End(sn_limit) => return Ok(sn_limit),
-                        ActualSearch::Continue { gov_version } => {
-                            better_gov_version = gov_version;
-                        }
-                    }
+                ActualSearch::End(sn_limit) => return Ok(sn_limit),
+                ActualSearch::Continue { gov_version } => {
+                    better_gov_version = gov_version;
                 }
             }
         }
 
         // Not_owners
-        for (creator, data) in data.old_owners.iter() {
+        for (creator, old_data) in data.old_owners.iter() {
             if let Some(witnesses_creator) = self.witnesses_creator.get(&(
                 creator.to_owned(),
                 namespace.clone(),
@@ -465,11 +525,12 @@ impl WitnessesRegister {
                     witnesses_creator.get(&WitnessesType::User(node.clone()))
                 {
                     // Si es testigo explicito
-                    for range in data.interval_gov_version.iter().rev() {
+                    for range in old_data.interval_gov_version.iter().rev() {
                         // Sigue siendo testigo.
                         if let Some(actual_lo) = actual_lo {
                             if range.contains(*actual_lo) {
-                                better_sn = better_sn.max(Some(data.sn));
+                                better_sn =
+                                    better_sn.max(Some(old_data.sn));
 
                                 break;
                             }
@@ -489,37 +550,16 @@ impl WitnessesRegister {
                 // Witness de schema.
                 if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
                     // ha tenido el rol de testigo.
-
-                    // el esquema X
-                    if let Some(witness_data) =
-                        self.witnesses.get(&(node.clone(), schema_id.clone()))
-                    {
-                        let search = Self::search_in_schema(
-                            witness_data,
-                            &parse_namespace,
-                            data,
-                            better_gov_version,
-                            better_sn,
-                        );
-                        better_gov_version = search.0;
-                        better_sn = search.1;
-                    }
-
-                    // todos los esquemas.
-                    if let Some(witness_data) = self
-                        .witnesses
-                        .get(&(node.clone(), SchemaType::AllSchemas))
-                    {
-                        let search = Self::search_in_schema(
-                            witness_data,
-                            &parse_namespace,
-                            data,
-                            better_gov_version,
-                            better_sn,
-                        );
-                        better_gov_version = search.0;
-                        better_sn = search.1;
-                    }
+                    let (bgv, bs) = self.search_schemas_old(
+                        node,
+                        &schema_id,
+                        &parse_namespace,
+                        old_data,
+                        better_gov_version,
+                        better_sn,
+                    );
+                    better_gov_version = bgv;
+                    better_sn = bs;
                 }
             }
         }

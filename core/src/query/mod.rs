@@ -36,7 +36,7 @@ pub enum QueryMessage {
     },
     GetAborts {
         subject_id: DigestIdentifier,
-        request_id: Option<String>,
+        request_id: Option<DigestIdentifier>,
         sn: Option<u64>,
         quantity: Option<u64>,
         page: Option<u64>,
@@ -104,7 +104,7 @@ impl Handler<Query> for Query {
                 }
             },
             QueryMessage::GetAborts { subject_id, request_id, sn, quantity, page, reverse } => {
-                match self.db.get_aborts(&subject_id.to_string(), request_id, sn, quantity, page, reverse).await {
+                match self.db.get_aborts(&subject_id.to_string(), request_id.map(|x| x.to_string()), sn, quantity, page, reverse).await {
                     Ok(data) => Ok(QueryResponse::PagAborts(data)),
                     Err(e) => Ok(QueryResponse::Error(e.to_string()))
                 }

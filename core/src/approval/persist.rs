@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     ActorMessage, NetworkMessage,
-    approval::types::{ApprovalState, ApprovalStateRes, VotationType},
+    approval::types::{VotationType},
     db::Storable,
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
@@ -20,10 +20,9 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::{
-    Namespace, SchemaType,
-    identity::{
+    Namespace, SchemaType, bridge::request::{ApprovalState, ApprovalStateRes}, identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    },
+    }
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;

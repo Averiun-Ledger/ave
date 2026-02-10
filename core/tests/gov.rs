@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 mod common;
 
-use ave_common::identity::{
+use ave_common::{bridge::request::ApprovalStateRes, identity::{
     PublicKey,
     keys::{Ed25519Signer, KeyPair},
-};
-use ave_core::{approval::types::ApprovalStateRes, auth::AuthWitness};
+}};
+use ave_core::{auth::AuthWitness};
 
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
@@ -120,7 +120,7 @@ async fn test_governance_and_subject_copy_with_approve() {
     .await
     .unwrap();
 
-    let subject_id =
+    let (subject_id, ..) =
         create_subject(node2, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1438,7 +1438,7 @@ async fn test_delete_schema() {
         .await
         .unwrap();
 
-    let subject_id =
+    let (subject_id, ..) =
         create_subject(node1, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1585,7 +1585,7 @@ async fn test_change_schema() {
         .await
         .unwrap();
 
-    let subject_id =
+    let (subject_id, ..) =
         create_subject(node1, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
