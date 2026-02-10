@@ -1,22 +1,30 @@
 use crate::{
-    Error,
-    approval::approver::{Approver, ApproverMessage},
-    distribution::distributor::{Distributor, DistributorMessage},
-    evaluation::{
-        evaluator::{Evaluator, EvaluatorMessage},
-        schema::{EvaluationSchema, EvaluationSchemaMessage},
+    approval::{
+        light::{ApprLight, ApprLightMessage},
+        persist::{ApprPersist, ApprPersistMessage},
     },
-    model::Namespace,
+    distribution::{
+        coordinator::{DistriCoordinator, DistriCoordinatorMessage},
+        worker::{DistriWorker, DistriWorkerMessage},
+    },
+    evaluation::{
+        coordinator::{EvalCoordinator, EvalCoordinatorMessage},
+        schema::{EvaluationSchema, EvaluationSchemaMessage},
+        worker::{EvalWorker, EvalWorkerMessage},
+    },
     update::updater::{Updater, UpdaterMessage},
     validation::{
+        coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         schema::{ValidationSchema, ValidationSchemaMessage},
-        validator::{Validator, ValidatorMessage},
+        worker::{ValiWorker, ValiWorkerMessage},
     },
 };
 
+use super::error::IntermediaryError;
+
 use super::ActorMessage;
-use super::{NetworkMessage, service::HelperService};
-use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
+use super::{NetworkMessage, service::NetworkSender};
+use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use bytes::Bytes;
 use network::Command as NetworkCommand;
@@ -24,104 +32,126 @@ use network::CommandHelper as Command;
 use network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
 use serde::Deserialize;
-use std::io::Cursor;
+use std::{io::Cursor, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{debug, error};
 
-const TARGET_NETWORK: &str = "Ave-Helper-Network";
-
-#[derive(Clone)]
-pub struct Intermediary {
-    service: HelperService,
-    network_sender: mpsc::Sender<NetworkCommand>,
-    system: SystemRef,
-    token: CancellationToken,
-}
+pub struct Intermediary;
 
 impl Intermediary {
-    pub fn new(
+    pub fn build(
         network_sender: mpsc::Sender<NetworkCommand>,
         system: SystemRef,
         token: CancellationToken,
-    ) -> Self {
-        let (command_sender, command_receiver) = mpsc::channel(10000);
-
-        let service = HelperService::new(command_sender);
-
-        Self {
-            service,
-            network_sender,
-            system,
-            token,
-        }
-        .spawn_command_receiver(command_receiver)
-    }
-
-    pub fn service(&self) -> HelperService {
-        self.service.clone()
-    }
-
-    fn spawn_command_receiver(
-        &mut self,
-        mut command_receiver: mpsc::Receiver<Command<NetworkMessage>>,
-    ) -> Self {
-        let clone = self.clone();
+    ) -> Arc<NetworkSender> {
+        let (command_sender, mut command_receiver) = mpsc::channel(10000);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     command = command_receiver.recv() => {
-                        if let Some(command) = command && let Err(e) = clone.handle_command(command).await {
-
-                                error!(TARGET_NETWORK, "{}", e);
-                                if let Error::Network(_) = e {
-                                    clone.token.cancel();
+                        if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await {
+                                error!(
+                                    error = %e,
+                                    "Network intermediary command handling failed"
+                                );
+                                if let IntermediaryError::NetworkSendFailed { .. } = e {
+                                    error!("Network send failed, cancelling token and stopping intermediary");
+                                    token.cancel();
                                     break;
                                 }
                         }
                     },
-                    _ = clone.token.cancelled() => {
+                    _ = token.cancelled() => {
+                        debug!("Network intermediary cancelled, stopping");
                         break;
                     }
                 }
             }
         });
 
-        self.clone()
+        Arc::new(NetworkSender::new(command_sender))
     }
 
     async fn handle_command(
-        &self,
         command: Command<NetworkMessage>,
-    ) -> Result<(), Error> {
+        system: &SystemRef,
+        network_sender: &mpsc::Sender<NetworkCommand>,
+    ) -> Result<(), IntermediaryError> {
         match command {
             Command::SendMessage { message } => {
-                // Public key to peer_id
-                let node_peer =
-                    Intermediary::to_peer_id(&message.info.receiver)?;
+                let receiver = message.info.receiver.clone();
+                let receiver_actor = message.info.receiver_actor.clone();
 
-                // Message to Vec<u8>
+                let node_peer = Intermediary::to_peer_id(
+                    &message.info.receiver,
+                )
+                .map_err(|e| {
+                    error!(
+                        receiver = %receiver,
+                        receiver_actor = %receiver_actor,
+                        error = %e,
+                        "Failed to convert public key to peer ID"
+                    );
+                    e
+                })?;
+
                 let network_message =
                     rmp_serde::to_vec(&message).map_err(|error| {
-                        Error::NetworkHelper(format!("{}", error))
+                        error!(
+                            receiver = %receiver,
+                            receiver_actor = %receiver_actor,
+                            error = %error,
+                            "Failed to serialize network message"
+                        );
+                        IntermediaryError::SerializationFailed {
+                            details: error.to_string(),
+                        }
                     })?;
-                // Send message to network
-                if let Err(error) = self
-                    .network_sender
+
+                if let Err(error) = network_sender
                     .send(NetworkCommand::SendMessage {
                         peer: node_peer,
                         message: Bytes::from(network_message),
                     })
                     .await
                 {
-                    return Err(Error::Network(format!(
-                        "Can not send message to network: {}",
-                        error
-                    )));
+                    error!(
+                        receiver = %receiver,
+                        receiver_actor = %receiver_actor,
+                        error = %error,
+                        "Failed to send message to network"
+                    );
+                    return Err(IntermediaryError::NetworkSendFailed {
+                        details: error.to_string(),
+                    }
+                    .into());
                 };
+
+                debug!(
+                    receiver = %receiver,
+                    receiver_actor = %receiver_actor,
+                    "Message sent to network successfully"
+                );
             }
-            Command::ReceivedMessage { message } => {
+            Command::ReceivedMessage { message, sender } => {
+                let sender =
+                    match PublicKey::new(DSAlgorithm::Ed25519, sender.to_vec())
+                    {
+                        Ok(sender) => sender,
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "Failed to parse sender public key"
+                            );
+                            return Err(IntermediaryError::InvalidPublicKey {
+                                details: e.to_string(),
+                            }
+                            .into());
+                        }
+                    };
+
                 let cur = Cursor::new(message.to_vec());
                 let mut de = Deserializer::new(cur);
 
@@ -129,564 +159,416 @@ impl Intermediary {
                     match Deserialize::deserialize(&mut de) {
                         Ok(message) => message,
                         Err(e) => {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not deserialize message: {}",
-                                e
-                            )));
+                            error!(
+                                sender = %sender.clone(),
+                                error = %e,
+                                "Failed to deserialize network message"
+                            );
+                            return Err(
+                                IntermediaryError::DeserializationFailed {
+                                    details: e.to_string(),
+                                }
+                                .into(),
+                            );
                         }
                     };
 
+                let path = ActorPath::from(message.info.receiver_actor.clone());
+                let request_id = message.info.request_id.clone();
                 match message.message {
-                    ActorMessage::TransferRes { res } => {
-                        let authorizer_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        let authorizer_actor: Option<ActorRef<Updater>> =
-                            self.system.get_actor(&authorizer_path).await;
-
-                        if let Some(authorizer_actor) = authorizer_actor {
-                            if let Err(e) = authorizer_actor
-                                .tell(UpdaterMessage::TransferResponse { res })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    authorizer_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                authorizer_path
-                            )));
-                        };
-                    }
-                    ActorMessage::Transfer { subject_id } => {
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
-
-                        if let Some(distributor_actor) = distributor_actor {
-                            if let Err(e) = distributor_actor
-                                .tell(DistributorMessage::Transfer {
-                                    subject_id: subject_id.to_string(),
-                                    info: message.info,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    distributor_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                distributor_path
-                            )));
-                        };
-                    }
                     ActorMessage::DistributionGetLastSn { subject_id } => {
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
+                        let actor = system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
 
-                        if let Some(distributor_actor) = distributor_actor {
-                            if let Err(e) = distributor_actor
-                                .tell(DistributorMessage::GetLastSn {
-                                    subject_id: subject_id.to_string(),
-                                    info: message.info,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    distributor_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                distributor_path
-                            )));
-                        };
-                    }
-                    ActorMessage::AuthLastSn { sn } => {
-                        let authorizer_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        let authorizer_actor: Option<ActorRef<Updater>> =
-                            self.system.get_actor(&authorizer_path).await;
-
-                        if let Some(authorizer_actor) = authorizer_actor {
-                            if let Err(e) = authorizer_actor
-                                .tell(UpdaterMessage::NetworkResponse { sn })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    authorizer_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                authorizer_path
-                            )));
-                        };
-                    }
-                    ActorMessage::ValidationReq { req, schema_id } => {
-                        // Validator path.
-                        let validator_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        if schema_id.is_gov() {
-                            let validator_actor: Option<ActorRef<Validator>> =
-                                self.system.get_actor(&validator_path).await;
-
-                            // We obtain the validator
-                            if let Some(validator_actor) = validator_actor {
-                                if let Err(e) = validator_actor
-                                    .tell(ValidatorMessage::NetworkRequest {
-                                        validation_req: req,
-                                        info: message.info,
-                                        schema_id,
-                                    })
-                                    .await
-                                {
-                                    return Err(Error::NetworkHelper(format!(
-                                        "Can not send a message to {}: {}",
-                                        validator_path, e
-                                    )));
-                                };
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    validator_path
-                                )));
-                            };
-                        } else {
-                            let validator_actor: Option<
-                                ActorRef<ValidationSchema>,
-                            > = self.system.get_actor(&validator_path).await;
-
-                            // We obtain the validator
-                            if let Some(validator_actor) = validator_actor {
-                                if let Err(e) = validator_actor
-                                    .tell(ValidationSchemaMessage::NetworkRequest {
-                                        validation_req: req,
-                                        info: message.info,
-                                        schema_id
-                                    })
-                                    .await
-                                    {
-                                        return Err(Error::NetworkHelper(format!("Can not send a message to {}: {}",validator_path, e)));
-                                    };
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    validator_path
-                                )));
-                            };
-                        }
-                    }
-                    ActorMessage::EvaluationReq { req, schema_id } => {
-                        // Evaluator path.
-                        let evaluator_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-
-                        if schema_id.is_gov() {
-                            // Evaluator actor.
-                            let evaluator_actor: Option<ActorRef<Evaluator>> =
-                                self.system.get_actor(&evaluator_path).await;
-
-                            // We obtain the validator
-                            if let Some(evaluator_actor) = evaluator_actor {
-                                if let Err(e) = evaluator_actor
-                                    .tell(EvaluatorMessage::NetworkRequest {
-                                        evaluation_req: req,
-                                        info: message.info,
-                                        schema_id,
-                                    })
-                                    .await
-                                {
-                                    return Err(Error::NetworkHelper(format!(
-                                        "Can not send a message to {}: {}",
-                                        evaluator_path, e
-                                    )));
-                                };
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    evaluator_path
-                                )));
-                            };
-                        } else {
-                            // Evaluator actor.
-                            let evaluator_actor: Option<
-                                ActorRef<EvaluationSchema>,
-                            > = self.system.get_actor(&evaluator_path).await;
-
-                            // We obtain the validator
-                            if let Some(evaluator_actor) = evaluator_actor {
-                                if let Err(e) = evaluator_actor
-                            .tell(EvaluationSchemaMessage::NetworkRequest {
-                                evaluation_req: Box::new(req),
+                        actor
+                            .tell(DistriWorkerMessage::GetLastSn {
+                                subject_id,
                                 info: message.info,
-                                schema_id
+                                sender: sender.clone(),
                             })
                             .await
-                            {
-                                return Err(Error::NetworkHelper(format!("Can not send a message to {}: {}",evaluator_path, e)));
-                            };
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    evaluator_path
-                                )));
-                            };
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::AuthLastSn { sn } => {
+                        let actor = system
+                            .get_actor::<Updater>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(UpdaterMessage::NetworkResponse {
+                                sn,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ValidationReq { req } => {
+                        let Ok(schema_id) = req.content().get_schema_id()
+                        else {
+                            error!(
+                                sender = %sender.clone(),
+                                path = %path,
+                                "Invalid schema ID in validation request"
+                            );
+                            return Err(IntermediaryError::InvalidSchemaId);
+                        };
+
+                        // Validator actor.
+                        if schema_id.is_gov() {
+                            let actor = system
+                                .get_actor::<ValiWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+
+                            actor
+                                .tell(ValiWorkerMessage::NetworkRequest {
+                                    validation_req: req,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<ValidationSchema>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+
+                            actor
+                                .tell(ValidationSchemaMessage::NetworkRequest {
+                                    validation_req: req,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        }
+                    }
+                    ActorMessage::EvaluationReq { req } => {
+                        if req.content().schema_id.is_gov() {
+                            let actor = system
+                                .get_actor::<EvalWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(EvalWorkerMessage::NetworkRequest {
+                                    evaluation_req: req,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<EvaluationSchema>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+
+                            actor
+                                .tell(EvaluationSchemaMessage::NetworkRequest {
+                                    evaluation_req: Box::new(req),
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
                         }
                     }
                     ActorMessage::ApprovalReq { req } => {
-                        let approver_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
+                        let actor = system
+                            .get_actor::<ApprPersist>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
 
-                        // Evaluator actor.
-                        let approver_actor: Option<ActorRef<Approver>> =
-                            self.system.get_actor(&approver_path).await;
-
-                        // We obtain the validator
-                        if let Some(approver_actor) = approver_actor {
-                            if let Err(e) = approver_actor
-                                .tell(ApproverMessage::NetworkRequest {
-                                    approval_req: req,
-                                    info: message.info,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    approver_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                approver_path
-                            )));
-                        };
+                        actor
+                            .tell(ApprPersistMessage::NetworkRequest {
+                                approval_req: req,
+                                info: message.info,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
-                    ActorMessage::DistributionLastEventReq {
-                        event,
-                        ledger,
-                        last_proof,
-                        last_vali_res,
-                    } => {
-                        // Distributor path.
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-
-                        // SI ESTE sdistributor no está disponible quiere decir que el sujeto no existe, enviarlo al distributor del nodo
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
-
-                        let distributor_actor = if let Some(distributor_actor) =
-                            distributor_actor
+                    ActorMessage::DistributionLastEventReq { ledger } => {
+                        let actor = match system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
                         {
-                            distributor_actor
-                        } else {
-                            let node_distributor_path =
-                                ActorPath::from("/user/node/distributor");
-                            let node_distributor_actor: Option<
-                                ActorRef<Distributor>,
-                            > = self
-                                .system
-                                .get_actor(&node_distributor_path)
-                                .await;
-                            if let Some(node_distributor_actor) =
-                                node_distributor_actor
-                            {
-                                node_distributor_actor
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    node_distributor_path
-                                )));
+                            Ok(actor) => actor,
+                            Err(..) => {
+                                debug!(
+                                    original_path = %path,
+                                    fallback_path = "/user/node/distributor",
+                                    "Distributor not found at path, using fallback"
+                                );
+                                let path =
+                                    ActorPath::from("/user/node/distributor");
+                                system
+                                    .get_actor::<DistriWorker>(&path)
+                                    .await
+                                    .map_err(|_| {
+                                        IntermediaryError::ActorNotFound {
+                                            path: path.to_string(),
+                                        }
+                                    })?
                             }
                         };
 
-                        // We obtain the validator
-                        if let Err(e) = distributor_actor
-                            .tell(DistributorMessage::LastEventDistribution {
-                                event: *event,
+                        actor
+                            .tell(DistriWorkerMessage::LastEventDistribution {
                                 ledger: *ledger,
                                 info: message.info,
-                                last_proof: last_proof.clone(),
-                                last_vali_res,
+                                sender: sender.clone(),
                             })
                             .await
-                        {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not send a message to {}: {}",
-                                distributor_actor.path(),
-                                e
-                            )));
-                        };
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
                     ActorMessage::DistributionLedgerReq {
-                        gov_version,
                         actual_sn,
                         subject_id,
                     } => {
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
+                        let actor = system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
 
-                        if let Some(distributor_actor) = distributor_actor {
-                            if let Err(e) = distributor_actor
-                                .tell(DistributorMessage::SendDistribution {
-                                    gov_version,
-                                    actual_sn,
-                                    subject_id: subject_id.to_string(),
-                                    info: message.info,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    distributor_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                distributor_path
-                            )));
-                        };
+                        actor
+                            .tell(DistriWorkerMessage::SendDistribution {
+                                actual_sn,
+                                subject_id,
+                                info: message.info,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
                     ActorMessage::ValidationRes { res } => {
-                        // Validator path.
-                        let validator_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        let validator_actor: Option<ActorRef<Validator>> =
-                            self.system.get_actor(&validator_path).await;
+                        let actor = system
+                            .get_actor::<ValiCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
 
-                        // We obtain the validator
-                        if let Some(validator_actor) = validator_actor {
-                            if let Err(e) = validator_actor
-                                .tell(ValidatorMessage::NetworkResponse {
-                                    validation_res: res,
-                                    request_id: message.info.request_id,
-                                    version: message.info.version,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    validator_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                validator_path
-                            )));
-                        };
+                        actor
+                            .tell(ValiCoordinatorMessage::NetworkResponse {
+                                validation_res: res,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
                     ActorMessage::EvaluationRes { res } => {
-                        // Validator path.
-                        let evaluator_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        let evaluator_actor: Option<ActorRef<Evaluator>> =
-                            self.system.get_actor(&evaluator_path).await;
+                        let actor = system
+                            .get_actor::<EvalCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
 
-                        // We obtain the validator
-                        if let Some(evaluator_actor) = evaluator_actor {
-                            if let Err(e) = evaluator_actor
-                                .tell(EvaluatorMessage::NetworkResponse {
-                                    evaluation_res: res,
-                                    request_id: message.info.request_id,
-                                    version: message.info.version,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    evaluator_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                evaluator_path
-                            )));
-                        }
+                        actor
+                            .tell(EvalCoordinatorMessage::NetworkResponse {
+                                evaluation_res: res,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
                     ActorMessage::ApprovalRes { res } => {
-                        // Validator path.
-                        let approver_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        let approver_actor: Option<ActorRef<Approver>> =
-                            self.system.get_actor(&approver_path).await;
-
-                        // We obtain the validator
-                        if let Some(approver_actor) = approver_actor {
-                            if let Err(e) = approver_actor
-                                .tell(ApproverMessage::NetworkResponse {
-                                    approval_res: *res,
-                                    request_id: message.info.request_id,
-                                    version: message.info.version,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    approver_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                approver_path
-                            )));
-                        }
+                        let actor = system
+                            .get_actor::<ApprLight>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ApprLightMessage::NetworkResponse {
+                                approval_res: *res,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
-                    ActorMessage::DistributionLedgerRes {
-                        ledger,
-                        last_state,
-                        namespace,
-                        schema_id,
-                        governance_id,
-                    } => {
-                        // Distributor path.
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-
-                        // SI ESTE sdistributor no está disponible quiere decir que el sujeto no existe, enviarlo al distributor del nodo
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
-
-                        let distributor_actor = if let Some(distributor_actor) =
-                            distributor_actor
+                    ActorMessage::DistributionLedgerRes { ledger, is_all } => {
+                        let actor = match system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
                         {
-                            distributor_actor
-                        } else {
-                            let node_distributor_path =
-                                ActorPath::from("/user/node/distributor");
-                            let node_distributor_actor: Option<
-                                ActorRef<Distributor>,
-                            > = self
-                                .system
-                                .get_actor(&node_distributor_path)
-                                .await;
-                            if let Some(node_distributor_actor) =
-                                node_distributor_actor
-                            {
-                                node_distributor_actor
-                            } else {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not get Actor: {}",
-                                    node_distributor_path
-                                )));
+                            Ok(actor) => actor,
+                            Err(_) => {
+                                debug!(
+                                    original_path = %path,
+                                    fallback_path = "/user/node/distributor",
+                                    "Distributor not found at path, using fallback"
+                                );
+                                let path =
+                                    ActorPath::from("/user/node/distributor");
+                                system
+                                    .get_actor::<DistriWorker>(&path)
+                                    .await
+                                    .map_err(|_| {
+                                        IntermediaryError::ActorNotFound {
+                                            path: path.to_string(),
+                                        }
+                                    })?
                             }
                         };
 
-                        let namespace = Namespace::from(namespace);
-
-                        // We obtain the validator
-                        if let Err(e) = distributor_actor
-                            .tell(DistributorMessage::LedgerDistribution {
-                                events: ledger,
+                        actor
+                            .tell(DistriWorkerMessage::LedgerDistribution {
+                                ledger,
                                 info: message.info,
-                                last_state,
-                                schema_id,
-                                namespace,
-                                governance_id,
+                                is_all,
+                                sender: sender.clone(),
                             })
                             .await
-                        {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not send a message to {}: {}",
-                                distributor_actor.path(),
-                                e
-                            )));
-                        };
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
-                    ActorMessage::DistributionLastEventRes { signer } => {
-                        // Validator path.
-                        let distributor_path = ActorPath::from(
-                            message.info.receiver_actor.clone(),
-                        );
-                        // Validator actor.
-                        let distributor_actor: Option<ActorRef<Distributor>> =
-                            self.system.get_actor(&distributor_path).await;
-
-                        // We obtain the validator
-                        if let Some(evaluator_actor) = distributor_actor {
-                            if let Err(e) = evaluator_actor
-                                .tell(DistributorMessage::NetworkResponse {
-                                    signer,
-                                })
-                                .await
-                            {
-                                return Err(Error::NetworkHelper(format!(
-                                    "Can not send a message to {}: {}",
-                                    distributor_path, e
-                                )));
-                            };
-                        } else {
-                            return Err(Error::NetworkHelper(format!(
-                                "Can not get Actor: {}",
-                                distributor_path
-                            )));
-                        }
+                    ActorMessage::DistributionLastEventRes => {
+                        let actor = system
+                            .get_actor::<DistriCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(DistriCoordinatorMessage::NetworkResponse {
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
                     }
                 }
+
+                debug!(
+                    sender = %sender,
+                    path = %path,
+                    request_id = %request_id,
+                    "Network message routed to actor successfully"
+                );
             }
         }
 
         Ok(())
     }
 
-    fn to_peer_id(public_key: &PublicKey) -> Result<PeerId, Error> {
+    fn to_peer_id(public_key: &PublicKey) -> Result<PeerId, IntermediaryError> {
         match public_key.algorithm() {
             DSAlgorithm::Ed25519 => {
-                let pk_ed = PublicKeyEd25519::try_from_bytes(public_key.as_bytes()).map_err(|e|
-                    Error::NetworkHelper(format!("Invalid Ed25519 public key, can not convert to PeerID: {}", e)))?;
+                let pk_ed =
+                    PublicKeyEd25519::try_from_bytes(public_key.as_bytes())
+                        .map_err(|e| {
+                            IntermediaryError::PeerIdConversionFailed {
+                                details: e.to_string(),
+                            }
+                        })?;
 
                 let pk = network::PublicKeyLibP2P::from(pk_ed);
                 Ok(pk.to_peer_id())
             }
         }
-    }
-
-    /// Send command to the network worker.
-    pub async fn send_command(
-        &mut self,
-        command: Command<NetworkMessage>,
-    ) -> Result<(), ActorError> {
-        self.service
-            .send_command(command)
-            .await
-            .map_err(|e| ActorError::Functional(e.to_string()))
     }
 }
 

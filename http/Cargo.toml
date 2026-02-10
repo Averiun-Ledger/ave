@@ -40,7 +40,7 @@ utoipa-rapidoc = { version = "6.0.0", features = ["axum"]}
 bytes = "1.11.0"
 
 # Auth system dependencies
-rusqlite = { version = "0.37.0", features = ["bundled", "time"] }
+rusqlite = { version = "0.38.0", features = ["bundled", "time"] }
 argon2 = { version = "0.5.3", features = ["std"] }
 sha2 = "0.10.8"
 hex = "0.4.3"

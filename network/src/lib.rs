@@ -22,7 +22,7 @@ pub use error::Error;
 pub use libp2p::{
     PeerId,
     identity::{
-        PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519
+        PublicKey as PublicKeyLibP2P, ed25519::PublicKey as PublicKeyEd25519,
     },
 };
 pub use monitor::*;
@@ -32,8 +32,8 @@ pub use tell::Config as TellConfig;
 pub use utils::NetworkState;
 pub use worker::NetworkWorker;
 
-use serde::{Deserialize, Serialize};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 pub use crate::utils::ReqResConfig;
 
@@ -65,7 +65,7 @@ pub struct Config {
     pub control_list: control_list::Config,
 
     /// Ram Limits.
-    pub memory_limit: Option<MemoryLimit>
+    pub memory_limit: Option<MemoryLimit>,
 }
 
 /// Ram Limits.
@@ -74,7 +74,7 @@ pub enum MemoryLimit {
     /// Ram in percentage.
     Percentage(f64),
     /// Ram in bytes.
-    Bytes(usize)
+    Bytes(usize),
 }
 
 impl Config {
@@ -84,7 +84,7 @@ impl Config {
         listen_addresses: Vec<String>,
         external_addresses: Vec<String>,
         boot_nodes: Vec<RoutingNode>,
-        memory_limit: Option<MemoryLimit>
+        memory_limit: Option<MemoryLimit>,
     ) -> Self {
         Self {
             boot_nodes,
@@ -155,6 +155,8 @@ where
     },
     /// Received a message.
     ReceivedMessage {
+        /// Sender public key
+        sender: [u8; 32],
         /// The message received.
         message: Bytes,
     },
@@ -169,8 +171,6 @@ pub struct ComunicateInfo {
     pub request_id: String,
     /// The request version.
     pub version: u64,
-    /// The sender key identifier.
-    pub sender: PublicKey,
     /// The receiver key identifier.
     pub receiver: PublicKey,
     /// The receiver actor.

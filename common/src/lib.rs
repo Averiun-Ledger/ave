@@ -5,46 +5,48 @@
 //! This crate re-exports essential types needed for working with Ave,
 //! such as identity and cryptography, without pulling in heavy dependencies
 //! like wasmtime that don't compile on all architectures.
-//!
-//! ## Usage
-//!
-//! ```rust
-//! use ave_common::{
-//!     identity::{KeyPair, Signature},
-//!     ValueWrapper,
-//!     BridgeEventRequest,
-//!     BridgeFactRequest,
-//! };
-//!
-//! // Create a new keypair
-//! let keypair = KeyPair::default();
-//!
-//! // Sign some data
-//! let data = b"Hello, Ave!";
-//! let signature = Signature::new(data, &keypair).unwrap();
-//!
-//! // Verify signature
-//! assert!(signature.verify(data).is_ok());
-//!
-//! // Use ValueWrapper
-//! let value = ValueWrapper::default();
-//! ```
 
-// Re-export the entire identity module
+// Internal modules
+// Internal modules
+#[cfg(feature = "common")]
+pub mod error;
+
+#[cfg(feature = "common")]
+pub mod bridge;
+
+#[cfg(feature = "common")]
+pub mod request;
+
+#[cfg(feature = "common")]
+pub mod schematype;
+
+#[cfg(feature = "common")]
+pub mod namespace;
+
+#[cfg(feature = "common")]
+pub mod sink;
+
+#[cfg(feature = "value-wrapper")]
+pub mod wrapper;
+
+// Re-exports
+#[cfg(feature = "common")]
 pub use ave_identity as identity;
 
-pub mod wrapper;
-// Internal modules
-pub mod error;
-pub mod namespace;
-pub mod request;
-pub mod response;
-pub mod signature;
+#[cfg(feature = "common")]
+pub use bridge::*;
 
-// Re-export commonly used types
-pub use error::Error;
+#[cfg(feature = "common")]
+pub use error::{ConversionError, Error, SignatureError};
+
+#[cfg(feature = "common")]
+pub use schematype::SchemaType;
+
+#[cfg(feature = "common")]
 pub use namespace::Namespace;
-pub use request::*;
-pub use response::*;
-pub use signature::*;
+
+#[cfg(feature = "common")]
+pub use sink::*;
+
+#[cfg(feature = "value-wrapper")]
 pub use wrapper::ValueWrapper;

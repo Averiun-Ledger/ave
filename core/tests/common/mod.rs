@@ -1,21 +1,11 @@
 use ave_common::{
-    ValueWrapper,
-    identity::{
+    Namespace, SchemaType, ValueWrapper, identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
-    },
+    }, request::{ConfirmRequest, CreateRequest, EventRequest, FactRequest, RejectRequest, TransferRequest}, response::{RequestState, SubjectDB}
 };
 use ave_core::{
-    Api,
-    approval::approver::ApprovalStateRes,
-    config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth},
-    helpers::db::common::{SignaturesInfo, SubjectInfo},
-    model::{
-        Namespace,
-        request::{
-            ConfirmRequest, CreateRequest, EventRequest, FactRequest, RejectRequest, SchemaType, TransferRequest
-        },
-    },
+    Api, approval::types::ApprovalStateRes, config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth}
 };
 use network::{Config as NetworkConfig, MonitorNetworkState, RoutingNode};
 use prometheus_client::registry::Registry;
@@ -69,7 +59,7 @@ pub async fn create_node(
         vec![listen_address.to_owned()],
         vec![],
         peers,
-        None
+        None,
     );
 
     let contract_dir =
@@ -78,6 +68,7 @@ pub async fn create_node(
     vec_dirs.push(contract_dir);
 
     let config = Config {
+        is_service: true,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
         ave_db: AveDbConfig::build(&local_db),
@@ -85,7 +76,7 @@ pub async fn create_node(
         network: network_config,
         contracts_path,
         always_accept,
-        garbage_collector: Duration::from_secs(500),
+        tracking_size: 100,
     };
 
     let mut registry = Registry::default();
@@ -218,10 +209,10 @@ pub async fn create_and_authorize_governance(
         namespace: Namespace::from(namespace),
     });
     let data = owner_node.own_request(request).await.unwrap();
-    let governance_id = DigestIdentifier::from_str(&data.subject_id).unwrap();
+    let governance_id = data.subject_id;
     wait_request(
         owner_node,
-        DigestIdentifier::from_str(&data.request_id).unwrap(),
+        data.request_id,
     )
     .await
     .unwrap();
@@ -255,13 +246,13 @@ pub async fn create_subject(
         namespace: Namespace::from(namespace),
     });
     let response = node.own_request(request).await?;
-    let subject_id = DigestIdentifier::from_str(&response.subject_id).unwrap();
+    let subject_id = response.subject_id;
 
     if !wait_request_state {
         return Ok(subject_id);
     }
 
-    let request_id = DigestIdentifier::from_str(&response.request_id).unwrap();
+    let request_id = response.request_id;
     wait_request(node, request_id.clone()).await.unwrap();
 
     Ok(subject_id)
@@ -280,7 +271,7 @@ pub async fn emit_fact(
 
     let response = node.own_request(request).await?;
     // state of request
-    let request_id = DigestIdentifier::from_str(&response.request_id).unwrap();
+    let request_id = response.request_id;
 
     if !wait_request_state {
         return Ok(request_id);
@@ -295,9 +286,9 @@ pub async fn get_subject(
     node: &Api,
     subject_id: DigestIdentifier,
     sn: Option<u64>,
-) -> Result<SubjectInfo, Box<dyn std::error::Error>> {
+) -> Result<SubjectDB, Box<dyn std::error::Error>> {
     loop {
-        if let Ok(state) = node.get_subject(subject_id.clone()).await {
+        if let Ok(state) = node.get_subject_state(subject_id.clone()).await {
             if let Some(sn) = sn {
                 if sn == state.sn {
                     return Ok(state);
@@ -310,37 +301,30 @@ pub async fn get_subject(
     }
 }
 
-pub async fn get_signatures(
-    node: &Api,
-    subject_id: DigestIdentifier,
-    sn: Option<u64>,
-) -> Result<SignaturesInfo, Box<dyn std::error::Error>> {
-    loop {
-        if let Ok(state) = node.get_signatures(subject_id.clone()).await {
-            if let Some(sn) = sn {
-                if sn == state.sn {
-                    return Ok(state);
-                }
-            } else {
-                return Ok(state);
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
 
+/*
+    Abort,
+    InQueue,
+    Invalid,
+    Finish,
+    Reboot,
+    Evaluation,
+    Approval,
+    Validation,
+    Distribution
+*/
 pub async fn wait_request(
     node: &Api,
     request_id: DigestIdentifier,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if let Ok(state) = node.request_state(request_id.clone()).await {
-            if state.status == "Finish"
-                || state.status == "In Approval"
-                || state.status == "Invalid"
-                || state.status == "Abort"
-            {
-                break;
+            match state.state {
+                RequestState::Approval
+                | RequestState::Abort {..}
+                | RequestState::Invalid {..}
+                | RequestState::Finish => break,
+                _ => {}
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -365,34 +349,6 @@ pub async fn node_running(
     Ok(())
 }
 
-pub async fn check_transfer(
-    node: &Api,
-    subject_id: DigestIdentifier,
-) -> Result<(), Box<dyn std::error::Error>> {
-    node.check_transfer(subject_id.clone()).await.unwrap();
-
-    let mut count = 0;
-    loop {
-        if count == 3 {
-            node.update_subject(subject_id.clone()).await.unwrap();
-            count = 0;
-        }
-
-        let transfer_data = node.get_pending_transfers().await.unwrap();
-        if transfer_data
-            .iter()
-            .find(|x| x.subject_id == subject_id.to_string())
-            .is_none()
-        {
-            break;
-        }
-
-        count += 1;
-        tokio::time::sleep(Duration::from_secs(2)).await
-    }
-
-    Ok(())
-}
 
 pub async fn emit_transfer(
     node: &Api,
@@ -411,7 +367,7 @@ pub async fn emit_transfer(
         return Ok(());
     }
 
-    let request_id = DigestIdentifier::from_str(&response.request_id).unwrap();
+    let request_id = response.request_id;
     wait_request(node, request_id.clone()).await.unwrap();
 
     Ok(())
@@ -433,11 +389,12 @@ pub async fn emit_approve(
 
     loop {
         if let Ok(state) = node.request_state(request_id.clone()).await {
-            if state.status == "Finish"
-                || state.status == "In Approval"
-                || state.status == "Invalid"
-            {
-                break;
+            match state.state {
+                RequestState::Approval
+                | RequestState::Abort {..}
+                | RequestState::Invalid {..}
+                | RequestState::Finish => break,
+                _ => {}
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -462,7 +419,7 @@ pub async fn emit_confirm(
         return Ok(());
     }
 
-    let request_id = DigestIdentifier::from_str(&response.request_id).unwrap();
+    let request_id = response.request_id;
     wait_request(node, request_id.clone()).await.unwrap();
 
     Ok(())
@@ -480,7 +437,7 @@ pub async fn emit_reject(
         return Ok(());
     }
 
-    let request_id = DigestIdentifier::from_str(&response.request_id).unwrap();
+    let request_id = response.request_id;
     wait_request(node, request_id.clone()).await.unwrap();
 
     Ok(())

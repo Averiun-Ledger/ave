@@ -5,7 +5,10 @@ use libp2p::{
     core::Endpoint,
     futures::FutureExt,
     kad::{
-        Behaviour as Kademlia, BootstrapError, Config as KademliaConfig, Event as KademliaEvent, GetClosestPeersError, GetClosestPeersOk, K_VALUE, PeerInfo, QueryResult, store::{MemoryStore, MemoryStoreConfig}
+        Behaviour as Kademlia, BootstrapError, Config as KademliaConfig,
+        Event as KademliaEvent, GetClosestPeersError, GetClosestPeersOk,
+        K_VALUE, PeerInfo, QueryResult,
+        store::{MemoryStore, MemoryStoreConfig},
     },
     swarm::{
         CloseConnection, ConnectionDenied, ConnectionId, FromSwarm,
@@ -22,7 +25,9 @@ use std::{
 
 use crate::{
     NodeType,
-    utils::{LimitsConfig, is_dns, is_global, is_loop_back, is_private, is_tcp},
+    utils::{
+        LimitsConfig, is_dns, is_global, is_loop_back, is_private, is_tcp,
+    },
 };
 
 /// The discovery behaviour.
@@ -66,7 +71,7 @@ impl Behaviour {
         config: Config,
         protocol: StreamProtocol,
         node_type: NodeType,
-        limits: LimitsConfig
+        limits: LimitsConfig,
     ) -> Self {
         let Config {
             dht_random_walk,
@@ -80,7 +85,9 @@ impl Behaviour {
         let mut kad_config = KademliaConfig::new(protocol);
 
         kad_config.disjoint_query_paths(kademlia_disjoint_query_paths);
-        kad_config.set_query_timeout(Duration::from_secs(limits.kademlia_query_timeout));
+        kad_config.set_query_timeout(Duration::from_secs(
+            limits.kademlia_query_timeout,
+        ));
         kad_config.set_replication_interval(None);
         kad_config.set_caching(libp2p::kad::Caching::Disabled);
 
@@ -90,12 +97,15 @@ impl Behaviour {
         kad_config.set_kbucket_inserts(libp2p::kad::BucketInserts::Manual);
         kad_config.set_record_filtering(libp2p::kad::StoreInserts::FilterBoth);
 
-        let store = MemoryStore::with_config(peer_id, MemoryStoreConfig {
-            max_records: 0,
-            max_value_bytes: 0,
-            max_providers_per_key: K_VALUE.get(),
-            max_provided_keys: 0,
-        });
+        let store = MemoryStore::with_config(
+            peer_id,
+            MemoryStoreConfig {
+                max_records: 0,
+                max_value_bytes: 0,
+                max_providers_per_key: K_VALUE.get(),
+                max_provided_keys: 0,
+            },
+        );
         let mut kad = Kademlia::with_config(peer_id, store, kad_config);
 
         if let NodeType::Addressable | NodeType::Bootstrap = node_type {
@@ -106,7 +116,9 @@ impl Behaviour {
 
         Self {
             kademlia: kad,
-            next_random_walk: if dht_random_walk && node_type == NodeType::Bootstrap {
+            next_random_walk: if dht_random_walk
+                && node_type == NodeType::Bootstrap
+            {
                 Some(Delay::new(Duration::new(0, 0)))
             } else {
                 None
@@ -818,7 +830,7 @@ mod tests {
                 config,
                 StreamProtocol::new("/ave/routing/1.0.0"),
                 NodeType::Bootstrap,
-                LimitsConfig::build(&NodeType::Bootstrap)
+                LimitsConfig::build(&NodeType::Bootstrap),
             )
         });
         let listen_addr: Multiaddr =

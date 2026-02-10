@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, NotPersistentActor,
@@ -5,13 +7,11 @@ use ave_actors::{
 use ave_common::identity::{PublicKey, TimeStamp};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 
-use crate::{NetworkMessage, intermediary::Intermediary};
+use crate::{NetworkMessage, helpers::network::service::NetworkSender};
 
 use super::common::emit_fail;
-
-const TARGET_NETWORK: &str = "Ave-Model-Network";
 
 #[derive(
     Debug,
@@ -26,20 +26,36 @@ const TARGET_NETWORK: &str = "Ave-Model-Network";
     Ord,
     PartialOrd,
 )]
-pub struct TimeOutResponse {
+pub struct TimeOut {
     pub who: PublicKey,
     pub re_trys: u32,
     pub timestamp: TimeStamp,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct RetryNetwork {}
+#[derive(Clone, Debug)]
+pub struct RetryNetwork {
+    network: Arc<NetworkSender>,
+}
+
+impl RetryNetwork {
+    pub fn new(network: Arc<NetworkSender>) -> Self {
+        Self { network }
+    }
+}
 
 #[async_trait]
 impl Actor for RetryNetwork {
     type Event = ();
     type Message = NetworkMessage;
     type Response = ();
+
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RetryNetwork")
+        } else {
+            info_span!("RetryNetwork")
+        }
+    }
 }
 
 impl NotPersistentActor for RetryNetwork {}
@@ -52,20 +68,15 @@ impl Handler<RetryNetwork> for RetryNetwork {
         msg: NetworkMessage,
         ctx: &mut ActorContext<RetryNetwork>,
     ) -> Result<(), ActorError> {
-        let helper: Option<Intermediary> =
-            ctx.system().get_helper("network").await;
-
-        let Some(mut helper) = helper else {
-            let e = ActorError::NotHelper("network".to_owned());
-            error!(TARGET_NETWORK, "Can not obtain network helper");
-            return Err(emit_fail(ctx, e).await);
-        };
-
-        if let Err(e) = helper
+        if let Err(e) = self
+            .network
             .send_command(network::CommandHelper::SendMessage { message: msg })
             .await
         {
-            error!(TARGET_NETWORK, "Can not send message to network helper");
+            error!(
+                error = %e,
+                "Failed to send message to network helper"
+            );
             return Err(emit_fail(ctx, e).await);
         };
         Ok(())

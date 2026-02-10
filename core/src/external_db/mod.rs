@@ -1,148 +1,36 @@
-use std::ops::Deref;
-use std::time::Duration;
-
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
-    Message,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
-use ave_actors::{LightPersistence, PersistentActor};
-use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, error, info_span};
 
-use crate::{
-    db::Storable,
-    error::Error,
-    helpers::db::{ExternalDB, Querys},
-};
-
-const TARGET_EXTERNAL: &str = "Ave-ExternalDB";
-
-#[derive(
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    PartialEq,
-    Eq,
-)]
-pub enum DeleteTypes {
-    Request { id: String },
-}
+use crate::{helpers::db::DatabaseError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DurationWrapper(Duration);
+pub struct DBManager;
 
-impl Deref for DurationWrapper {
-    type Target = Duration;
+impl NotPersistentActor for DBManager {}
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl BorshSerialize for DurationWrapper {
-    fn serialize<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        // Serialize Duration as seconds (u64) and nanoseconds (u32)
-        BorshSerialize::serialize(&self.0.as_secs(), writer)?;
-        BorshSerialize::serialize(&self.0.subsec_nanos(), writer)?;
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for DurationWrapper {
-    fn deserialize_reader<R: std::io::Read>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        let secs = u64::deserialize_reader(reader)?;
-        let nanos = u32::deserialize_reader(reader)?;
-        Ok(DurationWrapper(Duration::new(secs, nanos)))
-    }
-}
-
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct DBManager {
-    time: DurationWrapper,
-    delete_req: Vec<DeleteTypes>,
-}
-
-impl DBManager {
-    async fn delete(
-        &self,
-        delete: DeleteTypes,
-        our_ref: ActorRef<DBManager>,
-        helper: ExternalDB,
-    ) {
-        let time = self.time.clone();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(*time).await;
-            match delete.clone() {
-                DeleteTypes::Request { id } => {
-                    if let Err(e) = helper.del_request(&id).await
-                        && let Err(e) =
-                            our_ref.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(TARGET_EXTERNAL, "{}", e);
-                    };
-                }
-            };
-
-            if let Err(e) =
-                our_ref.tell(DBManagerMessage::ConfirmDelete(delete)).await
-            {
-                error!(TARGET_EXTERNAL, "{}", e);
-            };
-        });
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum DBManagerMessage {
-    InitDelete,
-    Error(Error),
-    Delete(DeleteTypes),
-    ConfirmDelete(DeleteTypes),
+    Error(DatabaseError),
 }
 
 impl Message for DBManagerMessage {}
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub enum DBManagerEvent {
-    DeleteReq(DeleteTypes),
-    DeleteConfirm(DeleteTypes),
-}
-
-impl Event for DBManagerEvent {}
-
 #[async_trait]
 impl Actor for DBManager {
     type Message = DBManagerMessage;
-    type Event = DBManagerEvent;
+    type Event = ();
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        self.init_store("db_manager", None, false, ctx).await
-    }
-
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "DBManager")
+        } else {
+            info_span!("DBManager")
+        }
     }
 }
 
@@ -154,114 +42,16 @@ impl Handler<DBManager> for DBManager {
         msg: DBManagerMessage,
         ctx: &mut ave_actors::ActorContext<DBManager>,
     ) -> Result<(), ActorError> {
-        let Some(helper): Option<ExternalDB> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!(TARGET_EXTERNAL, "Can not obtain ext_db helper");
-            ctx.system().stop_system();
-            let e = ActorError::NotHelper("ext_db".to_owned());
-            return Err(e);
-        };
-
         match msg {
-            DBManagerMessage::InitDelete => {
-                let Some(our_ref): Option<ActorRef<DBManager>> =
-                    ctx.reference().await
-                else {
-                    error!(
-                        TARGET_EXTERNAL,
-                        "InitDelete, Can not obtain DBManager actor"
-                    );
-                    ctx.system().stop_system();
-                    let e = ActorError::NotFound(ctx.path().clone());
-                    return Err(e);
-                };
-
-                for req in self.delete_req.clone() {
-                    self.delete(req, our_ref.clone(), helper.clone()).await;
-                }
-            }
             DBManagerMessage::Error(error) => {
                 error!(
-                    TARGET_EXTERNAL,
-                    "Error, Problem in Subscriber: {}", error
+                    msg_type = "Error",
+                    error = %error,
+                    "Critical database error in subscriber"
                 );
-                let e = ActorError::FunctionalFail(error.to_string());
                 ctx.system().stop_system();
-                return Err(e);
+                Ok(())
             }
-            DBManagerMessage::Delete(delete) => {
-                self.on_event(DBManagerEvent::DeleteReq(delete.clone()), ctx)
-                    .await;
-
-                let Some(our_ref): Option<ActorRef<DBManager>> =
-                    ctx.reference().await
-                else {
-                    error!(
-                        TARGET_EXTERNAL,
-                        "InitDelete, Can not obtain DBManager actor"
-                    );
-                    let e = ActorError::NotFound(ctx.path().clone());
-                    ctx.system().stop_system();
-                    return Err(e);
-                };
-
-                self.delete(delete, our_ref, helper).await;
-            }
-            DBManagerMessage::ConfirmDelete(confirm) => {
-                self.on_event(DBManagerEvent::DeleteConfirm(confirm), ctx)
-                    .await;
-            }
-        };
-
-        Ok(())
-    }
-
-    async fn on_event(
-        &mut self,
-        event: DBManagerEvent,
-        ctx: &mut ActorContext<DBManager>,
-    ) {
-        if let Err(e) = self.persist(&event, ctx).await {
-            error!(
-                TARGET_EXTERNAL,
-                "OnEvent, can not persist information: {}", e
-            );
-            ctx.system().stop_system();
-        };
-    }
-}
-
-#[async_trait]
-impl PersistentActor for DBManager {
-    type Persistence = LightPersistence;
-    type InitParams = Duration;
-
-    fn create_initial(params: Self::InitParams) -> Self {
-        Self {
-            time: DurationWrapper(params),
-            delete_req: vec![],
         }
     }
-
-    /// Change node state.
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match event {
-            DBManagerEvent::DeleteReq(delete_types) => {
-                self.delete_req.push(delete_types.clone());
-            }
-            DBManagerEvent::DeleteConfirm(delete_types) => {
-                if let Some(pos) =
-                    self.delete_req.iter().position(|x| *x == *delete_types)
-                {
-                    let _ = self.delete_req.remove(pos);
-                }
-            }
-        };
-
-        Ok(())
-    }
 }
-
-#[async_trait]
-impl Storable for DBManager {}

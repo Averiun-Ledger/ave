@@ -121,12 +121,8 @@ impl Namespace {
     /// Returns the name space at a specific level.
     ///
     pub fn at_level(&self, level: usize) -> Self {
-        if level < 1 || level >= self.level() {
+        if level == 0 || level > self.level() {
             self.clone()
-        } else if self.is_top_level() {
-            self.root()
-        } else if level == self.level() - 1 {
-            self.parent()
         } else {
             let mut tokens = self.0.clone();
             tokens.truncate(level);
@@ -156,7 +152,24 @@ impl Namespace {
     ///
     pub fn is_ancestor_of(&self, other: &Namespace) -> bool {
         let me = format!("{}.", self);
+        other.to_string().as_str().starts_with(me.as_str()) || self.is_empty()
+    }
+
+    /// Returns if the name space is an ancestor or equal of another name space.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other name space to check.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the name space is an ancestor of the other name space.
+    ///
+    pub fn is_ancestor_or_equal_of(&self, other: &Namespace) -> bool {
+        let me = format!("{}.", self);
         other.to_string().as_str().starts_with(me.as_str())
+            || self.is_empty()
+            || self == other
     }
 
     /// Returns if the name space is a descendant of another name space.
@@ -273,11 +286,12 @@ mod tests {
         assert_eq!(ns.at_level(1).to_string(), "a");
         assert_eq!(ns.at_level(2).to_string(), "a.b");
         assert_eq!(ns.at_level(3).to_string(), "a.b.c");
-        assert_eq!(ns.is_empty(), false);
-        assert_eq!(ns.is_ancestor_of(&Namespace::from("a.b.c.d")), true);
-        assert_eq!(ns.is_descendant_of(&Namespace::from("a.b")), true);
-        assert_eq!(ns.is_parent_of(&Namespace::from("a.b.c.d")), true);
-        assert_eq!(ns.is_child_of(&Namespace::from("a.b")), true);
-        assert_eq!(ns.is_top_level(), false);
+        assert!(!ns.is_empty());
+        assert!(ns.is_ancestor_of(&Namespace::from("a.b.c.d")));
+        assert!(ns.is_descendant_of(&Namespace::from("a.b")));
+        assert!(ns.is_parent_of(&Namespace::from("a.b.c.d")));
+        assert!(ns.is_child_of(&Namespace::from("a.b")));
+        assert!(!ns.is_top_level());
+        assert!(Namespace::new().is_ancestor_of(&Namespace::from("a.b.c.d")));
     }
 }

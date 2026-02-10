@@ -1,77 +1,70 @@
 //! # Validation module.
 //!
-
-pub mod proof;
-pub mod request;
-pub mod response;
-pub mod schema;
-pub mod validator;
-
 use crate::{
-    auth::WitnessesAuth,
-    governance::model::{ProtocolTypes, Quorum},
+    governance::model::Quorum,
+    helpers::network::service::NetworkSender,
     model::{
-        SignTypesNode,
         common::{
-            emit_fail, node::{get_sign, try_to_update}, send_reboot_to_req, subject::get_signers_quorum_gov_version, take_random_signers
+            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
         },
-        event::{ProofEvent, ProtocolsSignatures},
-        request::SchemaType,
+        event::{ValidationData, ValidationMetadata},
     },
-    request::manager::{RequestManager, RequestManagerMessage},
-    subject::Metadata,
-    system::ConfigHelper,
+    request::manager::{RebootType, RequestManager, RequestManagerMessage},
+    validation::{
+        coordinator::{ValiCoordinator, ValiCoordinatorMessage},
+        response::ResponseSummary,
+        worker::{ValiWorker, ValiWorkerMessage},
+    },
 };
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
-    Message, NotPersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    NotPersistentActor,
 };
 
 use async_trait::async_trait;
-use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed,
+use ave_common::{
+    ValueWrapper,
+    identity::{
+        CryptoError, DigestIdentifier, HashAlgorithm, PublicKey, Signature,
+        Signed, hash_borsh,
+    },
 };
-use borsh::{BorshDeserialize, BorshSerialize};
-use proof::ValidationProof;
+
 use request::ValidationReq;
 use response::ValidationRes;
-use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
-use validator::{Validator, ValidatorMessage};
+use tracing::{Span, debug, error, info_span, warn};
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
-const TARGET_VALIDATION: &str = "Ave-Validation";
+pub mod coordinator;
+pub mod request;
+pub mod response;
+pub mod schema;
+pub mod worker;
 
-/// A struct for passing validation information.
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct ValidationInfo {
-    pub metadata: Metadata,
-    pub event_proof: Signed<ProofEvent>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug)]
 pub struct Validation {
-    node_key: PublicKey,
+    our_key: Arc<PublicKey>,
     // Quorum
     quorum: Quorum,
     // Actual responses
-    validators_response: Vec<ProtocolsSignatures>,
+    validators_signatures: Vec<Signature>,
 
-    validators_timeout: Vec<ProtocolsSignatures>,
-    // Validators quantity
+    validators_response: Vec<ValidationMetadata>,
+
     validators_quantity: u32,
 
-    actual_proof: ValidationProof,
+    request: Signed<ValidationReq>,
 
-    errors: String,
+    hash: HashAlgorithm,
 
-    valid_validation: bool,
+    network: Arc<NetworkSender>,
 
-    request_id: String,
+    request_id: DigestIdentifier,
+
     version: u64,
+
+    validation_request_hash: DigestIdentifier,
 
     reboot: bool,
 
@@ -79,107 +72,89 @@ pub struct Validation {
 
     pending_validators: HashSet<PublicKey>,
 
-    signed_vali_req: Option<Signed<ValidationReq>>,
+    init_state: Option<ValueWrapper>,
 }
 
 impl Validation {
-    pub fn new(node_key: PublicKey) -> Self {
+    pub fn new(
+        our_key: Arc<PublicKey>,
+        request: Signed<ValidationReq>,
+        init_state: Option<ValueWrapper>,
+        quorum: Quorum,
+        hash: HashAlgorithm,
+        network: Arc<NetworkSender>,
+    ) -> Self {
         Validation {
-            node_key,
-            ..Default::default()
+            our_key,
+            quorum,
+            init_state,
+            validators_response: vec![],
+            validators_signatures: vec![],
+            validators_quantity: 0,
+            request,
+            hash,
+            network,
+            request_id: DigestIdentifier::default(),
+            version: 0,
+            validation_request_hash: DigestIdentifier::default(),
+            reboot: false,
+            current_validators: HashSet::new(),
+            pending_validators: HashSet::new(),
         }
-    }
-
-    async fn end_validators(
-        &self,
-        ctx: &mut ActorContext<Validation>,
-    ) -> Result<(), ActorError> {
-        for validator in self.current_validators.clone() {
-            let child: Option<ActorRef<Validator>> =
-                ctx.get_child(&validator.to_string()).await;
-            if let Some(child) = child {
-                child.ask_stop().await?;
-            }
-        }
-
-        Ok(())
     }
 
     fn check_validator(&mut self, validator: PublicKey) -> bool {
         self.current_validators.remove(&validator)
     }
 
-    async fn create_validation_req(
-        &self,
-        validation_info: ValidationInfo,
-        previous_proof: Option<ValidationProof>,
-        last_vali_res: Vec<ProtocolsSignatures>,
-        derivator: HashAlgorithm,
-    ) -> Result<ValidationReq, ActorError> {
-        let prev_evet_hash =
-            if let Some(previous_proof) = previous_proof.clone() {
-                previous_proof.event_hash
-            } else {
-                DigestIdentifier::default()
-            };
-
-        // Create proof from validation info
-        let proof = ValidationProof::from_info(
-            validation_info,
-            prev_evet_hash,
-            derivator,
-        )
-        .map_err(|e| ActorError::FunctionalFail(e.to_string()))?;
-
-        Ok(ValidationReq {
-            proof: proof.clone(),
-            previous_proof: previous_proof.clone(),
-            last_vali_res: last_vali_res.clone(),
-        })
-    }
-
     async fn create_validators(
         &self,
         ctx: &mut ActorContext<Validation>,
-        validation_req: Signed<ValidationReq>,
-        schema_id: &SchemaType,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
-        // Create Validator child
-        let child = ctx
-            .create_child(
-                &format!("{}", signer),
-                Validator::new(
-                    self.request_id.to_owned(),
-                    self.version,
-                    signer.clone(),
-                ),
-            )
-            .await;
-        let validator_actor = match child {
-            Ok(child) => child,
-            Err(e) => return Err(e),
-        };
+        if signer != *self.our_key {
+            let child = ctx
+                .create_child(
+                    &format!("{}", signer),
+                    ValiCoordinator::new(
+                        signer.clone(),
+                        self.request_id.to_string(),
+                        self.version,
+                        self.network.clone(),
+                    ),
+                )
+                .await?;
 
-        // Check node_key
-        let our_key = self.node_key.clone();
-        // We are signer
-        if signer == our_key {
-            validator_actor
-                .tell(ValidatorMessage::LocalValidation {
-                    validation_req: validation_req.content,
-                    our_key: signer,
+            child
+                .tell(ValiCoordinatorMessage::NetworkValidation {
+                    validation_req: self.request.clone(),
+                    node_key: signer,
                 })
                 .await?
-        }
-        // Other node is signer
-        else {
-            validator_actor
-                .tell(ValidatorMessage::NetworkValidation {
-                    validation_req,
-                    node_key: signer,
-                    our_key,
-                    schema_id: schema_id.to_owned(),
+        } else {
+            let child = ctx
+                .create_child(
+                    &format!("{}", signer),
+                    ValiWorker {
+                        node_key: (*self.our_key).clone(),
+                        our_key: self.our_key.clone(),
+                        init_state: self.init_state.clone(),
+                        governance_id: self
+                            .request
+                            .content().get_governance_id().expect("The build process verified that the event request is valid.")
+                            ,
+                        gov_version: self.request.content().get_gov_version(),
+                        sn: self.request.content().get_sn(),
+                        hash: self.hash,
+                        network: self.network.clone(),
+                        stop:true
+                    },
+                )
+                .await?;
+
+            child
+                .tell(ValiWorkerMessage::LocalValidation {
+                    validation_req: self.request.clone(),
                 })
                 .await?
         }
@@ -190,60 +165,57 @@ impl Validation {
     async fn send_validation_to_req(
         &self,
         ctx: &mut ActorContext<Validation>,
-        result: bool,
+        response: ValidationData,
     ) -> Result<(), ActorError> {
-        let mut error = self.errors.clone();
-        if !result && error.is_empty() {
-            let gov_id = if self.actual_proof.governance_id.is_empty() {
-                self.actual_proof.subject_id.clone()
-            } else {
-                self.actual_proof.governance_id.clone()
-            };
-            "who: ALL, error: No validator was able to validate the event."
-                .clone_into(&mut error);
+        let req_actor = ctx.get_parent::<RequestManager>().await?;
 
-            if self.validators_response.is_empty() {
-                try_to_update(ctx, gov_id, WitnessesAuth::Witnesses).await?
-            }
-        }
-
-        let req_path =
-            ActorPath::from(format!("/user/request/{}", self.request_id));
-        let req_actor: Option<ActorRef<RequestManager>> =
-            ctx.system().get_actor(&req_path).await;
-
-        if let Some(req_actor) = req_actor {
-            let mut signatures = self.validators_response.clone();
-            signatures.append(&mut self.validators_timeout.clone());
-
-            req_actor
-                .tell(RequestManagerMessage::ValidationRes {
-                    result,
-                    last_proof: Box::new(self.actual_proof.clone()),
-                    signatures,
-                    errors: error,
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(req_path));
-        };
+        req_actor
+            .tell(RequestManagerMessage::ValidationRes {
+                request_id: self.request_id.clone(),
+                val_req: self.request.content().clone(),
+                val_res: response,
+            })
+            .await?;
 
         Ok(())
+    }
+
+    fn create_vali_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
+        hash_borsh(&*self.hash.hasher(), &self.request)
+    }
+
+    fn check_responses(&self) -> ResponseSummary {
+        let res_set: HashSet<ValidationMetadata> =
+            HashSet::from_iter(self.validators_response.iter().cloned());
+
+        if res_set.len() == 1 {
+            ResponseSummary::Ok
+        } else {
+            ResponseSummary::Reboot
+        }
+    }
+
+    fn build_validation_data(&self) -> ValidationData {
+        ValidationData {
+            validation_req_signature: self.request.signature().clone(),
+            validation_req_hash: self.validation_request_hash.clone(),
+            validators_signatures: self.validators_signatures.clone(),
+            validation_metadata: self.validators_response[0].clone(),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum ValidationMessage {
     Create {
-        request_id: String,
+        request_id: DigestIdentifier,
         version: u64,
-        info: Box<ValidationInfo>,
-        last_proof: Box<Option<ValidationProof>>,
-        last_vali_res: Vec<ProtocolsSignatures>,
+        signers: HashSet<PublicKey>,
     },
     Response {
         validation_res: ValidationRes,
         sender: PublicKey,
+        signature: Option<Signature>,
     },
 }
 
@@ -257,18 +229,12 @@ impl Actor for Validation {
     type Message = ValidationMessage;
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Validation")
+        } else {
+            info_span!("Validation")
+        }
     }
 }
 
@@ -283,191 +249,185 @@ impl Handler<Validation> for Validation {
         match msg {
             ValidationMessage::Create {
                 request_id,
-                info,
                 version,
-                last_proof,
-                last_vali_res,
+                signers,
             } => {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await
-                {
-                    config.hash_algorithm
-                } else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-                let validation_req = match self
-                    .create_validation_req(
-                        *info.clone(),
-                        *last_proof,
-                        last_vali_res,
-                        hash,
-                    )
-                    .await
-                {
-                    Ok(validation_req) => validation_req,
+                let vali_req_hash = match self.create_vali_req_hash() {
+                    Ok(digest) => digest,
                     Err(e) => {
                         error!(
-                            TARGET_VALIDATION,
-                            "Create, can not create validation request: {}", e
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to create validation request hash"
                         );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-                self.actual_proof = validation_req.proof.clone();
-
-                // Get signers and quorum
-                let (signers, quorum, _) = match get_signers_quorum_gov_version(
-                    ctx,
-                    &info.metadata.subject_id.to_string(),
-                    &info.metadata.schema_id,
-                    info.metadata.namespace.clone(),
-                    ProtocolTypes::Validation,
-                )
-                .await
-                {
-                    Ok(signers_quorum) => signers_quorum,
-                    Err(e) => {
-                        error!(
-                            TARGET_VALIDATION,
-                            "Create, can not create obtain signers and quorum: {}",
-                            e
-                        );
-                        return Err(emit_fail(ctx, e).await);
+                        return Err(emit_fail(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Cannot create validation request hash: {}",
+                                    e
+                                ),
+                            },
+                        )
+                        .await);
                     }
                 };
 
-                // Update quorum and validators
-                self.valid_validation = false;
-                self.errors = String::default();
-                self.validators_response = vec![];
-                self.quorum = quorum;
+                self.validation_request_hash = vali_req_hash;
                 self.validators_quantity = signers.len() as u32;
                 self.request_id = request_id.clone();
                 self.version = version;
-                self.reboot = false;
-
-                if signers.is_empty() {
-                    warn!(
-                        TARGET_VALIDATION,
-                        "Create, There are no validators available for the {} scheme",
-                        info.metadata.schema_id
-                    );
-
-                    if let Err(e) =
-                        self.send_validation_to_req(ctx, false).await
-                    {
-                        error!(
-                            TARGET_VALIDATION,
-                            "Create, can not send validation response to Request actor: {}",
-                            e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    };
-                }
-
-                let signature = match get_sign(
-                    ctx,
-                    SignTypesNode::ValidationReq(Box::new(
-                        validation_req.clone(),
-                    )),
-                )
-                .await
-                {
-                    Ok(signature) => signature,
-                    Err(e) => {
-                        error!(
-                            TARGET_VALIDATION,
-                            "Create, can not sign request: {}", e
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-                };
-
-                let signed_validation_req: Signed<ValidationReq> = Signed {
-                    content: validation_req,
-                    signature,
-                };
-
-                self.signed_vali_req = Some(signed_validation_req.clone());
 
                 let validators_quantity = self.quorum.get_signers(
                     self.validators_quantity,
                     signers.len() as u32,
                 );
 
-                let (current_val, pending_val) =
+                let (current_vali, pending_vali) =
                     take_random_signers(signers, validators_quantity as usize);
-                self.current_validators.clone_from(&current_val);
-                self.pending_validators.clone_from(&pending_val);
+                self.current_validators.clone_from(&current_vali);
+                self.pending_validators.clone_from(&pending_vali);
 
-                for signer in current_val {
-                    if let Err(e) = self
-                        .create_validators(
-                            ctx,
-                            signed_validation_req.clone(),
-                            &info.metadata.schema_id,
-                            signer.clone(),
-                        )
-                        .await
+                for signer in current_vali.clone() {
+                    if let Err(e) =
+                        self.create_validators(ctx, signer.clone()).await
                     {
                         error!(
-                            TARGET_VALIDATION,
-                            "Can not create validator {}: {}", signer, e
+                            msg_type = "Create",
+                            error = %e,
+                            signer = %signer,
+                            "Failed to create validator"
                         );
                     }
                 }
+
+                debug!(
+                    msg_type = "Create",
+                    request_id = %request_id,
+                    version = version,
+                    validators_count = current_vali.len(),
+                    "Validation created and validators initialized"
+                );
             }
             ValidationMessage::Response {
                 validation_res,
                 sender,
+                signature,
             } => {
                 if !self.reboot {
-                    // If node is in validator list
                     if self.check_validator(sender.clone()) {
                         match validation_res {
-                            ValidationRes::Signature(signature) => {
-                                self.valid_validation = true;
+                            ValidationRes::Create {
+                                vali_req_hash,
+                                subject_metadata,
+                            } => {
+                                let Some(signature) = signature else {
+                                    error!(
+                                        msg_type = "Response",
+                                        sender = %sender,
+                                        "Validation response without signature"
+                                    );
+                                    return Err(ActorError::Functional {
+                                        description: "Validation Response solver without signature".to_owned(),
+                                    });
+                                };
+
+                                if vali_req_hash != self.validation_request_hash
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        expected_hash = %self.validation_request_hash,
+                                        received_hash = %vali_req_hash,
+                                        "Invalid validation request hash"
+                                    );
+                                    return Err(ActorError::Functional {
+                                        description: "Validation Response, Invalid validation request hash".to_owned(),
+                                    });
+                                }
+
                                 self.validators_response.push(
-                                    ProtocolsSignatures::Signature(signature),
-                                )
-                            }
-                            ValidationRes::TimeOut(timeout) => self
-                                .validators_timeout
-                                .push(ProtocolsSignatures::TimeOut(timeout)),
-                            ValidationRes::Error(error) => {
-                                self.errors = format!(
-                                    "{} who: {}, error: {}.",
-                                    self.errors, sender, error
+                                    ValidationMetadata::Metadata(
+                                        subject_metadata,
+                                    ),
                                 );
+                                self.validators_signatures.push(signature);
                             }
-                            ValidationRes::Reboot => {
-                                let governance_id =
-                                    self.actual_proof.governance_id.clone();
-                                if let Err(e) = send_reboot_to_req(
+                            ValidationRes::Response {
+                                vali_req_hash,
+                                modified_metadata_hash,
+                            } => {
+                                let Some(signature) = signature else {
+                                    error!(
+                                        msg_type = "Response",
+                                        sender = %sender,
+                                        "Validation response without signature"
+                                    );
+                                    return Err(ActorError::Functional {
+                                        description: "Validation Response solver without signature".to_owned(),
+                                    });
+                                };
+
+                                if vali_req_hash != self.validation_request_hash
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        expected_hash = %self.validation_request_hash,
+                                        received_hash = %vali_req_hash,
+                                        "Invalid validation request hash"
+                                    );
+                                    return Err(ActorError::Functional {
+                                        description: "Validation Response, Invalid validation request hash".to_owned(),
+                                    });
+                                }
+
+                                self.validators_response.push(
+                                    ValidationMetadata::ModifiedHash(
+                                        modified_metadata_hash,
+                                    ),
+                                );
+                                self.validators_signatures.push(signature);
+                            }
+                            ValidationRes::TimeOut => {
+                                // Do nothing
+                            }
+                            ValidationRes::Abort(error) => {
+                                if let Err(e) = abort_req(
                                     ctx,
-                                    &self.request_id,
-                                    governance_id,
+                                    self.request_id.clone(),
+                                    sender.clone(),
+                                    error,
+                                    self.request.content().get_sn(),
                                 )
                                 .await
                                 {
                                     error!(
-                                        TARGET_VALIDATION,
-                                        "Response, can not send reboot to Request actor: {}",
-                                        e
+                                        msg_type = "Response",
+                                        error = %e,
+                                        sender = %sender,
+                                        "Failed to abort request"
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                                self.reboot = true;
-
-                                if let Err(e) = self.end_validators(ctx).await {
+                            }
+                            ValidationRes::Reboot => {
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::Normal
+                                )
+                                .await
+                                {
                                     error!(
-                                        TARGET_VALIDATION,
-                                        "Response, can not end validators: {}",
-                                        e
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
                                     );
                                     return Err(emit_fail(ctx, e).await);
-                                };
+                                }
+
+                                self.reboot = true;
 
                                 return Ok(());
                             }
@@ -476,85 +436,105 @@ impl Handler<Validation> for Validation {
                         if self.quorum.check_quorum(
                             self.validators_quantity,
                             self.validators_response.len() as u32,
-                        ) && self.valid_validation
-                        {
-                            if let Err(e) =
-                                self.send_validation_to_req(ctx, true).await
+                        ) {
+                            let summary = self.check_responses();
+                            if let ResponseSummary::Reboot = summary {
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::Diff
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
+                            }
+
+                            let validation_data = self.build_validation_data();
+
+                            if let Err(e) = self
+                                .send_validation_to_req(ctx, validation_data)
+                                .await
                             {
                                 error!(
-                                    TARGET_VALIDATION,
-                                    "Response, can not send validation response to Request actor: {}",
-                                    e
+                                    msg_type = "Response",
+                                    error = %e,
+                                    "Failed to send validation to request actor"
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             };
+
+                            debug!(
+                                msg_type = "Response",
+                                request_id = %self.request_id,
+                                version = self.version,
+                                "Validation completed and sent to request"
+                            );
                         } else if self.current_validators.is_empty()
                             && !self.pending_validators.is_empty()
                         {
-                            if let Some(req) = self.signed_vali_req.clone() {
-                                let validators_quantity =
-                                    self.quorum.get_signers(
-                                        self.validators_quantity,
-                                        self.pending_validators.len() as u32,
-                                    );
+                            let validators_quantity = self.quorum.get_signers(
+                                self.validators_quantity,
+                                self.pending_validators.len() as u32,
+                            );
 
-                                let (current_val, pending_val) =
-                                    take_random_signers(
-                                        self.pending_validators.clone(),
-                                        validators_quantity as usize,
-                                    );
-                                self.current_validators
-                                    .clone_from(&current_val);
-                                self.pending_validators
-                                    .clone_from(&pending_val);
+                            let (curren_vali, pending_vali) =
+                                take_random_signers(
+                                    self.pending_validators.clone(),
+                                    validators_quantity as usize,
+                                );
+                            self.current_validators.clone_from(&curren_vali);
+                            self.pending_validators.clone_from(&pending_vali);
 
-                                for signer in current_val {
-                                    if let Err(e) = self
-                                        .create_validators(
-                                            ctx,
-                                            req.clone(),
-                                            &self.actual_proof.schema_id,
-                                            signer.clone(),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            TARGET_VALIDATION,
-                                            "Can not create validator {}: {}",
-                                            signer,
-                                            e
-                                        );
-                                    }
+                            for signer in curren_vali.clone() {
+                                if let Err(e) = self
+                                    .create_validators(ctx, signer.clone())
+                                    .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        signer = %signer,
+                                        "Failed to create validator from pending pool"
+                                    );
                                 }
-                            } else {
-                                let e = ActorError::FunctionalFail(
-                                    "Can not get validation request".to_owned(),
-                                );
-                                error!(
-                                    TARGET_VALIDATION,
-                                    "Response, can not get validation request: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
                             }
-                        } else if self.current_validators.is_empty() {
-                            // we have received all the responses and the quorum has not been met
 
-                            if let Err(e) =
-                                self.send_validation_to_req(ctx, false).await
-                            {
-                                error!(
-                                    TARGET_VALIDATION,
-                                    "Response, can not send validation response to Request actor: {}",
-                                    e
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            };
+                            debug!(
+                                msg_type = "Response",
+                                new_validators = curren_vali.len(),
+                                "Created additional validators from pending pool"
+                            );
+                        } else if self.current_validators.is_empty() {
+                            if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                    RebootType::TimeOut
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
                         }
                     } else {
                         warn!(
-                            TARGET_VALIDATION,
-                            "Response, A response has been received from someone we were not expecting."
+                            msg_type = "Response",
+                            sender = %sender,
+                            "Response from unexpected sender"
                         );
                     }
                 }
@@ -568,7 +548,12 @@ impl Handler<Validation> for Validation {
         error: ActorError,
         ctx: &mut ActorContext<Validation>,
     ) -> ChildAction {
-        error!(TARGET_VALIDATION, "OnChildFault, {}", error);
+        error!(
+            request_id = %self.request_id,
+            version = self.version,
+            error = %error,
+            "Child fault in validation actor"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
@@ -577,63 +562,90 @@ impl Handler<Validation> for Validation {
 #[cfg(test)]
 pub mod tests {
     use core::panic;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
     use tempfile::TempDir;
     use test_log::test;
 
-    use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink, SystemRef};
+    use ave_actors::{ActorPath, ActorRef, PersistentActor, SystemRef};
     use ave_common::{
-        ValueWrapper,
+        Namespace, SchemaType,
         identity::{
-            Blake3Hasher, DigestIdentifier, KeyPair, hash_borsh,
-            keys::Ed25519Signer,
+            DigestIdentifier, HashAlgorithm, KeyPair, keys::Ed25519Signer,
         },
+        request::{CreateRequest, EOLRequest},
+        response::RequestEventDB,
     };
+    use tokio::sync::mpsc;
 
     use crate::{
-        CreateRequest, EOLRequest, EventRequest, Node, NodeMessage, NodeResponse, Signed, governance::{Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData}, helpers::db::ExternalDB, model::{
-            Namespace, SignTypesNode, event::LedgerValue, request::SchemaType,
-        }, query::Query, request::{
+        EventRequest, Node, NodeMessage, NodeResponse, Signed,
+        governance::{
+            Governance, GovernanceMessage, GovernanceResponse,
+            data::GovernanceData,
+        },
+        helpers::{db::ExternalDB, network::service::NetworkSender},
+        model::common::node::SignTypesNode,
+        node::InitParamsNode,
+        query::{Query, QueryMessage, QueryResponse},
+        request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
-        }, subject::laststate::{LastState, LastStateMessage, LastStateResponse}, system::tests::create_system
+            tracking::RequestTracking,
+        },
+        system::tests::create_system,
     };
 
-    pub async fn create_subject_gov() -> (
+    pub async fn create_gov() -> (
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         ActorRef<Query>,
         ActorRef<Governance>,
-        ActorRef<LastState>,
+        ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
     ) {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
 
+        let (command_sender, _command_receiver) = mpsc::channel(10);
+        let network = Arc::new(NetworkSender::new(command_sender));
+
+        system.add_helper("network", network.clone()).await;
+
+        let public_key = Arc::new(node_keys.public_key());
         let node_actor = system
-            .create_root_actor("node", Node::initial(node_keys.clone()))
+            .create_root_actor(
+                "node",
+                Node::initial(InitParamsNode {
+                    key_pair: node_keys.clone(),
+                    public_key: public_key.clone(),
+                    hash: HashAlgorithm::Blake3,
+                    is_service: true,
+                }),
+            )
             .await
             .unwrap();
 
         let request_actor = system
             .create_root_actor(
                 "request",
-                RequestHandler::initial(node_keys.public_key()),
+                RequestHandler::initial((
+                    public_key.clone(),
+                    (HashAlgorithm::Blake3, network),
+                )),
             )
             .await
             .unwrap();
 
-        let query_actor = system
-            .create_root_actor("query", Query::new(node_keys.public_key()))
+        let ext_db = system
+            .get_helper::<Arc<ExternalDB>>("ext_db")
             .await
             .unwrap();
 
-        let ext_db: ExternalDB = system.get_helper("ext_db").await.unwrap();
-
-        let sink =
-            Sink::new(request_actor.subscribe(), ext_db.get_request_handler());
-        system.run_sink(sink).await;
+        let query_actor = system
+            .create_root_actor("query", Query::new(ext_db))
+            .await
+            .unwrap();
 
         let create_req = EventRequest::Create(CreateRequest {
             name: Some("Name".to_string()),
@@ -653,10 +665,7 @@ pub mod tests {
             panic!("Invalid Response")
         };
 
-        let signed_event_req = Signed {
-            content: create_req,
-            signature,
-        };
+        let signed_event_req = Signed::from_parts(create_req, signature);
 
         let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
@@ -677,22 +686,6 @@ pub mod tests {
             .await
             .unwrap();
 
-        let last_state_actor: ActorRef<LastState> = system
-            .get_actor(&ActorPath::from(format!(
-                "/user/node/{}/last_state",
-                owned_subj
-            )))
-            .await
-            .unwrap();
-
-        let LastStateResponse::LastState { event, .. } = last_state_actor
-            .ask(LastStateMessage::GetLastState)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -700,53 +693,100 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: owned_subj.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        let last_event = *event;
-        assert_eq!(last_event.content.subject_id.to_string(), owned_subj);
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 0);
-        assert_eq!(last_event.content.gov_version, 0);
-        assert_eq!(
-            last_event.content.value,
-            LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                "[]".to_owned(),
-            ),))
-        );
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: owned_subj.clone(),
+                sn: 0,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        assert_eq!(
-            last_event.content.state_hash,
-            hash_borsh(&Blake3Hasher, &metadata.properties).unwrap()
-        );
-        assert!(last_event.content.eval_success.is_none());
-        assert!(!last_event.content.appr_required);
-        assert!(last_event.content.appr_success.is_none());
-        assert!(last_event.content.vali_success);
-        assert_eq!(
-            last_event.content.hash_prev_event,
-            DigestIdentifier::default()
-        );
-        assert!(last_event.content.evaluators.is_none());
-        assert!(last_event.content.approvers.is_none(),);
-        assert!(!last_event.content.validators.is_empty());
+        let RequestEventDB::Create {
+            name,
+            description,
+            schema_id,
+            namespace,
+        } = event.event
+        else {
+            panic!()
+        };
 
-        assert_eq!(metadata.subject_id.to_string(), owned_subj);
+        assert_eq!(metadata.name, name);
+        assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, description);
+        assert_eq!(metadata.description, subject_data.description);
         assert_eq!(metadata.description.unwrap(), "Description");
-        assert_eq!(metadata.governance_id.to_string(), "");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, owned_subj);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, owned_subj);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id.to_string(), "governance");
+
+        assert_eq!(metadata.schema_id.to_string(), schema_id);
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(metadata.namespace.to_string(), namespace);
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
         assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
         assert_eq!(metadata.sn, 0);
-        assert_eq!(metadata.owner, node_keys.public_key());
+
+        assert!(subject_data.active);
         assert!(metadata.active);
 
+        assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 0);
-        // TODO MEJORAR
+
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
+
+        let tracking = system
+            .get_actor::<RequestTracking>(&ActorPath::from(
+                "/user/request/tracking",
+            ))
+            .await
+            .unwrap();
 
         (
             system,
@@ -754,29 +794,29 @@ pub mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            last_state_actor,
+            tracking,
             metadata.subject_id,
             _dirs,
         )
     }
 
     #[test(tokio::test)]
-    async fn test_create_req() {
-        let _ = create_subject_gov().await;
+    async fn test_create_gov() {
+        let _ = create_gov().await;
     }
 
     #[test(tokio::test)]
-    async fn test_eol_req() {
+    async fn test_eol_gov() {
         let (
             _system,
             node_actor,
             request_actor,
-            _query_actor,
+            query_actor,
             subject_actor,
-            last_state_actor,
+            _tracking,
             subject_id,
             _dirs,
-        ) = create_subject_gov().await;
+        ) = create_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {
             subject_id: subject_id.clone(),
@@ -792,10 +832,7 @@ pub mod tests {
             panic!("Invalid Response")
         };
 
-        let signed_event_req = Signed {
-            content: eol_reques,
-            signature,
-        };
+        let signed_event_req = Signed::from_parts(eol_reques, signature);
 
         let RequestHandlerResponse::Ok(_response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
@@ -807,15 +844,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        let LastStateResponse::LastState { event, .. } = last_state_actor
-            .ask(LastStateMessage::GetLastState)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -825,38 +854,79 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let last_event = *event;
-        assert_eq!(last_event.content.subject_id, subject_id);
-        assert_eq!(last_event.content.event_request, signed_event_req);
-        assert_eq!(last_event.content.sn, 1);
-        assert_eq!(last_event.content.gov_version, 0);
-        assert_eq!(
-            last_event.content.value,
-            LedgerValue::Patch(ValueWrapper(serde_json::Value::String(
-                "[]".to_owned(),
-            ),))
-        );
-        assert!(last_event.content.eval_success.is_none());
-        assert!(!last_event.content.appr_required);
-        assert!(last_event.content.appr_success.is_none());
-        assert!(last_event.content.vali_success);
-        assert!(last_event.content.evaluators.is_none());
-        assert!(last_event.content.approvers.is_none(),);
-        assert!(!last_event.content.validators.is_empty());
+        let QueryResponse::Subject(subject_data) = query_actor
+            .ask(QueryMessage::GetSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
 
-        assert_eq!(metadata.subject_id, subject_id);
-        assert_eq!(metadata.governance_id.to_string(), "");
+        let QueryResponse::Event(event) = query_actor
+            .ask(QueryMessage::GetEventSn {
+                subject_id: subject_id.clone(),
+                sn: 1,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let RequestEventDB::EOL = event.event else {
+            panic!()
+        };
+
+        assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
+
+        assert_eq!(metadata.description, subject_data.description);
         assert_eq!(metadata.description.unwrap(), "Description");
+
+        assert_eq!(metadata.subject_id.to_string(), event.subject_id);
+        assert_eq!(metadata.subject_id.to_string(), subject_data.subject_id);
+        assert_eq!(metadata.subject_id, subject_id);
+
+        assert_eq!(
+            metadata.governance_id.to_string(),
+            subject_data.governance_id
+        );
+        assert_eq!(metadata.governance_id, subject_id);
+
+        assert_eq!(
+            metadata.genesis_gov_version,
+            subject_data.genesis_gov_version
+        );
         assert_eq!(metadata.genesis_gov_version, 0);
-        assert_eq!(metadata.schema_id.to_string(), "governance");
+
+        assert_eq!(
+            metadata.schema_id.to_string(),
+            subject_data.schema_id.to_string()
+        );
+        assert_eq!(metadata.schema_id, SchemaType::Governance);
+
+        assert_eq!(
+            metadata.namespace.to_string(),
+            subject_data.namespace.to_string()
+        );
         assert_eq!(metadata.namespace, Namespace::new());
+
+        assert!(subject_data.new_owner.is_none());
+        assert!(metadata.new_owner.is_none());
+
+        assert_eq!(metadata.sn, event.sn);
+        assert_eq!(metadata.sn, subject_data.sn);
         assert_eq!(metadata.sn, 1);
+
+        assert!(!subject_data.active);
         assert!(!metadata.active);
 
+        assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
+
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());

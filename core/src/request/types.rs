@@ -1,14 +1,15 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Display};
 
 use crate::{
-    Event as AveEvent, ValidationInfo,
-    evaluation::{request::EvaluationReq, response::EvalLedgerResponse},
-    model::event::ProtocolsSignatures,
-    subject::SignedLedger,
-    validation::proof::ValidationProof,
+    evaluation::request::EvaluationReq, governance::model::Quorum,
+    model::event::EvaluationData, subject::SignedLedger,
+    validation::request::ValidationReq,
 };
 
-use ave_common::identity::Signed;
+use ave_common::{
+    ValueWrapper,
+    identity::{PublicKey, Signed},
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -20,21 +21,43 @@ pub enum RequestManagerState {
     Starting,
     Evaluation,
     Approval {
-        eval_req: Box<EvaluationReq>,
-        eval_res: EvalLedgerResponse,
-        eval_signatures: HashSet<ProtocolsSignatures>,
+        eval_req: EvaluationReq,
+        eval_res: EvaluationData,
     },
     Validation {
-        val_info: Box<ValidationInfo>,
-        last_proof: Option<ValidationProof>,
-        last_vali_res: Vec<ProtocolsSignatures>,
+        request: Signed<ValidationReq>,
+        quorum: Quorum,
+        init_state: Option<ValueWrapper>,
+        signers: HashSet<PublicKey>,
+    },
+    UpdateSubject {
+        ledger: SignedLedger,
     },
     Distribution {
-        event: Box<Signed<AveEvent>>,
-        ledger: Box<SignedLedger>,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
+        ledger: SignedLedger,
     },
+    End,
+}
+
+impl Display for RequestManagerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestManagerState::Reboot => write!(f, "Reboot"),
+            RequestManagerState::Starting => write!(f, "Starting"),
+            RequestManagerState::Evaluation => write!(f, "Evaluation"),
+            RequestManagerState::Approval { .. } => {
+                write!(f, "Approval")
+            }
+            RequestManagerState::Validation {..} => write!(f, "Validation"),
+            RequestManagerState::UpdateSubject { .. } => {
+                write!(f, "UpdateSubject")
+            }
+            RequestManagerState::Distribution { .. } => {
+                write!(f, "Distribution")
+            }
+            RequestManagerState::End => write!(f, "End"),
+        }
+    }
 }
 
 #[derive(
@@ -43,13 +66,4 @@ pub enum RequestManagerState {
 pub enum ReqManInitMessage {
     Evaluate,
     Validate,
-}
-
-#[derive(Default)]
-pub struct ProtocolsResult {
-    pub eval_success: Option<bool>,
-    pub appr_required: bool,
-    pub appr_success: Option<bool>,
-    pub eval_signatures: Option<HashSet<ProtocolsSignatures>>,
-    pub appr_signatures: Option<HashSet<ProtocolsSignatures>>,
 }
