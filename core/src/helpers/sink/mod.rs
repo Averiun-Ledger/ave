@@ -1,19 +1,21 @@
+mod error;
+
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ave_actors::Subscriber;
+use ave_common::DataToSink;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
+
+pub use error::SinkError;
 
 use crate::{
     config::SinkServer,
-    error::Error,
-    subject::sinkdata::{SinkDataEvent, SinkDataMessage, SinkTypes},
+    subject::sinkdata::{SinkDataEvent, SinkTypes},
 };
-
-const TARGET_SINK: &str = "Ave-Helper-Sink";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TokenResponse {
@@ -28,13 +30,11 @@ pub async fn obtain_token(
     auth: &str,
     username: &str,
     password: &str,
-) -> Result<TokenResponse, Error> {
+) -> Result<TokenResponse, SinkError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| {
-            Error::Sink(format!("Can not build reqwest client: {e}"))
-        })?;
+        .map_err(|e| SinkError::ClientBuild(e.to_string()))?;
 
     let res = client
         .post(auth)
@@ -43,15 +43,15 @@ pub async fn obtain_token(
         )
         .send()
         .await
-        .map_err(|e| Error::Sink(format!("Can not obtain auth token: {e}")))?;
+        .map_err(|e| SinkError::AuthRequest(e.to_string()))?;
 
-    let res = res.error_for_status().map_err(|e| {
-        Error::Sink(format!("Auth token endpoint returned error: {e}"))
-    })?;
+    let res = res
+        .error_for_status()
+        .map_err(|e| SinkError::AuthEndpoint(e.to_string()))?;
 
-    res.json::<TokenResponse>().await.map_err(|e| {
-        Error::Sink(format!("Can not parse OAuth 2.0 token response: {e}"))
-    })
+    res.json::<TokenResponse>()
+        .await
+        .map_err(|e| SinkError::TokenParse(e.to_string()))
 }
 
 #[derive(Clone)]
@@ -80,13 +80,9 @@ impl AveSink {
         }
     }
 
-    fn server_wants_event(server: &SinkServer, event: &SinkDataEvent) -> bool {
+    fn server_wants_event(server: &SinkServer, data: &DataToSink) -> bool {
         server.events.contains(&SinkTypes::All)
-            || SinkTypes::try_from(event.event.clone())
-                .map(|t| server.events.contains(&t))
-                .unwrap_or_else(|_| {
-                    unreachable!("We return early on UpdateState; other variants must be supported")
-                })
+            || server.events.contains(&SinkTypes::from(data))
     }
 
     fn build_url(template: &str, subject_id: &str, schema_id: &str) -> String {
@@ -105,7 +101,10 @@ impl AveSink {
         match obtain_token(&self.auth, &self.username, &self.password).await {
             Ok(t) => Some(t),
             Err(e) => {
-                error!(target: TARGET_SINK, "Can not get new auth token: {e}");
+                error!(
+                    error = %e,
+                    "Failed to obtain new auth token"
+                );
                 None
             }
         }
@@ -114,17 +113,34 @@ impl AveSink {
     async fn send_once(
         client: &Client,
         url: &str,
-        event: &SinkDataEvent,
+        data: &DataToSink,
         auth_header: Option<&str>,
-    ) -> Result<(), reqwest::Error> {
+    ) -> Result<(), SinkError> {
         let req = if let Some(h) = auth_header {
-            client.post(url).header("Authorization", h).json(event)
+            client.post(url).header("Authorization", h).json(data)
         } else {
-            client.post(url).json(event)
+            client.post(url).json(data)
         };
 
-        let res = req.send().await?;
-        res.error_for_status_ref()?;
+        let res = req
+            .send()
+            .await
+            .map_err(|e| SinkError::SendRequest(e.to_string()))?;
+
+        if let Err(e) = res.error_for_status_ref() {
+            if let Some(status) = e.status() {
+                return Err(match status.as_u16() {
+                    401 => SinkError::Unauthorized,
+                    422 => SinkError::UnprocessableEntity,
+                    code => SinkError::HttpStatus {
+                        status: code,
+                        message: e.to_string(),
+                    },
+                });
+            }
+            return Err(SinkError::SendRequest(e.to_string()));
+        }
+
         Ok(())
     }
 
@@ -132,10 +148,9 @@ impl AveSink {
         &self,
         client: &Client,
         url: &str,
-        event: &SinkDataEvent,
+        event: &DataToSink,
         server_requires_auth: bool,
     ) {
-        // 1) Primer intento (con header si tenemos token)
         let header = if server_requires_auth {
             self.current_auth_header().await
         } else {
@@ -144,61 +159,68 @@ impl AveSink {
 
         match Self::send_once(client, url, event, header.as_deref()).await {
             Ok(_) => {
-                info!(target: TARGET_SINK, "The information was sent to the sink");
+                debug!(
+                    url = %url,
+                    "Data sent to sink successfully"
+                );
             }
-            Err(e) => {
-                // Manejo específico por status
-                if let Some(status) = e.status() {
-                    match status.as_u16() {
-                        422 => {
-                            warn!(target: TARGET_SINK, "The sink was expecting another type of data");
-                        }
-                        401 if server_requires_auth && self.token.is_some() => {
-                            warn!(target: TARGET_SINK, "Authentication error on sink; trying to refresh token");
-                            // 2) Refrescar token y reintentar una vez
-                            if let Some(new_token) = self.refresh_token().await
-                            {
-                                if let Some(arc) = &self.token {
-                                    *arc.write().await = new_token.clone();
-                                }
-                                info!(target: TARGET_SINK, "A new token has been obtained, retrying the original request.");
-                                let new_header = format!(
-                                    "{} {}",
-                                    new_token.token_type,
-                                    new_token.access_token
-                                );
+            Err(SinkError::UnprocessableEntity) => {
+                warn!(
+                    url = %url,
+                    "Sink rejected data format (422)"
+                );
+            }
+            Err(SinkError::Unauthorized)
+                if server_requires_auth && self.token.is_some() =>
+            {
+                warn!(
+                    url = %url,
+                    "Authentication failed, refreshing token"
+                );
 
-                                match Self::send_once(
-                                    client,
-                                    url,
-                                    event,
-                                    Some(&new_header),
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        info!(target: TARGET_SINK, "The information was sent to the sink");
-                                    }
-                                    Err(e2) => {
-                                        if e2.status().map(|s| s.as_u16())
-                                            == Some(422)
-                                        {
-                                            warn!(target: TARGET_SINK, "The sink was expecting another type of data");
-                                        } else {
-                                            error!(target: TARGET_SINK, "The information was not sent to the sink: {e2}");
-                                        }
-                                    }
-                                }
-                            }
+                if let Some(new_token) = self.refresh_token().await {
+                    if let Some(arc) = &self.token {
+                        *arc.write().await = new_token.clone();
+                    }
+                    debug!(
+                        "Token refreshed, retrying request"
+                    );
+                    let new_header = format!(
+                        "{} {}",
+                        new_token.token_type, new_token.access_token
+                    );
+
+                    match Self::send_once(client, url, event, Some(&new_header))
+                        .await
+                    {
+                        Ok(_) => {
+                            debug!(
+                                url = %url,
+                                "Data sent to sink successfully after token refresh"
+                            );
                         }
-                        _ => {
-                            error!(target: TARGET_SINK, "The information was not sent to the sink: {e}");
+                        Err(SinkError::UnprocessableEntity) => {
+                            warn!(
+                                url = %url,
+                                "Sink rejected data format (422)"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                url = %url,
+                                error = %e,
+                                "Failed to send data to sink after token refresh"
+                            );
                         }
                     }
-                } else {
-                    // Error de red, DNS, etc.
-                    error!(target: TARGET_SINK, "Can not send post to sink: {e}");
                 }
+            }
+            Err(e) => {
+                error!(
+                    url = %url,
+                    error = %e,
+                    "Failed to send data to sink"
+                );
             }
         }
     }
@@ -207,29 +229,41 @@ impl AveSink {
 #[async_trait]
 impl Subscriber<SinkDataEvent> for AveSink {
     async fn notify(&self, event: SinkDataEvent) {
-        if matches!(event.event, SinkDataMessage::UpdateState(..)) {
-            return;
-        }
+        let data = match event {
+            SinkDataEvent::Event(data_to_sink) => data_to_sink,
+            SinkDataEvent::State(..) => return,
+        };
 
-        let (subject_id, schema_id) = event.event.get_subject_schema();
+        let (subject_id, schema_id) = data.event.get_subject_schema();
         let Some(servers) = self.sinks.get(&schema_id) else {
+            debug!(
+                schema_id = %schema_id,
+                "No sink servers configured for schema"
+            );
             return;
         };
         if servers.is_empty() {
             return;
         }
 
+        debug!(
+            subject_id = %subject_id,
+            schema_id = %schema_id,
+            servers_count = servers.len(),
+            "Processing sink event"
+        );
+
         let client = Client::new();
 
         for server in servers {
-            if !Self::server_wants_event(server, &event) {
+            if !Self::server_wants_event(server, &data) {
                 continue;
             }
 
             let url = Self::build_url(&server.url, &subject_id, &schema_id);
             let requires_auth = server.auth;
 
-            self.send_with_retry_on_401(&client, &url, &event, requires_auth)
+            self.send_with_retry_on_401(&client, &url, &data, requires_auth)
                 .await;
         }
     }

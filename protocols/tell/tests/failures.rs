@@ -148,10 +148,8 @@ async fn wait_inbound_failure(
 fn new_swarm_with_timeout(
     timeout: Duration,
 ) -> (PeerId, Swarm<ave_tell::Behaviour<TestCodec>>) {
-    let protocols = iter::once((
-        StreamProtocol::new("/test/1"),
-        ProtocolSupport::Full,
-    ));
+    let protocols =
+        iter::once((StreamProtocol::new("/test/1"), ProtocolSupport::Full));
     let cfg = ave_tell::Config::default().with_request_timeout(timeout);
 
     let swarm = Swarm::new_ephemeral(|_| {

@@ -32,9 +32,7 @@ impl ProtocolSupport {
     /// Whether outbound requests are supported.
     pub fn outbound(&self) -> bool {
         match self {
-            ProtocolSupport::Outbound | ProtocolSupport::Full => {
-                true
-            }
+            ProtocolSupport::Outbound | ProtocolSupport::Full => true,
             ProtocolSupport::Inbound => false,
         }
     }

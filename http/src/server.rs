@@ -10,8 +10,8 @@ use crate::{
     error::Error,
 };
 use ave_bridge::{
-    ApproveInfo, EventInfo, GovsData, PaginatorEvents, SubjsData,
-    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    ApproveInfo, EventInfo, GovsData, PaginatorEvents, RequestData,
+    RequestInfo, SignaturesInfo, SubjectInfo, SubjsData, TransferSubject,
 };
 use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use axum::{
@@ -890,11 +890,11 @@ async fn get_signatures(
         (status = 500, description = "Internal Server Error"),
     )
 )]
-async fn get_controller_id(
+async fn get_public_key(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
-    Json(bridge.controller_id().to_string())
+    Json(bridge.public_key().to_string())
 }
 
 /// Peer-id
@@ -1214,7 +1214,7 @@ pub fn build_routes(
         .route("/approval-request/{subject_id}", get(get_approval))
         .route("/event-request/{request_id}", get(get_request_state))
         .route("/event-request", post(send_event_request))
-        .route("/controller-id", get(get_controller_id))
+        .route("/controller-id", get(get_public_key))
         .route("/peer-id", get(get_peer_id))
         .route("/config", get(get_config))
         .route("/keys", get(get_keys))

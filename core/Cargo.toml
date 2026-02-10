@@ -23,13 +23,13 @@ ave-actors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["std"] }
+time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs"] }
 tracing = { workspace = true }
 network = { package = "ave-network", path = "../network" }
 rmp-serde = { workspace = true }
 wasmtime = {version = "39.0.1"}
-rusqlite = { version = "0.37.0", features = ["bundled"], optional = true}
+rusqlite = { version = "0.38.0", features = ["bundled"], optional = true}
 once_cell = { workspace = true }
 base64 = { workspace = true }
 prometheus-client = { workspace = true }
@@ -38,6 +38,7 @@ reqwest = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 bytes = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true } 

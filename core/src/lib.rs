@@ -16,34 +16,32 @@ pub mod node;
 pub mod query;
 pub mod request;
 pub mod subject;
-pub(crate) mod system;
+pub mod system;
+pub mod tracker;
 pub mod update;
 pub mod validation;
-pub mod tracker;
 
-use approval::approver::ApprovalStateRes;
+use std::collections::{HashSet};
+use std::sync::Arc;
+
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
-use ave_actors::{ActorPath, ActorRef, PersistentActor, Sink};
+use ave_actors::{ActorPath, ActorRef, PersistentActor};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
 use ave_common::identity::keys::KeyPair;
-use ave_common::identity::{DigestIdentifier, Signed};
+use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::request::EventRequest;
+use ave_common::response::{
+    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange
+};
 use config::Config as AveBaseConfig;
 use error::Error;
-use helpers::db::ExternalDB;
-use helpers::db::common::{
-    ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
-    SubjectInfo,
-};
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use model::event::Event;
-use model::{SignTypesNode, request::*};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 
-pub use network::MonitorNetworkState;
-
 use node::register::{
-    GovsData, Register, SubjsData, RegisterMessage, RegisterResponse,
+    Register, RegisterMessage, RegisterResponse,
 };
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
@@ -54,11 +52,17 @@ use request::{
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use validation::{Validation, ValidationInfo, ValidationMessage};
+use tracing::{debug, error, warn};
+use validation::{Validation, ValidationMessage};
 
-
+use crate::approval::request::ApprovalReq;
 use crate::config::SinkAuth;
+use crate::helpers::db::ExternalDB;
+use crate::model::common::node::SignTypesNode;
+use crate::node::InitParamsNode;
+use crate::request::tracking::{
+    RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
+};
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
@@ -74,13 +78,10 @@ compile_error!(
     "The 'test' feature should only be used during development/testing."
 );
 
-const TARGET_API: &str = "Ave-Api";
-
-
 #[derive(Clone)]
 pub struct Api {
     peer_id: String,
-    controller_id: String,
+    public_key: String,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
     auth: ActorRef<Auth>,
@@ -88,6 +89,7 @@ pub struct Api {
     register: ActorRef<Register>,
     monitor: ActorRef<Monitor>,
     manual_dis: ActorRef<ManualDistribution>,
+    tracking: ActorRef<RequestTracking>,
 }
 
 impl Api {
@@ -100,21 +102,26 @@ impl Api {
         password: &str,
         token: &CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
-        info!(TARGET_API, "Creating Api");
+        debug!("Creating Api");
 
         let (system, runner) =
-            system(config.clone(), sink_auth, password, token.clone()).await?;
+            system(config.clone(), sink_auth, password, token.clone())
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Failed to create system");
+                    e
+                })?;
 
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
             .create_root_actor("network_monitor", newtork_monitor)
             .await
             .map_err(|e| {
-                error!(
-                    TARGET_API,
-                    "Can not create network_monitor actor {}", e
-                );
-                Error::System(e.to_string())
+                error!(error = %e, "Can not create network_monitor actor");
+                Error::ActorCreation {
+                    actor: "network_monitor".to_string(),
+                    reason: e.to_string(),
+                }
             })?;
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
@@ -125,12 +132,12 @@ impl Api {
             token.clone(),
         )
         .map_err(|e| {
-            error!(TARGET_API, "Can not create networt {}", e);
+            error!(error = %e, "Can not create networt");
             Error::Network(e.to_string())
         })?;
 
         // Create worker
-        let service = Intermediary::new(
+        let service = Intermediary::build(
             worker.service().sender().clone(),
             system.clone(),
             token.clone(),
@@ -138,88 +145,109 @@ impl Api {
 
         let peer_id = worker.local_peer_id().to_string();
 
-        worker.add_helper_sender(service.service().sender());
+        worker.add_helper_sender(service.sender());
 
-        system.add_helper("network", service).await;
+        system.add_helper("network", service.clone()).await;
 
         let worker_runner = tokio::spawn(async move {
             let _ = worker.run().await;
         });
 
+        let public_key = Arc::new(keys.public_key());
         let node_actor = system
-            .create_root_actor("node", Node::initial(keys.clone()))
+            .create_root_actor(
+                "node",
+                Node::initial(InitParamsNode {
+                    key_pair: keys.clone(),
+                    hash: config.hash_algorithm,
+                    is_service: config.is_service,
+                    public_key: public_key.clone(),
+                }),
+            )
             .await
             .map_err(|e| {
-                let e = format!("Can not get node actor: {}", e);
-                error!(TARGET_API, "Init system, {}", e);
-                Error::System(e.to_owned())
+                error!(error = %e, "Init system, can not create node actor");
+                Error::ActorCreation {
+                    actor: "node".to_string(),
+                    reason: e.to_string(),
+                }
             })?;
 
-        let register: Option<ActorRef<Register>> = system
+        let register_actor: ActorRef<Register> = system
             .get_actor(&ActorPath::from("/user/node/register"))
-            .await;
-        let Some(register_actor) = register else {
-            let e = "Can not get register actor";
-            error!(TARGET_API, "Init system, {}", e);
-            return Err(Error::System(e.to_owned()));
-        };
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get register actor");
+                e
+            })?;
 
-        let manual_dis: Option<ActorRef<ManualDistribution>> = system
+        let manual_dis_actor: ActorRef<ManualDistribution> = system
             .get_actor(&ActorPath::from("/user/node/manual_distribution"))
-            .await;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get manual_distribution actor");
+                e
+            })?;
 
-        let Some(manual_dis_actor) = manual_dis else {
-            let e = "Can not get manual_dis actor";
-            error!(TARGET_API, "Init system, {}", e);
-            return Err(Error::System(e.to_owned()));
-        };
-
-        let auth: Option<ActorRef<Auth>> =
-            system.get_actor(&ActorPath::from("/user/node/auth")).await;
-        let Some(auth_actor) = auth else {
-            let e = "Can not get auth actor";
-            error!(TARGET_API, "Init system, {}", e);
-            return Err(Error::System(e.to_owned()));
-        };
+        let auth_actor: ActorRef<Auth> = system
+            .get_actor(&ActorPath::from("/user/node/auth"))
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get auth actor");
+                e
+            })?;
 
         let request_actor = system
             .create_root_actor(
                 "request",
-                RequestHandler::initial(keys.public_key()),
+                RequestHandler::initial((
+                    public_key,
+                    (config.hash_algorithm, service),
+                )),
             )
             .await
             .map_err(|e| {
-                let e = format!("Can not get request actor: {}", e);
-                error!(TARGET_API, "Init system, {}", e);
-                Error::System(e.to_owned())
+                error!(error = %e, "Init system, can not create request actor");
+                Error::ActorCreation {
+                    actor: "request".to_string(),
+                    reason: e.to_string(),
+                }
             })?;
-        let Some(ext_db): Option<ExternalDB> =
-            system.get_helper("ext_db").await
+
+        let tracking_actor: ActorRef<RequestTracking> = system
+            .get_actor(&ActorPath::from("/user/request/tracking"))
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get tracking actor");
+                e
+            })?;
+
+        let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
         else {
-            let e = "Can not get ext_db helper";
-            error!(TARGET_API, "Init system, {}", e);
-            return Err(Error::System(e.to_owned()));
+            error!("External database helper not found");
+            return Err(Error::MissingResource {
+                name: "ext_db".to_string(),
+                reason: "External database helper not found".to_string(),
+            });
         };
 
-        let sink =
-            Sink::new(request_actor.subscribe(), ext_db.get_request_handler());
-        system.run_sink(sink).await;
-
-        let query = Query::new(keys.public_key());
+        let query = Query::new(ext_db);
         let query_actor = system
             .create_root_actor("query", query)
             .await
             .map_err(|e| {
-                let e = format!("Can not get query actor: {}", e);
-                error!(TARGET_API, "Init system, {}", e);
-                Error::System(e.to_owned())
+                error!(error = %e, "Init system, can not create query actor");
+                Error::ActorCreation {
+                    actor: "query".to_string(),
+                    reason: e.to_string(),
+                }
             })?;
 
         let tasks = Vec::from([runner, worker_runner]);
 
         Ok((
             Self {
-                controller_id: keys.public_key().to_string(),
+                public_key: keys.public_key().to_string(),
                 peer_id,
                 request: request_actor,
                 auth: auth_actor,
@@ -228,40 +256,110 @@ impl Api {
                 register: register_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
+                tracking: tracking_actor,
             },
             tasks,
         ))
     }
 
+    ///////// General
+    ////////////////////////////
+
     pub fn peer_id(&self) -> &str {
         &self.peer_id
     }
 
-    pub fn controller_id(&self) -> &str {
-        &self.controller_id
+    pub fn public_key(&self) -> &str {
+        &self.public_key
     }
 
+    ///////// Network
+    ////////////////////////////
     pub async fn get_network_state(
         &self,
     ) -> Result<MonitorNetworkState, Error> {
         let response =
             self.monitor.ask(MonitorMessage::State).await.map_err(|e| {
-                let e = format!("Can not get network state {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Unable to retrieve network state");
+                Error::NetworkState(e.to_string())
             })?;
 
         match response {
             MonitorResponse::State(state) => Ok(state),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from network monitor");
+                Err(Error::UnexpectedResponse {
+                    actor: "network_monitor".to_string(),
+                    expected: "State".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
-    /// Request from issuer.
+    ///////// Request
+    ////////////////////////////
+
+    pub async fn get_handling_in_queue_requests(
+        &self,
+    ) -> Result<RequestsInManager,Error> {
+        let response = self
+            .request
+            .ask(RequestHandlerMessage::RequestInManager)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Request processing failed");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestHandlerResponse::RequestInManager(request) => {
+                Ok(request)
+            }
+            _ => {
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "RequestInManager".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn get_handling_in_queue_requests_subject_id(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<RequestsInManagerSubject, Error>
+    {
+        let response = self
+            .request
+            .ask(RequestHandlerMessage::RequestInManagerSubjectId {
+                subject_id,
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Request processing failed");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestHandlerResponse::RequestInManagerSubjectId(request) => Ok(request),
+            _ => {
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "RequestInManagerSubjectId".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
     pub async fn external_request(
         &self,
         request: Signed<EventRequest>,
@@ -271,22 +369,25 @@ impl Api {
             .ask(RequestHandlerMessage::NewRequest { request })
             .await
             .map_err(|e| {
-                let e = format!("Can not send external request {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Request processing failed");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
             })?;
 
         match response {
             RequestHandlerResponse::Ok(request_data) => Ok(request_data),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "Ok".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
-    /// Own request.
     pub async fn own_request(
         &self,
         request: EventRequest,
@@ -298,25 +399,23 @@ impl Api {
             )))
             .await
             .map_err(|e| {
-                let e =
-                    format!("The node was unable to sign the request: {}", e);
-                warn!(TARGET_API, e);
-                Error::Node(e)
+                warn!(error = %e, "Node was unable to sign the request");
+                Error::SigningFailed(e.to_string())
             })?;
 
         let signature = match response {
             NodeResponse::SignRequest(signature) => signature,
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                return Err(Error::Api(e.to_owned()));
+                warn!("Unexpected response from node");
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_string(),
+                    expected: "SignRequest".to_string(),
+                    received: "other".to_string(),
+                });
             }
         };
 
-        let signed_event_req = Signed {
-            content: request,
-            signature,
-        };
+        let signed_event_req = Signed::from_parts(request, signature);
 
         let response = self
             .request
@@ -325,67 +424,21 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not send our request {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to send request");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
             })?;
 
         match response {
             RequestHandlerResponse::Ok(request_data) => Ok(request_data),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
-            }
-        }
-    }
-
-    pub async fn get_pending_transfers(
-        &self,
-    ) -> Result<Vec<TransferSubject>, Error> {
-        let response =
-            self.node.ask(NodeMessage::PendingTransfers).await.map_err(
-                |e| {
-                    let e = format!(
-                        "The node was unable to get pending transfers: {}",
-                        e
-                    );
-                    warn!(TARGET_API, e);
-                    Error::Node(e)
-                },
-            )?;
-
-        let NodeResponse::PendingTransfers(pending) = response else {
-            let e = "A response was received that was not the expected one";
-            warn!(TARGET_API, e);
-            return Err(Error::Api(e.to_owned()));
-        };
-
-        Ok(pending)
-    }
-
-    pub async fn request_state(
-        &self,
-        request_id: DigestIdentifier,
-    ) -> Result<RequestInfo, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetRequestState {
-                request_id: request_id.to_string(),
-            })
-            .await
-            .map_err(|e| {
-                let e = format!("Can not get request state {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
-            })?;
-
-        match response {
-            QueryResponse::RequestState(state) => Ok(state),
-            _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "Ok".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
@@ -393,43 +446,58 @@ impl Api {
     pub async fn get_approval(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<ApproveInfo, Error> {
+        state: Option<ApprovalState>,
+    ) -> Result<Option<(ApprovalReq, ApprovalState)>, Error> {
         let response = self
-            .query
-            .ask(QueryMessage::GetApproval {
-                subject_id: subject_id.to_string(),
-            })
+            .request
+            .ask(RequestHandlerMessage::GetApproval { state, subject_id })
             .await
             .map_err(|e| {
-                let e = format!("Can not get approval request {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get approval request");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
             })?;
 
         match response {
-            QueryResponse::ApprovalState(data) => Ok(data),
+            RequestHandlerResponse::Approval(data) => Ok(data),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "Approval".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
-    pub async fn manual_distribution(
+    pub async fn get_approvals(
         &self,
-        subject_id: DigestIdentifier,
-    ) -> Result<String, Error> {
-        self.manual_dis
-            .ask(ManualDistributionMessage::Update(subject_id))
+        state: Option<ApprovalState>,
+    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, Error> {
+        let response = self
+            .request
+            .ask(RequestHandlerMessage::GetAllApprovals { state })
             .await
             .map_err(|e| {
-                let e = format!("Can not post manual update {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get approval requests");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
             })?;
 
-        Ok("Manual update in progress".to_owned())
+        match response {
+            RequestHandlerResponse::Approvals(data) => Ok(data),
+            _ => {
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "Approvals".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
     }
 
     pub async fn approve(
@@ -438,33 +506,140 @@ impl Api {
         state: ApprovalStateRes,
     ) -> Result<String, Error> {
         if let ApprovalStateRes::Obsolete = state {
-            let e = "Invalid approval state";
-            warn!(TARGET_API, e);
-            return Err(Error::Api(e.to_owned()));
+            warn!("Cannot set approval state to Obsolete");
+            return Err(Error::InvalidApprovalState("Obsolete".to_string()));
         }
 
         let response = self
             .request
             .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.to_string(),
+                subject_id,
                 state,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not change approve request state: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to change approval state");
+                Error::ApprovalUpdateFailed(e.to_string())
             })?;
 
         match response {
             RequestHandlerResponse::Response(res) => Ok(res),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from request handler");
+                Err(Error::UnexpectedResponse {
+                    actor: "request".to_string(),
+                    expected: "Response".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
+
+    pub async fn manual_request_abort(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.request
+            .tell(RequestHandlerMessage::AbortRequest { subject_id })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to abort request");
+                Error::ActorCommunication {
+                    actor: "request".to_string(),
+                }
+            })?;
+
+        Ok("Trying to abort".to_string())
+    }
+
+    ///////// Tracking
+    ////////////////////////////
+    pub async fn get_request_state(
+        &self,
+        request_id: DigestIdentifier,
+    ) -> Result<RequestInfo, Error> {
+        let response = self
+            .tracking
+            .ask(RequestTrackingMessage::SearchRequest(request_id.clone()))
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get request state");
+                Error::ActorCommunication {
+                    actor: "tracking".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestTrackingResponse::Info(state) => Ok(state),
+            RequestTrackingResponse::NotFound => {
+                Err(Error::RequestNotFound(request_id.to_string()))
+            }
+            _ => {
+                warn!("Unexpected response from tracking");
+                Err(Error::UnexpectedResponse {
+                    actor: "tracking".to_string(),
+                    expected: "Info".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn all_request_state(&self) -> Result<Vec<RequestInfo>, Error> {
+        let response = self
+            .tracking
+            .ask(RequestTrackingMessage::AllRequests)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get all request states");
+                Error::ActorCommunication {
+                    actor: "tracking".to_string(),
+                }
+            })?;
+
+        match response {
+            RequestTrackingResponse::AllInfo(state) => Ok(state),
+            _ => {
+                warn!("Unexpected response from tracking");
+                Err(Error::UnexpectedResponse {
+                    actor: "tracking".to_string(),
+                    expected: "AllInfo".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    ///////// Node
+    ////////////////////////////
+
+    pub async fn get_pending_transfers(
+        &self,
+    ) -> Result<Vec<TransferSubject>, Error> {
+        let response =
+            self.node.ask(NodeMessage::PendingTransfers).await.map_err(
+                |e| {
+                    warn!(error = %e, "Failed to get pending transfers");
+                    Error::ActorCommunication {
+                        actor: "node".to_string(),
+                    }
+                },
+            )?;
+
+        let NodeResponse::PendingTransfers(pending) = response else {
+            warn!("Unexpected response from node");
+            return Err(Error::UnexpectedResponse {
+                actor: "node".to_string(),
+                expected: "PendingTransfers".to_string(),
+                received: "other".to_string(),
+            });
+        };
+
+        Ok(pending)
+    }
+
+    ///////// Auth
+    ////////////////////////////
 
     pub async fn auth_subject(
         &self,
@@ -478,27 +653,33 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get auth subject: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Authentication operation failed");
+                Error::AuthOperation(e.to_string())
             })?;
 
         Ok("Ok".to_owned())
     }
 
-    pub async fn all_auth_subjects(&self) -> Result<Vec<String>, Error> {
+    pub async fn all_auth_subjects(
+        &self,
+    ) -> Result<Vec<DigestIdentifier>, Error> {
         let response =
             self.auth.ask(AuthMessage::GetAuths).await.map_err(|e| {
-                error!(TARGET_API, "Can not get auth subject: {}", e);
-                Error::Api(format!("Can not get auth subjects: {}", e))
+                error!(error = %e, "Failed to get auth subjects");
+                Error::ActorCommunication {
+                    actor: "auth".to_string(),
+                }
             })?;
 
         match response {
             AuthResponse::Auths { subjects } => Ok(subjects),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from auth");
+                Err(Error::UnexpectedResponse {
+                    actor: "auth".to_string(),
+                    expected: "Auths".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
@@ -506,23 +687,29 @@ impl Api {
     pub async fn witnesses_subject(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<AuthWitness, Error> {
+    ) -> Result<HashSet<PublicKey>, Error> {
         let response = self
             .auth
-            .ask(AuthMessage::GetAuth { subject_id })
+            .ask(AuthMessage::GetAuth {
+                subject_id: subject_id.clone(),
+            })
             .await
             .map_err(|e| {
-                let e = format!("Can not get witnesses of subjects: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get witnesses for subject");
+                Error::ActorCommunication {
+                    actor: "auth".to_string(),
+                }
             })?;
 
         match response {
             AuthResponse::Witnesses(witnesses) => Ok(witnesses),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from auth");
+                Err(Error::UnexpectedResponse {
+                    actor: "auth".to_string(),
+                    expected: "Witnesses".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
@@ -535,36 +722,11 @@ impl Api {
             .tell(AuthMessage::DeleteAuth { subject_id })
             .await
             .map_err(|e| {
-                let e = format!("Can not delete auth of subjects: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to delete auth subject");
+                Error::AuthOperation(e.to_string())
             })?;
 
         Ok("Ok".to_owned())
-    }
-
-    pub async fn check_transfer(
-        &self,
-        subject_id: DigestIdentifier,
-    ) -> Result<String, Error> {
-        let response = self
-            .auth
-            .ask(AuthMessage::CheckTransfer { subject_id })
-            .await
-            .map_err(|e| {
-                let e = format!("Can not check Transfer: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
-            })?;
-
-        match response {
-            AuthResponse::None => Ok("Checking in progress".to_owned()),
-            _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
-            }
-        }
     }
 
     pub async fn update_subject(
@@ -574,26 +736,48 @@ impl Api {
         let response = self
             .auth
             .ask(AuthMessage::Update {
-                subject_id,
-                more_info: auth::WitnessesAuth::None,
+                subject_id: subject_id.clone(),
+                objective: None,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not update subject: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to update subject");
+                Error::UpdateFailed(subject_id.to_string(), e.to_string())
             })?;
 
         match response {
             AuthResponse::None => Ok("Update in progress".to_owned()),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from auth");
+                Err(Error::UnexpectedResponse {
+                    actor: "auth".to_string(),
+                    expected: "None".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
+    ///////// manual distribution
+    ////////////////////////////
+
+    pub async fn manual_distribution(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.manual_dis
+            .ask(ManualDistributionMessage::Update(subject_id.clone()))
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Manual distribution failed");
+                Error::DistributionFailed(subject_id.to_string())
+            })?;
+
+        Ok("Manual distribution in progress".to_owned())
+    }
+
+    ///////// Register
+    ////////////////////////////
     pub async fn all_govs(
         &self,
         active: Option<bool>,
@@ -603,79 +787,147 @@ impl Api {
             .ask(RegisterMessage::GetGovs { active })
             .await
             .map_err(|e| {
-                let e = format!("Can not get resgister governances: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get governances");
+                Error::ActorCommunication {
+                    actor: "register".to_string(),
+                }
             })?;
 
         match response {
             RegisterResponse::Govs { governances } => Ok(governances),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from register");
+                Err(Error::UnexpectedResponse {
+                    actor: "register".to_string(),
+                    expected: "Govs".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
     pub async fn all_subjs(
         &self,
-        gov_id: DigestIdentifier,
+        governance_id: DigestIdentifier,
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, Error> {
         let response = self
             .register
             .ask(RegisterMessage::GetSubj {
-                gov_id: gov_id.to_string(),
+                gov_id: governance_id.to_string(),
                 active,
                 schema_id,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get resgister subjects: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get subjects");
+                Error::ActorCommunication {
+                    actor: "register".to_string(),
+                }
             })?;
 
         match response {
             RegisterResponse::Subjs { subjects } => Ok(subjects),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from register");
+                Err(Error::UnexpectedResponse {
+                    actor: "register".to_string(),
+                    expected: "Subjs".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
+    ///////// Query
+    ////////////////////////////
     pub async fn get_events(
         &self,
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         page: Option<u64>,
-        reverese: Option<bool>,
+        reverse: Option<bool>,
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
     ) -> Result<PaginatorEvents, Error> {
         let response = self
             .query
             .ask(QueryMessage::GetEvents {
-                subject_id: subject_id.to_string(),
-                quantity,
+                subject_id: subject_id,
+                event_ledger_ts,
+                event_request_ts,
                 page,
-                reverese,
+                quantity,
+                reverse,
+                sink_ts,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get events: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get events");
+                Error::ActorCommunication {
+                    actor: "query".to_string(),
+                }
             })?;
 
         match response {
-            QueryResponse::PaginatorEvents(data) => Ok(data),
+            QueryResponse::PagEvents(data) => Ok(data),
+            QueryResponse::Error(e) => {
+                warn!(error = %e, "Query failed");
+                Err(Error::QueryFailed(e))
+            }
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from query");
+                Err(Error::UnexpectedResponse {
+                    actor: "query".to_string(),
+                    expected: "PagEvents".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn get_aborts(
+        &self,
+        subject_id: DigestIdentifier,
+        request_id: Option<DigestIdentifier>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, Error> {
+        let response = self
+            .query
+            .ask(QueryMessage::GetAborts {
+                subject_id: subject_id,
+                request_id,
+                sn,
+                quantity,
+                page,
+                reverse,
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get aborts");
+                Error::ActorCommunication {
+                    actor: "query".to_string(),
+                }
+            })?;
+
+        match response {
+            QueryResponse::PagAborts(data) => Ok(data),
+            QueryResponse::Error(e) => {
+                warn!(error = %e, "Query failed");
+                Err(Error::QueryFailed(e))
+            }
+            _ => {
+                warn!("Unexpected response from query");
+                Err(Error::UnexpectedResponse {
+                    actor: "query".to_string(),
+                    expected: "PagAborts".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
@@ -684,26 +936,37 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
         sn: u64,
-    ) -> Result<EventInfo, Error> {
+    ) -> Result<LedgerDB, Error> {
         let response = self
             .query
             .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id.clone(),
                 sn,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get event sn: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get event");
+                Error::ActorCommunication {
+                    actor: "query".to_string(),
+                }
             })?;
 
         match response {
             QueryResponse::Event(data) => Ok(data),
+            QueryResponse::Error(e) => {
+                warn!(error = %e, "Query failed");
+                Err(Error::EventNotFound {
+                    subject: subject_id.to_string(),
+                    sn,
+                })
+            }
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from query");
+                Err(Error::UnexpectedResponse {
+                    actor: "query".to_string(),
+                    expected: "Event".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
@@ -713,81 +976,69 @@ impl Api {
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        success: Option<bool>,
-    ) -> Result<Vec<EventInfo>, Error> {
+    ) -> Result<Vec<LedgerDB>, Error> {
         let response = self
             .query
             .ask(QueryMessage::GetFirstOrEndEvents {
-                subject_id: subject_id.to_string(),
+                subject_id,
                 quantity,
                 reverse,
-                success,
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get first or end events: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get events");
+                Error::ActorCommunication {
+                    actor: "query".to_string(),
+                }
             })?;
 
         match response {
             QueryResponse::Events(data) => Ok(data),
+            QueryResponse::Error(e) => {
+                warn!(error = %e, "Query failed");
+                Err(Error::QueryFailed(e))
+            }
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from query");
+                Err(Error::UnexpectedResponse {
+                    actor: "query".to_string(),
+                    expected: "Events".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }
 
-    pub async fn get_subject(
+    pub async fn get_subject_state(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<SubjectInfo, Error> {
+    ) -> Result<SubjectDB, Error> {
         let response = self
             .query
             .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.to_string(),
+                subject_id: subject_id.clone(),
             })
             .await
             .map_err(|e| {
-                let e = format!("Can not get subject: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
+                warn!(error = %e, "Failed to get subject state");
+                Error::ActorCommunication {
+                    actor: "query".to_string(),
+                }
             })?;
 
         match response {
-            QueryResponse::Subject(subject) => Ok(subject),
-            _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+            QueryResponse::Subject(data) => Ok(data),
+            QueryResponse::Error(e) => {
+                warn!(error = %e, "Query failed");
+                Err(Error::SubjectNotFound(subject_id.to_string()))
             }
-        }
-    }
-
-    pub async fn get_signatures(
-        &self,
-        subject_id: DigestIdentifier,
-    ) -> Result<SignaturesInfo, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetSignatures {
-                subject_id: subject_id.to_string(),
-            })
-            .await
-            .map_err(|e| {
-                let e = format!("Can not get signatures: {}", e);
-                warn!(TARGET_API, e);
-                Error::Api(e)
-            })?;
-
-        match response {
-            QueryResponse::Signatures(signatures) => Ok(signatures),
             _ => {
-                let e = "A response was received that was not the expected one";
-                warn!(TARGET_API, e);
-                Err(Error::Api(e.to_owned()))
+                warn!("Unexpected response from query");
+                Err(Error::UnexpectedResponse {
+                    actor: "query".to_string(),
+                    expected: "Subject".to_string(),
+                    received: "other".to_string(),
+                })
             }
         }
     }

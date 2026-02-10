@@ -2,104 +2,92 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
 };
 use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{Span, debug, error, info_span};
 
-use crate::model::common::{emit_fail, subject::{get_last_state, get_metadata}};
+use crate::model::common::{emit_fail, subject::get_gov_sn};
 
 use super::manager::{RequestManager, RequestManagerMessage};
 
-const TARGET_REBOOT: &str = "Ave-Request-Reboot";
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reboot {
+    request_id: DigestIdentifier,
     governance_id: DigestIdentifier,
-    sn_ledger: u64,
-    sn_event: u64,
+    actual_sn: u64,
+    count: u64,
 }
 
 impl Reboot {
-    pub fn new(governance_id: DigestIdentifier) -> Self {
+    pub fn new(governance_id: DigestIdentifier, request_id: DigestIdentifier) -> Self {
         Self {
+            request_id,
             governance_id,
-            sn_ledger: 0,
-            sn_event: 0,
+            actual_sn: 0,
+            count: 0,
         }
-    }
-
-    async fn update_event_sn(
-        &mut self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
-    ) -> Result<(), ActorError> {
-        self.sn_event =
-            match get_last_state(ctx, &self.governance_id.to_string()).await {
-                Ok((last_event, ..)) => last_event.content.sn,
-                Err(e) => {
-                    if let ActorError::Functional(_) = e {
-                        0
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-        Ok(())
-    }
-
-    async fn update_ledger_sn(
-        &mut self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
-    ) -> Result<(), ActorError> {
-        let metadata =
-            get_metadata(ctx, &self.governance_id.to_string()).await?;
-        self.sn_ledger = metadata.sn;
-
-        Ok(())
     }
 
     async fn sleep(
         &self,
         ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
-        let actor = ctx.reference().await;
-        if let Some(actor) = actor {
-            let request = RebootMessage::Update {
-                last_sn_event: self.sn_event,
-                last_sn_ledger: self.sn_ledger,
-            };
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Err(e) = actor.tell(request).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Sleep, can not send Update message to Reboot actor: {}",
-                        e
-                    );
-                }
-            });
-        } else {
-            let path = ctx.path().clone();
-            return Err(ActorError::NotFound(path));
-        }
+        let actor = ctx.reference().await?;
+        let request = RebootMessage::Update;
+        let request_id = self.request_id.clone();
+        let governance_id = self.governance_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if let Err(e) = actor.tell(request).await {
+                error!(
+                    request_id = %request_id,
+                    governance_id = %governance_id,
+                    error = %e,
+                    "Failed to send Update message to Reboot actor"
+                );
+            }
+        });
+
         Ok(())
     }
 
     async fn finish(
+        &self,
         ctx: &mut ave_actors::ActorContext<Reboot>,
     ) -> Result<(), ActorError> {
-        let request_actor: Option<ave_actors::ActorRef<RequestManager>> =
-            ctx.parent().await;
+        debug!(
+            request_id = %self.request_id,
+            governance_id = %self.governance_id,
+            count = self.count,
+            "Finishing reboot, notifying parent"
+        );
 
-        if let Some(request_actor) = request_actor {
-            request_actor
-                .tell(RequestManagerMessage::FinishReboot)
-                .await?
-        } else {
-            let path = ctx.path().parent();
-            return Err(ActorError::NotFound(path));
+        let request_actor = match ctx.get_parent::<RequestManager>().await {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(
+                    request_id = %self.request_id,
+                    governance_id = %self.governance_id,
+                    error = %e,
+                    "Failed to get parent RequestManager"
+                );
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = request_actor
+            .tell(RequestManagerMessage::FinishReboot {request_id: self.request_id.clone()})
+            .await
+        {
+            error!(
+                request_id = %self.request_id,
+                governance_id = %self.governance_id,
+                error = %e,
+                "Failed to send FinishReboot message to parent"
+            );
+            return Err(e);
         }
 
         ctx.stop(None).await;
@@ -110,10 +98,7 @@ impl Reboot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RebootMessage {
     Init,
-    Update {
-        last_sn_event: u64,
-        last_sn_ledger: u64,
-    },
+    Update,
 }
 
 impl Message for RebootMessage {}
@@ -126,18 +111,12 @@ impl Actor for Reboot {
     type Event = ();
     type Response = ();
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
-
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Reboot")
+        } else {
+            info_span!("Reboot")
+        }
     }
 }
 
@@ -151,71 +130,119 @@ impl Handler<Reboot> for Reboot {
     ) -> Result<(), ActorError> {
         match msg {
             RebootMessage::Init => {
-                if let Err(e) = self.update_event_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Init, can not uptade event sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if let Err(e) = self.update_ledger_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Init, can not uptade ledger sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if let Err(e) = self.sleep(ctx).await {
-                    error!(TARGET_REBOOT, "Init, can not sleep: {}", e);
-                    return Err(emit_fail(ctx, e).await);
-                };
-            }
-            RebootMessage::Update {
-                last_sn_event,
-                last_sn_ledger,
-            } => {
-                if let Err(e) = self.update_event_sn(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Update, can not uptade event sn: {}", e
-                    );
-                    return Err(emit_fail(ctx, e).await);
-                };
-
-                if self.sn_event > last_sn_event {
-                    if let Err(e) = Self::finish(ctx).await {
+                match get_gov_sn(ctx, &self.governance_id).await {
+                    Ok(sn) => {
+                        self.actual_sn = sn;
+                        debug!(
+                            msg_type = "Init",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            sn = sn,
+                            "Reboot initialized with governance sn"
+                        );
+                    }
+                    Err(e) => {
                         error!(
-                            TARGET_REBOOT,
-                            "Update, can not finish reboot: {}", e
+                            msg_type = "Init",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            error = %e,
+                            "Failed to get governance sn"
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                    return Ok(());
-                }
+                };
 
-                if let Err(e) = self.update_ledger_sn(ctx).await {
+                if let Err(e) = self.sleep(ctx).await {
                     error!(
-                        TARGET_REBOOT,
-                        "Update, can not uptade ledger sn: {}", e
+                        msg_type = "Init",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        error = %e,
+                        "Failed to schedule sleep"
                     );
                     return Err(emit_fail(ctx, e).await);
                 };
+            }
+            RebootMessage::Update => {
+                let actual_sn = self.actual_sn;
 
-                if self.sn_ledger > last_sn_ledger
-                    && let Err(e) = self.sleep(ctx).await
-                {
-                    error!(TARGET_REBOOT, "Update, can not sleep: {}", e);
-                    return Err(emit_fail(ctx, e).await);
+                match get_gov_sn(ctx, &self.governance_id).await {
+                    Ok(sn) => {
+                        self.actual_sn = sn;
+                        debug!(
+                            msg_type = "Update",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            old_sn = actual_sn,
+                            new_sn = sn,
+                            "Governance sn retrieved"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "Update",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            error = %e,
+                            "Failed to get governance sn"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+                };
+
+                if actual_sn == self.actual_sn {
+                    self.count += 1;
+                    debug!(
+                        msg_type = "Update",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        sn = actual_sn,
+                        count = self.count,
+                        "Governance sn unchanged, incrementing counter"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "Update",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        old_sn = actual_sn,
+                        new_sn = self.actual_sn,
+                        count = self.count,
+                        "Governance sn changed"
+                    );
                 }
 
-                if let Err(e) = Self::finish(ctx).await {
-                    error!(
-                        TARGET_REBOOT,
-                        "Update, can not finish reboot: {}", e
+                if self.count >= 3 {
+                    debug!(
+                        msg_type = "Update",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        count = self.count,
+                        "Max retry count reached, finishing reboot"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    if let Err(e) = self.finish(ctx).await {
+                        error!(
+                            msg_type = "Update",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            error = %e,
+                            "Failed to finish reboot"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+                } else {
+                    if let Err(e) = self.sleep(ctx).await {
+                        error!(
+                            msg_type = "Update",
+                            request_id = %self.request_id,
+                            governance_id = %self.governance_id,
+                            count = self.count,
+                            error = %e,
+                            "Failed to schedule sleep"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    };
                 }
             }
         };

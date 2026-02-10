@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Command, Stdio}, sync::Arc,
+    process::{Command, Stdio},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -11,7 +12,7 @@ use ave_actors::{
 };
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, hash_borsh},
+    identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
 use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
@@ -19,14 +20,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{fs, sync::RwLock};
 
-use tracing::error;
+use tracing::{Span, debug, error, info_span};
 use wasmtime::{Engine, ExternType, Module, Store};
 
 use crate::{
-    Error, model::common::contract::{MAX_FUEL_COMPILATION, MemoryManager, generate_linker}, system::ConfigHelper
+    model::common::contract::{
+        MAX_FUEL_COMPILATION, MemoryManager, generate_linker,
+    },
 };
 
-const TARGET_COMPILER: &str = "Ave-Evaluation-Compiler";
+pub mod error;
+use error::*;
 
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
@@ -36,12 +40,17 @@ pub struct ContractResult {
     pub error: String,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Compiler {
-    pub contract: DigestIdentifier,
+    contract: DigestIdentifier,
+    hash: HashAlgorithm
 }
 
 impl Compiler {
+    pub fn new(hash: HashAlgorithm) -> Self {
+        Self { contract: DigestIdentifier::default(), hash }
+    }
+
     fn compilation_toml() -> String {
         r#"
     [package]
@@ -69,19 +78,25 @@ impl Compiler {
     async fn compile_contract(
         contract: &str,
         contract_path: &Path,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CompilerError> {
         // Write contract.
-        let Ok(decode_base64) = BASE64_STANDARD.decode(contract) else {
-            return Err(Error::Compiler(format!(
-                "Failed to decode base64 {}",
-                contract_path.to_string_lossy()
-            )));
-        };
+        let decode_base64 = BASE64_STANDARD.decode(contract).map_err(|e| {
+            CompilerError::Base64DecodeFailed {
+                details: format!(
+                    "{} (path: {})",
+                    e,
+                    contract_path.to_string_lossy()
+                ),
+            }
+        })?;
 
         let dir = contract_path.join("src");
         if !Path::new(&dir).exists() {
             fs::create_dir_all(&dir).await.map_err(|e| {
-                Error::Node(format!("Can not create src dir: {}", e))
+                CompilerError::DirectoryCreationFailed {
+                    path: dir.to_string_lossy().to_string(),
+                    details: e.to_string(),
+                }
             })?;
         }
 
@@ -89,14 +104,19 @@ impl Compiler {
         let cargo = contract_path.join("Cargo.toml");
         // We write cargo.toml
         fs::write(&cargo, toml).await.map_err(|e| {
-            Error::Node(format!("Can not create Cargo.toml file: {}", e))
+            CompilerError::FileWriteFailed {
+                path: cargo.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
         })?;
 
-        fs::write(contract_path.join("src").join("lib.rs"), decode_base64)
-            .await
-            .map_err(|e| {
-                Error::Compiler(format!("Can not create lib.rs file: {}", e))
-            })?;
+        let lib_rs = contract_path.join("src").join("lib.rs");
+        fs::write(&lib_rs, decode_base64).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: lib_rs.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
 
         // Compiling contract
         let status = Command::new("cargo")
@@ -108,15 +128,13 @@ impl Compiler {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map_err(|e| {
-                Error::Compiler(format!("Can not compile contract: {}", e))
+            .map_err(|e| CompilerError::CargoBuildFailed {
+                details: e.to_string(),
             })?;
 
         // Is success
         if !status.success() {
-            return Err(Error::Compiler(
-                "Can not compile contract".to_string(),
-            ));
+            return Err(CompilerError::CompilationFailed.into());
         }
 
         Ok(())
@@ -126,31 +144,31 @@ impl Compiler {
         ctx: &mut ActorContext<Compiler>,
         contract_path: &Path,
         state: ValueWrapper,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Vec<u8>, CompilerError> {
         // Use the same secure configuration as the runner to ensure consistency
-        let Some(engine) = ctx.system().get_helper::<Arc<Engine>>("engine").await
+        let Some(engine) =
+            ctx.system().get_helper::<Arc<Engine>>("engine").await
         else {
-            return Err(Error::Compiler("Can not get engine from helper".to_owned()));
+            return Err(CompilerError::MissingHelper { name: "engine" }.into());
         };
         // Read compile contract
-        let file = fs::read(
-            contract_path
-                .join("target")
-                .join("wasm32-unknown-unknown")
-                .join("release")
-                .join("contract.wasm"),
-        )
-        .await
-        .map_err(|e| {
-            Error::Compiler(format!("Can not read contract.wasm: {}", e))
+        let wasm_path = contract_path
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join("contract.wasm");
+        let file = fs::read(&wasm_path).await.map_err(|e| {
+            CompilerError::FileReadFailed {
+                path: wasm_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
         })?;
 
         // Precompilation
         let contract_bytes = engine.precompile_module(&file).map_err(|e| {
-            Error::Compiler(format!(
-                "Can not precompile module with wasmtime engine: {}",
-                e
-            ))
+            CompilerError::WasmPrecompileFailed {
+                details: e.to_string(),
+            }
         })?;
 
         drop(file);
@@ -159,10 +177,9 @@ impl Compiler {
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
             Module::deserialize(&engine, &contract_bytes).map_err(|e| {
-                Error::Compiler(format!(
-                    "Error deserializing the contract in wastime: {}",
-                    e
-                ))
+                CompilerError::WasmDeserializationFailed {
+                    details: e.to_string(),
+                }
             })?
         };
 
@@ -176,20 +193,34 @@ impl Compiler {
             match import.ty() {
                 ExternType::Func(_) => {
                     if !pending_sdk.remove(import.name()) {
-                        return Err(Error::Compiler("Module has a function that is not contemplated in the sdk".to_owned()));
+                        return Err(CompilerError::InvalidModule {
+                            kind: InvalidModuleKind::UnknownImportFunction {
+                                name: import.name().to_string(),
+                            },
+                        }
+                        .into());
                     }
                 }
-                _ => {
-                    return Err(Error::Compiler(
-                        "Module has a import that is not function".to_owned(),
-                    ));
+                extern_type => {
+                    return Err(CompilerError::InvalidModule {
+                        kind: InvalidModuleKind::NonFunctionImport {
+                            import_type: format!("{:?}", extern_type),
+                        },
+                    }
+                    .into());
                 }
             }
         }
         if !pending_sdk.is_empty() {
-            return Err(Error::Compiler(
-                "Module has not all imports of sdk".to_owned(),
-            ));
+            return Err(CompilerError::InvalidModule {
+                kind: InvalidModuleKind::MissingImports {
+                    missing: pending_sdk
+                        .into_iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                },
+            }
+            .into());
         }
 
         // We create a context from the state and the event.
@@ -200,7 +231,9 @@ impl Compiler {
 
         // Set fuel limit for compilation/validation (more generous than production)
         store.set_fuel(MAX_FUEL_COMPILATION).map_err(|e| {
-            Error::Compiler(format!("Error setting fuel limit: {}", e))
+            CompilerError::FuelLimitError {
+                details: e.to_string(),
+            }
         })?;
 
         // Responsible for combining several object files into a single WebAssembly executable file (.wasm).
@@ -209,10 +242,9 @@ impl Compiler {
         // Contract instance.
         let instance =
             linker.instantiate(&mut store, &module).map_err(|e| {
-                Error::Compiler(format!(
-                    "Error when creating a contract instance: {}",
-                    e
-                ))
+                CompilerError::InstantiationFailed {
+                    details: e.to_string(),
+                }
             })?;
 
         // Get access to contract, only to check if main_function exist.
@@ -221,29 +253,24 @@ impl Compiler {
                 &mut store,
                 "main_function",
             )
-            .map_err(|e| {
-                Error::Compiler(format!(
-                    "Contract entry point not found: {}",
-                    e
-                ))
+            .map_err(|_e| CompilerError::EntryPointNotFound {
+                function: "main_function",
             })?;
 
         // Get access to contract
         let init_contract_entrypoint = instance
             .get_typed_func::<u32, u32>(&mut store, "init_check_function")
-            .map_err(|e| {
-                Error::Compiler(format!(
-                    "Contract entry point not found: {}",
-                    e
-                ))
+            .map_err(|_e| CompilerError::EntryPointNotFound {
+                function: "init_check_function",
             })?;
 
         // Contract execution
-        let result_ptr = init_contract_entrypoint
-            .call(&mut store, state_ptr)
-            .map_err(|e| {
-            Error::Compiler(format!("Contract execution failed: {}", e))
-        })?;
+        let result_ptr =
+            init_contract_entrypoint
+                .call(&mut store, state_ptr)
+                .map_err(|e| CompilerError::ContractExecutionFailed {
+                    details: e.to_string(),
+                })?;
 
         Self::check_result(&store, result_ptr)?;
 
@@ -253,39 +280,36 @@ impl Compiler {
     fn check_result(
         store: &Store<MemoryManager>,
         pointer: u32,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CompilerError> {
         let bytes = store.data().read_data(pointer as usize)?;
         let contract_result: ContractResult =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
-                Error::Compiler(format!(
-                    "Can not generate wasm contract result: {}",
-                    e
-                ))
+                CompilerError::SerializationError {
+                    context: "contract result deserialization",
+                    details: e.to_string(),
+                }
             })?;
 
         if contract_result.success {
             Ok(())
         } else {
-            Err(Error::Compiler(format!(
-                "Contract execution in compilation was not successful: {}",
-                contract_result.error
-            )))
+            Err(CompilerError::ContractCheckFailed {
+                error: contract_result.error,
+            }
+            .into())
         }
     }
 
     fn generate_context(
         state: ValueWrapper,
-    ) -> Result<(MemoryManager, u32), Error> {
+    ) -> Result<(MemoryManager, u32), CompilerError> {
         let mut context = MemoryManager::default();
-        let state_bytes = to_vec(&state).map_err(|e| {
-            Error::Compiler(format!(
-                "Error when serializing the state using borsh: {}",
-                e
-            ))
-        })?;
-        let state_ptr = context.add_data_raw(&state_bytes).map_err(|e| {
-            Error::Compiler(format!("Error allocating state in memory: {}", e))
-        })?;
+        let state_bytes =
+            to_vec(&state).map_err(|e| CompilerError::SerializationError {
+                context: "state serialization",
+                details: e.to_string(),
+            })?;
+        let state_ptr = context.add_data_raw(&state_bytes)?;
         Ok((context, state_ptr as u32))
     }
 
@@ -315,6 +339,14 @@ impl Actor for Compiler {
     type Event = ();
     type Message = CompilerMessage;
     type Response = ();
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Compiler", id)
+        } else {
+            info_span!("Compiler", id)
+        }
+    }
 }
 
 #[async_trait]
@@ -332,26 +364,22 @@ impl Handler<Compiler> for Compiler {
                 contract_path,
                 initial_value,
             } => {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-                let contract_hash = match hash_borsh(&*hash.hasher(), &contract)
+                
+                let contract_hash = match hash_borsh(&*self.hash.hasher(), &contract)
                 {
                     Ok(hash) => hash,
                     Err(e) => {
                         error!(
-                            TARGET_COMPILER,
-                            "Compile, Can not hash contract: {}", e
+                            msg_type = "Compile",
+                            error = %e,
+                            "Failed to hash contract"
                         );
-                        return Err(ActorError::Functional(format!(
-                            "Can not hash contract: {}",
-                            e
-                        )));
+                        return Err(ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not hash contract: {}",
+                                e
+                            ),
+                        });
                     }
                 };
 
@@ -360,10 +388,15 @@ impl Handler<Compiler> for Compiler {
                         Self::compile_contract(&contract, &contract_path).await
                     {
                         error!(
-                            TARGET_COMPILER,
-                            "Compile, Can not compile: {}", e
+                            msg_type = "Compile",
+                            error = %e,
+                            contract_name = %contract_name,
+                            path = %contract_path.display(),
+                            "Contract compilation failed"
                         );
-                        return Err(ActorError::Functional(e.to_string()));
+                        return Err(ActorError::FunctionalCritical {
+                            description: e.to_string(),
+                        });
                     };
 
                     let contract = match Self::check_wasm(
@@ -376,23 +409,44 @@ impl Handler<Compiler> for Compiler {
                         Ok(contract) => contract,
                         Err(e) => {
                             error!(
-                                TARGET_COMPILER,
-                                "Compile, Can check wasm: {}", e
+                                msg_type = "Compile",
+                                error = %e,
+                                contract_name = %contract_name,
+                                "WASM validation failed"
                             );
-                            return Err(ActorError::Functional(e.to_string()));
+                            return Err(ActorError::FunctionalCritical {
+                                description: e.to_string(),
+                            });
                         }
                     };
 
                     {
                         let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts").await else {
-                            return Err(ActorError::FunctionalFail("Can not obtain contracts helper".to_owned()));
+                            error!(
+                                msg_type = "Compile",
+                                "Contracts helper not found"
+                            );
+                            return Err(ActorError::Helper { name: "contracts".to_string(), reason: "Not found".to_string() });
                         };
-                        
+
                         let mut contracts = contracts.write().await;
-                        contracts.insert(contract_name, contract);
+                        contracts.insert(contract_name.clone(), contract);
                     }
 
-                    self.contract = contract_hash;
+                    self.contract = contract_hash.clone();
+
+                    debug!(
+                        msg_type = "Compile",
+                        contract_name = %contract_name,
+                        contract_hash = %contract_hash,
+                        "Contract compiled and validated successfully"
+                    );
+                } else {
+                    debug!(
+                        msg_type = "Compile",
+                        contract_name = %contract_name,
+                        "Contract already compiled, skipping"
+                    );
                 }
 
                 Ok(())

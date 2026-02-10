@@ -1,59 +1,31 @@
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
-use ave_common::identity::{DigestIdentifier, PublicKey, Signature, Signed};
-pub use ave_common::{
-    // Response types
-    ApprovalReqInfo,
-    ApproveInfo,
-    BridgeConfirmRequest,
-    BridgeCreateRequest,
-    BridgeEOLRequest,
-    BridgeEventRequest,
-    BridgeFactRequest,
-    BridgeRejectRequest,
-    BridgeSignature,
-    // Request types
-    BridgeSignedEventRequest,
-    BridgeTransferRequest,
-    ConfirmRequestInfo,
-    CreateRequestInfo,
-    EOLRequestInfo,
-    EventInfo,
-    EventRequestInfo,
-    FactInfo,
-    FactRequestInfo,
-    GovsData,
-    Namespace,
-    Paginator,
-    PaginatorEvents,
-    ProtocolsError,
-    ProtocolsSignaturesInfo,
-    SubjsData,
-    RejectRequestInfo,
-    RequestData,
-    RequestInfo,
-    SignatureInfo,
-    SignaturesInfo,
-    SignedInfo,
-    SubjectInfo,
-    TimeOutResponseInfo,
-    TransferRequestInfo,
-    TransferSubject,
+pub use ave_common::Namespace;
+pub use ave_common::response::MonitorNetworkState;
+use ave_common::{
+    bridge::request::{
+        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
+    },
+    identity::{DigestIdentifier, PublicKey, Signature, Signed},
+    request::EventRequest,
+    response::{
+        ApprovalReq, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
+        RequestData as RequestDataRes, RequestInfo, RequestsInManager,
+        RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange,
+        TransferSubject,
+    },
 };
 use config::Config;
-pub use core::{
+pub use ave_core::{
     Api as AveApi,
-    approval::approver::ApprovalStateRes,
     auth::AuthWitness,
     config::Config as AveConfig,
     config::{
         LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer,
     },
     error::Error,
-    model::request::EventRequest,
 };
-use core::{config::SinkAuth, helpers::sink::obtain_token};
-pub use network::MonitorNetworkState;
+use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 pub use network::MemoryLimit;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
@@ -70,6 +42,7 @@ use utils::key_pair;
 pub mod config;
 pub use http::{CorsConfig, HttpConfig, SelfSignedCertConfig};
 pub mod conversions;
+pub mod error;
 pub mod http;
 pub mod settings;
 pub mod utils;
@@ -79,6 +52,12 @@ pub mod auth;
 pub mod prometheus;
 #[cfg(feature = "prometheus")]
 use prometheus::run_prometheus;
+
+pub use error::BridgeError;
+
+use crate::conversions::{
+    core_approval_req_to_common, core_tranfer_subject_to_common,
+};
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
@@ -102,7 +81,7 @@ impl Bridge {
         password: &str,
         password_sink: &str,
         token: Option<CancellationToken>,
-    ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
+    ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
         let keys = key_pair(settings, password)?;
 
         let auth_token = if !settings.sink.auth.is_empty() {
@@ -180,33 +159,61 @@ impl Bridge {
         });
     }
 
-    pub fn peer_id(&self) -> &str {
+    ///////// General
+    ////////////////////////////
+    pub fn get_peer_id(&self) -> &str {
         self.api.peer_id()
     }
 
-    pub fn controller_id(&self) -> &str {
-        self.api.controller_id()
+    pub fn get_public_key(&self) -> &str {
+        self.api.public_key()
     }
 
-    pub fn config(&self) -> Config {
+    pub fn get_config(&self) -> Config {
         self.config.clone()
     }
 
-    pub async fn send_event_request(
+    ///////// Network
+    ////////////////////////////
+    pub async fn get_network_state(
+        &self,
+    ) -> Result<MonitorNetworkState, BridgeError> {
+        Ok(self.api.get_network_state().await?)
+    }
+
+    ///////// Request
+    ////////////////////////////
+    pub async fn get_handling_in_queue_requests(
+        &self,
+    ) -> Result<RequestsInManager, BridgeError> {
+        Ok(self.api.get_handling_in_queue_requests().await?)
+    }
+
+    pub async fn get_handling_in_queue_requests_subject_id(
+        &self,
+        subject_id: String,
+    ) -> Result<RequestsInManagerSubject, BridgeError> {
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self
+            .api
+            .get_handling_in_queue_requests_subject_id(subject_id)
+            .await?)
+    }
+
+    pub async fn post_send_event_request(
         &self,
         request: BridgeSignedEventRequest,
-    ) -> Result<RequestData, Error> {
+    ) -> Result<RequestDataRes, BridgeError> {
         let event: EventRequest =
             conversions::bridge_to_event_request(request.request)?;
         let result = if let Some(signature) = request.signature {
             let signature = Signature::try_from(signature).map_err(|e| {
-                Error::Bridge(format!("Invalid signature: {:?}", e))
+                BridgeError::InvalidSignature(format!("{:?}", e))
             })?;
 
-            let signed_request = Signed {
-                content: event,
-                signature,
-            };
+            let signed_request = Signed::from_parts(event, signature);
 
             self.api.external_request(signed_request).await?
         } else {
@@ -215,73 +222,99 @@ impl Bridge {
         Ok(conversions::core_request_to_common(result))
     }
 
-    pub async fn get_network_state(
-        &self,
-    ) -> Result<MonitorNetworkState, Error> {
-        self.api.get_network_state().await
-    }
-
-    pub async fn get_pending_transfers(
-        &self,
-    ) -> Result<Vec<TransferSubject>, Error> {
-        let transfers = self.api.get_pending_transfers().await?;
-        Ok(transfers
-            .into_iter()
-            .map(conversions::core_transfer_to_common)
-            .collect())
-    }
-
-    pub async fn get_request_state(
-        &self,
-        request_id: String,
-    ) -> Result<RequestInfo, Error> {
-        let request_id = DigestIdentifier::from_str(&request_id)
-            .map_err(|e| Error::Bridge(format!("Invalid request id: {}", e)))?;
-        self.api.request_state(request_id).await
-    }
-
     pub async fn get_approval(
         &self,
         subject_id: String,
-    ) -> Result<ApproveInfo, Error> {
+        state: Option<ApprovalState>,
+    ) -> Result<Option<(ApprovalReq, ApprovalState)>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.get_approval(subject_id).await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self
+            .api
+            .get_approval(subject_id, state)
+            .await?
+            .map(|x| (core_approval_req_to_common(x.0), x.1)))
+    }
+
+    pub async fn get_approvals(
+        &self,
+        state: Option<ApprovalState>,
+    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, BridgeError> {
+        let res = self.api.get_approvals(state).await?;
+
+        Ok(res
+            .iter()
+            .map(|x| (core_approval_req_to_common(x.0.clone()), x.1.clone()))
+            .collect())
     }
 
     pub async fn patch_approve(
         &self,
         subject_id: String,
-        state: String,
-    ) -> Result<String, Error> {
-        let state = match state.as_str() {
-            "Accepted" => ApprovalStateRes::RespondedAccepted,
-            "Rejected" => ApprovalStateRes::RespondedRejected,
-            _ => {
-                return Err(Error::Bridge(
-                    "Invalid approve response".to_owned(),
-                ));
-            }
-        };
-
+        state: ApprovalStateRes,
+    ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        self.api.approve(subject_id, state).await
+        Ok(self.api.approve(subject_id, state).await?)
     }
 
+    pub async fn post_manual_request_abort(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.manual_request_abort(subject_id).await?)
+    }
+
+    ///////// Tracking
+    ////////////////////////////
+    pub async fn get_request_state(
+        &self,
+        request_id: String,
+    ) -> Result<RequestInfo, BridgeError> {
+        let request_id = DigestIdentifier::from_str(&request_id)
+            .map_err(|e| BridgeError::InvalidRequestId(e.to_string()))?;
+
+        Ok(self.api.get_request_state(request_id).await?)
+    }
+
+    pub async fn get_all_request_state(
+        &self,
+    ) -> Result<Vec<RequestInfo>, BridgeError> {
+        Ok(self.api.all_request_state().await?)
+    }
+
+    ///////// Node
+    ////////////////////////////
+    pub async fn get_pending_transfers(
+        &self,
+    ) -> Result<Vec<TransferSubject>, BridgeError> {
+        let res = self.api.get_pending_transfers().await?;
+        Ok(res
+            .iter()
+            .map(|x| core_tranfer_subject_to_common(x.clone()))
+            .collect())
+    }
+
+    ///////// Auth
+    ////////////////////////////
     pub async fn put_auth_subject(
         &self,
         subject_id: String,
         witnesses: Vec<String>,
-    ) -> Result<String, Error> {
+    ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
         let mut witnesses_key = vec![];
 
         for witness in witnesses {
             witnesses_key.push(PublicKey::from_str(&witness).map_err(|e| {
-                Error::Bridge(format!("Invalid key identifier: {}", e))
+                BridgeError::InvalidPublicKey(e.to_string())
             })?);
         }
 
@@ -293,117 +326,149 @@ impl Bridge {
             AuthWitness::Many(witnesses_key)
         };
 
-        self.api.auth_subject(subject_id, auh_witness).await
+        Ok(self.api.auth_subject(subject_id, auh_witness).await?)
     }
 
-    pub async fn get_all_auth_subjects(&self) -> Result<Vec<String>, Error> {
-        self.api.all_auth_subjects().await
+    pub async fn get_all_auth_subjects(
+        &self,
+    ) -> Result<Vec<String>, BridgeError> {
+        let res = self.api.all_auth_subjects().await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
     }
 
     pub async fn get_witnesses_subject(
         &self,
         subject_id: String,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<HashSet<String>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        let auth_witness = self.api.witnesses_subject(subject_id).await?;
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        match auth_witness {
-            AuthWitness::One(key_identifier) => {
-                Ok(vec![key_identifier.to_string()])
-            }
-            AuthWitness::Many(vec) => {
-                Ok(vec.iter().map(|x| x.to_string()).collect())
-            }
-            AuthWitness::None => Ok(vec![]),
-        }
+        let res = self.api.witnesses_subject(subject_id).await?;
+
+        Ok(res.iter().map(|x| x.to_string()).collect())
     }
 
     pub async fn delete_auth_subject(
         &self,
         subject_id: String,
-    ) -> Result<String, Error> {
+    ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.delete_auth_subject(subject_id).await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.delete_auth_subject(subject_id).await?)
     }
 
-    pub async fn check_transfer(
+    pub async fn post_update_subject(
         &self,
         subject_id: String,
-    ) -> Result<String, Error> {
+    ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.check_transfer(subject_id).await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.update_subject(subject_id).await?)
     }
 
-    pub async fn update_subject(
+    ///////// manual distribution
+    ////////////////////////////
+    pub async fn post_manual_distribution(
         &self,
         subject_id: String,
-    ) -> Result<String, Error> {
+    ) -> Result<String, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.update_subject(subject_id).await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.manual_distribution(subject_id).await?)
     }
 
+    ///////// Register
+    ////////////////////////////
     pub async fn get_all_govs(
         &self,
         active: Option<bool>,
-    ) -> Result<Vec<GovsData>, Error> {
-        let govs = self.api.all_govs(active).await?;
-        Ok(govs
-            .into_iter()
-            .map(conversions::core_gov_to_common)
-            .collect())
+    ) -> Result<Vec<GovsData>, BridgeError> {
+        Ok(self.api.all_govs(active).await?)
     }
 
     pub async fn get_all_subjs(
         &self,
-        gov_id: String,
+        governance_id: String,
         active: Option<bool>,
-        schema: Option<String>,
-    ) -> Result<Vec<SubjsData>, Error> {
-        let gov_id = DigestIdentifier::from_str(&gov_id).map_err(|e| {
-            Error::Bridge(format!("Invalid governance id: {}", e))
-        })?;
-        let subjs = self.api.all_subjs(gov_id, active, schema).await?;
-        Ok(subjs
-            .into_iter()
-            .map(conversions::core_subj_to_common)
-            .collect())
+        schema_id: Option<String>,
+    ) -> Result<Vec<SubjsData>, BridgeError> {
+        let governance_id = DigestIdentifier::from_str(&governance_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self
+            .api
+            .all_subjs(governance_id, active, schema_id)
+            .await?)
     }
 
-    pub async fn manual_distribution(
-        &self,
-        subject_id: String,
-    ) -> Result<String, Error> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.manual_distribution(subject_id).await
-    }
-
+    ///////// Query
+    ////////////////////////////
     pub async fn get_events(
         &self,
         subject_id: String,
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
-    ) -> Result<PaginatorEvents, Error> {
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
+    ) -> Result<PaginatorEvents, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api
-            .get_events(subject_id, quantity, page, reverse)
-            .await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self
+            .api
+            .get_events(
+                subject_id,
+                quantity,
+                page,
+                reverse,
+                event_request_ts,
+                event_ledger_ts,
+                sink_ts,
+            )
+            .await?)
+    }
+
+    pub async fn get_aborts(
+        &self,
+        subject_id: String,
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, BridgeError> {
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        let request_id = if let Some(request_id) = request_id {
+            Some(DigestIdentifier::from_str(&request_id).map_err(|e| {
+                BridgeError::InvalidRequestId(e.to_string())
+            })?)
+        } else {
+            None
+        };
+
+        Ok(self
+            .api
+            .get_aborts(subject_id, request_id, sn, quantity, page, reverse)
+            .await?)
     }
 
     pub async fn get_event_sn(
         &self,
         subject_id: String,
         sn: u64,
-    ) -> Result<EventInfo, Error> {
+    ) -> Result<LedgerDB, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.get_event_sn(subject_id, sn).await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.get_event_sn(subject_id, sn).await?)
     }
 
     pub async fn get_first_or_end_events(
@@ -411,30 +476,23 @@ impl Bridge {
         subject_id: String,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        success: Option<bool>,
-    ) -> Result<Vec<EventInfo>, Error> {
+    ) -> Result<Vec<LedgerDB>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api
-            .get_first_or_end_events(subject_id, quantity, reverse, success)
-            .await
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self
+            .api
+            .get_first_or_end_events(subject_id, quantity, reverse)
+            .await?)
     }
 
-    pub async fn get_subject(
+    pub async fn get_subject_state(
         &self,
         subject_id: String,
-    ) -> Result<SubjectInfo, Error> {
+    ) -> Result<SubjectDB, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.get_subject(subject_id).await
-    }
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-    pub async fn get_signatures(
-        &self,
-        subject_id: String,
-    ) -> Result<SignaturesInfo, Error> {
-        let subject_id = DigestIdentifier::from_str(&subject_id)
-            .map_err(|e| Error::Bridge(format!("Invalid subject id: {}", e)))?;
-        self.api.get_signatures(subject_id).await
+        Ok(self.api.get_subject_state(subject_id).await?)
     }
 }

@@ -1,33 +1,41 @@
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
-use rusqlite::{Connection, OpenFlags, params};
-use serde_json::{Value, json};
-use tracing::error;
-
-use crate::approval::approver::ApproverEvent;
-use crate::approval::request::ApprovalReq;
-use crate::error::Error;
-use crate::external_db::{DBManager, DBManagerMessage, DeleteTypes};
-use crate::helpers::db::common::{ApprovalReqInfo, ApproveInfo, EventDB};
-use crate::model::event::{LedgerValue};
-use crate::request::RequestHandlerEvent;
-use crate::request::manager::RequestManagerEvent;
-use crate::request::types::RequestManagerState;
-use crate::subject::SignedLedger;
-use crate::subject::laststate::LastStateEvent;
-use crate::subject::sinkdata::{SinkDataEvent, SinkDataMessage};
-
-use super::common::{
-    EventInfo, Paginator, PaginatorEvents, SignaturesDB, SignaturesInfo,
-    SubjectDB, SubjectInfo,
+use ave_common::response::{
+    AbortDB, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
+    RequestEventDB, SubjectDB, TimeRange,
 };
-use super::{Querys, RequestInfo};
+use rusqlite::types::Type;
+use rusqlite::{Connection, OpenFlags, params};
+use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tracing::{debug, error};
 
-const TARGET_SQLITE: &str = "Ave-Helper-DB-Sqlite";
+use super::{DatabaseError, Querys};
+use crate::external_db::{DBManager, DBManagerMessage};
+use crate::request::tracking::RequestTrackingEvent;
+use crate::subject::sinkdata::SinkDataEvent;
+use crate::subject::{Metadata, SignedLedger};
+
+/// Parses an ISO 8601 string and converts it to nanoseconds (i64 for SQLite).
+fn parse_iso8601_to_nanos(s: &str) -> Result<i64, DatabaseError> {
+    let dt = OffsetDateTime::parse(s, &Rfc3339).map_err(|e| {
+        DatabaseError::DateTimeParse(format!(
+            "Invalid ISO 8601 date '{}': {}",
+            s, e
+        ))
+    })?;
+    let nanos = dt.unix_timestamp_nanos();
+    i64::try_from(nanos).map_err(|_| {
+        DatabaseError::IntegerConversion(format!(
+            "Timestamp nanoseconds out of range for i64: {}",
+            nanos
+        ))
+    })
+}
 
 #[derive(Clone)]
 pub struct SqliteLocal {
@@ -37,111 +45,236 @@ pub struct SqliteLocal {
 
 #[async_trait]
 impl Querys for SqliteLocal {
-    async fn get_signatures(
+    async fn get_aborts(
         &self,
         subject_id: &str,
-    ) -> Result<SignaturesInfo, Error> {
-        let subject_id = subject_id.to_owned();
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
+    ) -> Result<PaginatorAborts, DatabaseError> {
+        let quantity = quantity.unwrap_or(50).max(1);
+        let mut page = page.unwrap_or(1).max(1);
 
-        let signatures: SignaturesDB = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql = "SELECT * FROM signatures WHERE subject_id = ?1";
+        // Build WHERE clauses and parameters
+        let mut where_clauses = vec!["subject_id = ?1".to_string()];
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![subject_id.to_string().into()];
 
-                conn.query_row(sql, params![subject_id], |row| {
-                    Ok(SignaturesDB {
-                        subject_id: row.get(0)?,
-                        sn: row.get(1)?,
-                        signatures_eval: row.get(2)?,
-                        signatures_appr: row.get(3)?,
-                        signatures_vali: row.get(4)?,
+        if let Some(rid) = request_id {
+            params_values.push(rid.into());
+            where_clauses
+                .push(format!("request_id = ?{}", params_values.len()));
+        }
+
+        if let Some(sn_val) = sn {
+            let sn_i64 = i64::try_from(sn_val).map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "sn out of range for SQLite INTEGER (i64): {sn_val}"
+                ))
+            })?;
+            params_values.push(sn_i64.into());
+            where_clauses.push(format!("sn = ?{}", params_values.len()));
+        }
+
+        let where_sql = where_clauses.join(" AND ");
+
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        // Count query with filters
+        let count_sql =
+            format!("SELECT COUNT(*) FROM aborts WHERE {}", where_sql);
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let total_i64: i64 = conn
+            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let total = u64::try_from(total_i64).map_err(|_| {
+            DatabaseError::IntegerConversion(
+                "COUNT(*) returned invalid value".to_owned(),
+            )
+        })?;
+
+        if total == 0 {
+            return Ok(PaginatorAborts {
+                paginator: Paginator {
+                    pages: 0,
+                    next: None,
+                    prev: None,
+                },
+                events: vec![],
+            });
+        }
+
+        let mut pages = (total + quantity - 1) / quantity;
+        if pages == 0 {
+            pages = 1;
+        }
+        if page > pages {
+            page = pages;
+        }
+
+        let offset = (page - 1) * quantity;
+
+        let order_clause = if reverse.unwrap_or(false) {
+            "sn DESC"
+        } else {
+            "sn ASC"
+        };
+
+        let quantity_i64 = i64::try_from(quantity).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "quantity out of range for SQLite INTEGER (i64): {quantity}"
+            ))
+        })?;
+        let offset_i64 = i64::try_from(offset).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "offset out of range for SQLite INTEGER (i64): {offset}"
+            ))
+        })?;
+
+        // Add LIMIT and OFFSET params
+        params_values.push(quantity_i64.into());
+        let limit_idx = params_values.len();
+        params_values.push(offset_i64.into());
+        let offset_idx = params_values.len();
+
+        let sql = format!(
+            r#"
+            SELECT request_id, subject_id, sn, error, who, abort_type
+            FROM aborts
+            WHERE {}
+            ORDER BY {}
+            LIMIT ?{} OFFSET ?{}
+            "#,
+            where_sql, order_clause, limit_idx, offset_idx
+        );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let aborts: Vec<AbortDB> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let sn_opt: Option<i64> = row.get(2)?;
+                let sn = sn_opt
+                    .map(|v| {
+                        u64::try_from(v).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                Type::Integer,
+                                Box::new(e),
+                            )
+                        })
                     })
+                    .transpose()?;
+
+                Ok(AbortDB {
+                    request_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    sn,
+                    error: row.get(3)?,
+                    who: row.get(4)?,
+                    abort_type: row.get(5)?,
                 })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
-        };
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
 
-        let signatures_eval = if let Some(sig_eval) = signatures.signatures_eval
-        {
-            Some(serde_json::from_str(&sig_eval).map_err(|e| Error::ExtDB(format!("Can not convert signatures_eval into Option<HashSet<ProtocolsSignaturesInfo>>: {}", e)))?)
-        } else {
-            None
-        };
+        let prev = if page <= 1 { None } else { Some(page - 1) };
+        let next = if page < pages { Some(page + 1) } else { None };
+        let paginator = Paginator { pages, next, prev };
 
-        let signatures_appr = if let Some(sig_appr) = signatures.signatures_appr
-        {
-            Some(serde_json::from_str(&sig_appr).map_err(|e| Error::ExtDB(format!("Can not convert signatures_appr into Option<HashSet<ProtocolsSignaturesInfo>>: {}", e)))?)
-        } else {
-            None
-        };
-
-        Ok(SignaturesInfo {
-            subject_id: signatures.subject_id,
-            sn: signatures.sn,
-            signatures_eval,
-            signatures_appr,
-            signatures_vali: serde_json::from_str(&signatures.signatures_vali).map_err(|e| Error::ExtDB(format!("Can not convert signatures_vali into HashSet<ProtocolsSignaturesInfo>: {}", e)))?
+        Ok(PaginatorAborts {
+            paginator,
+            events: aborts,
         })
     }
 
     async fn get_subject_state(
         &self,
         subject_id: &str,
-    ) -> Result<SubjectInfo, Error> {
+    ) -> Result<SubjectDB, DatabaseError> {
         let subject_id = subject_id.to_owned();
 
         let subject: SubjectDB = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql = "SELECT * FROM subjects WHERE subject_id = ?1";
+            let conn =
+                self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
-                conn.query_row(sql, params![subject_id], |row| {
-                    Ok(SubjectDB {
-                        name: row.get(0)?,
-                        description: row.get(1)?,
-                        subject_id: row.get(2)?,
-                        governance_id: row.get(3)?,
-                        genesis_gov_version: row.get(4)?,
-                        namespace: row.get(5)?,
-                        schema_id: row.get(6)?,
-                        owner: row.get(7)?,
-                        creator: row.get(8)?,
-                        active: row.get(9)?,
-                        sn: row.get(10)?,
-                        properties: row.get(11)?,
-                        new_owner: row.get(12)?,
-                    })
+            let sql = r#"
+            SELECT
+                name, description, subject_id, governance_id, genesis_gov_version,
+                prev_ledger_event_hash, schema_id, namespace, sn,
+                creator, owner, new_owner, active, properties
+            FROM subjects
+            WHERE subject_id = ?1
+        "#;
+
+            conn.query_row(sql, params![subject_id], |row| {
+                let props_str: String = row.get(13)?;
+                let props_val: Value = serde_json::from_str(&props_str)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            13,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
+                let genesis_gov_version =
+                    u64::try_from(row.get::<usize, i64>(4)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(8)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+
+                Ok(SubjectDB {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    subject_id: row.get(2)?,
+                    governance_id: row.get(3)?,
+                    genesis_gov_version,
+                    prev_ledger_event_hash: row.get(5)?,
+                    schema_id: row.get(6)?,
+                    namespace: row.get(7)?,
+                    sn,
+                    creator: row.get(9)?,
+                    owner: row.get(10)?,
+                    new_owner: row.get(11)?,
+                    active: row.get::<usize, i64>(12)? != 0,
+                    properties: props_val,
                 })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    DatabaseError::SubjectNotFound(subject_id.clone())
+                }
+                _ => DatabaseError::Query(e.to_string()),
+            })?
         };
 
-        Ok(SubjectInfo {
-            name: subject.name.unwrap_or_default(),
-            description: subject.description.unwrap_or_default(),
-            subject_id: subject.subject_id,
-            governance_id: subject.governance_id,
-            genesis_gov_version: subject.genesis_gov_version,
-            namespace: subject.namespace,
-            schema_id: subject.schema_id,
-            owner: subject.owner,
-            creator: subject.creator,
-            active: subject.active,
-            sn: subject.sn,
-            properties: Value::from_str(&subject.properties).map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert properties into Value: {}",
-                    e
-                ))
-            })?,
-            new_owner: subject.new_owner,
-        })
+        Ok(subject)
     }
 
     async fn get_events(
@@ -150,161 +283,279 @@ impl Querys for SqliteLocal {
         quantity: Option<u64>,
         page: Option<u64>,
         reverse: Option<bool>,
-    ) -> Result<PaginatorEvents, Error> {
-        let mut quantity = quantity.unwrap_or(50);
-        let mut page = page.unwrap_or(1);
-        if page == 0 {
-            page = 1;
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
+    ) -> Result<PaginatorEvents, DatabaseError> {
+        let quantity = quantity.unwrap_or(50).max(1);
+        let mut page = page.unwrap_or(1).max(1);
+
+        // Build WHERE clauses and parameters for timestamp filters
+        let mut where_clauses = vec!["subject_id = ?1".to_string()];
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![subject_id.to_string().into()];
+
+        // Helper to add timestamp range filters
+        let mut add_ts_filter = |col: &str,
+                                 range: Option<TimeRange>|
+         -> Result<(), DatabaseError> {
+            if let Some(r) = range {
+                if let Some(from) = r.from {
+                    let nanos = parse_iso8601_to_nanos(&from)?;
+                    params_values.push(nanos.into());
+                    where_clauses.push(format!(
+                        "{} >= ?{}",
+                        col,
+                        params_values.len()
+                    ));
+                }
+                if let Some(to) = r.to {
+                    let nanos = parse_iso8601_to_nanos(&to)?;
+                    params_values.push(nanos.into());
+                    where_clauses.push(format!(
+                        "{} <= ?{}",
+                        col,
+                        params_values.len()
+                    ));
+                }
+            }
+            Ok(())
+        };
+
+        add_ts_filter("event_request_timestamp", event_request_ts)?;
+        add_ts_filter("event_ledger_timestamp", event_ledger_ts)?;
+        add_ts_filter("sink_timestamp", sink_ts)?;
+
+        let where_sql = where_clauses.join(" AND ");
+
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        // Count query with filters
+        let count_sql =
+            format!("SELECT COUNT(*) FROM events WHERE {}", where_sql);
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let total_i64: i64 = conn
+            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let total = u64::try_from(total_i64).map_err(|_| {
+            DatabaseError::IntegerConversion(
+                "COUNT(*) returned invalid value".to_owned(),
+            )
+        })?;
+
+        if total == 0 {
+            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
         }
-        if quantity == 0 {
-            quantity = 1;
+
+        let mut pages = (total + quantity - 1) / quantity;
+        if pages == 0 {
+            pages = 1;
+        }
+        if page > pages {
+            page = pages;
         }
 
-        let subject_id_cloned = subject_id.to_owned();
+        let offset = (page - 1) * quantity;
 
-        let sql = "SELECT COUNT(*) FROM events WHERE subject_id = ?1";
-
-        if let Ok(conn) = self.conn.lock() {
-            let total: u64 = conn
-                .query_row(sql, params![subject_id_cloned], |row| row.get(0))
-                .map_err(|e| Error::ExtDB(e.to_string()))?;
-
-            if total == 0 {
-                return Err(Error::ExtDB(format!(
-                    "There is no event for subject {}",
-                    subject_id
-                )));
-            }
-
-            let mut pages = if total.is_multiple_of(quantity) {
-                total / quantity
-            } else {
-                total / quantity + 1
-            };
-
-            if pages == 0 {
-                pages = 1;
-            }
-
-            if page > pages {
-                page = pages
-            }
-
-            let offset = (page - 1) * quantity;
-            let subject_id = subject_id.to_owned();
-
-            let order_clause = if reverse.unwrap_or_default() {
-                "sn DESC"
-            } else {
-                "sn ASC"
-            };
-
-            let sql = format!(
-                "SELECT * FROM events WHERE subject_id = ?1 ORDER BY {} LIMIT ?2 OFFSET ?3",
-                order_clause
-            );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| Error::ExtDB(e.to_string()))?;
-
-            let events = stmt.query_map(params![subject_id, quantity, offset], |row| {
-                    Ok(EventDB {
-                        subject_id: row.get(0)?,
-                        sn: row.get(1)?,
-                        patch: row.get(2)?,
-                        error: row.get(3)?,
-                        event_req: row.get(4)?,
-                        succes: row.get(5)?,
-                    })
-                }).map_err(|e| Error::ExtDB(e.to_string()))?.map(|x| {
-                    let event = x.map_err(|e| Error::ExtDB(e.to_string()))?;
-
-                    let patch = if let Some(patch) = event.patch {
-                        Some(Value::from_str(&patch).map_err(|e| Error::ExtDB(format!("Can not convert patch into Value: {}", e)))?)
-                    } else {
-                        None
-                    };
-
-                    let error =  if let Some(error) = event.error {
-                        Some(serde_json::from_str(&error).map_err(|e| Error::ExtDB(format!("Can not convert patch into Value: {}", e)))?)
-                    } else {
-                        None
-                    };
-                    Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: event.succes })
-                }).collect::<std::result::Result<Vec<EventInfo>, Error>>()?;
-
-            let prev = if page <= 1 { None } else { Some(page - 1) };
-
-            let next = if page < pages { Some(page + 1) } else { None };
-            let paginator = Paginator { pages, next, prev };
-
-            Ok(PaginatorEvents { paginator, events })
+        let order_clause = if reverse.unwrap_or(false) {
+            "sn DESC"
         } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
+            "sn ASC"
+        };
+
+        let quantity_i64 = i64::try_from(quantity).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "quantity out of range for SQLite INTEGER (i64): {quantity}"
+            ))
+        })?;
+        let offset_i64 = i64::try_from(offset).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "offset out of range for SQLite INTEGER (i64): {offset}"
+            ))
+        })?;
+
+        // Add LIMIT and OFFSET params
+        params_values.push(quantity_i64.into());
+        let limit_idx = params_values.len();
+        params_values.push(offset_i64.into());
+        let offset_idx = params_values.len();
+
+        let sql = format!(
+            r#"
+        SELECT
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+        FROM events
+        WHERE {}
+        ORDER BY {}
+        LIMIT ?{} OFFSET ?{}
+        "#,
+            where_sql, order_clause, limit_idx, offset_idx
+        );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let events: Vec<LedgerDB> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let event_str: String = row.get(5)?;
+                let event: RequestEventDB = serde_json::from_str(&event_str)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
+                Ok(LedgerDB {
+                    subject_id: row.get(0)?,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
+                    event,
+                })
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        let prev = if page <= 1 { None } else { Some(page - 1) };
+        let next = if page < pages { Some(page + 1) } else { None };
+        let paginator = Paginator { pages, next, prev };
+
+        Ok(PaginatorEvents { paginator, events })
     }
 
-    async fn get_events_sn(
+    async fn get_event_sn(
         &self,
         subject_id: &str,
         sn: u64,
-    ) -> Result<EventInfo, Error> {
-        let subject_id = subject_id.to_owned();
+    ) -> Result<LedgerDB, DatabaseError> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
-        let event = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql =
-                    "SELECT * FROM events WHERE subject_id = ?1 AND sn = ?2";
+        let sn_i64 = i64::try_from(sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {sn}"
+            ))
+        })?;
 
-                conn.query_row(sql, params![subject_id, sn], |row| {
-                    Ok(EventDB {
-                        subject_id: row.get(0)?,
-                        sn: row.get(1)?,
-                        patch: row.get(2)?,
-                        error: row.get(3)?,
-                        event_req: row.get(4)?,
-                        succes: row.get(5)?,
-                    })
+        let sql = r#"
+        SELECT
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+        FROM events
+        WHERE subject_id = ?1 AND sn = ?2
+    "#;
+
+        let ledger = conn
+            .query_row(sql, params![subject_id, sn_i64], |row| {
+                let event_str: String = row.get(5)?;
+                let event: RequestEventDB = serde_json::from_str(&event_str)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
+                Ok(LedgerDB {
+                    subject_id: row.get(0)?,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
+                    event,
                 })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
-        };
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    DatabaseError::EventNotFound {
+                        subject_id: subject_id.to_owned(),
+                        sn,
+                    }
+                }
+                _ => DatabaseError::Query(e.to_string()),
+            })?;
 
-        let patch = if let Some(patch) = event.patch {
-            Some(Value::from_str(&patch).map_err(|e| {
-                Error::ExtDB(format!("Can not convert patch into Value: {}", e))
-            })?)
-        } else {
-            None
-        };
-
-        let error = if let Some(error) = event.error {
-            Some(serde_json::from_str(&error).map_err(|e| {
-                Error::ExtDB(format!("Can not convert patch into Value: {}", e))
-            })?)
-        } else {
-            None
-        };
-
-        Ok(EventInfo {
-            subject_id: event.subject_id,
-            sn: event.sn,
-            patch,
-            error,
-            event_req: serde_json::from_str(&event.event_req).map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert event_req into EventRequestInfo: {}",
-                    e
-                ))
-            })?,
-            succes: event.succes,
-        })
+        Ok(ledger)
     }
 
     async fn get_first_or_end_events(
@@ -312,145 +563,94 @@ impl Querys for SqliteLocal {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        sucess: Option<bool>,
-    ) -> Result<Vec<EventInfo>, Error> {
-        let subject_id = subject_id.to_owned();
-        let mut quantity = quantity.unwrap_or(50);
-        if quantity == 0 {
-            quantity = 1;
-        }
-        let reverse = reverse.unwrap_or_default();
+    ) -> Result<Vec<LedgerDB>, DatabaseError> {
+        let quantity = quantity.unwrap_or(50).max(1);
+        let reverse = reverse.unwrap_or(false);
         let order = if reverse { "DESC" } else { "ASC" };
-        let sucess_condition = if let Some(sucess_value) = sucess {
-            format!("AND succes = {}", if sucess_value { 1 } else { 0 })
-        } else {
-            String::default()
-        };
 
-        if let Ok(conn) = self.conn.lock() {
-            let sql = format!(
-                "SELECT * FROM events WHERE subject_id = ?1 {} ORDER BY sn {} LIMIT ?2",
-                sucess_condition, order
-            );
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| Error::ExtDB(e.to_string()))?;
+        let limit_i64 = i64::try_from(quantity).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "quantity out of range for SQLite INTEGER (i64): {quantity}"
+            ))
+        })?;
 
-            stmt.query_map(params![subject_id, quantity], |row| {
-                Ok(EventDB {
+        let sql = format!(
+            r#"
+        SELECT
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+        FROM events
+        WHERE subject_id = ?1
+        ORDER BY sn {}
+        LIMIT ?2
+        "#,
+            order
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let events: Vec<LedgerDB> = stmt
+            .query_map(params![subject_id, limit_i64], |row| {
+                let event_str: String = row.get(5)?;
+                let event: RequestEventDB = serde_json::from_str(&event_str)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
+                let sn =
+                    u64::try_from(row.get::<usize, i64>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_request_timestamp =
+                    u64::try_from(row.get::<usize, i64>(2)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let event_ledger_timestamp =
+                    u64::try_from(row.get::<usize, i64>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            Type::Integer,
+                            Box::new(e),
+                        )
+                    })?;
+                let sink_timestamp = u64::try_from(row.get::<usize, i64>(4)?)
+                    .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Integer,
+                        Box::new(e),
+                    )
+                })?;
+
+                Ok(LedgerDB {
                     subject_id: row.get(0)?,
-                    sn: row.get(1)?,
-                    patch: row.get(2)?,
-                    error: row.get(3)?,
-                    event_req: row.get(4)?,
-                    succes: row.get(5)?,
-                })
-            }).map_err(|e| Error::ExtDB(e.to_string()))?.map(|x| {
-                let event = x.map_err(|e| Error::ExtDB(e.to_string()))?;
-
-                let patch = if let Some(patch) = event.patch {
-                    Some(Value::from_str(&patch).map_err(|e| Error::ExtDB(format!("Can not convert patch into Value: {}", e)))?)
-                } else {
-                    None
-                };
-
-                let error =  if let Some(error) = event.error {
-                    Some(serde_json::from_str(&error).map_err(|e| Error::ExtDB(format!("Can not convert patch into Value: {}", e)))?)
-                } else {
-                    None
-                };
-                Ok(EventInfo { subject_id: event.subject_id, sn: event.sn, patch, error, event_req: serde_json::from_str(&event.event_req).map_err(|e| Error::ExtDB(format!("Can not convert event_req into EventRequestInfo: {}", e)))?, succes: event.succes })
-            }).collect::<std::result::Result<Vec<EventInfo>, Error>>()
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
-
-    async fn get_request_id_status(
-        &self,
-        request_id: &str,
-    ) -> Result<RequestInfo, Error> {
-        let request_id = request_id.to_owned();
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "SELECT state, version, error FROM request WHERE id = ?1";
-
-            conn.query_row(sql, params![request_id], |row| {
-                Ok(RequestInfo {
-                    status: row.get(0)?,
-                    version: row.get(1)?,
-                    error: row.get(2)?,
+                    sn,
+                    event_request_timestamp,
+                    event_ledger_timestamp,
+                    sink_timestamp,
+                    event,
                 })
             })
-            .map_err(|e| Error::ExtDB(e.to_string()))
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
 
-    async fn del_request(&self, request_id: &str) -> Result<(), Error> {
-        let request_id = request_id.to_owned();
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "DELETE FROM request WHERE id = ?1";
-
-            conn.execute(sql, params![request_id])
-                .map_err(|e| Error::ExtDB(e.to_string()))?;
-            Ok(())
-        } else {
-            return Err(Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            ));
-        }
-    }
-
-    async fn get_approve_req(
-        &self,
-        subject_id: &str,
-    ) -> Result<ApproveInfo, Error> {
-        let subject_id = subject_id.to_owned();
-
-        let approve: (String, String) = {
-            if let Ok(conn) = self.conn.lock() {
-                let sql =
-                    "SELECT data, state FROM approval WHERE subject_id = ?1";
-
-                conn.query_row(sql, params![subject_id], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .map_err(|e| Error::ExtDB(e.to_string()))?
-            } else {
-                return Err(Error::ExtDB(
-                    "Can not lock mutex connection with DB".to_owned(),
-                ));
-            }
-        };
-
-        let approval_request: ApprovalReq = serde_json::from_str(&approve.0)
-            .map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert str to ApprovalReq {}",
-                    e
-                ))
-            })?;
-
-        let approval_request_info = ApprovalReqInfo::try_from(approval_request)
-            .map_err(|e| {
-                Error::ExtDB(format!(
-                    "Can not convert ApprovalReq to ApprovalReqInfo {}",
-                    e
-                ))
-            })?;
-
-        Ok(ApproveInfo {
-            state: approve.1,
-            request: approval_request_info,
-        })
+        Ok(events)
     }
 }
 
@@ -458,18 +658,32 @@ impl SqliteLocal {
     pub async fn new(
         path: &PathBuf,
         manager: ActorRef<DBManager>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, DatabaseError> {
         let flags = OpenFlags::default();
         let conn = Connection::open_with_flags(path, flags).map_err(|e| {
-            Error::ExtDB(format!("SQLite fail open connection: {}", e))
+            error!(
+                path = %path.display(),
+                error = %e,
+                "Failed to open SQLite database connection"
+            );
+            DatabaseError::ConnectionOpen(e.to_string())
         })?;
 
-        // Run database migrations
         let migration_001 =
             include_str!("../../../migrations/001_initial_schema.sql");
         conn.execute_batch(migration_001).map_err(|e| {
-            Error::ExtDB(format!("Migration 001 failed: {}", e))
+            error!(
+                path = %path.display(),
+                error = %e,
+                "Failed to run SQLite migrations"
+            );
+            DatabaseError::Migration(e.to_string())
         })?;
+
+        debug!(
+            path = %path.display(),
+            "SQLite database connection established and migrations applied"
+        );
 
         Ok(SqliteLocal {
             conn: Arc::new(Mutex::new(conn)),
@@ -478,461 +692,220 @@ impl SqliteLocal {
     }
 }
 
-#[async_trait]
-impl Subscriber<RequestManagerEvent> for SqliteLocal {
-    async fn notify(&self, event: RequestManagerEvent) {
-        let sql = match event {
-            RequestManagerEvent::UpdateState { id, state } => {
-                let state = match *state {
-                    RequestManagerState::Starting => return,
-                    RequestManagerState::Reboot => "In Reboot".to_owned(),
-                    RequestManagerState::Evaluation => {
-                        "In Evaluation".to_owned()
-                    }
-                    RequestManagerState::Approval { .. } => {
-                        "In Approval".to_owned()
-                    }
-                    RequestManagerState::Validation { .. } => {
-                        "In Validation".to_owned()
-                    }
-                    RequestManagerState::Distribution { .. } => {
-                        "In Distribution".to_owned()
-                    }
-                };
+impl SqliteLocal {
+    async fn save_signed_ledger(
+        &self,
+        event: &SignedLedger,
+    ) -> Result<(), DatabaseError> {
+        let event_db = event
+            .content()
+            .build_ledger_db(event.signature().timestamp.as_nanos());
 
-                format!(
-                    "UPDATE request SET state = '{}' WHERE id = '{}'",
-                    state, id
-                )
-            }
-            RequestManagerEvent::UpdateVersion { id, version } => {
-                format!(
-                    "UPDATE request SET version = '{}' WHERE id = '{}'",
-                    version, id
-                )
-            }
-        };
+        let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                event_db.sn
+            ))
+        })?;
+        let req_ts_i64 = i64::try_from(event_db.event_request_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "event_request_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.event_request_timestamp
+                ))
+            })?;
+        let ledger_ts_i64 = i64::try_from(event_db.event_ledger_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "event_ledger_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.event_ledger_timestamp
+                ))
+            })?;
+        let sink_timestamp_i64 = i64::try_from(event_db.sink_timestamp)
+            .map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "sink_timestamp out of range for SQLite INTEGER (i64): {}",
+                    event_db.sink_timestamp
+                ))
+            })?;
 
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(&sql, params![]).map_err(async |e| {
-                let e = Error::ExtDB(format!(
-                    "Can not update request state: {}",
-                    e
-                ));
-                error!(TARGET_SQLITE, "Subscriber<RequestManagerEvent>: {}", e);
-                if let Err(e) =
-                    self.manager.tell(DBManagerMessage::Error(e)).await
-                {
-                    error!(
-                        TARGET_SQLITE,
-                        "Can no send message to DBManager actor: {}", e
-                    );
-                }
-            });
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<RequestManagerEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
+        let event_json = serde_json::to_string(&event_db.event)
+            .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
+
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        conn.execute(
+            r#"
+        INSERT INTO events (
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "#,
+            params![
+                event_db.subject_id,
+                sn_i64,
+                req_ts_i64,
+                ledger_ts_i64,
+                sink_timestamp_i64,
+                event_json
+            ],
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(())
     }
-}
 
-#[async_trait]
-impl Subscriber<RequestHandlerEvent> for SqliteLocal {
-    async fn notify(&self, event: RequestHandlerEvent) {
-        let (id, state, insert, mut error) = match event {
-            RequestHandlerEvent::Abort { id, error, .. } => {
-                (id, "Abort".to_owned(), false, error)
-            }
-            RequestHandlerEvent::EventToQueue { id, .. } => {
-                (id, "In queue".to_owned(), true, String::default())
-            }
-            RequestHandlerEvent::Invalid { id, error, .. } => {
-                (id, "Invalid".to_owned(), false, error)
-            }
-            RequestHandlerEvent::FinishHandling { id, .. } => {
-                (id, "Finish".to_owned(), false, String::default())
-            }
-            RequestHandlerEvent::EventToHandling { request_id, .. } => (
-                request_id,
-                "In Handling".to_owned(),
-                false,
-                String::default(),
-            ),
-        };
-
-        let sql = if insert {
-            "INSERT INTO request (id, state, version) VALUES (?1, ?2, 0)"
-                .to_owned()
-        } else {
-            if !error.is_empty() {
-                error = format!(", error = '{}'", error);
-            }
-            format!("UPDATE request SET state = ?2{} WHERE id = ?1", error)
-        };
-
-        let id_clone = id.clone();
-        let state_clone = state.clone();
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(&sql, params![id_clone, state_clone]).map_err(
-                async |e| {
-                    let e = Error::ExtDB(format!(
-                        "Update request_id {} state {}: {}",
-                        id, state, e
-                    ));
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<RequestHandlerEvent>: {}", e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                },
-            );
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<RequestHandlerEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
-
-        if state == "Finish"
-            && let Err(e) = self
-                .manager
-                .tell(DBManagerMessage::Delete(DeleteTypes::Request { id }))
-                .await
-        {
-            error!(
-                TARGET_SQLITE,
-                "Can no send message to DBManager actor: {}", e
-            );
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<ApproverEvent> for SqliteLocal {
-    async fn notify(&self, event: ApproverEvent) {
-        match event {
-            ApproverEvent::ChangeState { subject_id, state } => {
-                let response = state.to_string();
-
-                if let Ok(conn) = self.conn.lock() {
-                    let sql =
-                        "UPDATE approval SET state = ?1 WHERE subject_id = ?2";
-
-                    let _ = conn.execute(sql, params![response, subject_id]).map_err(async |e| {
-                        let e = Error::ExtDB(format!("Can not update approval: {}", e));
-                        error!(TARGET_SQLITE, "Subscriber<ApproverEvent> ApproverEvent::ChangeState: {}", e);
-                        if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-                        {
-                            error!(
-                                TARGET_SQLITE,
-                                "Can no send message to DBManager actor: {}", e
-                            );
-                        }
-                    });
-                } else {
-                    let e = Error::ExtDB(
-                        "Can not lock mutex connection with DB".to_owned(),
-                    );
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<ApproverEvent> ApproverEvent::ChangeState: {}",
-                        e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                }
-            }
-            ApproverEvent::SafeState {
-                subject_id,
-                request,
-                state,
-                ..
-            } => {
-                let Ok(request) = serde_json::to_string(&request) else {
-                    let e = Error::ExtDB(
-                        "Can not Serialize request as String".to_owned(),
-                    );
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<ApproverEvent> ApproverEvent::SafeState: {}",
-                        e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                    return;
-                };
-
-                if let Ok(conn) = self.conn.lock() {
-                    let sql = "INSERT OR REPLACE INTO approval (subject_id, data, state) VALUES (?1, ?2, ?3)";
-
-                    let _ = conn.execute(sql, params![subject_id, request, state.to_string()]).map_err(async |e| {
-                        let e = Error::ExtDB(format!("Can not update approval: {}", e));
-                        error!(TARGET_SQLITE, "Subscriber<ApproverEvent> ApproverEvent::SafeState: {}", e);
-                        if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-                        {
-                            error!(
-                                TARGET_SQLITE,
-                                "Can no send message to DBManager actor: {}", e
-                            );
-                        }
-                    });
-                } else {
-                    let e = Error::ExtDB(
-                        "Can not lock mutex connection with DB".to_owned(),
-                    );
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<ApproverEvent> ApproverEvent::SafeState: {}",
-                        e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-#[async_trait]
-impl Subscriber<LastStateEvent> for SqliteLocal {
-    async fn notify(&self, event: LastStateEvent) {
-        let sn = event.event.content.sn;
-        let subject_id = event.event.content.subject_id.to_string();
-
-        let sig_eval = if let Some(sig_eval) = event.event.content.evaluators {
-            let Ok(sig_eval) = serde_json::to_string(&sig_eval) else {
-                let e = Error::ExtDB(
-                    "Can not Serialize evaluators as String".to_owned(),
-                );
-                error!(TARGET_SQLITE, "Subscriber<LedgerEventEvent>: {}", e);
-                if let Err(e) =
-                    self.manager.tell(DBManagerMessage::Error(e)).await
-                {
-                    error!(
-                        TARGET_SQLITE,
-                        "Can no send message to DBManager actor: {}", e
-                    );
-                }
-                return;
+    async fn save_subject_state(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<(), DatabaseError> {
+        let prev_ledger_event_hash =
+            if metadata.prev_ledger_event_hash.is_empty() {
+                None
+            } else {
+                Some(metadata.prev_ledger_event_hash.to_string())
             };
 
-            Some(sig_eval)
+        let s = SubjectDB {
+            name: metadata.name.clone(),
+            description: metadata.description.clone(),
+            subject_id: metadata.subject_id.to_string(),
+            governance_id: metadata.governance_id.to_string(),
+            genesis_gov_version: metadata.genesis_gov_version,
+            prev_ledger_event_hash,
+            schema_id: metadata.schema_id.to_string(),
+            namespace: metadata.namespace.to_string(),
+            sn: metadata.sn,
+            creator: metadata.creator.to_string(),
+            owner: metadata.owner.to_string(),
+            new_owner: metadata.new_owner.clone().map(|x| x.to_string()),
+            active: metadata.active,
+            properties: metadata.properties.0.clone(),
+        };
+
+        let properties_json = serde_json::to_string(&s.properties)
+            .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
+
+        let active = if s.active { 1 } else { 0 };
+
+        let genesis_gov_version_i64 =
+            i64::try_from(s.genesis_gov_version).map_err(|_| {
+                DatabaseError::IntegerConversion(format!(
+                    "genesis_gov_version out of range for SQLite INTEGER (i64): {}",
+                    s.genesis_gov_version
+                ))
+            })?;
+        let sn_i64 = i64::try_from(s.sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                s.sn
+            ))
+        })?;
+
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        conn.execute(
+            r#"
+        INSERT OR REPLACE INTO subjects (
+            name, description, subject_id, governance_id, genesis_gov_version,
+            prev_ledger_event_hash, schema_id, namespace, sn,
+            creator, owner, new_owner, active, properties
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5,
+            ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12, ?13, ?14
+        )
+        "#,
+            params![
+                s.name,
+                s.description,
+                s.subject_id,
+                s.governance_id,
+                genesis_gov_version_i64,
+                s.prev_ledger_event_hash,
+                s.schema_id,
+                s.namespace,
+                sn_i64,
+                s.creator,
+                s.owner,
+                s.new_owner,
+                active,
+                properties_json
+            ],
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn save_abort(
+        &self,
+        request_id: String,
+        subject_id: String,
+        sn: Option<u64>,
+        error: String,
+        who: String,
+        abort_type: String
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
+
+        let sn_i64 = if let Some(sn) = sn {
+            Some(i64::try_from(sn).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "sn out of range for SQLite INTEGER (i64): {}",
+                sn
+            ))
+        })?)
         } else {
             None
         };
 
-        let sig_appr = if let Some(sig_appr) = event.event.content.approvers {
-            let Ok(sig_appr) = serde_json::to_string(&sig_appr) else {
-                let e = Error::ExtDB(
-                    "Can not Serialize approvers as String".to_owned(),
-                );
-                error!(TARGET_SQLITE, "Subscriber<LedgerEventEvent>: {}", e);
-                if let Err(e) =
-                    self.manager.tell(DBManagerMessage::Error(e)).await
-                {
-                    error!(
-                        TARGET_SQLITE,
-                        "Can no send message to DBManager actor: {}", e
-                    );
-                }
-                return;
-            };
+        conn.execute(
+            r#"
+        INSERT OR REPLACE INTO aborts (
+            request_id, subject_id, sn, error, who, abort_type
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6
+        )
+        "#,
+            params![request_id, subject_id, sn_i64, error, who, abort_type],
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            Some(sig_appr)
-        } else {
-            None
-        };
-
-        let Ok(sig_vali) =
-            serde_json::to_string(&event.event.content.validators)
-        else {
-            let e = Error::ExtDB(
-                "Can not Serialize validators as String".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<LedgerEventEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-            return;
-        };
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "INSERT OR REPLACE INTO signatures (subject_id, sn, signatures_eval, signatures_appr, signatures_vali) VALUES (?1, ?2, ?3, ?4, ?5)";
-
-            let _ = conn
-                .execute(
-                    sql,
-                    params![subject_id, sn, sig_eval, sig_appr, sig_vali],
-                )
-                .map_err(async |e| {
-                    let e = Error::ExtDB(format!(
-                        "Can not update signatures: {}",
-                        e
-                    ));
-                    error!(
-                        TARGET_SQLITE,
-                        "Subscriber<LedgerEventEvent>: {}", e
-                    );
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                });
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
-            );
-            error!(TARGET_SQLITE, "Subscriber<LedgerEventEvent>: {}", e);
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
-        }
+        Ok(())
     }
 }
-
-
 
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
-        let subject_id = event.content.subject_id.to_string();
-        let sn = event.content.sn;
-        let succes: i32;
-        let Ok(event_req) =
-            serde_json::to_string(&json!(event.content.event_request.content))
-        else {
-            let e = Error::ExtDB(
-                "Can not Serialize protocols_error as String".to_owned(),
+        let subject_id = event
+            .content()
+            .get_subject_id()
+            .to_string();
+        let sn = event.content().sn;
+
+        if let Err(e) = self.save_signed_ledger(&event).await {
+            error!(
+                subject_id = %subject_id,
+                sn = sn,
+                error = %e,
+                "Failed to save signed ledger to SQLite"
             );
-            error!(TARGET_SQLITE, "Subscriber<Signed<Ledger>>: {}", e);
             if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
+                    subject_id = %subject_id,
+                    sn = sn,
+                    error = %e,
+                    "Failed to notify DBManager about ledger save error"
                 );
             }
-            return;
-        };
-        let (patch, error): (Option<String>, Option<String>) =
-            match event.content.value.clone() {
-                LedgerValue::Patch(value_wrapper) => {
-                    succes = 1;
-                    (Some(value_wrapper.0.to_string()), None)
-                }
-                LedgerValue::Error(protocols_error) => {
-                    let Ok(string) = serde_json::to_string(&protocols_error)
-                    else {
-                        let e = Error::ExtDB(
-                            "Can not Serialize protocols_error as String"
-                                .to_owned(),
-                        );
-                        error!(
-                            TARGET_SQLITE,
-                            "Subscriber<Signed<Ledger>> LedgerValue::Error: {}",
-                            e
-                        );
-                        if let Err(e) =
-                            self.manager.tell(DBManagerMessage::Error(e)).await
-                        {
-                            error!(
-                                TARGET_SQLITE,
-                                "Can no send message to DBManager actor: {}", e
-                            );
-                        }
-                        return;
-                    };
-                    succes = 0;
-                    (None, Some(string))
-                }
-            };
-
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "INSERT INTO events (subject_id, sn, patch, error, event_req, succes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
-
-            let _ = conn
-                .execute(
-                    sql,
-                    params![subject_id, sn, patch, error, event_req, succes],
-                )
-                .map_err(async |e| {
-                    let e =
-                        Error::ExtDB(format!("Can not update events: {}", e));
-                    error!(TARGET_SQLITE, "Subscriber<Signed<Ledger>>: {}", e);
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                });
         } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
+            debug!(
+                subject_id = %subject_id,
+                sn = sn,
+                "Signed ledger saved to SQLite successfully"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
-            {
-                error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
-                );
-            }
         }
     }
 }
@@ -940,72 +913,83 @@ impl Subscriber<SignedLedger> for SqliteLocal {
 #[async_trait]
 impl Subscriber<SinkDataEvent> for SqliteLocal {
     async fn notify(&self, event: SinkDataEvent) {
-        let SinkDataMessage::UpdateState(metadata) = event.event else {
+        let SinkDataEvent::State(metadata) = event else {
             return;
         };
 
-        let name = metadata.name;
-        let description = metadata.description;
         let subject_id = metadata.subject_id.to_string();
-        let governance_id = metadata.governance_id.to_string();
-        let genesis_gov_version = metadata.genesis_gov_version;
-        let namespace = metadata.namespace.to_string();
-        let schema_id = metadata.schema_id.to_string();
-        let owner = metadata.owner.to_string();
-        let creator = metadata.creator.to_string();
-        let active = metadata.active as i32;
         let sn = metadata.sn;
-        let properties = metadata.properties.0.to_string();
-        let new_owner =
-            metadata.new_owner.map(|new_owner| new_owner.to_string());
 
-        if let Ok(conn) = self.conn.lock() {
-            let sql = "INSERT OR REPLACE INTO subjects (name, description, subject_id, governance_id, genesis_gov_version, namespace, schema_id, owner, creator, active, sn, properties, new_owner) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
-
-            let _ = conn
-                .execute(
-                    sql,
-                    params![
-                        name,
-                        description,
-                        subject_id,
-                        governance_id,
-                        genesis_gov_version,
-                        namespace,
-                        schema_id,
-                        owner,
-                        creator,
-                        active,
-                        sn,
-                        properties,
-                        new_owner
-                    ],
-                )
-                .map_err(async |e| {
-                    let e =
-                        Error::ExtDB(format!("Can not update subject: {}", e));
-                    error!(TARGET_SQLITE, "Subscriber<SinkDataEvent>: {}", e);
-                    if let Err(e) =
-                        self.manager.tell(DBManagerMessage::Error(e)).await
-                    {
-                        error!(
-                            TARGET_SQLITE,
-                            "Can no send message to DBManager actor: {}", e
-                        );
-                    }
-                });
-        } else {
-            let e = Error::ExtDB(
-                "Can not lock mutex connection with DB".to_owned(),
+        if let Err(e) = self.save_subject_state(&metadata).await {
+            error!(
+                subject_id = %subject_id,
+                sn = sn,
+                error = %e,
+                "Failed to save subject state to SQLite"
             );
-            error!(TARGET_SQLITE, "Subscriber<SinkDataEvent>: {}", e);
             if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
-                    TARGET_SQLITE,
-                    "Can no send message to DBManager actor: {}", e
+                    subject_id = %subject_id,
+                    sn = sn,
+                    error = %e,
+                    "Failed to notify DBManager about state save error"
                 );
             }
+        } else {
+            debug!(
+                subject_id = %subject_id,
+                sn = sn,
+                "Subject state saved to SQLite successfully"
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl Subscriber<RequestTrackingEvent> for SqliteLocal {
+    async fn notify(&self, event: RequestTrackingEvent) {
+        let request_id = event.request_id.clone();
+        let subject_id = event.subject_id.clone();
+        let sn = event.sn;
+        let who = event.who.clone();
+
+        if let Err(e) = self
+            .save_abort(
+                event.request_id,
+                event.subject_id,
+                event.sn,
+                event.error,
+                event.who,
+                event.abort_type,
+            )
+            .await
+        {
+            error!(
+                subject_id = %subject_id,
+                request_id = %request_id,
+                sn = ?sn,
+                error = %e,
+                "Failed to save abort record to SQLite"
+            );
+            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            {
+                error!(
+                    subject_id = %subject_id,
+                    request_id = %request_id,
+                    sn = ?sn,
+                    error = %e,
+                    "Failed to notify DBManager about abort save error"
+                );
+            }
+        } else {
+            debug!(
+                subject_id = %subject_id,
+                request_id = %request_id,
+                sn = ?sn,
+                who = %who,
+                "Abort record saved to SQLite successfully"
+            );
         }
     }
 }

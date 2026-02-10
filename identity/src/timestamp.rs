@@ -22,7 +22,7 @@ use time::OffsetDateTime;
     BorshSerialize,
     BorshDeserialize,
 )]
-pub struct TimeStamp(pub u64);
+pub struct TimeStamp(u64);
 
 impl TimeStamp {
     /// Returns a new `TimeStamp` representing the current time

@@ -825,10 +825,8 @@ mod tests {
 
         let ping = Ping(Bytes::from("ping"));
 
-        let protocols = iter::once((
-            StreamProtocol::new("/ping/1"),
-            ProtocolSupport::Full,
-        ));
+        let protocols =
+            iter::once((StreamProtocol::new("/ping/1"), ProtocolSupport::Full));
         let cfg = Config::default();
         let mut swarm1 = Swarm::new_ephemeral(|_| {
             Behaviour::new(protocols.clone(), cfg.clone())
@@ -920,10 +918,7 @@ mod tests {
         let offline_peer = PeerId::random();
         let mut swarm1 = Swarm::new_ephemeral(|_| {
             Behaviour::new(
-                vec![(
-                    StreamProtocol::new("/ping/1"),
-                    ProtocolSupport::Full,
-                )],
+                vec![(StreamProtocol::new("/ping/1"), ProtocolSupport::Full)],
                 Config::default(),
             )
         });

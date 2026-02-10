@@ -1,34 +1,38 @@
 //! # Helper service
 //!
 
-use crate::Error;
+use ave_actors::ActorError;
 use network::CommandHelper as Command;
 use tokio::sync::mpsc::Sender;
+use tracing::error;
 
 use super::NetworkMessage;
 
 /// The Helper service.
 #[derive(Debug, Clone)]
-pub struct HelperService {
+pub struct NetworkSender {
     /// The command sender to communicate with the worker.
     command_sender: Sender<Command<NetworkMessage>>,
 }
 
-impl HelperService {
-    /// Create a new `HelperService`.
+impl NetworkSender {
+    /// Create a new `NetworkSender`.
     pub fn new(command_sender: Sender<Command<NetworkMessage>>) -> Self {
         Self { command_sender }
     }
 
     /// Send command to the network worker.
     pub async fn send_command(
-        &mut self,
+        &self,
         command: Command<NetworkMessage>,
-    ) -> Result<(), Error> {
-        self.command_sender
-            .send(command)
-            .await
-            .map_err(|e| Error::Network(e.to_string()))
+    ) -> Result<(), ActorError> {
+        self.command_sender.send(command).await.map_err(|e| {
+            error!(
+                error = %e,
+                "Failed to send command to network worker"
+            );
+            ActorError::Functional { description: e.to_string() }
+        })
     }
 
     /// Send a message to the Helper worker.

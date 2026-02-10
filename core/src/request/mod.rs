@@ -1,273 +1,731 @@
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Event,
-    Handler, Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Event, Handler,
+    Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
 use ave_common::identity::{
-    DigestIdentifier, PublicKey, Signed, hash_borsh,
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh,
 };
+use ave_common::request::EventRequest;
+use ave_common::response::{RequestState, RequestsInManager, RequestsInManagerSubject};
+
 use borsh::{BorshDeserialize, BorshSerialize};
+use error::RequestHandlerError;
 use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use tracing::{error, info};
+use std::sync::Arc;
+use tracing::{Span, error, info_span};
 use types::ReqManInitMessage;
 
-use crate::governance::data::GovernanceData;
-use crate::model::common::node::{get_quantity, subject_owner};
-use crate::model::common::subject::{get_gov, get_metadata};
-use crate::model::request::SchemaType;
-use crate::request::manager::InitRequestManager;
-use crate::subject::CreateSubjectData;
-use crate::system::ConfigHelper;
-use crate::{
-    CreateRequest, EventRequest, Node, NodeMessage, NodeResponse,
-    approval::approver::{ApprovalStateRes, Approver, ApproverMessage},
-    db::Storable,
-    governance::{model::CreatorQuantity},
-    helpers::db::ExternalDB,
-    model::{
-        Namespace
-    },
+use crate::approval::persist::{
+    ApprPersist, ApprPersistMessage, ApprPersistResponse,
 };
+use crate::approval::request::ApprovalReq;
+use crate::db::Storable;
+use crate::governance::events::GovernanceEvent;
+use crate::helpers::db::ExternalDB;
+use crate::helpers::network::service::NetworkSender;
+use crate::model::common::node::{get_subject_data, i_owner_new_owner};
+use crate::model::common::subject::get_version;
+use crate::model::common::{
+    check_signature, check_subject_creation, emit_fail, send_to_tracking,
+};
+use crate::model::request::EventRequestType;
+use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
+use crate::request::manager::InitRequestManager;
+use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
+use crate::system::ConfigHelper;
 
+pub mod error;
 pub mod manager;
 pub mod reboot;
+pub mod tracking;
 pub mod types;
-
-const TARGET_REQUEST: &str = "Ave-Request";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestData {
-    pub request_id: String,
-    pub subject_id: String,
+    pub request_id: DigestIdentifier,
+    pub subject_id: DigestIdentifier,
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
-    node_key: PublicKey,
-    handling: HashMap<String, (String, Signed<EventRequest>)>,
-    in_queue: HashMap<String, VecDeque<Signed<EventRequest>>>,
+    #[serde(skip)]
+    helpers: Option<(HashAlgorithm, Arc<NetworkSender>)>,
+    #[serde(skip)]
+    our_key: Arc<PublicKey>,
+    handling: HashMap<DigestIdentifier, DigestIdentifier>,
+    in_queue: HashMap<
+        DigestIdentifier,
+        VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
+    >,
+}
+
+impl BorshSerialize for RequestHandler {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.handling, writer)?;
+        BorshSerialize::serialize(&self.in_queue, writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for RequestHandler {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let handling =
+            HashMap::<DigestIdentifier, DigestIdentifier>::deserialize_reader(
+                reader,
+            )?;
+        let in_queue = HashMap::<
+            DigestIdentifier,
+            VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
+        >::deserialize_reader(reader)?;
+
+        let our_key = Arc::new(PublicKey::default());
+
+        Ok(Self {
+            helpers: None,
+            our_key,
+            handling,
+            in_queue,
+        })
+    }
 }
 
 impl RequestHandler {
     async fn queued_event(
         ctx: &mut ActorContext<RequestHandler>,
-        subject_id: &str,
+        subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let request_path = ActorPath::from("/user/request");
-        let request_actor: Option<ave_actors::ActorRef<RequestHandler>> =
-            ctx.system().get_actor(&request_path).await;
-
-        if let Some(request_actor) = request_actor {
-            request_actor
-                .tell(RequestHandlerMessage::PopQueue {
-                    subject_id: subject_id.to_owned(),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(request_path));
-        }
-        Ok(())
-    }
-
-    async fn create_subject(
-        ctx: &mut ActorContext<RequestHandler>,
-        create_req: CreateRequest,
-        request: Signed<EventRequest>,
-    ) -> Result<DigestIdentifier, ActorError> {
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-        let subject_id = hash_borsh(&*hash.hasher(), &request)
-            .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-        let data = if create_req.schema_id.is_gov() {
-            let gov = GovernanceData::new(request.signature.signer.clone());
-            let value = gov
-                .to_value_wrapper();
-
-            CreateSubjectData {
-                create_req,
-                subject_id,
-                creator: request.signature.signer.clone(),
-                genesis_gov_version: 0,
-                value,
-            }
-        } else {
-            let governance =
-                get_gov(ctx, &create_req.governance_id.to_string()).await?;
-            let value = governance
-                .get_init_state(&create_req.schema_id)
-                .map_err(|e| ActorError::Functional(e.to_string()))?;
-
-            CreateSubjectData {
-                create_req,
-                subject_id,
-                creator: request.signature.signer.clone(),
-                genesis_gov_version: governance.version,
-                value,
-            }
-        };
-
-        let node_path = ActorPath::from("/user/node");
-        let node_actor: Option<ave_actors::ActorRef<Node>> =
-            ctx.system().get_actor(&node_path).await;
-
-        let response = if let Some(node_actor) = node_actor {
-            node_actor
-                .ask(NodeMessage::CreateNewSubjectReq(data.clone()))
-                .await?
-        } else {
-            return Err(ActorError::NotFound(node_path));
-        };
-
-        match response {
-            NodeResponse::SonWasCreated => Ok(data.subject_id),
-            _ => Err(ActorError::UnexpectedResponse(
-                node_path,
-                "NodeResponse::SonWasCreated".to_owned(),
-            )),
-        }
+        let request_actor = ctx.reference().await?;
+        request_actor
+            .tell(RequestHandlerMessage::PopQueue {
+                subject_id: subject_id.to_owned(),
+            })
+            .await
     }
 
     async fn error_queue_handling(
         &mut self,
         ctx: &mut ActorContext<RequestHandler>,
-        id: &str,
-        subject_id: &str,
-        error: &str,
+        error: String,
+        subject_id: &DigestIdentifier,
+        request_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         self.on_event(
             RequestHandlerEvent::Invalid {
-                id: id.to_owned(),
                 subject_id: subject_id.to_owned(),
-                error: error.to_owned(),
             },
             ctx,
         )
         .await;
 
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: request_id.clone(),
+                state: RequestState::Invalid {
+                    error,
+                    sn: None,
+                    subject_id: subject_id.to_string(),
+                    who: self.our_key.to_string(),
+                },
+            },
+        )
+        .await?;
+
         RequestHandler::queued_event(ctx, subject_id).await
     }
 
-    async fn error(
-        &mut self,
+    async fn change_approval(
         ctx: &mut ActorContext<RequestHandler>,
-        e: &str,
-        subject_id: &str,
-        request_id: &str,
-    ) -> Result<RequestHandlerResponse, ActorError> {
-        error!(TARGET_REQUEST, "PopQueue, {} for {}", e, subject_id);
-        if let Err(e) = self
-            .error_queue_handling(ctx, request_id, subject_id, e)
-            .await
-        {
-            error!(
-                TARGET_REQUEST,
-                "PopQueue, Can not enqueue next event: {}", e
-            );
-            ctx.system().stop_system();
-            return Err(e);
+        subject_id: &DigestIdentifier,
+        state: ApprovalStateRes,
+    ) -> Result<(), RequestHandlerError> {
+        if state == ApprovalStateRes::Obsolete {
+            return Err(RequestHandlerError::ObsoleteApproval);
         }
 
-        Ok(RequestHandlerResponse::None)
+        let approver_path =
+            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+        let approver_actor = ctx
+            .system()
+            .get_actor::<ApprPersist>(&approver_path)
+            .await
+            .map_err(|_| {
+                RequestHandlerError::ApprovalNotFound(subject_id.to_string())
+            })?;
+
+        approver_actor
+            .tell(ApprPersistMessage::ChangeResponse {
+                response: state.clone(),
+            })
+            .await
+            .map_err(|_| RequestHandlerError::ApprovalChangeFailed)
     }
 
-    pub async fn check_creations(
-        &self,
-        message: &str,
+    async fn get_approval(
         ctx: &mut ActorContext<RequestHandler>,
-        governance_id: &str,
-        schema_id: SchemaType,
-        namespace: Namespace,
-        gov: GovernanceData,
-    ) -> Result<(), ActorError> {
-        if let Some(max_quantity) =
-            gov.max_creations(&self.node_key, schema_id.clone(), namespace.clone())
-        {
-            if let CreatorQuantity::Quantity(max_quantity) = max_quantity {
-                let quantity = match get_quantity(
-                    ctx,
-                    governance_id.to_string(),
-                    schema_id.clone(),
-                    self.node_key.to_string(),
-                    namespace.to_string(),
-                )
-                .await
-                {
-                    Ok(quantity) => quantity,
-                    Err(e) => {
-                        error!(
-                            TARGET_REQUEST,
-                            "{}, can not get subject quatity of node: {}",
-                            message,
-                            e
-                        );
-                        return Err(ActorError::Functional(format!(
-                            "Can not get subject quatity of node: {}",
-                            e
-                        )));
+        subject_id: &DigestIdentifier,
+        state: Option<ApprovalState>,
+    ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
+        let approver_path =
+            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+        let approver_actor = ctx
+            .system()
+            .get_actor::<ApprPersist>(&approver_path)
+            .await
+            .map_err(|_| {
+                RequestHandlerError::ApprovalNotFound(subject_id.to_string())
+            })?;
+
+        let response = approver_actor
+            .ask(ApprPersistMessage::GetApproval { state })
+            .await
+            .map_err(|_| RequestHandlerError::ApprovalGetFailed)?;
+
+        let res = match response {
+            ApprPersistResponse::Ok => None,
+            ApprPersistResponse::Approval { request, state } => {
+                Some((request, state))
+            }
+        };
+
+        Ok(res)
+    }
+
+    async fn get_all_approvals(
+        ctx: &mut ActorContext<RequestHandler>,
+        state: Option<ApprovalState>,
+    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, ActorError> {
+        let node_path = ActorPath::from("/user/node");
+        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
+        let response = node_actor.ask(NodeMessage::GetGovernances).await?;
+        let vec = match response {
+            NodeResponse::Governances(govs) => govs,
+            _ => {
+                return Err(ActorError::UnexpectedResponse {
+                    path: node_path,
+                    expected: "NodeResponse::Governances".to_string(),
+                });
+            }
+        };
+
+        let mut responses = vec![];
+        for governance in vec.iter() {
+            let approver_path =
+                ActorPath::from(format!("/user/node/{}/approver", governance));
+            if let Ok(approver_actor) =
+                ctx.system().get_actor::<ApprPersist>(&approver_path).await
+            {
+                let response = approver_actor
+                    .ask(ApprPersistMessage::GetApproval {
+                        state: state.clone(),
+                    })
+                    .await?;
+
+                match response {
+                    ApprPersistResponse::Ok => {}
+                    ApprPersistResponse::Approval { request, state } => {
+                        responses.push((request, state))
                     }
                 };
+            };
+        }
 
-                if quantity >= max_quantity as usize {
-                    error!(
-                        TARGET_REQUEST,
-                        "{}, The maximum number of subjects you can create for schema_id {} in governance {} has been reached.",
-                        message,
-                        schema_id,
-                        governance_id
-                    );
-                    return Err(ActorError::Functional(format!(
-                        "The maximum number of subjects you can create for schema_id {} in governance {} has been reached.",
-                        schema_id, governance_id
-                    )));
+        Ok(responses)
+    }
+
+    async fn check_owner_new_owner(
+        ctx: &mut ActorContext<RequestHandler>,
+        request: &EventRequest,
+    ) -> Result<(), RequestHandlerError> {
+        match request {
+            EventRequest::Create(..) => {}
+            EventRequest::Fact(..)
+            | EventRequest::Transfer(..)
+            | EventRequest::EOL(..) => {
+                let subject_id = request.get_subject_id();
+                let (i_owner, i_new_owner) =
+                    i_owner_new_owner(ctx, &subject_id).await?;
+                if !i_owner {
+                    return Err(RequestHandlerError::NotOwner(
+                        subject_id.to_string(),
+                    ));
+                }
+
+                if i_new_owner.is_some() {
+                    return Err(RequestHandlerError::PendingNewOwner(
+                        subject_id.to_string(),
+                    ));
                 }
             }
+            EventRequest::Confirm(..) | EventRequest::Reject(..) => {
+                let subject_id = request.get_subject_id();
+                let (i_owner, i_new_owner) =
+                    i_owner_new_owner(ctx, &subject_id).await?;
+                if i_owner {
+                    return Err(RequestHandlerError::IsOwner(
+                        subject_id.to_string(),
+                    ));
+                }
 
-            Ok(())
-        } else {
-            let e = "The Scheme does not exist or does not have permissions for the creation of subjects, it needs to be assigned the creator role.";
-            error!(TARGET_REQUEST, "{}, {}", message, e);
+                if let Some(new_owner) = i_new_owner {
+                    if !new_owner {
+                        return Err(RequestHandlerError::NotNewOwner(
+                            subject_id.to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(RequestHandlerError::NoNewOwnerPending(
+                        subject_id.to_string(),
+                    ));
+                }
+            }
+        };
+        Ok(())
+    }
 
-            Err(ActorError::Functional(e.to_owned()))
+    fn check_event_request(
+        request: &EventRequest,
+        is_gov: bool,
+    ) -> Result<(), RequestHandlerError> {
+        match request {
+            EventRequest::Create(create_request) => {
+                if let Some(name) = &create_request.name
+                    && (name.is_empty() || name.len() > 100)
+                {
+                    return Err(RequestHandlerError::InvalidName);
+                }
+
+                if let Some(description) = &create_request.description
+                    && (description.is_empty() || description.len() > 200)
+                {
+                    return Err(RequestHandlerError::InvalidDescription);
+                }
+
+                if !create_request.schema_id.is_valid_in_request() {
+                    return Err(RequestHandlerError::InvalidSchemaId);
+                }
+
+                if is_gov {
+                    if !create_request.governance_id.is_empty() {
+                        return Err(
+                            RequestHandlerError::GovernanceIdMustBeEmpty,
+                        );
+                    }
+
+                    if !create_request.namespace.is_empty() {
+                        return Err(RequestHandlerError::NamespaceMustBeEmpty);
+                    }
+                } else {
+                    if create_request.governance_id.is_empty() {
+                        return Err(RequestHandlerError::GovernanceIdRequired);
+                    }
+                }
+            }
+            EventRequest::Transfer(transfer_request) => {
+                if transfer_request.new_owner.is_empty() {
+                    return Err(RequestHandlerError::TransferNewOwnerEmpty);
+                }
+            }
+            EventRequest::Confirm(confirm_request) => {
+                if is_gov {
+                    if let Some(name_old_owner) =
+                        &confirm_request.name_old_owner
+                    {
+                        if name_old_owner.is_empty() {
+                            return Err(
+                                RequestHandlerError::ConfirmNameOldOwnerEmpty,
+                            );
+                        }
+                    }
+                } else {
+                    if confirm_request.name_old_owner.is_some() {
+                        return Err(
+                            RequestHandlerError::ConfirmTrackerNameOldOwner,
+                        );
+                    }
+                }
+            }
+            EventRequest::Fact(fact_request) => {
+                if is_gov
+                    && serde_json::from_value::<GovernanceEvent>(
+                        fact_request.payload.0.clone(),
+                    )
+                    .is_err()
+                {
+                    return Err(RequestHandlerError::GovFactInvalidEvent);
+                }
+            }
+            EventRequest::Reject(..) | EventRequest::EOL(..) => {}
+        }
+
+        Ok(())
+    }
+
+    async fn build_subject_data(
+        ctx: &mut ActorContext<RequestHandler>,
+        request: &EventRequest,
+    ) -> Result<SubjectData, RequestHandlerError> {
+        let subject_data = match request {
+            EventRequest::Create(create_request) => {
+                if create_request.schema_id.is_gov() {
+                    SubjectData::Governance { active: true }
+                } else {
+                    SubjectData::Tracker {
+                        governance_id: create_request.governance_id.clone(),
+                        schema_id: create_request.schema_id.clone(),
+                        namespace: create_request.namespace.to_string(),
+                        active: true,
+                    }
+                }
+            }
+            EventRequest::Fact(..)
+            | EventRequest::Transfer(..)
+            | EventRequest::Confirm(..)
+            | EventRequest::Reject(..)
+            | EventRequest::EOL(..) => {
+                let subject_id = request.get_subject_id();
+                let Some(subject_data) =
+                    get_subject_data(ctx, &subject_id).await?
+                else {
+                    return Err(RequestHandlerError::SubjectDataNotFound(
+                        subject_id.to_string(),
+                    ));
+                };
+
+                subject_data
+            }
+        };
+
+        Ok(subject_data)
+    }
+
+    async fn check_creation(
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_data: SubjectData,
+        event_request: &EventRequestType,
+        signer: PublicKey,
+    ) -> Result<(), ActorError> {
+        match event_request {
+            EventRequestType::Create | EventRequestType::Confirm => {
+                if let SubjectData::Tracker {
+                    governance_id,
+                    schema_id,
+                    namespace,
+                    ..
+                } = subject_data
+                {
+                    let version = get_version(ctx, &governance_id).await?;
+                    check_subject_creation(
+                        ctx,
+                        &governance_id,
+                        signer,
+                        version,
+                        namespace,
+                        schema_id,
+                    )
+                    .await?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn build_request_id_subject_id(
+        hash: HashAlgorithm,
+        request: &Signed<EventRequest>,
+    ) -> Result<(DigestIdentifier, DigestIdentifier), RequestHandlerError> {
+        match &request.content() {
+            EventRequest::Create(..) => {
+                let request_id = hash_borsh(
+                    &*hash.hasher(),
+                    &(request.clone(), TimeStamp::now().as_nanos()),
+                )
+                .map_err(|e| {
+                    RequestHandlerError::RequestIdHash(e.to_string())
+                })?;
+
+                let subject_id =
+                    hash_borsh(&*hash.hasher(), request).map_err(|e| {
+                        RequestHandlerError::SubjectIdHash(e.to_string())
+                    })?;
+
+                Ok((request_id, subject_id))
+            }
+            EventRequest::Fact(..)
+            | EventRequest::Transfer(..)
+            | EventRequest::Confirm(..)
+            | EventRequest::Reject(..)
+            | EventRequest::EOL(..) => {
+                let request_id = hash_borsh(
+                    &*hash.hasher(),
+                    &(request.clone(), TimeStamp::now().as_nanos()),
+                )
+                .map_err(|e| {
+                    RequestHandlerError::RequestIdHash(e.to_string())
+                })?;
+
+                Ok((request_id, request.content().get_subject_id()))
+            }
         }
     }
-}
 
-// Enviar un evento sin firmar
-// Enviar un evento firmado
-// Aprobar
+    async fn handle_queue_request(
+        &mut self,
+        ctx: &mut ActorContext<RequestHandler>,
+        request: Signed<EventRequest>,
+        request_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        is_gov: bool,
+    ) -> Result<(), ActorError> {
+        let Some(helpers) = self.helpers.clone() else {
+            let e = " Can not obtain helpers".to_string();
+
+            return Err(ActorError::FunctionalCritical { description: e });
+        };
+
+        let in_handling = self.handling.contains_key(&subject_id);
+        let in_queue = self.in_queue.contains_key(&subject_id);
+
+        if !in_handling && !in_queue {
+            let command = Self::build_req_manager_init_msg(
+                &EventRequestType::from(request.content()),
+                is_gov,
+            );
+            let init_data = InitRequestManager {
+                our_key: self.our_key.clone(),
+                subject_id: subject_id.clone(),
+                helpers,
+            };
+
+            let actor = ctx
+                .create_child(
+                    &subject_id.to_string(),
+                    RequestManager::initial(init_data),
+                )
+                .await?;
+            actor
+                .tell(RequestManagerMessage::FirstRun {
+                    command,
+                    request,
+                    request_id: request_id.clone(),
+                })
+                .await?;
+
+            self.on_event(
+                RequestHandlerEvent::EventToHandling {
+                    subject_id: subject_id.clone(),
+                    request_id: request_id.clone(),
+                },
+                ctx,
+            )
+            .await;
+
+            send_to_tracking(
+                ctx,
+                RequestTrackingMessage::UpdateState {
+                    request_id: request_id.clone(),
+                    state: RequestState::Handling,
+                },
+            )
+            .await?;
+        } else {
+            self.on_event(
+                RequestHandlerEvent::EventToQueue {
+                    subject_id: subject_id.clone(),
+                    event: request,
+                    request_id: request_id.clone(),
+                },
+                ctx,
+            )
+            .await;
+
+            send_to_tracking(
+                ctx,
+                RequestTrackingMessage::UpdateState {
+                    request_id: request_id.clone(),
+                    state: RequestState::InQueue,
+                },
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    fn build_req_manager_init_msg(
+        event_request: &EventRequestType,
+        is_gov: bool,
+    ) -> ReqManInitMessage {
+        match event_request {
+            EventRequestType::Create => ReqManInitMessage::Validate,
+            EventRequestType::Fact => ReqManInitMessage::Evaluate,
+            EventRequestType::Transfer => ReqManInitMessage::Evaluate,
+            EventRequestType::Confirm => {
+                if is_gov {
+                    ReqManInitMessage::Evaluate
+                } else {
+                    ReqManInitMessage::Validate
+                }
+            }
+            EventRequestType::Reject => ReqManInitMessage::Validate,
+            EventRequestType::EOL => ReqManInitMessage::Validate,
+        }
+    }
+
+    async fn check_in_queue(
+        ctx: &mut ActorContext<RequestHandler>,
+        request: &Signed<EventRequest>,
+        our_key: PublicKey,
+    ) -> Result<bool, RequestHandlerError> {
+        if let EventRequest::Create(..) = request.content() {
+            return Err(RequestHandlerError::CreationNotQueued);
+        }
+
+        Self::check_owner_new_owner(ctx, &request.content()).await?;
+
+        let subject_data =
+            Self::build_subject_data(ctx, &request.content()).await?;
+        let event_request_type = EventRequestType::from(request.content());
+        let signer = request.signature().signer.clone();
+        let governance_id =
+            if let Some(governance_id) = subject_data.get_governance_id() {
+                governance_id
+            } else {
+                request.content().get_subject_id()
+            };
+        let is_gov = subject_data.get_schema_id().is_gov();
+
+        if !subject_data.get_active() {
+            return Err(RequestHandlerError::SubjectNotActive(
+                request.content().get_subject_id().to_string(),
+            ));
+        }
+
+        check_signature(
+            ctx,
+            our_key,
+            signer.clone(),
+            &governance_id,
+            &event_request_type,
+            subject_data.clone(),
+        )
+        .await?;
+
+        Self::check_creation(ctx, subject_data, &event_request_type, signer)
+            .await?;
+
+        Ok(is_gov)
+    }
+
+    async fn in_queue_to_handling(
+        &mut self,
+        ctx: &mut ActorContext<RequestHandler>,
+        request: Signed<EventRequest>,
+        request_id: &DigestIdentifier,
+        is_gov: bool,
+    ) -> Result<(), ActorError> {
+        let command = Self::build_req_manager_init_msg(
+            &EventRequestType::from(request.content()),
+            is_gov,
+        );
+        let subject_id = request.content().get_subject_id();
+
+        let actor = ctx
+            .get_child::<RequestManager>(&subject_id.to_string())
+            .await?;
+
+        actor
+            .tell(RequestManagerMessage::FirstRun {
+                command,
+                request,
+                request_id: request_id.clone(),
+            })
+            .await?;
+
+        self.on_event(
+            RequestHandlerEvent::EventToHandling {
+                subject_id: subject_id.clone(),
+                request_id: request_id.clone(),
+            },
+            ctx,
+        )
+        .await;
+
+        send_to_tracking(
+            ctx,
+            RequestTrackingMessage::UpdateState {
+                request_id: request_id.clone(),
+                state: RequestState::Handling,
+            },
+        )
+        .await
+    }
+
+    async fn end_child(
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let actor = ctx
+            .get_child::<RequestManager>(&subject_id.to_string())
+            .await?;
+        actor.ask_stop().await
+    }
+
+    async fn manual_abort_request(
+        &self,
+        ctx: &mut ActorContext<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let actor = ctx
+            .get_child::<RequestManager>(&subject_id.to_string())
+            .await?;
+
+        actor.tell(RequestManagerMessage::ManualAbort).await
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum RequestHandlerMessage {
     NewRequest {
         request: Signed<EventRequest>,
     },
+    RequestInManager,
+    RequestInManagerSubjectId {
+        subject_id: DigestIdentifier,
+    },
     ChangeApprovalState {
-        subject_id: String,
+        subject_id: DigestIdentifier,
         state: ApprovalStateRes,
     },
+    GetApproval {
+        subject_id: DigestIdentifier,
+        state: Option<ApprovalState>,
+    },
+    GetAllApprovals {
+        state: Option<ApprovalState>,
+    },
     PopQueue {
-        subject_id: String,
+        subject_id: DigestIdentifier,
     },
     EndHandling {
-        subject_id: String,
-        id: String,
+        subject_id: DigestIdentifier,
     },
     AbortRequest {
-        subject_id: String,
-        id: String,
-        error: String,
+        subject_id: DigestIdentifier,
     },
 }
 
@@ -275,8 +733,12 @@ impl Message for RequestHandlerMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RequestHandlerResponse {
+    RequestInManager(RequestsInManager),
+    RequestInManagerSubjectId(RequestsInManagerSubject),
     Ok(RequestData),
     Response(String),
+    Approval(Option<(ApprovalReq, ApprovalState)>),
+    Approvals(Vec<(ApprovalReq, ApprovalState)>),
     None,
 }
 
@@ -287,28 +749,19 @@ impl Response for RequestHandlerResponse {}
 )]
 pub enum RequestHandlerEvent {
     EventToQueue {
-        id: String,
-        subject_id: String,
+        subject_id: DigestIdentifier,
         event: Signed<EventRequest>,
+        request_id: DigestIdentifier,
     },
     Invalid {
-        id: String,
-        subject_id: String,
-        error: String,
-    },
-    Abort {
-        id: String,
-        subject_id: String,
-        error: String,
+        subject_id: DigestIdentifier,
     },
     FinishHandling {
-        id: String,
-        subject_id: String,
+        subject_id: DigestIdentifier,
     },
     EventToHandling {
-        subject_id: String,
-        request_id: String,
-        event: Signed<EventRequest>,
+        subject_id: DigestIdentifier,
+        request_id: DigestIdentifier,
     },
 }
 
@@ -320,42 +773,119 @@ impl Actor for RequestHandler {
     type Message = RequestHandlerMessage;
     type Response = RequestHandlerResponse;
 
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "RequestHandler")
+        } else {
+            info_span!("RequestHandler")
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("request", None, false, ctx).await?;
+        if let Err(e) = self.init_store("request", None, false, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize store during pre_start"
+            );
+            return Err(e);
+        }
 
-        let Some(ext_db): Option<ExternalDB> =
+        let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
-            return Err(ActorError::NotHelper("ext_db".to_owned()));
+            error!("External database helper not found");
+            return Err(ActorError::Helper {
+                name: "ext_db".to_string(),
+                reason: "Not found".to_string(),
+            });
         };
 
-        for (subject_id, (request_id, request)) in self.handling.clone() {
+        let tracking_size = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.tracking_size
+        } else {
+            error!(
+                helper = "config",
+                "Config helper not found during pre_start"
+            );
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_string(),
+            });
+        };
+
+        let tracking = match ctx
+            .create_child("tracking", RequestTracking::new(tracking_size))
+            .await
+        {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to create tracking child during pre_start"
+                );
+                return Err(e);
+            }
+        };
+
+        let sink =
+            Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
+
+        ctx.system().run_sink(sink).await;
+
+        let Some((hash, network)) = self.helpers.clone() else {
+            let e = " Can not obtain helpers".to_string();
+            error!(
+                error = %e,
+                "Failed to obtain helpers during pre_start"
+            );
+            ctx.system().stop_system();
+            return Err(ActorError::FunctionalCritical { description: e });
+        };
+
+        for (subject_id, request_id) in self.handling.clone() {
             let request_manager_init = InitRequestManager {
-                our_key: self.node_key.clone(),
-                id: request_id.clone(),
-                subject_id,
-                request,
-                command: ReqManInitMessage::Validate,
+                our_key: self.our_key.clone(),
+                subject_id: subject_id.clone(),
+                helpers: (hash.clone(), network.clone()),
             };
-            let request_manager_actor = ctx
+
+            let request_manager_actor = match ctx
                 .create_child(
-                    &request_id,
+                    &subject_id.to_string(),
                     RequestManager::initial(request_manager_init),
                 )
-                .await?;
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to create request manager child during pre_start"
+                    );
+                    return Err(e);
+                }
+            };
 
-            let sink = Sink::new(
-                request_manager_actor.subscribe(),
-                ext_db.get_request_manager(),
-            );
-            ctx.system().run_sink(sink).await;
-
-            request_manager_actor
-                .tell(RequestManagerMessage::Run)
-                .await?;
+            if let Err(e) = request_manager_actor
+                .tell(RequestManagerMessage::Run {
+                    request_id: request_id.clone(),
+                })
+                .await
+            {
+                error!(
+                    subject_id = %subject_id,
+                    request_id = %request_id,
+                    error = %e,
+                    "Failed to send Run message to request manager during pre_start"
+                );
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -365,7 +895,14 @@ impl Actor for RequestHandler {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop store during pre_stop"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -378,722 +915,324 @@ impl Handler<RequestHandler> for RequestHandler {
         ctx: &mut ave_actors::ActorContext<RequestHandler>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
-            RequestHandlerMessage::AbortRequest {
-                subject_id,
-                id,
-                error,
-            } => {
-                info!(
-                    TARGET_REQUEST,
-                    "AbortRequest, Aborting request {} for {}: {}",
-                    id,
-                    subject_id,
-                    error
-                );
+            RequestHandlerMessage::RequestInManagerSubjectId { subject_id } => {
+                let handling = self.handling.get(&subject_id).map(|x| x.to_string());
+                let in_queue = self.in_queue.get(&subject_id).map(|x| {
+                    x.iter()
+                            .map(|x| x.1.to_string())
+                            .collect::<Vec<String>>()
+                });
 
-                self.on_event(
-                    RequestHandlerEvent::Abort {
-                        id: id.to_owned(),
-                        subject_id: subject_id.to_owned(),
-                        error: error.to_owned(),
-                    },
-                    ctx,
-                )
-                .await;
-
+                Ok(RequestHandlerResponse::RequestInManagerSubjectId(RequestsInManagerSubject { handling, in_queue }))
+            }
+            RequestHandlerMessage::RequestInManager => {
+                Ok(RequestHandlerResponse::RequestInManager(RequestsInManager {
+                    handling: self.handling.iter().map(|x| (x.0.to_string(), x.1.to_string())).collect(),
+                    in_queue: self
+                        .in_queue
+                        .iter()
+                        .map(|x| {
+                            (
+                                x.0.to_string(),
+                                x.1.iter()
+                                    .map(|x| x.1.to_string())
+                                    .collect::<Vec<String>>(),
+                            )
+                        })
+                        .collect()
+                }))
+            }
+            RequestHandlerMessage::AbortRequest { subject_id } => {
+                self.manual_abort_request(ctx, &subject_id).await?;
                 Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::ChangeApprovalState {
                 subject_id,
                 state,
             } => {
-                info!(
-                    TARGET_REQUEST,
-                    "ChangeApprovalState, new approval for {}, approval response: {}",
-                    subject_id,
-                    state
-                );
-
-                match state.to_string().as_str() {
-                    "RespondedAccepted" | "RespondedRejected" => {}
-                    _ => {
+                Self::change_approval(ctx, &subject_id, state.clone())
+                    .await
+                    .map_err(|e| {
                         error!(
-                            TARGET_REQUEST,
-                            "ChangeApprovalState, Invalid approval response"
+                            error = %e,
+                            "ChangeApprovalState failed"
                         );
-                        return Err(ActorError::Functional(
-                            "Invalid Response".to_owned(),
-                        ));
-                    }
-                };
-
-                let approver_path = ActorPath::from(format!(
-                    "/user/node/{}/approver",
-                    subject_id
-                ));
-                let approver_actor: Option<ActorRef<Approver>> =
-                    ctx.system().get_actor(&approver_path).await;
-
-                if let Some(approver_actor) = approver_actor {
-                    if let Err(e) = approver_actor
-                        .tell(ApproverMessage::ChangeResponse {
-                            response: state.clone(),
-                        })
-                        .await
-                    {
-                        error!(
-                            TARGET_REQUEST,
-                            "ChangeApprovalState, can not send message to Approver actor: {}",
-                            e
-                        );
-                        ctx.system().stop_system();
-                        return Err(e);
-                    }
-                } else {
-                    error!(
-                        TARGET_REQUEST,
-                        "ChangeApprovalState, can not obtain Approver actor"
-                    );
-                    return Err(ActorError::NotFound(approver_path));
-                };
+                        ActorError::from(e)
+                    })?;
 
                 Ok(RequestHandlerResponse::Response(format!(
                     "The approval request for subject {} has changed to {}",
                     subject_id, state
                 )))
             }
-            RequestHandlerMessage::NewRequest { request } => {
-                if let Err(e) = request.verify() {
-                    error!(
-                        TARGET_REQUEST,
-                        "NewRequest, can not verify new request: {}", e
-                    );
-                    return Err(ActorError::Functional(format!(
-                        "Can not verify request signature {}",
-                        e
-                    )));
-                };
-
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-                let subject_id = request.content.get_subject_id();
-
-                let (is_owner,is_pending) = subject_owner(
-                    ctx,
-                    &subject_id.to_string(),
-                ).await.map_err(|e| {
-                    error!(TARGET_REQUEST, "NewRequest, Could not determine if the node is the owner of the subject: {}", e);
-                    ActorError::Functional(format!(
-                        "An error has occurred: {}",
-                        e
-                    ))
-                })?;
-
-                if !is_owner
-                    && !is_pending
-                    && !request.content.is_create_event()
-                {
-                    let e = "An event is being sent to a subject that does not belong to us or its creation is pending completion, and the subject is not pending event confirmation.";
-                    error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
-                }
-
-                if is_owner && is_pending {
-                    let e = "We are the owner of the subject but this subject is pending transfer";
-                    error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
-                }
-
-                let metadata = match request.content.clone() {
-                    EventRequest::Create(create_request) => {
-                        if let Some(name) = create_request.name.clone()
-                            && (name.is_empty() || name.len() > 100)
-                        {
-                            let e = "The subject name must be less than 100 characters or not be empty.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        if let Some(description) =
-                            create_request.description.clone()
-                            && (description.is_empty()
-                                || description.len() > 200)
-                        {
-                            let e = "The subject description must be less than 200 characters or not be empty.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        // verificar que el firmante sea el nodo.
-                        if request.signature.signer != self.node_key {
-                            let e = "Only the node can sign creation events.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        if create_request.schema_id.is_gov() {
-                            if !create_request.namespace.is_empty() {
-                                let e = "The creation event is for a governance, the namespace must be empty.";
-                                error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
-                            }
-
-                            if !create_request.governance_id.is_empty() {
-                                let e = "The creation event is for a governance, the governance_id must be empty.";
-                                error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
-                            }
-                        } else {
-                            if create_request.governance_id.is_empty() {
-                                let e = "The creation event is for a traceability subject, the governance_id cannot be empty.";
-                                error!(TARGET_REQUEST, "NewRequest, {}", e);
-                                return Err(ActorError::Functional(
-                                    e.to_owned(),
-                                ));
-                            }
-
-                            let gov = match get_gov(
-                                ctx,
-                                &create_request.governance_id.to_string(),
-                            )
-                            .await
-                            {
-                                Ok(gov) => gov,
-                                Err(e) => {
-                                    error!(
-                                        TARGET_REQUEST,
-                                        "NewRequest, can not get governance: {}",
-                                        e
-                                    );
-                                    return Err(ActorError::Functional(
-                                        format!(
-                                            "It has not been possible to obtain governance: {}",
-                                            e
-                                        ),
-                                    ));
-                                }
-                            };
-
-                            self.check_creations(
-                                "NewRequest",
-                                ctx,
-                                &create_request.governance_id.to_string(),
-                                create_request.schema_id.clone(),
-                                create_request.namespace.clone(),
-                                gov,
-                            )
-                            .await?;
-                        }
-                        let subject_id = match RequestHandler::create_subject(
-                            ctx,
-                            create_request,
-                            request.clone(),
-                        )
-                        .await
-                        {
-                            Ok(subject_id) => subject_id,
-                            Err(e) => {
-                                error!(
-                                    TARGET_REQUEST,
-                                    "NewRequest, An error has occurred and the subject could not be created: {}",
-                                    e
-                                );
-                                return Err(ActorError::Functional(format!(
-                                    "An error has occurred and the subject could not be created: {}",
-                                    e
-                                )));
-                            }
-                        };
-
-                        let request_id = hash_borsh(&*hash.hasher(), &request)
-                            .map_err(|e| {
-                                error!(TARGET_REQUEST, "NewRequest, Can not obtain request hash id: {}", e);
-                                ActorError::Functional(format!(
-                                    "Can not obtain request hash id: {}",
-                                    e
-                                ))
-                            })?
-                            .to_string();
-
-                        self.on_event(
-                            RequestHandlerEvent::EventToQueue {
-                                id: request_id.clone(),
-                                subject_id: subject_id.to_string(),
-                                event: request,
-                            },
-                            ctx,
-                        )
-                        .await;
-
-                        if let Err(e) = RequestHandler::queued_event(
-                            ctx,
-                            &subject_id.to_string(),
-                        )
-                        .await
-                        {
-                            error!(
-                                TARGET_REQUEST,
-                                "NewRequest, Can not enqueue new event: {}", e
-                            );
-                            ctx.system().stop_system();
-                            return Err(e);
-                        }
-
-                        return Ok(RequestHandlerResponse::Ok(RequestData {
-                            request_id,
-                            subject_id: subject_id.to_string(),
-                        }));
-                    }
-                    EventRequest::Fact(fact_request) => {
-                        let metadata = get_metadata(
-                            ctx,
-                            &fact_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        if metadata.new_owner.is_some() {
-                            let e = "After Transfer event only can emit Confirm or Reject event";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        metadata
-                    }
-                    EventRequest::Transfer(transfer_request) => {
-                        if request.signature.signer != self.node_key {
-                            let e = "Only the node can sign transfer events.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        let metadata = get_metadata(
-                            ctx,
-                            &transfer_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        if metadata.new_owner.is_some() {
-                            let e = "After Transfer event only can emit Confirm or Reject event";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        metadata
-                    }
-                    EventRequest::Confirm(confirm_request) => {
-                        if request.signature.signer != self.node_key {
-                            let e = "Only the node can sign Confirm events.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-                        let metadata = get_metadata(
-                            ctx,
-                            &confirm_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        let Some(new_owner) = metadata.new_owner.clone() else {
-                            let e = "Confirm event need Transfer event before";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        };
-
-                        if new_owner != self.node_key {
-                            let e = "You are not new owner";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        if !metadata.governance_id.is_empty() {
-                            let gov = match get_gov(
-                                ctx,
-                                &metadata.governance_id.to_string(),
-                            )
-                            .await
-                            {
-                                Ok(gov) => gov,
-                                Err(e) => {
-                                    error!(
-                                        TARGET_REQUEST,
-                                        "NewRequest, can not get governance: {}",
-                                        e
-                                    );
-                                    return Err(ActorError::Functional(
-                                        format!(
-                                            "It has not been possible to obtain governance: {}",
-                                            e
-                                        ),
-                                    ));
-                                }
-                            };
-
-                            self.check_creations(
-                                "NewRequest",
-                                ctx,
-                                &metadata.governance_id.to_string(),
-                                metadata.schema_id.clone(),
-                                metadata.namespace.clone(),
-                                gov,
-                            )
-                            .await?;
-                        }
-
-                        metadata
-                    }
-                    EventRequest::Reject(reject_request) => {
-                        if request.signature.signer != self.node_key {
-                            let e = "Only the node can sign reject events.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-                        let metadata = get_metadata(
-                            ctx,
-                            &reject_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        let Some(new_owner) = metadata.new_owner.clone() else {
-                            let e = "Reject event need Transfer event before";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        };
-
-                        if new_owner != self.node_key {
-                            let e = "You are not new owner";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        metadata
-                    }
-                    EventRequest::EOL(eol_request) => {
-                        if request.signature.signer != self.node_key {
-                            let e = "Only the node can sign eol events.";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        let metadata = get_metadata(
-                            ctx,
-                            &eol_request.subject_id.to_string(),
-                        )
-                        .await?;
-
-                        if metadata.new_owner.is_some() {
-                            let e = "After Transfer event only can emit Confirm or Reject event";
-                            error!(TARGET_REQUEST, "NewRequest, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        }
-
-                        metadata
-                    }
-                };
-
-                if !metadata.active {
-                    let e = "The subject is no longer active.";
-                    error!(TARGET_REQUEST, "NewRequest, {}", e);
-                    return Err(ActorError::Functional(e.to_owned()));
-                }
-
-                let request_id = hash_borsh(&*hash.hasher(), &request)
+            RequestHandlerMessage::GetApproval { subject_id, state } => {
+                let res = Self::get_approval(ctx, &subject_id, state.clone())
+                    .await
                     .map_err(|e| {
                         error!(
-                            TARGET_REQUEST,
-                            "NewRequest, Can not obtain request id hash id: {}",
-                            e
+                            error = %e,
+                            "GetApproval failed"
                         );
-                        ActorError::Functional(format!(
-                            "Can not obtain request id hash id: {}",
-                            e
-                        ))
-                    })?
-                    .to_string();
+                        ActorError::from(e)
+                    })?;
 
-                self.on_event(
-                    RequestHandlerEvent::EventToQueue {
-                        id: request_id.clone(),
-                        subject_id: metadata.subject_id.to_string(),
-                        event: request,
-                    },
+                Ok(RequestHandlerResponse::Approval(res))
+            }
+            RequestHandlerMessage::GetAllApprovals { state } => {
+                let res = Self::get_all_approvals(ctx, state.clone())
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            error = %e,
+                            "GetAllApprovals failed"
+                        );
+                        e
+                    })?;
+
+                Ok(RequestHandlerResponse::Approvals(res))
+            }
+            RequestHandlerMessage::NewRequest { request } => {
+                if let Err(e) = request.verify() {
+                    let err = RequestHandlerError::SignatureVerification(
+                        e.to_string(),
+                    );
+                    error!(error = %err, "Request signature verification failed");
+                    return Err(ActorError::from(err));
+                };
+
+                let Some((hash, ..)) = self.helpers.clone() else {
+                    let err = RequestHandlerError::HelpersNotInitialized;
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %err,
+                        "Helpers not initialized"
+                    );
+                    return Err(emit_fail(ctx, ActorError::from(err)).await);
+                };
+
+                if let Err(e) =
+                    Self::check_owner_new_owner(ctx, &request.content()).await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Owner or new owner check failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
+                let subject_data =
+                    match Self::build_subject_data(ctx, &request.content())
+                        .await
+                    {
+                        Ok(data) => data,
+                        Err(e) => {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Failed to build subject data"
+                            );
+                            return Err(ActorError::from(e));
+                        }
+                    };
+                let event_request_type =
+                    EventRequestType::from(request.content());
+                let signer = request.signature().signer.clone();
+                let governance_id = if let Some(governance_id) =
+                    subject_data.get_governance_id()
+                {
+                    governance_id
+                } else {
+                    request.content().get_subject_id()
+                };
+                let is_gov = subject_data.get_schema_id().is_gov();
+
+                if !subject_data.get_active() {
+                    let subject_id = request.content().get_subject_id();
+                    error!(
+                        msg_type = "NewRequest",
+                        subject_id = %subject_id,
+                        "Subject is not active"
+                    );
+                    return Err(ActorError::from(
+                        RequestHandlerError::SubjectNotActive(
+                            subject_id.to_string(),
+                        ),
+                    ));
+                }
+
+                if let Err(e) =
+                    Self::check_event_request(&request.content(), is_gov)
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Event request validation failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
+                if let Err(e) = check_signature(
                     ctx,
+                    (*self.our_key).clone(),
+                    signer.clone(),
+                    &governance_id,
+                    &event_request_type,
+                    subject_data.clone(),
                 )
-                .await;
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        governance_id = %governance_id,
+                        error = %e,
+                        "Signature check failed"
+                    );
+                    return Err(e);
+                }
 
-                if !self.handling.contains_key(&metadata.subject_id.to_string())
-                    && let Err(e) = RequestHandler::queued_event(
+                if let Err(e) = Self::check_creation(
+                    ctx,
+                    subject_data,
+                    &event_request_type,
+                    signer,
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Creation check failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
+                let (request_id, subject_id) =
+                    match Self::build_request_id_subject_id(hash, &request) {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Failed to build request ID and subject ID"
+                            );
+                            return Err(ActorError::from(e));
+                        }
+                    };
+
+                if let Err(e) = self
+                    .handle_queue_request(
                         ctx,
-                        &metadata.subject_id.to_string(),
+                        request,
+                        &request_id,
+                        &subject_id,
+                        is_gov,
                     )
                     .await
                 {
                     error!(
-                        TARGET_REQUEST,
-                        "NewRequest, Can not enqueue new event: {}", e
+                        msg_type = "NewRequest",
+                        request_id = %request_id,
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to handle queue request"
                     );
-                    ctx.system().stop_system();
                     return Err(e);
                 }
 
                 Ok(RequestHandlerResponse::Ok(RequestData {
                     request_id,
-                    subject_id: metadata.subject_id.to_string(),
+                    subject_id,
                 }))
             }
             RequestHandlerMessage::PopQueue { subject_id } => {
-                if self.handling.contains_key(&subject_id) {
-                    // Se está manejando otro evento para este sujeto.
-                    return Ok(RequestHandlerResponse::None);
-                }
-
-                let hash = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config").await {
-                        config.hash_algorithm
-                }
-                else {
-                    return Err(ActorError::NotHelper("config".to_owned()));
-                };
-
-                let event = if let Some(events) = self.in_queue.get(&subject_id)
+                let (event, request_id) = if let Some(events) =
+                    self.in_queue.get(&subject_id)
                 {
-                    if let Some(event) = events.clone().pop_front() {
-                        event
+                    if let Some((event, request_id)) =
+                        events.clone().pop_front()
+                    {
+                        (event, request_id)
                     } else {
-                        // No hay más eventos pendientes.
+                        if let Err(e) = Self::end_child(ctx, &subject_id).await
+                        {
+                            error!(
+                                msg_type = "PopQueue",
+                                subject_id = %subject_id,
+                                error = %e,
+                                "Failed to end child actor when queue is empty"
+                            );
+                            ctx.system().stop_system();
+                            return Err(e);
+                        }
                         return Ok(RequestHandlerResponse::None);
                     }
                 } else {
-                    // es imposible que no sea un option
+                    if let Err(e) = Self::end_child(ctx, &subject_id).await {
+                        error!(
+                            msg_type = "PopQueue",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to end child actor when no events available"
+                        );
+                        ctx.system().stop_system();
+                        return Err(e);
+                    }
                     return Ok(RequestHandlerResponse::None);
                 };
 
-                let request_id = match hash_borsh(&*hash.hasher(), &event) {
-                    Ok(request_id) => request_id.to_string(),
-                    Err(e) => {
-                        // YA previamente se ha generado el request id, por lo que no debería haber problema
-                        error!(
-                            TARGET_REQUEST,
-                            "PopQueue, Can not obtain request id hash id: {}",
-                            e
-                        );
-                        let e = ActorError::Functional(format!(
-                            "Can not obtain request id hash id: {}",
-                            e
-                        ));
-                        ctx.system().stop_system();
-                        return Err(e);
-                    }
-                };
-
-                let metadata = match get_metadata(ctx, &subject_id.to_string())
-                    .await
+                let is_gov = match Self::check_in_queue(
+                    ctx,
+                    &event,
+                    (*self.our_key).clone(),
+                )
+                .await
                 {
-                    Ok(metadata) => metadata,
+                    Ok(is_gov) => is_gov,
                     Err(e) => {
-                        error!(
-                            TARGET_REQUEST,
-                            "PopQueue, Can not obtain subject metadata: {}", e
-                        );
-                        ctx.system().stop_system();
-                        return Err(e);
-                    }
-                };
-
-                if !metadata.active {
-                    let e = "Subject is not active";
-                    return self.error(ctx, e, &subject_id, &request_id).await;
-                }
-
-                let gov = match get_gov(ctx, &subject_id).await {
-                    Ok(gov) => gov,
-                    Err(e) => {
-                        error!(
-                            TARGET_REQUEST,
-                            "PopQueue, Can not get governance: {}", e
-                        );
-                        return Err(ActorError::Functional(format!(
-                            "It has not been possible to obtain governance: {}",
-                            e
-                        )));
-                    }
-                };
-
-                if !event.content.check_signers(
-                    &event.signature.signer,
-                    &metadata,
-                    &gov,
-                ) {
-                    let e = "Invalid signer for this event";
-                    return self.error(ctx, e, &subject_id, &request_id).await;
-                }
-
-                let (message, command) = match event.content.clone() {
-                    EventRequest::Create(create_request) => {
-                        if !create_request.schema_id.is_gov()
-                            && let Err(e) = self
-                                .check_creations(
-                                    "PopQueue",
-                                    ctx,
-                                    &metadata.governance_id.to_string(),
-                                    metadata.schema_id,
-                                    metadata.namespace.clone(),
-                                    gov,
-                                )
-                                .await
+                        if let Err(e) = self
+                            .error_queue_handling(
+                                ctx,
+                                e.to_string(),
+                                &subject_id,
+                                &request_id,
+                            )
+                            .await
                         {
-                            return self
-                                .error(
-                                    ctx,
-                                    &e.to_string(),
-                                    &subject_id,
-                                    &request_id,
-                                )
-                                .await;
-                        }
-                        (
-                            RequestManagerMessage::Validate,
-                            ReqManInitMessage::Validate,
-                        )
-                    }
+                            error!(
+                                msg_type = "PopQueue",
+                                subject_id = %subject_id,
+                                request_id = %request_id,
+                                error = %e,
+                                "Failed to handle queue error"
+                            );
+                            ctx.system().stop_system();
+                            return Err(e);
+                        };
 
-                    EventRequest::Confirm(confirm_req) => {
-                        if metadata.governance_id.is_empty() {
-                            if let Some(name) = confirm_req.name_old_owner
-                                && name.is_empty()
-                            {
-                                let e = "Name of old owner can not be a empty String";
-                                return self
-                                    .error(ctx, e, &subject_id, &request_id)
-                                    .await;
-                            }
-                            (
-                                RequestManagerMessage::Evaluate,
-                                ReqManInitMessage::Evaluate,
-                            )
-                        } else {
-                            if confirm_req.name_old_owner.is_some() {
-                                let e = "Name of old owner must be None";
-                                return self
-                                    .error(ctx, e, &subject_id, &request_id)
-                                    .await;
-                            }
-
-                            if let Err(e) = self
-                                .check_creations(
-                                    "PopQueue",
-                                    ctx,
-                                    &metadata.governance_id.to_string(),
-                                    metadata.schema_id,
-                                    metadata.namespace.clone(),
-                                    gov,
-                                )
-                                .await
-                            {
-                                return self
-                                    .error(
-                                        ctx,
-                                        &e.to_string(),
-                                        &subject_id,
-                                        &request_id,
-                                    )
-                                    .await;
-                            };
-                            (
-                                RequestManagerMessage::Validate,
-                                ReqManInitMessage::Validate,
-                            )
-                        }
+                        return Ok(RequestHandlerResponse::None);
                     }
-                    EventRequest::Fact(_) | EventRequest::Transfer(_) => (
-                        RequestManagerMessage::Evaluate,
-                        ReqManInitMessage::Evaluate,
-                    ),
-                    _ => (
-                        RequestManagerMessage::Validate,
-                        ReqManInitMessage::Validate,
-                    ),
                 };
 
-                let request_manager_init = InitRequestManager {
-                    our_key: self.node_key.clone(),
-                    id: request_id.clone(),
-                    subject_id: subject_id.clone(),
-                    request: event.clone(),
-                    command,
-                };
-
-                let request_actor = match ctx
-                    .create_child(
-                        &request_id.clone(),
-                        RequestManager::initial(request_manager_init),
-                    )
+                if let Err(e) = self
+                    .in_queue_to_handling(ctx, event, &request_id, is_gov)
                     .await
                 {
-                    Ok(request_actor) => request_actor,
-                    Err(e) => {
-                        error!(
-                            TARGET_REQUEST,
-                            "PopQueue, Can not create request manager actor: {}",
-                            e
-                        );
-                        ctx.system().stop_system();
-                        return Err(e);
-                    }
-                };
-
-                let Some(ext_db): Option<ExternalDB> =
-                    ctx.system().get_helper("ext_db").await
-                else {
                     error!(
-                        TARGET_REQUEST,
-                        "PopQueue, Can not obtaint ext_db helper"
-                    );
-                    ctx.system().stop_system();
-                    return Err(ActorError::NotHelper("ext_db".to_owned()));
-                };
-
-                let sink = Sink::new(
-                    request_actor.subscribe(),
-                    ext_db.get_request_manager(),
-                );
-                ctx.system().run_sink(sink).await;
-
-                info!(TARGET_REQUEST, "New Request {}!!!", request_id);
-                if let Err(e) = request_actor.tell(message).await {
-                    error!(
-                        TARGET_REQUEST,
-                        "PopQueue, Can not send message to request manager actor: {}",
-                        e
+                        msg_type = "PopQueue",
+                        request_id = %request_id,
+                        error = %e,
+                        "Failed to transition from queue to handling"
                     );
                     ctx.system().stop_system();
                     return Err(e);
-                };
-
-                self.on_event(
-                    RequestHandlerEvent::EventToHandling {
-                        subject_id: subject_id.clone(),
-                        request_id,
-                        event,
-                    },
-                    ctx,
-                )
-                .await;
+                }
 
                 Ok(RequestHandlerResponse::None)
             }
-            RequestHandlerMessage::EndHandling { subject_id, id } => {
+            RequestHandlerMessage::EndHandling { subject_id } => {
                 self.on_event(
                     RequestHandlerEvent::FinishHandling {
-                        id,
                         subject_id: subject_id.clone(),
                     },
                     ctx,
@@ -1104,8 +1243,10 @@ impl Handler<RequestHandler> for RequestHandler {
                     RequestHandler::queued_event(ctx, &subject_id).await
                 {
                     error!(
-                        TARGET_REQUEST,
-                        "EndHandling, Can not enqueue next event: {}", e
+                        msg_type = "EndHandling",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to enqueue next event"
                     );
                     ctx.system().stop_system();
                     return Err(e);
@@ -1121,7 +1262,10 @@ impl Handler<RequestHandler> for RequestHandler {
         error: ActorError,
         ctx: &mut ActorContext<RequestHandler>,
     ) -> ChildAction {
-        error!(TARGET_REQUEST, "OnChildFault, {}", error);
+        error!(
+            error = %error,
+            "Child fault in request handler"
+        );
         ctx.system().stop_system();
         ChildAction::Stop
     }
@@ -1133,19 +1277,11 @@ impl Handler<RequestHandler> for RequestHandler {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_REQUEST,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                "Failed to persist event"
             );
             ctx.system().stop_system();
         };
-
-        if let Err(e) = ctx.publish_event(event).await {
-            error!(
-                TARGET_REQUEST,
-                "PublishEvent, can not publish event: {}", e
-            );
-            ctx.system().stop_system();
-        }
     }
 }
 
@@ -1155,11 +1291,17 @@ impl Storable for RequestHandler {}
 #[async_trait]
 impl PersistentActor for RequestHandler {
     type Persistence = LightPersistence;
-    type InitParams = PublicKey;
+    type InitParams = (Arc<PublicKey>, (HashAlgorithm, Arc<NetworkSender>));
+
+    fn update(&mut self, state: Self) {
+        self.in_queue = state.in_queue;
+        self.handling = state.handling;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         RequestHandler {
-            node_key: params,
+            our_key: params.0,
+            helpers: Some(params.1),
             handling: HashMap::new(),
             in_queue: HashMap::new(),
         }
@@ -1168,40 +1310,37 @@ impl PersistentActor for RequestHandler {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
-            RequestHandlerEvent::Abort { subject_id, .. } => {
-                self.handling.remove(subject_id);
-            }
             RequestHandlerEvent::EventToQueue {
-                subject_id, event, ..
+                subject_id,
+                event,
+                request_id,
             } => {
-                if let Some(vec) = self.in_queue.get_mut(subject_id) {
-                    vec.push_back(event.clone());
-                } else {
-                    let mut vec = VecDeque::new();
-                    vec.push_back(event.clone());
-                    self.in_queue.insert(subject_id.clone(), vec);
-                };
+                self.in_queue
+                    .entry(subject_id.clone())
+                    .or_default()
+                    .push_back((event.clone(), request_id.clone()));
             }
-            RequestHandlerEvent::Invalid { subject_id, .. } => {
+            RequestHandlerEvent::Invalid { subject_id } => {
                 if let Some(vec) = self.in_queue.get_mut(subject_id) {
                     vec.pop_front();
+                    if vec.is_empty() {
+                        self.in_queue.remove(subject_id);
+                    }
                 }
             }
             RequestHandlerEvent::EventToHandling {
                 subject_id,
                 request_id,
-                event,
-                ..
             } => {
-                self.handling.insert(
-                    subject_id.clone(),
-                    (request_id.clone(), event.clone()),
-                );
+                self.handling.insert(subject_id.clone(), request_id.clone());
                 if let Some(vec) = self.in_queue.get_mut(subject_id) {
                     vec.pop_front();
+                    if vec.is_empty() {
+                        self.in_queue.remove(subject_id);
+                    }
                 }
             }
-            RequestHandlerEvent::FinishHandling { subject_id, .. } => {
+            RequestHandlerEvent::FinishHandling { subject_id } => {
                 self.handling.remove(subject_id);
             }
         };

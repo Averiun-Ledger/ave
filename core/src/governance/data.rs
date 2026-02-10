@@ -1,49 +1,456 @@
 //! # GovernanceData module.
 //!
-use crate::{
-    Error,
-    governance::model::{
-        CreatorQuantity, HashThisRole, PolicyGov, PolicySchema, ProtocolTypes,
-        Quorum, RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas,
-        RolesGov, RolesSchema, Schema, SchemaKeyCreators, SignersType,
-        WitnessesData,
+
+use crate::governance::{
+    RolesUpdateConfirm, RolesUpdateRemove,
+    error::GovernanceError,
+    model::{
+        HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
+        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas, RolesGov,
+        RolesSchema, Schema, WitnessesData,
     },
-    model::{Namespace, request::SchemaType},
 };
 
-use ave_actors::ActorError;
-
-use ave_common::{ValueWrapper, identity::PublicKey};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    schematype::ReservedWords,
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub type MemberName = String;
-pub type SchemaId = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct GovernanceData {
     pub version: u64,
     pub members: BTreeMap<MemberName, PublicKey>,
     pub roles_gov: RolesGov,
     pub policies_gov: PolicyGov,
-    pub schemas: BTreeMap<SchemaId, Schema>,
-    pub roles_schema: BTreeMap<SchemaId, RolesSchema>,
+    pub schemas: BTreeMap<SchemaType, Schema>,
+    pub roles_schema: BTreeMap<SchemaType, RolesSchema>,
     pub roles_all_schemas: RolesAllSchemas,
-    pub policies_schema: BTreeMap<SchemaId, PolicySchema>,
+    pub policies_schema: BTreeMap<SchemaType, PolicySchema>,
 }
 
 impl GovernanceData {
-    pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaId>) {
+    pub fn new(owner_key: PublicKey) -> Self {
+        let policies_gov = PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        };
+
+        let owner_signers_gov: BTreeSet<MemberName> =
+            BTreeSet::from([ReservedWords::Owner.to_string()]);
+
+        let roles_gov = RolesGov {
+            approver: owner_signers_gov.clone(),
+            evaluator: owner_signers_gov.clone(),
+            validator: owner_signers_gov.clone(),
+            witness: BTreeSet::new(),
+            issuer: RoleGovIssuer {
+                any: false,
+                signers: owner_signers_gov.clone(),
+            },
+        };
+
+        let not_gov_role = RolesAllSchemas {
+            evaluator: BTreeSet::new(),
+            validator: BTreeSet::new(),
+            witness: BTreeSet::new(),
+            issuer: RoleSchemaIssuer {
+                signers: BTreeSet::new(),
+                any: false,
+            },
+        };
+
+        Self {
+            version: 0,
+            members: BTreeMap::from([(
+                ReservedWords::Owner.to_string(),
+                owner_key,
+            )]),
+            roles_gov,
+            policies_gov,
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_all_schemas: not_gov_role,
+            policies_schema: BTreeMap::new(),
+        }
+    }
+
+    pub fn roles_update_remove_confirm(
+        &self,
+        old_owner_key: &PublicKey,
+        new_owner_key: &PublicKey,
+    ) -> RolesUpdateConfirm {
+        let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
+            HashSet::new();
+
+        let mut new_approver = None;
+        let mut new_evaluator = None;
+        let mut new_validator = None;
+
+        let mut remove_witnesses: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let remove_approver: PublicKey = old_owner_key.clone();
+        let mut remove_evaluators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+        let mut remove_validators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let old_name = self
+            .members
+            .iter()
+            .find(|x| x.1 == new_owner_key)
+            .map(|x| x.0)
+            .cloned();
+
+        // gov
+        if let Some(old_name) = old_name {
+            if !self.roles_gov.approver.contains(&old_name) {
+                new_approver = Some(new_owner_key.clone());
+            }
+
+            if !self.roles_gov.evaluator.contains(&old_name) {
+                new_evaluator = Some(new_owner_key.clone());
+            }
+            remove_evaluators
+                .entry((SchemaType::Governance, old_owner_key.clone()))
+                .or_default()
+                .push(Namespace::new());
+            if !self.roles_gov.validator.contains(&old_name) {
+                new_validator = Some(new_owner_key.clone());
+            }
+
+            remove_validators
+                .entry((SchemaType::Governance, old_owner_key.clone()))
+                .or_default()
+                .push(Namespace::new());
+
+            // schema
+            for (schema_id, roles_schema) in self.roles_schema.iter() {
+                for evaluators in roles_schema.evaluator.iter() {
+                    if evaluators.name == ReservedWords::Owner.to_string() {
+                        remove_evaluators
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    } else if evaluators.name == old_name {
+                        remove_evaluators
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    }
+                }
+
+                for validators in roles_schema.validator.iter() {
+                    if validators.name == ReservedWords::Owner.to_string() {
+                        remove_validators
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    } else if validators.name == old_name {
+                        remove_validators
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    }
+                }
+
+                for creators in roles_schema.creator.iter() {
+                    if creators.name == ReservedWords::Owner.to_string() {
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            old_owner_key.clone(),
+                        ));
+                    } else if creators.name == old_name {
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            new_owner_key.clone(),
+                        ));
+                    }
+                }
+                for witness in roles_schema.witness.iter() {
+                    if witness.name == ReservedWords::Owner.to_string() {
+                        remove_witnesses
+                            .entry((schema_id.clone(), old_owner_key.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    } else if witness.name == old_name {
+                        remove_witnesses
+                            .entry((schema_id.clone(), new_owner_key.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    }
+                }
+            }
+
+            for evaluators in self.roles_all_schemas.evaluator.iter() {
+                if evaluators.name == ReservedWords::Owner.to_string() {
+                    remove_evaluators
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(evaluators.namespace.clone());
+                } else if evaluators.name == old_name {
+                    remove_evaluators
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(evaluators.namespace.clone());
+                }
+            }
+            for validators in self.roles_all_schemas.validator.iter() {
+                if validators.name == ReservedWords::Owner.to_string() {
+                    remove_validators
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(validators.namespace.clone());
+                } else if validators.name == old_name {
+                    remove_validators
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(validators.namespace.clone());
+                }
+            }
+            for witness in self.roles_all_schemas.witness.iter() {
+                if witness.name == ReservedWords::Owner.to_string() {
+                    remove_witnesses
+                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .or_default()
+                        .push(witness.namespace.clone());
+                } else if witness.name == old_name {
+                    remove_witnesses
+                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .or_default()
+                        .push(witness.namespace.clone());
+                }
+            }
+        }
+
+        RolesUpdateConfirm {
+            new_approver,
+            new_evaluator,
+            new_validator,
+            remove_approver,
+            remove_creator,
+            remove_evaluators,
+            remove_validators,
+            remove_witnesses,
+        }
+    }
+
+    pub fn roles_update_remove_fact(
+        &self,
+        remove_members: Option<HashSet<String>>,
+        remove_schemas: Option<HashSet<SchemaType>>,
+    ) -> RolesUpdateRemove {
+        let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
+            HashSet::new();
+
+        let mut remove_witnesses: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let mut remove_approvers: Vec<PublicKey> = vec![];
+        let mut remove_evaluators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+        let mut remove_validators: HashMap<
+            (SchemaType, PublicKey),
+            Vec<Namespace>,
+        > = HashMap::new();
+
+        let remove_schemas = remove_schemas.unwrap_or_default();
+
+        for schema_id in remove_schemas.iter() {
+            if let Some(roles_schema) = self.roles_schema.get(schema_id) {
+                for evaluators in roles_schema.evaluator.iter() {
+                    if let Some(user) = self.members.get(&evaluators.name) {
+                        remove_evaluators
+                            .entry((schema_id.clone(), user.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    }
+                }
+
+                for validators in roles_schema.validator.iter() {
+                    if let Some(user) = self.members.get(&validators.name) {
+                        remove_validators
+                            .entry((schema_id.clone(), user.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    }
+                }
+
+                for creators in roles_schema.creator.iter() {
+                    if let Some(user) = self.members.get(&creators.name) {
+                        remove_creator.insert((
+                            schema_id.clone(),
+                            creators.namespace.to_string(),
+                            user.clone(),
+                        ));
+                    }
+                }
+                for witness in roles_schema.witness.iter() {
+                    if let Some(user) = self.members.get(&witness.name) {
+                        remove_witnesses
+                            .entry((schema_id.clone(), user.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(remove_members) = remove_members {
+            // gov
+            for user in remove_members.iter() {
+                if let Some(user_key) = self.members.get(user) {
+                    if self.roles_gov.approver.contains(user) {
+                        remove_approvers.push(user_key.clone());
+                    }
+                    if self.roles_gov.evaluator.contains(user) {
+                        remove_evaluators
+                            .entry((SchemaType::Governance, user_key.clone()))
+                            .or_default()
+                            .push(Namespace::new());
+                    }
+                    if self.roles_gov.validator.contains(user) {
+                        remove_validators
+                            .entry((SchemaType::Governance, user_key.clone()))
+                            .or_default()
+                            .push(Namespace::new());
+                    }
+                }
+            }
+
+            // schema
+            for (schema_id, roles_schema) in self.roles_schema.iter() {
+                if !remove_schemas.contains(schema_id) {
+                    for evaluators in roles_schema.evaluator.iter() {
+                        if remove_members.contains(&evaluators.name) {
+                            if let Some(user) =
+                                self.members.get(&evaluators.name)
+                            {
+                                remove_evaluators
+                                    .entry((schema_id.clone(), user.clone()))
+                                    .or_default()
+                                    .push(evaluators.namespace.clone());
+                            }
+                        }
+                    }
+
+                    for validators in roles_schema.validator.iter() {
+                        if remove_members.contains(&validators.name) {
+                            if let Some(user) =
+                                self.members.get(&validators.name)
+                            {
+                                remove_validators
+                                    .entry((schema_id.clone(), user.clone()))
+                                    .or_default()
+                                    .push(validators.namespace.clone());
+                            }
+                        }
+                    }
+
+                    for creators in roles_schema.creator.iter() {
+                        if remove_members.contains(&creators.name) {
+                            if let Some(user) = self.members.get(&creators.name)
+                            {
+                                remove_creator.insert((
+                                    schema_id.clone(),
+                                    creators.namespace.to_string(),
+                                    user.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    for witness in roles_schema.witness.iter() {
+                        if remove_members.contains(&witness.name) {
+                            if let Some(user) = self.members.get(&witness.name)
+                            {
+                                remove_witnesses
+                                    .entry((schema_id.clone(), user.clone()))
+                                    .or_default()
+                                    .push(witness.namespace.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // all_schemas
+            for evaluators in self.roles_all_schemas.evaluator.iter() {
+                if remove_members.contains(&evaluators.name) {
+                    if let Some(user) = self.members.get(&evaluators.name) {
+                        remove_evaluators
+                            .entry((SchemaType::AllSchemas, user.clone()))
+                            .or_default()
+                            .push(evaluators.namespace.clone());
+                    }
+                }
+            }
+            for validators in self.roles_all_schemas.validator.iter() {
+                if remove_members.contains(&validators.name) {
+                    if let Some(user) = self.members.get(&validators.name) {
+                        remove_validators
+                            .entry((SchemaType::AllSchemas, user.clone()))
+                            .or_default()
+                            .push(validators.namespace.clone());
+                    }
+                }
+            }
+            for witness in self.roles_all_schemas.witness.iter() {
+                if remove_members.contains(&witness.name) {
+                    if let Some(user) = self.members.get(&witness.name) {
+                        remove_witnesses
+                            .entry((SchemaType::AllSchemas, user.clone()))
+                            .or_default()
+                            .push(witness.namespace.clone());
+                    }
+                }
+            }
+        }
+
+        RolesUpdateRemove {
+            witnesses: remove_witnesses,
+            creator: remove_creator,
+            approvers: remove_approvers,
+            evaluators: remove_evaluators,
+            validators: remove_validators,
+        }
+    }
+
+    pub fn remove_schema(&mut self, remove_schemas: HashSet<SchemaType>) {
         for schema_id in remove_schemas {
             self.roles_schema.remove(&schema_id);
             self.policies_schema.remove(&schema_id);
         }
     }
 
-    pub fn add_schema(&mut self, add_schema: HashSet<SchemaId>) {
+    pub fn add_schema(&mut self, add_schema: HashSet<SchemaType>) {
         for schema_id in add_schema {
             self.roles_schema
                 .insert(schema_id.clone(), RolesSchema::default());
@@ -61,15 +468,17 @@ impl GovernanceData {
         }
     }
 
-    pub fn change_name_role(
-        &mut self,
-        chang_name_members: &Vec<(String, String)>,
-    ) {
-        self.roles_gov.change_name_role(chang_name_members);
-        self.roles_all_schemas.change_name_role(chang_name_members);
+    pub fn update_name_role(&mut self, old_name: String) {
+        let old_name = vec![old_name];
+        let owner_name = vec![ReservedWords::Owner.to_string()];
+        self.roles_gov.remove_member_role(&old_name);
+
+        self.roles_all_schemas.remove_member_role(&old_name);
+        self.roles_all_schemas.remove_member_role(&owner_name);
 
         for (_, roles) in self.roles_schema.iter_mut() {
-            roles.change_name_role(chang_name_members);
+            roles.remove_member_role(&old_name);
+            roles.remove_member_role(&owner_name);
         }
     }
 
@@ -81,74 +490,24 @@ impl GovernanceData {
         self.roles_gov.check_basic_gov()
     }
 
-    pub fn new(owner_key: PublicKey) -> Self {
-        let policies_gov = PolicyGov {
-            approve: Quorum::Majority,
-            evaluate: Quorum::Majority,
-            validate: Quorum::Majority,
-        };
-
-        let owner_users_gov: BTreeSet<MemberName> =
-            BTreeSet::from(["Owner".to_owned()]);
-
-        let roles_gov = RolesGov {
-            approver: owner_users_gov.clone(),
-            evaluator: owner_users_gov.clone(),
-            validator: owner_users_gov.clone(),
-            witness: BTreeSet::new(),
-            issuer: RoleGovIssuer {
-                any: false,
-                users: owner_users_gov.clone(),
-            },
-        };
-
-        let not_gov_role = RolesAllSchemas {
-            evaluator: BTreeSet::new(),
-            validator: BTreeSet::new(),
-            witness: BTreeSet::new(),
-            issuer: RoleSchemaIssuer {
-                users: BTreeSet::new(),
-                any: false,
-            },
-        };
-
-        Self {
-            version: 0,
-            members: BTreeMap::from([("Owner".to_owned(), owner_key)]),
-            roles_gov,
-            policies_gov,
-            schemas: BTreeMap::new(),
-            roles_schema: BTreeMap::new(),
-            roles_all_schemas: not_gov_role,
-            policies_schema: BTreeMap::new(),
-        }
-    }
-
     /// Get the initial state for GovernanceData model
     ///  # Arguments
     ///  * `schema_id` - The identifier of the [`Schema`].
     /// # Returns
     /// * [`ValueWrapper`] - The initial state.
     /// # Errors
-    /// * `Error` - If the schema is not found.
+    /// * `GovernanceError` - If the schema is not found.
     pub fn get_init_state(
         &self,
         schema_id: &SchemaType,
-    ) -> Result<ValueWrapper, Error> {
-        let Some(schema) = self.schemas.get(&schema_id.to_string()) else {
-            return Err(Error::Governance("Schema not found.".to_owned()));
+    ) -> Result<ValueWrapper, GovernanceError> {
+        let Some(schema) = self.schemas.get(schema_id) else {
+            return Err(GovernanceError::SchemaDoesNotExist {
+                schema_id: schema_id.to_string(),
+            });
         };
 
         Ok(schema.initial_value.clone())
-    }
-
-    /// Get the members as a set of key identifiers.
-    /// # Returns
-    /// * `HashSet<PublicKey>` - The set of key [`PublicKey`].
-    /// # Errors
-    /// * `Error` - If the key identifier is not valid.
-    pub fn members_to_key_identifier(&self) -> HashSet<PublicKey> {
-        HashSet::from_iter(self.members.values().cloned())
     }
 
     /// Check if the user has a role.
@@ -192,8 +551,7 @@ impl GovernanceData {
                     return true;
                 }
 
-                let Some(roles) = self.roles_schema.get(&schema_id.to_string())
-                else {
+                let Some(roles) = self.roles_schema.get(&schema_id) else {
                     return false;
                 };
 
@@ -215,8 +573,7 @@ impl GovernanceData {
                     return false;
                 };
 
-                let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id.to_string())
+                let Some(roles_schema) = self.roles_schema.get(&schema_id)
                 else {
                     return false;
                 };
@@ -228,7 +585,9 @@ impl GovernanceData {
                     return true;
                 }
 
-                if witnesses_creator.contains("Witnesses") {
+                if witnesses_creator
+                    .contains(&ReservedWords::Witnesses.to_string())
+                {
                     let not_gov_witnesses = self
                         .roles_all_schemas
                         .get_signers(RoleTypes::Witness, namespace.clone())
@@ -252,31 +611,6 @@ impl GovernanceData {
         }
     }
 
-    /// Get the maximum creations for the user.
-    /// # Arguments
-    /// * `user` - The user id.
-    /// * `schema_id` - The schema id from [`Schema`].
-    /// * [`Namespace`] - The namespace.
-    /// # Returns
-    /// * Option<[`CreatorQuantity`]> - The maximum creations.
-    pub fn max_creations(
-        &self,
-        key: &PublicKey,
-        schema_id: SchemaType,
-        namespace: Namespace,
-    ) -> Option<CreatorQuantity> {
-        let name = self
-            .members
-            .iter()
-            .find(|x| x.1 == key)
-            .map(|x| x.0)
-            .cloned()?;
-
-        let roles = self.roles_schema.get(&schema_id.to_string())?;
-
-        roles.max_creations(namespace, &name)
-    }
-
     /// Gets the signers for the request stage.
     /// # Arguments
     /// * [`Roles`] - The role.
@@ -286,25 +620,22 @@ impl GovernanceData {
     /// * (HashSet<[`PublicKey`]>, bool) - The set of key identifiers and a flag indicating if the user is not a member.
     pub fn get_signers(
         &self,
-        role: SignersType,
+        role: RoleTypes,
         schema_id: &SchemaType,
         namespace: Namespace,
     ) -> (HashSet<PublicKey>, bool) {
-        let role = RoleTypes::from(role);
-
         let (names, any) = if schema_id.is_gov() {
             self.roles_gov.get_signers(role)
         } else {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_all_schemas
                 .get_signers(role.clone(), namespace.clone());
-            let (mut schema_signers, schema_any) = if let Some(roles) =
-                self.roles_schema.get(&schema_id.to_string())
-            {
-                roles.get_signers(role, namespace)
-            } else {
-                (vec![], false)
-            };
+            let (mut schema_signers, schema_any) =
+                if let Some(roles) = self.roles_schema.get(schema_id) {
+                    roles.get_signers(role, namespace)
+                } else {
+                    (vec![], false)
+                };
 
             not_gov_signers.append(&mut schema_signers);
 
@@ -324,7 +655,7 @@ impl GovernanceData {
     pub fn get_witnesses(
         &self,
         data: WitnessesData,
-    ) -> Result<HashSet<PublicKey>, ActorError> {
+    ) -> Result<HashSet<PublicKey>, GovernanceError> {
         let names = match data {
             WitnessesData::Gov => {
                 self.roles_gov.get_signers(RoleTypes::Witness).0
@@ -341,22 +672,19 @@ impl GovernanceData {
                     .map(|x| x.0)
                     .cloned()
                 else {
-                    return Err(ActorError::Functional(
-                        "Creator must be a GovernanceData member".to_owned(),
-                    ));
+                    return Err(GovernanceError::CreatorNotMember);
                 };
 
-                let Some(roles_schema) =
-                    self.roles_schema.get(&schema_id.to_string())
+                let Some(roles_schema) = self.roles_schema.get(&schema_id)
                 else {
-                    return Err(ActorError::Functional("They are trying to obtain witnesses for a scheme that does not exist.".to_owned()));
+                    return Err(GovernanceError::WitnessesForNonexistentSchema);
                 };
                 let witnesses_creator =
                     roles_schema.creator_witnesses(&creator, namespace.clone());
 
                 let mut names = vec![];
                 for witness in witnesses_creator {
-                    if witness == "Witnesses" {
+                    if witness == ReservedWords::Witnesses.to_string() {
                         let mut not_gov_witnesses = self
                             .roles_all_schemas
                             .get_signers(RoleTypes::Witness, namespace.clone())
@@ -400,7 +728,7 @@ impl GovernanceData {
         if schema_id.is_gov() {
             self.policies_gov.get_quorum(role)
         } else {
-            let policie = self.policies_schema.get(&schema_id.to_string())?;
+            let policie = self.policies_schema.get(schema_id)?;
 
             policie.get_quorum(role)
         }
@@ -418,28 +746,146 @@ impl GovernanceData {
         role: ProtocolTypes,
         schema_id: &SchemaType,
         namespace: Namespace,
-    ) -> Result<(HashSet<PublicKey>, Quorum), ActorError> {
+    ) -> Result<(HashSet<PublicKey>, Quorum), GovernanceError> {
         let (signers, _not_members) = self.get_signers(
-            SignersType::from(role.clone()),
+            RoleTypes::from(role.clone()),
             schema_id,
             namespace,
         );
 
         let Some(quorum) = self.get_quorum(role.clone(), schema_id) else {
-            return Err(ActorError::Functional(format!(
-                "No quorum found for role {} and schema {}",
-                role, schema_id
-            )));
+            return Err(GovernanceError::QuorumNotFound {
+                role: role.to_string(),
+                schema_id: schema_id.to_string(),
+            });
         };
 
         Ok((signers, quorum))
+    }
+
+    pub fn schemas_name(
+        &self,
+        role: ProtocolTypes,
+        key: &PublicKey,
+    ) -> BTreeSet<SchemaType> {
+        let Some(name) = self
+            .members
+            .iter()
+            .find(|x| x.1 == key)
+            .map(|x| x.0)
+            .cloned()
+        else {
+            return BTreeSet::new();
+        };
+
+        if self
+            .roles_all_schemas
+            .hash_this_rol_not_namespace(role.clone(), &name)
+        {
+            return self.schemas.keys().cloned().collect();
+        }
+
+        let mut schemas: BTreeSet<SchemaType> = BTreeSet::new();
+
+        for (schema_id, roles) in self.roles_schema.iter() {
+            if roles.hash_this_rol_not_namespace(role.clone(), &name) {
+                schemas.insert(schema_id.clone());
+            }
+        }
+
+        schemas
+    }
+
+    pub fn schemas_namespace(
+        &self,
+        role: ProtocolTypes,
+        key: &PublicKey,
+    ) -> BTreeMap<SchemaType, Vec<Namespace>> {
+        let mut map = BTreeMap::new();
+
+        let Some(name) = self
+            .members
+            .iter()
+            .find(|x| x.1 == key)
+            .map(|x| x.0)
+            .cloned()
+        else {
+            return map;
+        };
+
+        let vec = self.roles_all_schemas.role_namespace(role.clone(), &name);
+
+        if !vec.is_empty() {
+            map.insert(SchemaType::AllSchemas, vec);
+        }
+
+        for (schema_id, roles) in self.roles_schema.iter() {
+            let vec = roles.role_namespace(role.clone(), &name);
+            if !vec.is_empty() {
+                map.insert(schema_id.clone(), vec);
+            }
+        }
+        map
+    }
+
+    pub fn schema_creators_namespace(
+        &self,
+        schema_namespaces: BTreeMap<SchemaType, Vec<Namespace>>,
+    ) -> BTreeMap<SchemaType, BTreeMap<PublicKey, BTreeSet<Namespace>>> {
+        let mut map: BTreeMap<
+            SchemaType,
+            BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        > = BTreeMap::new();
+
+        for (schema_id, namespace) in schema_namespaces {
+            if schema_id == SchemaType::AllSchemas {
+                for (schema_id, roles) in self.roles_schema.iter() {
+                    let schema_entry =
+                        map.entry(schema_id.clone()).or_default();
+                    for ns in namespace.iter() {
+                        for user in roles.creator.iter() {
+                            if ns.is_ancestor_or_equal_of(&user.namespace) {
+                                if let Some(pub_key) =
+                                    self.members.get(&user.name)
+                                {
+                                    schema_entry
+                                        .entry(pub_key.clone())
+                                        .or_default()
+                                        .insert(user.namespace.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if let Some(roles) = self.roles_schema.get(&schema_id) {
+                    let schema_entry = map.entry(schema_id).or_default();
+                    for ns in namespace.iter() {
+                        for user in roles.creator.iter() {
+                            if ns.is_ancestor_or_equal_of(&user.namespace) {
+                                if let Some(pub_key) =
+                                    self.members.get(&user.name)
+                                {
+                                    schema_entry
+                                        .entry(pub_key.clone())
+                                        .or_default()
+                                        .insert(user.namespace.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        map
     }
 
     pub fn schemas(
         &self,
         role: ProtocolTypes,
         key: &PublicKey,
-    ) -> BTreeMap<SchemaId, Schema> {
+    ) -> BTreeMap<SchemaType, Schema> {
         let Some(name) = self
             .members
             .iter()
@@ -457,7 +903,7 @@ impl GovernanceData {
             return self.schemas.clone();
         }
 
-        let mut not_schemas: Vec<String> = vec![];
+        let mut not_schemas: Vec<SchemaType> = vec![];
 
         for (schema_id, roles) in self.roles_schema.iter() {
             if !roles.hash_this_rol_not_namespace(role.clone(), &name) {
@@ -473,10 +919,11 @@ impl GovernanceData {
         copy_schemas
     }
 
-    pub fn subjects_schemas_rol_namespace(
+    pub fn schemas_init_value(
         &self,
+        role: ProtocolTypes,
         key: &PublicKey,
-    ) -> Vec<SchemaKeyCreators> {
+    ) -> BTreeMap<SchemaType, ValueWrapper> {
         let Some(name) = self
             .members
             .iter()
@@ -484,55 +931,37 @@ impl GovernanceData {
             .map(|x| x.0)
             .cloned()
         else {
-            return vec![];
+            return BTreeMap::new();
         };
 
-        let (not_gov_val, not_gov_eval) =
-            self.roles_all_schemas.roles_namespace(&name);
+        if self
+            .roles_all_schemas
+            .hash_this_rol_not_namespace(role.clone(), &name)
+        {
+            return self
+                .schemas
+                .iter()
+                .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+                .collect();
+        }
 
-        let mut schema_key_creators: Vec<SchemaKeyCreators> = vec![];
+        let mut not_schemas: Vec<SchemaType> = vec![];
 
         for (schema_id, roles) in self.roles_schema.iter() {
-            let schema_creators = roles.roles_creators(
-                &name,
-                not_gov_val.clone(),
-                not_gov_eval.clone(),
-            );
-
-            if !schema_creators.is_empty() {
-                let mut schema_key = SchemaKeyCreators {
-                    schema_id: SchemaType::Type(schema_id.clone()),
-                    validation: None,
-                    evaluation: None,
-                };
-
-                if let Some(val_schema_creators) = schema_creators.validation {
-                    let mut hash_keys: HashSet<PublicKey> = HashSet::new();
-                    for name in val_schema_creators {
-                        let Some(key) = self.members.get(&name) else {
-                            return vec![];
-                        };
-                        hash_keys.insert(key.clone());
-                    }
-
-                    schema_key.validation = Some(hash_keys);
-                }
-
-                if let Some(eval_schema_creators) = schema_creators.evaluation {
-                    let mut hash_keys: HashSet<PublicKey> = HashSet::new();
-                    for name in eval_schema_creators {
-                        let Some(key) = self.members.get(&name) else {
-                            return vec![];
-                        };
-                        hash_keys.insert(key.clone());
-                    }
-                    schema_key.evaluation = Some(hash_keys);
-                }
-
-                schema_key_creators.push(schema_key);
+            if !roles.hash_this_rol_not_namespace(role.clone(), &name) {
+                not_schemas.push(schema_id.clone());
             }
         }
-        schema_key_creators
+
+        let mut copy_schemas = self.schemas.clone();
+        for schema_id in not_schemas {
+            copy_schemas.remove(&schema_id);
+        }
+
+        copy_schemas
+            .iter()
+            .map(|x| (x.0.clone(), x.1.initial_value.clone()))
+            .collect()
     }
 
     /// Check if the key is a member.
@@ -542,15 +971,12 @@ impl GovernanceData {
 }
 
 impl TryFrom<ValueWrapper> for GovernanceData {
-    type Error = Error;
+    type Error = GovernanceError;
 
     fn try_from(value: ValueWrapper) -> Result<Self, Self::Error> {
         let governance: GovernanceData = serde_json::from_value(value.0)
-            .map_err(|e| {
-                Error::Governance(format!(
-                    "Can not convert Value into GovernanceData: {}",
-                    e
-                ))
+            .map_err(|e| GovernanceError::ConversionFailed {
+                details: e.to_string(),
             })?;
         Ok(governance)
     }

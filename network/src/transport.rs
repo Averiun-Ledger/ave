@@ -3,7 +3,10 @@
 
 use std::time::Duration;
 
-use crate::{Error, utils::{LimitsConfig, NOISE_PROTOCOL}};
+use crate::{
+    Error,
+    utils::{LimitsConfig, NOISE_PROTOCOL},
+};
 
 use libp2p::{
     PeerId, Transport,
@@ -13,11 +16,11 @@ use libp2p::{
     },
     identity::Keypair,
     metrics::{BandwidthTransport, Registry},
-    yamux, noise
+    noise, yamux,
 };
 
 #[cfg(feature = "test")]
-use libp2p::{core::transport::memory};
+use libp2p::core::transport::memory;
 
 #[cfg(not(feature = "test"))]
 use libp2p::{
@@ -49,12 +52,11 @@ pub fn build_transport(
     limits: LimitsConfig,
 ) -> Result<AveTransport, Error> {
     let noise = noise::Config::new(keys)
-            .map_err(|e| Error::Transport(format!("Noise authentication {:?}", e)))?
-            .with_prologue(NOISE_PROTOCOL.as_bytes().to_vec());
+        .map_err(|e| Error::Transport(format!("Noise authentication {:?}", e)))?
+        .with_prologue(NOISE_PROTOCOL.as_bytes().to_vec());
 
     let mut binding = yamux::Config::default();
     let yamux = binding.set_max_num_streams(limits.yamux_max_num_streams);
-
 
     #[cfg(not(feature = "test"))]
     let transport = {

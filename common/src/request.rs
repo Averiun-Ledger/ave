@@ -1,87 +1,188 @@
-//! Request types for Ave API
-//!
-//! These types are used for communication with the Ave HTTP API
-
-use crate::signature::BridgeSignature;
+use ave_identity::{DigestIdentifier, PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-#[cfg(feature = "openapi")]
-use utoipa::ToSchema;
+use crate::{Namespace, SchemaType, ValueWrapper};
 
-/// Signed event request
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeSignedEventRequest {
-    /// Event request
-    pub request: BridgeEventRequest,
-    /// Signature
-    pub signature: Option<BridgeSignature>,
+/// An enum representing a Ave Ledger event request.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub enum EventRequest {
+    /// A request to create a new subject.
+    Create(CreateRequest),
+    /// A request to add a fact to a subject.
+    Fact(FactRequest),
+    /// A request to transfer ownership of a subject.
+    Transfer(TransferRequest),
+
+    Confirm(ConfirmRequest),
+
+    Reject(RejectRequest),
+    /// A request to mark a subject as end-of-life.
+    EOL(EOLRequest),
+
 }
 
-/// Event request
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-#[serde(tag = "event", content = "data", rename_all = "snake_case")]
-pub enum BridgeEventRequest {
-    Create(BridgeCreateRequest),
-    Fact(BridgeFactRequest),
-    Transfer(BridgeTransferRequest),
-    EOL(BridgeEOLRequest),
-    Confirm(BridgeConfirmRequest),
-    Reject(BridgeRejectRequest),
+impl EventRequest {
+    pub fn check_request_signature(
+        &self,
+        signer: &PublicKey,
+        owner: &PublicKey,
+        new_owner: &Option<PublicKey>,
+    ) -> bool {
+        match self {
+            EventRequest::Create(..)
+            | EventRequest::Transfer(..)
+            | EventRequest::EOL(..) => signer == owner,
+            EventRequest::Confirm(..) | EventRequest::Reject(..) => {
+                if let Some(new_owner) = new_owner {
+                    new_owner == signer
+                } else {
+                    false
+                }
+            }
+            EventRequest::Fact(..) => true,
+        }
+    }
+
+    pub fn is_create_event(&self) -> bool {
+        matches!(self, EventRequest::Create(_create_request))
+    }
+    pub fn is_fact_event(&self) -> bool {
+        matches!(self, EventRequest::Fact(_fact_request))
+    }
+
+    pub fn get_subject_id(&self) -> DigestIdentifier {
+        match self {
+            EventRequest::Create(_create_request) => {
+                DigestIdentifier::default()
+            }
+            EventRequest::Fact(fact_request) => fact_request.subject_id.clone(),
+            EventRequest::Transfer(transfer_request) => {
+                transfer_request.subject_id.clone()
+            }
+            EventRequest::Confirm(confirm_request) => {
+                confirm_request.subject_id.clone()
+            }
+            EventRequest::Reject(reject_request) => {
+                reject_request.subject_id.clone()
+            }
+            EventRequest::EOL(eolrequest) => eolrequest.subject_id.clone(),
+        }
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeRejectRequest {
-    /// Subject identifier
-    pub subject_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeCreateRequest {
+/// A struct representing a request to create a new subject.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct CreateRequest {
+    /// The name of subject.
     pub name: Option<String>,
+    /// The description of subject.
     pub description: Option<String>,
-    /// The identifier of the governance contract
-    pub governance_id: Option<String>,
-    /// The identifier of the schema used to validate the event
-    pub schema_id: String,
-    /// The namespace of the subject
-    pub namespace: Option<String>,
+    /// The identifier of the governance contract.
+    pub governance_id: DigestIdentifier,
+    /// The identifier of the schema used to validate the event.
+    pub schema_id: SchemaType,
+    /// The namespace of the subject.
+    pub namespace: Namespace,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeFactRequest {
-    /// Subject identifier
-    pub subject_id: String,
-    /// Changes to be applied to the subject
-    pub payload: Value,
+/// A struct representing a request to add a fact to a subject.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct FactRequest {
+    /// The identifier of the subject to which the fact will be added.
+    pub subject_id: DigestIdentifier,
+    /// The payload of the fact to be added.
+    pub payload: ValueWrapper,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeTransferRequest {
-    /// Subject identifier
-    pub subject_id: String,
-    /// Public key of the new owner
-    pub new_owner: String,
+/// A struct representing a request to transfer ownership of a subject.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct TransferRequest {
+    /// The identifier of the subject to transfer ownership of.
+    pub subject_id: DigestIdentifier,
+    /// The identifier of the public key of the new owner.
+    pub new_owner: PublicKey,
 }
 
-/// EOL request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeEOLRequest {
-    /// Subject identifier
-    pub subject_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct BridgeConfirmRequest {
-    /// Subject identifier
-    pub subject_id: String,
+/// A struct representing a request to transfer ownership of a subject.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct ConfirmRequest {
+    pub subject_id: DigestIdentifier,
+    /// The new name of old owner, only for governance confirm, if is None in governance confirm, old owner will not add to members
     pub name_old_owner: Option<String>,
+}
+
+/// A struct representing a request to mark a subject as end-of-life.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct EOLRequest {
+    /// The identifier of the subject to mark as end-of-life.
+    pub subject_id: DigestIdentifier,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct RejectRequest {
+    pub subject_id: DigestIdentifier,
 }

@@ -1,11 +1,17 @@
 use crate::{Error, NodeType, routing::RoutingNode};
+use bytes::Bytes;
 use ip_network::IpNetwork;
-use libp2p::{Multiaddr, PeerId, multiaddr::Protocol, swarm::ConnectionId};
+use libp2p::{
+    Multiaddr, PeerId,
+    identity::{self},
+    multiaddr::Protocol,
+    multihash::Multihash,
+    swarm::ConnectionId,
+};
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
 use tracing::error;
-use bytes::Bytes;
 
 use std::{
     cmp::Ordering,
@@ -23,6 +29,42 @@ pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
 
+#[derive(Debug, thiserror::Error)]
+pub enum PeerIdToEd25519Error {
+    #[error(
+        "peer id is not an identity multihash (public key is not recoverable)"
+    )]
+    NotIdentityMultihash,
+    #[error("multihash digest is empty or invalid")]
+    InvalidDigest,
+    #[error("failed to decode protobuf-encoded public key: {0}")]
+    Protobuf(#[from] identity::DecodingError),
+    #[error("public key is not ed25519: {0}")]
+    NotEd25519(#[from] identity::OtherVariantError),
+}
+
+pub fn peer_id_to_ed25519_pubkey_bytes(
+    peer_id: &PeerId,
+) -> Result<[u8; 32], PeerIdToEd25519Error> {
+    // PeerId: AsRef<Multihash<64>>
+    let mh: &Multihash<64> = peer_id.as_ref();
+
+    // multihash identity = 0x00
+    if mh.code() != 0x00 {
+        return Err(PeerIdToEd25519Error::NotIdentityMultihash);
+    }
+
+    let digest = mh.digest();
+    if digest.is_empty() {
+        return Err(PeerIdToEd25519Error::InvalidDigest);
+    }
+
+    // digest == protobuf-encoded public key
+    let pk = identity::PublicKey::try_decode_protobuf(digest)?;
+    let ed_pk = pk.try_into_ed25519()?;
+    Ok(ed_pk.to_bytes())
+}
+
 #[derive(Clone)]
 pub struct LimitsConfig {
     pub yamux_max_num_streams: usize,
@@ -36,56 +78,52 @@ pub struct LimitsConfig {
     // TODO mirar en un futuro.
     pub identify_cache: usize,
     pub kademlia_query_timeout: u64,
-    pub conn_limmits_max_pending_incoming : Option<u32>,
-    pub conn_limmits_max_pending_outgoing : Option<u32>,
-    pub conn_limmits_max_established_incoming : Option<u32>,
-    pub conn_limmits_max_established_outgoing : Option<u32>,
-    pub conn_limmits_max_established_per_peer : Option<u32>,
-    pub conn_limmits_max_established_total : Option<u32>,
+    pub conn_limmits_max_pending_incoming: Option<u32>,
+    pub conn_limmits_max_pending_outgoing: Option<u32>,
+    pub conn_limmits_max_established_incoming: Option<u32>,
+    pub conn_limmits_max_established_outgoing: Option<u32>,
+    pub conn_limmits_max_established_per_peer: Option<u32>,
+    pub conn_limmits_max_established_total: Option<u32>,
 }
 
 impl LimitsConfig {
     pub fn build(node_type: &NodeType) -> Self {
         match node_type {
-            NodeType::Bootstrap | NodeType::Addressable => {
-                Self {
-                    yamux_max_num_streams: 512,
-                    tcp_listen_backlog: 8192,
-                    tcp_nodelay: true,
-                    reqres_max_concurrent_streams: 2048,
-                    reqres_request_timeout: 15,
-                    tell_max_concurrent_streams: 2048,
-                    tell_request_timeout: 15,
-                    identify_interval: 60 * 15,
-                    identify_cache: 1024,
-                    kademlia_query_timeout: 25,
-                    conn_limmits_max_pending_incoming: Some(512),
-                    conn_limmits_max_pending_outgoing: Some(128),
-                    conn_limmits_max_established_incoming: Some(8000),
-                    conn_limmits_max_established_outgoing: Some(1000),
-                    conn_limmits_max_established_per_peer: Some(2),
-                    conn_limmits_max_established_total: Some(9000)
-                }
-            }
-            NodeType::Ephemeral => {
-                Self {
-                    yamux_max_num_streams: 128,
-                    tcp_listen_backlog: 512,
-                    tcp_nodelay: true,
-                    reqres_max_concurrent_streams: 128,
-                    reqres_request_timeout: 10,
-                    tell_max_concurrent_streams: 128,
-                    tell_request_timeout: 10,
-                    identify_interval: 60 * 60,
-                    identify_cache: 0,
-                    kademlia_query_timeout: 15,
-                    conn_limmits_max_pending_incoming: Some(50),
-                    conn_limmits_max_pending_outgoing: Some(100),
-                    conn_limmits_max_established_incoming: Some(100),
-                    conn_limmits_max_established_outgoing: Some(200),
-                    conn_limmits_max_established_per_peer: Some(2),
-                    conn_limmits_max_established_total: Some(300)
-                }
+            NodeType::Bootstrap | NodeType::Addressable => Self {
+                yamux_max_num_streams: 512,
+                tcp_listen_backlog: 8192,
+                tcp_nodelay: true,
+                reqres_max_concurrent_streams: 2048,
+                reqres_request_timeout: 15,
+                tell_max_concurrent_streams: 2048,
+                tell_request_timeout: 15,
+                identify_interval: 60 * 15,
+                identify_cache: 1024,
+                kademlia_query_timeout: 25,
+                conn_limmits_max_pending_incoming: Some(512),
+                conn_limmits_max_pending_outgoing: Some(128),
+                conn_limmits_max_established_incoming: Some(8000),
+                conn_limmits_max_established_outgoing: Some(1000),
+                conn_limmits_max_established_per_peer: Some(2),
+                conn_limmits_max_established_total: Some(9000),
+            },
+            NodeType::Ephemeral => Self {
+                yamux_max_num_streams: 128,
+                tcp_listen_backlog: 512,
+                tcp_nodelay: true,
+                reqres_max_concurrent_streams: 128,
+                reqres_request_timeout: 10,
+                tell_max_concurrent_streams: 128,
+                tell_request_timeout: 10,
+                identify_interval: 60 * 60,
+                identify_cache: 0,
+                kademlia_query_timeout: 15,
+                conn_limmits_max_pending_incoming: Some(50),
+                conn_limmits_max_pending_outgoing: Some(100),
+                conn_limmits_max_established_incoming: Some(100),
+                conn_limmits_max_established_outgoing: Some(200),
+                conn_limmits_max_established_per_peer: Some(2),
+                conn_limmits_max_established_total: Some(300),
             },
         }
     }

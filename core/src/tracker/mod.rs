@@ -1,69 +1,54 @@
+use std::sync::Arc;
+
 use crate::{
-    Error, EventRequestType,
-    auth::WitnessesAuth,
     db::Storable,
-    distribution::{Distribution, DistributionType},
-    evaluation::Evaluation,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
-        model::CreatorQuantity,
+        sn_register::{SnRegister, SnRegisterMessage},
+        subject_register::{SubjectRegister, SubjectRegisterMessage},
+        witnesses_register::{WitnessesRegister, WitnessesRegisterMessage},
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        Namespace,
-        common::{
-            emit_fail, get_last_event, get_n_events, get_node_key, node::try_to_update, purge_storage, subject::{get_gov, get_last_state}
-        },
-        event::{Ledger, LedgerValue},
-        request::EventRequest,
+        common::{emit_fail, get_last_event},
+        event::{Protocols, ValidationMetadata},
     },
-    node::{
-        register::RegisterMessage,
-        relationship::{
-            OwnerSchema, RelationShip, RelationShipMessage,
-            RelationShipResponse,
-        }
-    },
+    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        CreateSubjectData, DataForSink, LastStateData,
-        Metadata, SignedLedger, Subject, SubjectMetadata, VerifyData,
-        laststate::LastState, sinkdata::{SinkData, SinkDataMessage},
+        DataForSink, Metadata, SignedLedger, Subject, SubjectMetadata,
+        error::SubjectError,
+        sinkdata::{SinkData, SinkDataMessage},
     },
-    update::TransferResponse,
-    validation::Validation,
+    validation::request::LastData,
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    Handler, Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
+    Response, Sink,
 };
 use ave_common::{
-    ValueWrapper,
-    identity::{DigestIdentifier, PublicKey, Signed, hash_borsh},
+    Namespace, ValueWrapper,
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
+    request::EventRequest,
 };
 
 use async_trait::async_trait;
-use ave_actors::{
-    FullPersistence, PersistentActor,
-};
+use ave_actors::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
-const TARGET_TRACKER: &str = "Ave-Tracker";
-
-#[derive(
-    Default,
-    Debug,
-    Serialize,
-    Deserialize,
-    Clone,
-    BorshDeserialize,
-    BorshSerialize,
-)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Tracker {
+    #[serde(skip)]
+    pub our_key: Arc<PublicKey>,
+    #[serde(skip)]
+    pub service: bool,
+    #[serde(skip)]
+    pub hash: Option<HashAlgorithm>,
+
     pub subject_metadata: SubjectMetadata,
     pub governance_id: DigestIdentifier,
     /// The namespace of the subject.
@@ -74,101 +59,258 @@ pub struct Tracker {
     pub properties: ValueWrapper,
 }
 
-impl From<CreateSubjectData> for Tracker {
-    fn from(value: CreateSubjectData) -> Self {
-        Tracker {
+#[derive(Default)]
+pub struct TrackerInit {
+    pub subject_metadata: SubjectMetadata,
+    pub governance_id: DigestIdentifier,
+    pub namespace: Namespace,
+    pub genesis_gov_version: u64,
+    pub properties: ValueWrapper,
+}
+
+impl From<&Metadata> for TrackerInit {
+    fn from(value: &Metadata) -> Self {
+        Self {
             subject_metadata: SubjectMetadata::new(&value),
-            governance_id: value.create_req.governance_id,
-            genesis_gov_version: value.genesis_gov_version,
-            namespace: value.create_req.namespace,
-            properties: value.value,
+            governance_id: value.governance_id.clone(),
+            namespace: value.namespace.clone(),
+            genesis_gov_version: value.genesis_gov_version.clone(),
+            properties: value.properties.clone(),
         }
+    }
+}
+
+impl BorshSerialize for Tracker {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Serialize only the fields we want to persist, skipping 'owner'
+        BorshSerialize::serialize(&self.subject_metadata, writer)?;
+        BorshSerialize::serialize(&self.governance_id, writer)?;
+        BorshSerialize::serialize(&self.namespace, writer)?;
+        BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
+        BorshSerialize::serialize(&self.properties, writer)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Tracker {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        // Deserialize the persisted fields
+        let subject_metadata = SubjectMetadata::deserialize_reader(reader)?;
+        let governance_id = DigestIdentifier::deserialize_reader(reader)?;
+        let namespace = Namespace::deserialize_reader(reader)?;
+        let genesis_gov_version = u64::deserialize_reader(reader)?;
+        let properties = ValueWrapper::deserialize_reader(reader)?;
+
+        // Create a default/placeholder KeyPair for 'owner'
+        // This will be replaced by the actual owner during actor initialization
+        let our_key = Arc::new(PublicKey::default());
+        let hash = None;
+
+        Ok(Self {
+            service: false,
+            hash,
+            our_key,
+            subject_metadata,
+            governance_id,
+            namespace,
+            genesis_gov_version,
+            properties,
+        })
     }
 }
 
 #[async_trait]
 impl Subject for Tracker {
-        async fn delete_subject(
+    async fn update_sn(
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        
-        self.delete_relation(ctx).await?;
-        Self::delet_node_subject(ctx, &self.subject_metadata.subject_id.to_string()).await?;
-
-        purge_storage(ctx).await?;
-
-        ctx.stop(None).await;
-
-        Ok(())
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::UpdateSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn,
+            })
+            .await
     }
 
-    async fn get_ledger_data(
+    async fn eol(
+        &self,
+    ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::EOLSubject {
+            subject_id:self.subject_metadata.subject_id.clone(),
+            i_owner: *self.our_key == self.subject_metadata.owner
+        })
+        .await
+    }
+
+    async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
-        last_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, Option<LastStateData>), ActorError> {
-        let ledger = get_n_events(ctx, last_sn, 100).await?;
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::RejectTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await?;
 
-        if ledger.len() < 100 {
-            match get_last_state(
-                ctx,
-                &self.subject_metadata.subject_id.to_string(),
-            )
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Reject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn + 1,
+                gov_version,
+            })
             .await
-            {
-                Ok((event, proof, vali_res)) => Ok((
-                    ledger,
-                    Some(LastStateData {
-                        event,
-                        proof,
-                        vali_res,
-                    }),
-                )),
-                Err(e) => {
-                    if let ActorError::Functional(_) = e {
-                        Ok((ledger, None))
-                    } else {
-                        error!(
-                            TARGET_TRACKER,
-                            "GetLedger, can not get last event: {}", e
-                        );
-                        Err(e)
-                    }
-                }
-            }
-        } else {
-            Ok((ledger, None))
-        }
     }
 
-    fn apply_patch(&mut self, value: LedgerValue) -> Result<(), ActorError> {
-        let json_patch = match value {
-            LedgerValue::Patch(value_wrapper) => value_wrapper,
-            LedgerValue::Error(e) => {
-                let error = format!(
-                    "Apply, event value can not be an error if protocols was successful: {:?}",
-                    e
+    async fn confirm(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::ConfirmTransfer(
+            self.subject_metadata.subject_id.clone(),
+        ))
+        .await?;
+
+        if !self.service && *self.our_key == self.subject_metadata.owner
+            || self.service
+        {
+            let subject_register = ctx
+                .system()
+                .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
+                    "/user/node/{}/subject_register",
+                    self.governance_id
+                )))
+                .await?;
+
+            let _response = subject_register
+                .ask(SubjectRegisterMessage::UpdateSubject {
+                    new_owner,
+                    old_owner: self.subject_metadata.owner.clone(),
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    gov_version,
+                })
+                .await?;
+        }
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Confirm {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: self.subject_metadata.sn + 1,
+                gov_version,
+            })
+            .await
+    }
+
+    async fn transfer(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        node.tell(NodeMessage::TransferSubject(TransferSubject {
+            name: self.subject_metadata.name.clone(),
+            subject_id: self.subject_metadata.subject_id.clone(),
+            new_owner: new_owner.clone(),
+            actual_owner: self.subject_metadata.owner.clone(),
+        }))
+        .await?;
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Transfer {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner,
+                gov_version,
+            })
+            .await
+    }
+
+    async fn get_last_ledger(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<Option<SignedLedger>, ActorError> {
+        get_last_event(ctx).await
+    }
+
+    fn apply_patch(
+        &mut self,
+        json_patch: ValueWrapper,
+    ) -> Result<(), ActorError> {
+        let patch_json = serde_json::from_value::<Patch>(json_patch.0)
+            .map_err(|e| {
+                let error = SubjectError::PatchConversionFailed {
+                    details: e.to_string(),
+                };
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to convert patch from JSON"
                 );
-                error!(TARGET_TRACKER, error);
-                return Err(ActorError::Functional(error));
-            }
-        };
+                ActorError::Functional {
+                    description: error.to_string(),
+                }
+            })?;
 
-        let patch_json = match serde_json::from_value::<Patch>(json_patch.0) {
-            Ok(patch) => patch,
-            Err(e) => {
-                let error = format!("Apply, can not obtain json patch: {}", e);
-                error!(TARGET_TRACKER, error);
-                return Err(ActorError::Functional(error));
+        patch(&mut self.properties.0, &patch_json).map_err(|e| {
+            let error = SubjectError::PatchApplicationFailed {
+                details: e.to_string(),
+            };
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to apply patch to properties"
+            );
+            ActorError::Functional {
+                description: error.to_string(),
             }
-        };
+        })?;
 
-        if let Err(e) = patch(&mut self.properties.0, &patch_json) {
-            let error = format!("Apply, can not apply json patch: {}", e);
-            error!(TARGET_TRACKER, error);
-            return Err(ActorError::Functional(error));
-        };
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            "Patch applied successfully"
+        );
 
         Ok(())
     }
@@ -178,55 +320,38 @@ impl Subject for Tracker {
         ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
     ) -> Result<(), ActorError> {
-        let our_key = get_node_key(ctx).await?;
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Can not obtain Hash".to_string(),
+            });
+        };
+
         let current_sn = self.subject_metadata.sn;
 
-        let i_current_new_owner =
-            self.subject_metadata.new_owner.clone() == Some(our_key.clone());
-        let current_owner = self.subject_metadata.owner.clone();
-
-        if let Err(e) = self.verify_new_ledger_events_not_gov(ctx, events).await
+        if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
         {
-            if let ActorError::Functional(error) = e.clone() {
-                warn!(TARGET_TRACKER, "Error verifying new events: {}", error);
+            if let ActorError::Functional { description } = e.clone() {
+                warn!(
+                    error = %description,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Error verifying new ledger events"
+                );
 
                 // Falló en la creación
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
             } else {
-                error!(TARGET_TRACKER, "Error verifying new events {}", e);
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    "Critical error verifying new ledger events"
+                );
                 return Err(e);
             }
         };
-
-        if current_sn < self.subject_metadata.sn {
-            if !self.subject_metadata.active && current_owner == our_key {
-                Self::down_owner_not_gov(ctx).await?;
-            }
-
-            let i_new_owner = self.subject_metadata.new_owner.clone()
-                == Some(our_key.clone());
-
-            // Si antes no eramos el new owner y ahora somos el new owner.
-            if !i_current_new_owner && i_new_owner && current_owner != our_key {
-                Self::up_owner_not_gov(ctx, &our_key).await?;
-            }
-
-            // Si cambió el dueño
-            if current_owner != self.subject_metadata.owner {
-                // Si ahora somos el dueño pero no eramos new owner.
-                if self.subject_metadata.owner == our_key
-                    && !i_current_new_owner
-                {
-                    Self::up_owner_not_gov(ctx, &our_key).await?;
-                } else if current_owner == our_key && !i_new_owner {
-                    Self::down_owner_not_gov(ctx).await?;
-                }
-            } else if i_current_new_owner && !i_new_owner {
-                Self::down_owner_not_gov(ctx).await?;
-            }
-        }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             Self::publish_sink(
@@ -237,12 +362,7 @@ impl Subject for Tracker {
             )
             .await?;
 
-            Self::update_subject_node(
-                ctx,
-                &self.subject_metadata.subject_id.to_string(),
-                self.subject_metadata.sn,
-            )
-            .await?;
+            self.update_sn(ctx).await?;
         }
 
         Ok(())
@@ -250,105 +370,86 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
-    pub fn from_create_event(
-        ledger: &Signed<Ledger>,
-        properties: ValueWrapper,
-    ) -> Result<Self, Error> {
-        if let EventRequest::Create(request) =
-            &ledger.content.event_request.content
-        {
-            Ok(Tracker {
-                subject_metadata: SubjectMetadata::from_create_request(
-                    ledger.content.subject_id.clone(),
-                    request,
-                    ledger.content.event_request.signature.signer.clone(),
-                    DigestIdentifier::default(),
-                ),
-                governance_id: request.governance_id.clone(),
-                namespace: request.namespace.clone(),
-                genesis_gov_version: ledger.content.gov_version,
-                properties,
-            })
-        } else {
-            Err(Error::Tracker("Invalid create event request".to_string()))
-        }
-    }
-
-    async fn build_childs_all_schemas(
+    async fn create(
         &self,
-        ctx: &mut ActorContext<Tracker>,
-        our_key: PublicKey,
-    ) -> Result<(), ActorError> {
-        let owner = our_key == self.subject_metadata.owner;
-        let new_owner = self.subject_metadata.new_owner.is_some();
-        let i_new_owner =
-            self.subject_metadata.new_owner == Some(our_key.clone());
-
-        if new_owner {
-            if i_new_owner {
-                Self::up_owner_not_gov(ctx, &our_key).await?;
-            }
-        } else if owner {
-            Self::up_owner_not_gov(ctx, &our_key).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn up_owner_not_gov(
         ctx: &mut ActorContext<Self>,
-        our_key: &PublicKey,
+        gov_version: u64,
     ) -> Result<(), ActorError> {
-        let validation = Validation::new(our_key.clone());
-        ctx.create_child("validation", validation).await?;
+        let sn_register = ctx
+            .system()
+            .get_actor::<SnRegister>(&ActorPath::from(format!(
+                "/user/node/{}/sn_register",
+                self.governance_id
+            )))
+            .await?;
 
-        let evaluation = Evaluation::new(our_key.clone());
-        ctx.create_child("evaluation", evaluation).await?;
+        sn_register
+            .tell(SnRegisterMessage::RegisterSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                sn: 0,
+            })
+            .await?;
 
-        let distribution =
-            Distribution::new(our_key.clone(), DistributionType::Subject);
-        ctx.create_child("distribution", distribution).await?;
+        if !self.service && *self.our_key == self.subject_metadata.owner
+            || self.service
+        {
+            let subject_register = ctx
+                .system()
+                .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
+                    "/user/node/{}/subject_register",
+                    self.governance_id
+                )))
+                .await?;
 
-        Ok(())
+            let _response = subject_register
+                .ask(SubjectRegisterMessage::CreateSubject {
+                    creator: self.subject_metadata.owner.clone(),
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    gov_version,
+                })
+                .await?;
+        }
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+
+        witnesses_register
+            .tell(WitnessesRegisterMessage::Create {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                owner: self.subject_metadata.owner.clone(),
+            })
+            .await
     }
 
-    async fn down_owner_not_gov(
-        ctx: &mut ActorContext<Tracker>,
+    async fn register_gov_version_sn(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        gov_version: u64,
     ) -> Result<(), ActorError> {
-        let actor: Option<ActorRef<Validation>> =
-            ctx.get_child("validation").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            return Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/validation",
-                ctx.path()
-            ))));
-        }
+        let sn_register = ctx
+            .system()
+            .get_actor::<SnRegister>(&ActorPath::from(format!(
+                "/user/node/{}/sn_register",
+                self.governance_id
+            )))
+            .await?;
 
-        let actor: Option<ActorRef<Evaluation>> =
-            ctx.get_child("evaluation").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            return Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/evaluation",
-                ctx.path()
-            ))));
-        }
-
-        let actor: Option<ActorRef<Distribution>> =
-            ctx.get_child("distribution").await;
-        if let Some(actor) = actor {
-            actor.ask_stop().await?;
-        } else {
-            return Err(ActorError::NotFound(ActorPath::from(format!(
-                "{}/distribution",
-                ctx.path()
-            ))));
-        }
-
-        Ok(())
+        sn_register
+            .tell(SnRegisterMessage::RegisterSn {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                gov_version,
+                sn: self.subject_metadata.sn,
+            })
+            .await
     }
 
     async fn get_governance(
@@ -358,49 +459,35 @@ impl Tracker {
         let governance_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
 
-        let governance_actor: Option<ActorRef<Governance>> =
-            ctx.system().get_actor(&governance_path).await;
+        let governance_actor = ctx
+            .system()
+            .get_actor::<Governance>(&governance_path)
+            .await?;
 
-        let response = if let Some(governance_actor) = governance_actor {
-            governance_actor
-                .ask(GovernanceMessage::GetGovernance)
-                .await?
-        } else {
-            return Err(ActorError::NotFound(governance_path));
-        };
+        let response = governance_actor
+            .ask(GovernanceMessage::GetGovernance)
+            .await?;
 
         match response {
             GovernanceResponse::Governance(gov) => Ok(*gov),
-            _ => Err(ActorError::UnexpectedResponse(
-                governance_path,
-                "TrackerResponse::Governance".to_owned(),
-            )),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: governance_path,
+                expected: "GovernanceResponse::Governance".to_owned(),
+            }),
         }
     }
 
-    async fn verify_new_ledger_events_not_gov(
+    async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Tracker>,
         events: Vec<SignedLedger>,
+        hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let mut iter = events.into_iter();
         let last_ledger = get_last_event(ctx).await?;
 
-        let gov = get_gov(ctx, &self.governance_id.to_string()).await?;
-
         let Some(first) = iter.next() else {
             return Ok(());
-        };
-
-        let Some(max_quantity) = gov.max_creations(
-            &first.signature.signer,
-            self.subject_metadata.schema_id.clone(),
-            self.namespace.clone(),
-        ) else {
-            return Err(ActorError::Functional(
-                "The number of subjects that can be created has not been found"
-                    .to_owned(),
-            ));
         };
 
         let mut pending = Vec::new();
@@ -409,25 +496,23 @@ impl Tracker {
             pending.push(first);
             last_ledger
         } else {
-            self.register_relation(
-                ctx,
-                self.subject_metadata.owner.to_string(),
-                max_quantity.clone(),
-            )
-            .await?;
-
             if let Err(e) = Self::verify_first_ledger_event(
-                self.subject_metadata.owner.clone(),
+                ctx,
                 &first,
+                hash,
+                Metadata::from(self.clone()),
             )
             .await
             {
-                self.delete_subject(ctx,).await?;
-
-                return Err(ActorError::Functional(e.to_string()));
+                return Err(ActorError::Functional {
+                    description: e.to_string(),
+                });
             }
 
+            self.create(ctx, first.content().gov_version).await?;
+
             self.on_event(first.clone(), ctx).await;
+
             Self::register(
                 ctx,
                 RegisterMessage::RegisterSubj {
@@ -450,13 +535,15 @@ impl Tracker {
                     namespace: self.namespace.to_string(),
                     schema_id: self.subject_metadata.schema_id.clone(),
                     issuer: first
-                        .content
+                        .content()
                         .event_request
-                        .signature
+                        .signature()
                         .signer
                         .to_string(),
+                    event_ledger_timestamp: first.signature().timestamp.as_nanos(),
+                    event_request_timestamp: first.content().event_request.signature().timestamp.as_nanos()
                 },
-                &first.content.event_request.content,
+                &first.content().event_request.content(),
             )
             .await?;
 
@@ -466,76 +553,77 @@ impl Tracker {
         pending.extend(iter);
 
         for event in pending {
+            let actual_ledger_hash =
+                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not creacte actual ledger event hash: {}",
+                            e
+                        ),
+                    }
+                })?;
+            let last_data = LastData {
+                gov_version: last_ledger.content().gov_version,
+                vali_data: last_ledger
+                    .content()
+                    .protocols
+                    .get_validation_data(),
+            };
+
+            let last_gov_version = last_data.gov_version;
+
             let last_event_is_ok = match Self::verify_new_ledger_event(
-                VerifyData {
-                    active: self.subject_metadata.active,
-                    owner: self.subject_metadata.owner.clone(),
-                    new_owner: self.subject_metadata.new_owner.clone(),
-                    is_gov: self.subject_metadata.schema_id.is_gov(),
-                    properties: self.properties.clone(),
-                },
-                &last_ledger,
+                ctx,
                 &event,
+                Metadata::from(self.clone()),
+                actual_ledger_hash,
+                last_data,
+                hash,
             )
             .await
             {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
-                    if let Error::Sn = e {
+                    // Check if it's a sequence number error
+                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
                         // El evento que estamos aplicando no es el siguiente.
                         continue;
                     } else {
-                        return Err(ActorError::Functional(e.to_string()));
+                        return Err(ActorError::Functional {
+                            description: e.to_string(),
+                        });
                     }
                 }
             };
 
             if last_event_is_ok {
-                match event.content.event_request.content.clone() {
+                if last_gov_version != event.content().gov_version {
+                    self.register_gov_version_sn(ctx, last_gov_version).await?;
+                }
+
+                match event.content().event_request.content().clone() {
                     EventRequest::Transfer(transfer_request) => {
-                        Tracker::new_transfer_subject(
+                        self.transfer(
                             ctx,
-                            self.subject_metadata.name.clone(),
-                            &transfer_request.subject_id.to_string(),
-                            &transfer_request.new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
+                            transfer_request.new_owner,
+                            event.content().gov_version,
                         )
                         .await?;
                     }
-                    EventRequest::Reject(reject_request) => {
-                        Tracker::reject_transfer_subject(
+                    EventRequest::Reject(..) => {
+                        self.reject(ctx, event.content().gov_version).await?;
+                    }
+                    EventRequest::Confirm(..) => {
+                        self.confirm(
                             ctx,
-                            &reject_request.subject_id.to_string(),
+                            event.signature().signer.clone(),
+                            event.content().gov_version,
                         )
                         .await?;
                     }
-                    EventRequest::Confirm(confirm_request) => {
-                        self.register_relation(
-                            ctx,
-                            event.signature.signer.to_string(),
-                            max_quantity.clone(),
-                        )
-                        .await?;
+                    EventRequest::EOL(..) => {
+                        self.eol(ctx).await?;
 
-                        Tracker::change_node_subject(
-                            ctx,
-                            &confirm_request.subject_id.to_string(),
-                            &event.signature.signer.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        self.delete_relation(ctx).await?;
-
-                        Tracker::transfer_register(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                            event.signature.signer.clone(),
-                            self.subject_metadata.owner.clone(),
-                        )
-                        .await?;
-                    }
-                    EventRequest::EOL(_eolrequest) => {
                         Self::register(
                             ctx,
                             RegisterMessage::EOLSubj {
@@ -564,13 +652,15 @@ impl Tracker {
                         namespace: self.namespace.to_string(),
                         schema_id: self.subject_metadata.schema_id.clone(),
                         issuer: event
-                            .content
+                            .content()
                             .event_request
-                            .signature
+                            .signature()
                             .signer
                             .to_string(),
+                        event_ledger_timestamp: event.signature().timestamp.as_nanos(),
+                        event_request_timestamp: event.content().event_request.signature().timestamp.as_nanos()
                     },
-                    &event.content.event_request.content,
+                    &event.content().event_request.content(),
                 )
                 .await?;
             }
@@ -584,97 +674,15 @@ impl Tracker {
 
         Ok(())
     }
-
-    async fn register_relation(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        owner: String,
-        max_quantity: CreatorQuantity,
-    ) -> Result<(), ActorError> {
-        let relation_path = ActorPath::from(&format!(
-            "/user/node/{}/relation_ship",
-            self.governance_id.to_string()
-        ));
-        let relation_actor: Option<ActorRef<RelationShip>> =
-            ctx.system().get_actor(&relation_path).await;
-
-        let response = if let Some(relation_actor) = relation_actor {
-            relation_actor
-                .ask(RelationShipMessage::RegisterNewSubject {
-                    data: OwnerSchema {
-                        owner,
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        namespace: self.namespace.to_string(),
-                    },
-                    subject_id: self.subject_metadata.subject_id.to_string(),
-                    max_quantity,
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(relation_path));
-        };
-
-        match response {
-            RelationShipResponse::None => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse(
-                relation_path,
-                "RelationShipResponse::None".to_owned(),
-            )),
-        }
-    }
-
-    pub async fn delete_relation(
-        &self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        let relation_path = ActorPath::from(&format!(
-            "/user/node/{}/relation_ship",
-            self.governance_id.to_string()
-        ));
-        let relation_actor: Option<ActorRef<RelationShip>> =
-            ctx.system().get_actor(&relation_path).await;
-
-        let response = if let Some(relation_actor) = relation_actor {
-            relation_actor
-                .ask(RelationShipMessage::DeleteSubject {
-                    data: OwnerSchema {
-                        owner: self.subject_metadata.owner.to_string(),
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        namespace: self.namespace.to_string(),
-                    },
-                    subject_id: self.subject_metadata.subject_id.to_string(),
-                })
-                .await?
-        } else {
-            return Err(ActorError::NotFound(relation_path));
-        };
-
-        if let RelationShipResponse::None = response {
-            Ok(())
-        } else {
-            Err(ActorError::UnexpectedResponse(
-                relation_path,
-                "RelationShipResponse::None".to_owned(),
-            ))
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub enum TrackerMessage {
-    UpdateTransfer(TransferResponse),
-    /// Get the subject metadata.
     GetMetadata,
-    GetLedger {
-        last_sn: u64,
-    },
+    GetLedger { lo_sn: Option<u64>, hi_sn: u64},
     GetLastLedger,
-    UpdateLedger {
-        events: Vec<SignedLedger>,
-    },
+    UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
-    GetOwner,
-    DeleteTracker,
 }
 
 impl Message for TrackerMessage {}
@@ -686,10 +694,13 @@ pub enum TrackerResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
-        last_state: Option<LastStateData>,
+        is_all: bool
+    },
+    LastLedger {
+        ledger_event: Option<SignedLedger>,
     },
     Governance(Box<GovernanceData>),
-    Owner(PublicKey),
+    Sn(u64),
     Ok,
 }
 impl Response for TrackerResponse {}
@@ -700,51 +711,74 @@ impl Actor for Tracker {
     type Message = TrackerMessage;
     type Response = TrackerResponse;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Tracker", id)
+        } else {
+            info_span!("Tracker", id)
+        }
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.init_store("tracker", None, true, ctx).await?;
-
-        let our_key = get_node_key(ctx).await?;
-
-        let Some(ext_db): Option<ExternalDB> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            return Err(ActorError::NotHelper("ext_db".to_owned()));
-        };
-
-        let Some(ave_sink): Option<AveSink> =
-            ctx.system().get_helper("sink").await
-        else {
-            return Err(ActorError::NotHelper("sink".to_owned()));
-        };
-
-        let last_state_actor = ctx
-            .create_child("last_state", LastState::initial(()))
-            .await?;
-
-        let sink =
-            Sink::new(last_state_actor.subscribe(), ext_db.get_last_state());
-        ctx.system().run_sink(sink).await;
-
-        if self.subject_metadata.active {
-            self.build_childs_all_schemas(ctx, our_key.clone()).await?;
+        if let Err(e) = self.init_store("tracker", None, true, ctx).await {
+            error!(
+                error = %e,
+                "Failed to initialize tracker store"
+            );
+            return Err(e);
         }
 
-        let sink_actor = ctx
-            .create_child(
-                "sink_data",
-                SinkData {
-                    controller_id: our_key.to_string(),
-                },
-            )
-            .await?;
-        let sink = Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-        ctx.system().run_sink(sink).await;
+        let our_key = self.our_key.clone();
 
-        let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-        ctx.system().run_sink(sink).await;
+        if self.subject_metadata.active {
+            let Some(ext_db): Option<Arc<ExternalDB>> =
+                ctx.system().get_helper("ext_db").await
+            else {
+                error!("External database helper not found");
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            let Some(ave_sink): Option<AveSink> =
+                ctx.system().get_helper("sink").await
+            else {
+                error!("Sink helper not found");
+                return Err(ActorError::Helper {
+                    name: "sink".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            let sink_actor = match ctx
+                .create_child(
+                    "sink_data",
+                    SinkData {
+                        public_key: our_key.to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create sink_data child"
+                    );
+                    return Err(e);
+                }
+            };
+            let sink =
+                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
+            ctx.system().run_sink(sink).await;
+
+            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
+            ctx.system().run_sink(sink).await;
+        }
 
         Ok(())
     }
@@ -753,7 +787,14 @@ impl Actor for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
+        if let Err(e) = self.stop_store(ctx).await {
+            error!(
+                error = %e,
+                "Failed to stop tracker store"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -766,74 +807,40 @@ impl Handler<Tracker> for Tracker {
         ctx: &mut ActorContext<Tracker>,
     ) -> Result<TrackerResponse, ActorError> {
         match msg {
-            TrackerMessage::UpdateTransfer(res) => {
-                match res {
-                    TransferResponse::Confirm => {
-                        let Some(new_owner) =
-                            self.subject_metadata.new_owner.clone()
-                        else {
-                            let e = "Can not obtain new_owner";
-                            error!(TARGET_TRACKER, "Confirm, {}", e);
-                            return Err(ActorError::Functional(e.to_owned()));
-                        };
-
-                        Tracker::change_node_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                            &new_owner.to_string(),
-                            &self.subject_metadata.owner.to_string(),
-                        )
-                        .await?;
-
-                        self.delete_relation(ctx).await?;
-                    }
-                    TransferResponse::Reject => {
-                        Tracker::reject_transfer_subject(
-                            ctx,
-                            &self.subject_metadata.subject_id.to_string(),
-                        )
-                        .await?;
-                        try_to_update(
-                            ctx,
-                            self.subject_metadata.subject_id.clone(),
-                            WitnessesAuth::None,
-                        )
-                        .await?;
-                    }
-                }
-
-                Ok(TrackerResponse::Ok)
-            }
-            TrackerMessage::DeleteTracker => {
-                self.delete_subject(ctx).await?;
-                Ok(TrackerResponse::Ok)
-            }
-            TrackerMessage::GetLedger { last_sn } => {
-                let (ledger, last_state) =
-                    self.get_ledger_data(ctx, last_sn).await?;
-                Ok(TrackerResponse::Ledger { ledger, last_state })
+            TrackerMessage::GetLedger {lo_sn, hi_sn} => {
+                let (ledger, is_all) = self.get_ledger(ctx, lo_sn, hi_sn).await?;
+                Ok(TrackerResponse::Ledger { ledger, is_all })
             }
             TrackerMessage::GetLastLedger => {
-                let (ledger, last_state) =
-                    self.get_ledger_data(ctx, self.subject_metadata.sn).await?;
-                Ok(TrackerResponse::Ledger { ledger, last_state })
+                let ledger_event = self.get_last_ledger(ctx).await?;
+                Ok(TrackerResponse::LastLedger { ledger_event })
             }
-            TrackerMessage::GetOwner => {
-                Ok(TrackerResponse::Owner(self.subject_metadata.owner.clone()))
-            }
-            TrackerMessage::GetMetadata => {
-                Ok(TrackerResponse::Metadata(Box::new(Metadata::from(self.clone()))))
-            }
+            TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
+                Box::new(Metadata::from(self.clone())),
+            )),
             TrackerMessage::UpdateLedger { events } => {
+                let events_count = events.len();
                 if let Err(e) =
                     self.manager_new_ledger_events(ctx, events).await
                 {
                     warn!(
-                        TARGET_TRACKER,
-                        "UpdateLedger, can not verify new events: {}", e
+                        msg_type = "UpdateLedger",
+                        error = %e,
+                        subject_id = %self.subject_metadata.subject_id,
+                        events_count = events_count,
+                        "Failed to verify new ledger events"
                     );
                     return Err(e);
                 };
+
+                debug!(
+                    msg_type = "UpdateLedger",
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = self.subject_metadata.sn,
+                    events_count = events_count,
+                    "Ledger updated successfully"
+                );
+
                 Ok(TrackerResponse::UpdateResult(
                     self.subject_metadata.sn,
                     self.subject_metadata.owner.clone(),
@@ -855,18 +862,28 @@ impl Handler<Tracker> for Tracker {
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
-                TARGET_TRACKER,
-                "OnEvent, can not persist information: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to persist event"
             );
             emit_fail(ctx, e).await;
         };
 
-        if let Err(e) = ctx.publish_event(event).await {
+        if let Err(e) = ctx.publish_event(event.clone()).await {
             error!(
-                TARGET_TRACKER,
-                "PublishEvent, can not publish event: {}", e
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Failed to publish event"
             );
             emit_fail(ctx, e).await;
+        } else {
+            debug!(
+                subject_id = %self.subject_metadata.subject_id,
+                sn = self.subject_metadata.sn,
+                "Event persisted and published successfully"
+            );
         }
     }
 
@@ -875,123 +892,162 @@ impl Handler<Tracker> for Tracker {
         error: ActorError,
         ctx: &mut ActorContext<Tracker>,
     ) -> ChildAction {
-        error!(TARGET_TRACKER, "OnChildFault, {}", error);
+        error!(
+            subject_id = %self.subject_metadata.subject_id,
+            sn = self.subject_metadata.sn,
+            error = %error,
+            "Child fault in tracker"
+        );
         emit_fail(ctx, error).await;
         ChildAction::Stop
     }
 }
 
+pub struct InitParamsTracker {
+    pub data: Option<TrackerInit>,
+    pub public_key: Arc<PublicKey>,
+    pub hash: HashAlgorithm,
+    pub is_service: bool
+}
+
 #[async_trait]
 impl PersistentActor for Tracker {
     type Persistence = FullPersistence;
-    type InitParams = Option<Self>;
+    type InitParams = InitParamsTracker;
+
+    fn update(&mut self, state: Self) {
+        self.properties = state.properties;
+        self.governance_id = state.governance_id;
+        self.namespace = state.namespace;
+        self.genesis_gov_version = state.genesis_gov_version;
+        self.subject_metadata = state.subject_metadata;
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        params.unwrap_or_default()
+        let init = params.data.unwrap_or_default();
+
+        Self {
+            service: params.is_service,
+            hash: Some(params.hash),
+            our_key: params.public_key,
+            subject_metadata: init.subject_metadata,
+            properties: init.properties,
+            genesis_gov_version: init.genesis_gov_version,
+            governance_id: init.governance_id,
+            namespace: init.namespace,
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        let valid_event = match Self::verify_protocols_state(
-            EventRequestType::from(&event.content.event_request.content),
-            event.content.eval_success,
-            event.content.appr_success,
-            event.content.appr_required,
-            event.content.vali_success,
-            false,
+        match (
+            event.content().event_request.content(),
+            &event.content().protocols,
         ) {
-            Ok(is_ok) => is_ok,
-            Err(e) => {
-                let error =
-                    format!("Apply, can not verify protocols state: {}", e);
-                error!(TARGET_TRACKER, error);
-                return Err(ActorError::Functional(error));
+            (EventRequest::Create(..), Protocols::Create { validation }) => {
+                if let ValidationMetadata::Metadata(metadata) =
+                    &validation.validation_metadata
+                {
+                    self.subject_metadata = SubjectMetadata::new(metadata);
+                    self.properties = metadata.properties.clone();
+
+                    debug!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        sn = self.subject_metadata.sn,
+                        "Applied create event"
+                    );
+                } else {
+                    error!(
+                        event_type = "Create",
+                        "Validation metadata must be Metadata type"
+                    );
+                    return Err(ActorError::Functional { description: "In create event, validation metadata must be a Metadata".to_owned() });
+                }
+
+                return Ok(());
             }
-        };
-
-        if valid_event {
-            match &event.content.event_request.content {
-                EventRequest::Create(create_event) => {
-                    let last_event_hash = hash_borsh(
-                        &*event.signature.content_hash.algorithm().hasher(),
-                        &event,
-                    )
-                    .map_err(|e| {
-                        let error = format!(
-                            "Apply, can not obtain last event hash: {}",
-                            e
-                        );
-                        error!(TARGET_TRACKER, error);
-                        ActorError::Functional(error)
-                    })?;
-
-                    let properties = if let LedgerValue::Patch(init_state) =
-                        event.content.value.clone()
-                    {
-                        init_state
-                    } else {
-                        let e = "Can not create subject, ledgerValue is not a patch";
-                        return Err(ActorError::Functional(e.to_string()));
-                    };
-
-                    self.subject_metadata =
-                        SubjectMetadata::from_create_request(
-                            event.content.subject_id.clone(),
-                            create_event,
-                            event
-                                .content
-                                .event_request
-                                .signature
-                                .signer
-                                .clone(),
-                            last_event_hash,
-                        );
-                    self.genesis_gov_version = event.content.gov_version;
-                    self.namespace = create_event.namespace.clone();
-                    self.governance_id = create_event.governance_id.clone();
-                    self.properties = properties;
-
-                    return Ok(());
+            (
+                EventRequest::Fact(..),
+                Protocols::TrackerFact { evaluation, .. },
+            ) => {
+                if let Some(eval_res) = evaluation.evaluator_res() {
+                    self.apply_patch(eval_res.patch)?;
+                    debug!(
+                        event_type = "Fact",
+                        subject_id = %self.subject_metadata.subject_id,
+                        "Applied fact event with patch"
+                    );
                 }
-                EventRequest::Fact(_fact_request) => {
-                    self.apply_patch(event.content.value.clone())?;
-                }
-                EventRequest::Transfer(transfer_request) => {
+            }
+            (
+                EventRequest::Transfer(transfer_request),
+                Protocols::Transfer { evaluation, .. },
+            ) => {
+                if evaluation.evaluator_res().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
+                    debug!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        new_owner = %transfer_request.new_owner,
+                        "Applied transfer event"
+                    );
                 }
-                EventRequest::Confirm(_confirm_request) => {
-                    let Some(new_owner) =
-                        self.subject_metadata.new_owner.clone()
-                    else {
-                        let error = "In confirm event was succefully but new owner is empty:";
-                        error!(TARGET_TRACKER, error);
-                        return Err(ActorError::Functional(error.to_owned()));
-                    };
-
-                    self.subject_metadata.owner = new_owner;
-                    self.subject_metadata.new_owner = None;
+            }
+            (EventRequest::Confirm(..), Protocols::TrackerConfirm { .. }) => {
+                if let Some(new_owner) = self.subject_metadata.new_owner.take()
+                {
+                    self.subject_metadata.owner = new_owner.clone();
+                    debug!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        new_owner = %new_owner,
+                        "Applied confirm event"
+                    );
+                } else {
+                    error!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        "New owner is None in confirm event"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In confirm event, new owner is None"
+                            .to_owned(),
+                    });
                 }
-                EventRequest::Reject(_reject_request) => {
-                    self.subject_metadata.new_owner = None;
-                }
-                EventRequest::EOL(_eolrequest) => {
-                    self.subject_metadata.active = false
-                }
+            }
+            (EventRequest::Reject(..), Protocols::Reject { .. }) => {
+                self.subject_metadata.new_owner = None;
+                debug!(
+                    event_type = "Reject",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied reject event"
+                );
+            }
+            (EventRequest::EOL(..), Protocols::EOL { .. }) => {
+                self.subject_metadata.active = false;
+                debug!(
+                    event_type = "EOL",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied EOL event"
+                );
+            }
+            _ => {
+                error!(
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Invalid protocol data for Tracker"
+                );
+                return Err(ActorError::Functional {
+                    description:
+                        "Protocols data is for Governance and this is a Tracker"
+                            .to_owned(),
+                });
             }
         }
 
-        let last_event_hash = hash_borsh(
-            &*event.signature.content_hash.algorithm().hasher(),
-            &event,
-        )
-        .map_err(|e| {
-            let error = format!("Apply, can not obtain last event hash: {}", e);
-            error!(TARGET_TRACKER, error);
-            ActorError::Functional(error)
-        })?;
-
-        self.subject_metadata.last_event_hash = last_event_hash;
         self.subject_metadata.sn += 1;
+        self.subject_metadata.prev_ledger_event_hash =
+            event.content().prev_ledger_event_hash.clone();
 
         Ok(())
     }

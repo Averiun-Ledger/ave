@@ -427,7 +427,7 @@ mod tests {
         assert!(db.verify_api_key(&api_key).is_ok());
 
         // Wait for expiration
-        
+
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         loop {

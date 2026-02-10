@@ -4,8 +4,9 @@ use ave_common::{
     ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
     BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
     BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
-    EventRequestInfo, GovsData, Namespace, PaginatorEvents, SubjsData,
-    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData,
+    RequestInfo, RequestState, SignaturesInfo, SubjectInfo, SubjsData,
+    TransferSubject,
     identity::{KeyPair, keys::Ed25519Signer},
 };
 use ave_http::config_types::ConfigHttp;
@@ -88,7 +89,7 @@ async fn fact_req(
     client: &Client,
     server: &TestServer,
     subject_id: &str,
-    controller_id: &str,
+    public_key: &str,
 ) -> Value {
     let request = BridgeSignedEventRequest {
         request: BridgeEventRequest::Fact(BridgeFactRequest {
@@ -98,7 +99,7 @@ async fn fact_req(
                     "add": [
                         {
                             "name": "Node1",
-                            "key": controller_id
+                            "key": public_key
                         }
                     ]
                 },
@@ -133,7 +134,7 @@ async fn fact_req_schema(
     client: &Client,
     server: &TestServer,
     subject_id: &str,
-    controller_id: &str,
+    public_key: &str,
 ) -> Value {
     let request = BridgeSignedEventRequest {
         request: BridgeEventRequest::Fact(BridgeFactRequest {
@@ -143,7 +144,7 @@ async fn fact_req_schema(
                     "add": [
                         {
                             "name": "node1",
-                            "key": controller_id
+                            "key": public_key
                         }
                     ]
                 },
@@ -174,7 +175,6 @@ async fn fact_req_schema(
                         [
                         {
                             "schema_id": "Example1",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -212,12 +212,11 @@ async fn fact_req_schema(
                                             "namespace": []
                                         }
                                     ]
-                                }
+
                             }
                         },
                             {
                             "schema_id": "Example2",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -256,7 +255,7 @@ async fn fact_req_schema(
                                         }
                                     ]
                                 }
-                            }
+
                         }
                     ]
                 },
@@ -264,7 +263,7 @@ async fn fact_req_schema(
                     "schema": [
                         {
                             "schema_id": "Example1",
-                            "policies": {
+
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -273,11 +272,10 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+
                         },
                         {
                             "schema_id": "Example2",
-                            "policies": {
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -286,7 +284,7 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+
                         }
                     ]
                 }
@@ -312,12 +310,12 @@ async fn transfer_req(
     client: &Client,
     server: &TestServer,
     subject_id: &str,
-    controller_id: &str,
+    public_key: &str,
 ) -> Value {
     let request = BridgeSignedEventRequest {
         request: BridgeEventRequest::Transfer(BridgeTransferRequest {
             subject_id: subject_id.to_string(),
-            new_owner: controller_id.to_string(),
+            new_owner: public_key.to_string(),
         }),
         signature: None,
     };
@@ -447,7 +445,7 @@ async fn test_request_state_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             res = body;
             break;
         } else {
@@ -456,7 +454,7 @@ async fn test_request_state_deserialization() {
     }
 
     let request_info: RequestInfo = serde_json::from_value(res).unwrap();
-    assert_eq!(request_info.status, "Finish");
+    assert_eq!(request_info.state.to_string(), "Finish");
     assert_eq!(request_info.version, 0);
     assert_eq!(request_info.error, None);
 }
@@ -473,12 +471,12 @@ async fn test_approval_request_deserialization() {
     let body = create_req(&client, &server).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
-    let controller_id = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+    let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
 
     let body =
-        fact_req(&client, &server, &request_data.subject_id, &controller_id)
+        fact_req(&client, &server, &request_data.subject_id, &public_key)
             .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
@@ -509,17 +507,17 @@ async fn test_approval_request_deserialization() {
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
     assert_eq!(
-        approval.request.event_request.content.subject_id,
+        approval.request.event_request.content().subject_id,
         request_data.subject_id
     );
     assert_eq!(
-        approval.request.event_request.content.payload,
+        approval.request.event_request.content().payload,
         json!({
             "members": {
                 "add": [
                     {
                         "name": "Node1",
-                        "key": controller_id
+                        "key": public_key
                     }
                 ]
             },
@@ -620,9 +618,9 @@ async fn test_auth_endpoints_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let controller_id: Vec<String> = serde_json::from_value(body).unwrap();
+    let public_key: Vec<String> = serde_json::from_value(body).unwrap();
     assert_eq!(
-        controller_id,
+        public_key,
         vec!["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"]
     );
 
@@ -683,12 +681,12 @@ async fn test_update_and_transfer_deserialization() {
     let res: String = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
 
-    let controller_id = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+    let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
 
     let body =
-        fact_req(&client, &server, &request_data.subject_id, &controller_id)
+        fact_req(&client, &server, &request_data.subject_id, &public_key)
             .await;
 
     let request_data: RequestData = serde_json::from_value(body).unwrap();
@@ -704,7 +702,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -715,7 +713,7 @@ async fn test_update_and_transfer_deserialization() {
         &client,
         &server,
         &request_data.subject_id,
-        &controller_id,
+        &public_key,
     )
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
@@ -731,7 +729,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -782,7 +780,7 @@ async fn test_update_and_transfer_deserialization() {
     assert!(!res.is_empty());
     assert_eq!(res[0].name, "Governance");
     assert_eq!(res[0].actual_owner, owner);
-    assert_eq!(res[0].new_owner, controller_id);
+    assert_eq!(res[0].new_owner, public_key);
     assert_eq!(res[0].subject_id, subject_id);
 }
 
@@ -809,7 +807,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -836,7 +834,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -898,7 +896,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -919,7 +917,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -940,7 +938,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1119,7 +1117,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1182,7 +1180,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1211,7 +1209,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let controller_id_2: String = serde_json::from_value(body).unwrap();
+    let public_key_2: String = serde_json::from_value(body).unwrap();
 
     let (status, body) = make_request(
         &client,
@@ -1222,14 +1220,14 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let controller_id_1: String = serde_json::from_value(body).unwrap();
+    let public_key_1: String = serde_json::from_value(body).unwrap();
 
     let (status, _body) = make_request(
         &client,
         &server2.url(&format!("/auth/{}", governance_id)),
         "PUT",
         None,
-        Some(json!([controller_id_1])),
+        Some(json!([public_key_1])),
     )
     .await;
     assert!(status.is_success());
@@ -1239,13 +1237,13 @@ async fn test_subject_deserialization() {
         &server1.url(&format!("/auth/{}", governance_id)),
         "PUT",
         None,
-        Some(json!([controller_id_2])),
+        Some(json!([public_key_2])),
     )
     .await;
     assert!(status.is_success());
 
     let body =
-        fact_req(&client, &server1, &governance_id, &controller_id_2).await;
+        fact_req(&client, &server1, &governance_id, &public_key_2).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
@@ -1260,7 +1258,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1287,13 +1285,13 @@ async fn test_subject_deserialization() {
     assert_eq!(subject.description, "A governance");
     assert_eq!(subject.namespace, "");
     assert_eq!(subject.genesis_gov_version, 0);
-    assert_eq!(subject.owner, controller_id_1);
-    assert_eq!(subject.creator, controller_id_1);
+    assert_eq!(subject.owner, public_key_1);
+    assert_eq!(subject.creator, public_key_1);
     assert!(subject.new_owner.is_none());
     assert!(subject.properties.is_object());
     assert!(subject.properties["members"].is_object());
-    assert_eq!(subject.properties["members"]["Owner"], controller_id_1);
-    assert_eq!(subject.properties["members"]["Node1"], controller_id_2);
+    assert_eq!(subject.properties["members"]["Owner"], public_key_1);
+    assert_eq!(subject.properties["members"]["Node1"], public_key_2);
 
     let (status, body) = make_request(
         &client,
@@ -1315,16 +1313,16 @@ async fn test_subject_deserialization() {
     assert_eq!(subject.description, "A governance");
     assert_eq!(subject.namespace, "");
     assert_eq!(subject.genesis_gov_version, 0);
-    assert_eq!(subject.owner, controller_id_1);
-    assert_eq!(subject.creator, controller_id_1);
+    assert_eq!(subject.owner, public_key_1);
+    assert_eq!(subject.creator, public_key_1);
     assert!(subject.new_owner.is_none());
     assert!(subject.properties.is_object());
     assert!(subject.properties["members"].is_object());
-    assert_eq!(subject.properties["members"]["Owner"], controller_id_1);
-    assert_eq!(subject.properties["members"]["Node1"], controller_id_2);
+    assert_eq!(subject.properties["members"]["Owner"], public_key_1);
+    assert_eq!(subject.properties["members"]["Node1"], public_key_2);
 
     let body =
-        transfer_req(&client, &server1, &governance_id, &controller_id_2).await;
+        transfer_req(&client, &server1, &governance_id, &public_key_2).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
@@ -1339,7 +1337,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1373,7 +1371,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1405,7 +1403,7 @@ async fn test_subject_deserialization() {
     assert_eq!(subject.sn, 3);
 
     let body =
-        transfer_req(&client, &server1, &governance_id, &controller_id_2).await;
+        transfer_req(&client, &server1, &governance_id, &public_key_2).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
@@ -1420,7 +1418,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1454,7 +1452,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1488,7 +1486,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1592,7 +1590,7 @@ async fn test_subject_deserialization() {
         panic!("Invalid Request expect Transfer");
     };
     assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, controller_id_2);
+    assert_eq!(request.new_owner, public_key_2);
 
     assert_eq!(paginator_reverse.events[3].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[3].sn, 3);
@@ -1617,7 +1615,7 @@ async fn test_subject_deserialization() {
         panic!("Invalid Request expect Transfer");
     };
     assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, controller_id_2);
+    assert_eq!(request.new_owner, public_key_2);
 
     assert_eq!(paginator_reverse.events[5].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[5].sn, 1);
@@ -1637,7 +1635,7 @@ async fn test_subject_deserialization() {
                 "add": [
                     {
                         "name": "Node1",
-                        "key": controller_id_2
+                        "key": public_key_2
                     }
                 ]
             },
@@ -1691,7 +1689,7 @@ async fn test_subject_deserialization() {
         panic!("Invalid Request expect Transfer");
     };
     assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, controller_id_2);
+    assert_eq!(request.new_owner, public_key_2);
 
     // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
     let (status, body) = make_request(
@@ -1772,7 +1770,7 @@ async fn test_subject_deserialization() {
                 "add": [
                     {
                         "name": "Node1",
-                        "key": controller_id_2
+                        "key": public_key_2
                     }
                 ]
             },
@@ -1810,7 +1808,7 @@ async fn test_signatures_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1851,7 +1849,7 @@ async fn test_system_info_deserialization() {
         make_request(&client, &server.url("/controller-id"), "GET", None, None)
             .await;
     assert!(status.is_success());
-    let controller_id: String = serde_json::from_value(body).unwrap();
+    let public_key: String = serde_json::from_value(body).unwrap();
 
     // PEER-ID
     let (status, body) =
@@ -1861,14 +1859,14 @@ async fn test_system_info_deserialization() {
 
     assert!(!peer_id.is_empty(), "Peer ID should not be empty");
     assert!(
-        !controller_id.is_empty(),
+        !public_key.is_empty(),
         "Controller ID should not be empty"
     );
 
     // Verify they are different (peer-id and controller-id should be different)
     assert_ne!(
         peer_id.to_string(),
-        controller_id.to_string(),
+        public_key.to_string(),
         "Peer ID and Controller ID should be different"
     );
 
@@ -1897,7 +1895,7 @@ async fn test_system_info_deserialization() {
 
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);
-    assert_eq!(config.node.garbage_collector, 120);
+    assert_eq!(config.node.tracking_size, 100);
 
     assert_eq!(config.node.network.node_type, "Bootstrap");
     assert_eq!(
