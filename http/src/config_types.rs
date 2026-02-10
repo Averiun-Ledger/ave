@@ -3,10 +3,11 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    HttpConfig, MemoryLimit,
-    auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
-    },
+
+    HttpConfig, MemoryLimit, SelfSignedCertConfig, auth::{
+        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, RateLimitConfig, SessionConfig,
+    }
+
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -105,6 +106,7 @@ pub struct RateLimitConfigHttp {
     pub limit_by_key: bool,
     pub limit_by_ip: bool,
     pub cleanup_interval_seconds: i64,
+    pub sensitive_endpoints: Vec<EndpointRateLimitHttp>,
 }
 
 impl From<RateLimitConfig> for RateLimitConfigHttp {
@@ -116,6 +118,27 @@ impl From<RateLimitConfig> for RateLimitConfigHttp {
             limit_by_key: value.limit_by_key,
             limit_by_ip: value.limit_by_ip,
             cleanup_interval_seconds: value.cleanup_interval_seconds,
+            sensitive_endpoints: value.sensitive_endpoints
+                .into_iter()
+                .map(EndpointRateLimitHttp::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct EndpointRateLimitHttp {
+    pub endpoint: String,
+    pub max_requests: u32,
+    pub window_seconds: Option<i64>,
+}
+
+impl From<EndpointRateLimit> for EndpointRateLimitHttp {
+    fn from(value: EndpointRateLimit) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            max_requests: value.max_requests,
+            window_seconds: value.window_seconds,
         }
     }
 }
@@ -124,7 +147,7 @@ impl From<RateLimitConfig> for RateLimitConfigHttp {
 pub struct SessionConfigHttp {
     pub audit_enable: bool,
     pub audit_retention_days: u32,
-    pub log_all_requests: bool,
+    pub audit_max_entries: u32,
 }
 
 impl From<SessionConfig> for SessionConfigHttp {
@@ -132,7 +155,7 @@ impl From<SessionConfig> for SessionConfigHttp {
         Self {
             audit_enable: value.audit_enable,
             audit_retention_days: value.audit_retention_days,
-            log_all_requests: value.log_all_requests,
+            audit_max_entries: value.audit_max_entries,
         }
     }
 }
@@ -144,6 +167,8 @@ pub struct HttpConfigHttp {
     pub https_cert_path: Option<String>,
     pub https_private_key_path: Option<String>,
     pub enable_doc: bool,
+    pub cors: CorsConfigHttp,
+    pub self_signed_cert: SelfSignedCertConfigHttp,
 }
 
 impl From<HttpConfig> for HttpConfigHttp {
@@ -158,6 +183,56 @@ impl From<HttpConfig> for HttpConfigHttp {
                 .https_private_key_path
                 .map(|x| x.to_string_lossy().to_string()),
             enable_doc: value.enable_doc,
+            cors: CorsConfigHttp::from(value.cors),
+            self_signed_cert: SelfSignedCertConfigHttp::from(value.self_signed_cert),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SelfSignedCertConfigHttp {
+    /// Enable automatic self-signed certificate generation
+    pub enabled: bool,
+    /// Common Name for the certificate (e.g., "localhost")
+    pub common_name: String,
+    /// Subject Alternative Names (additional hostnames/IPs)
+    pub san: Vec<String>,
+    /// Certificate validity in days
+    pub validity_days: u32,
+    /// Days before expiration to trigger renewal
+    pub renew_before_days: u32,
+    /// Check interval in seconds for certificate expiration
+    pub check_interval_secs: u64,
+}
+
+impl From<SelfSignedCertConfig> for SelfSignedCertConfigHttp {
+    fn from(value: SelfSignedCertConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            common_name: value.common_name,
+            san: value.san,
+            validity_days: value.validity_days,
+            renew_before_days: value.renew_before_days,
+            check_interval_secs: value.check_interval_secs,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct CorsConfigHttp {
+    pub enabled: bool,
+    pub allow_any_origin: bool,
+    pub allowed_origins: Vec<String>,
+    pub allow_credentials: bool,
+}
+
+impl From<ave_bridge::CorsConfig> for CorsConfigHttp {
+    fn from(value: ave_bridge::CorsConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            allow_any_origin: value.allow_any_origin,
+            allowed_origins: value.allowed_origins,
+            allow_credentials: value.allow_credentials,
         }
     }
 }

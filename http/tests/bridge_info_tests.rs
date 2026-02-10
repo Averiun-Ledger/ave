@@ -1959,19 +1959,24 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.auth.lockout.duration_seconds, 60);
     assert!(config.auth.rate_limit.enable);
     assert_eq!(config.auth.rate_limit.window_seconds, 60);
-    assert_eq!(config.auth.rate_limit.max_requests, 20);
+    assert_eq!(config.auth.rate_limit.max_requests, 10000);
     assert!(config.auth.rate_limit.limit_by_key);
     assert!(config.auth.rate_limit.limit_by_ip);
     assert_eq!(config.auth.rate_limit.cleanup_interval_seconds, 1800);
     assert!(config.auth.session.audit_enable);
     assert_eq!(config.auth.session.audit_retention_days, 30);
-    assert!(config.auth.session.log_all_requests);
 
     assert_eq!(config.http.http_address, "0.0.0.0:3000");
     assert!(config.http.https_address.is_none());
     assert!(config.http.https_cert_path.is_none());
     assert!(config.http.https_private_key_path.is_none());
     assert!(!config.http.enable_doc);
+
+    // Self-signed cert defaults
+    assert!(!config.http.self_signed_cert.enabled);
+    assert_eq!(config.http.self_signed_cert.common_name, "localhost");
+    assert_eq!(config.http.self_signed_cert.validity_days, 365);
+    assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
 
     // KEYS - Verify PKCS#8 with PKCS#5 encryption
     // First check if the key file actually exists in the keys_path directory

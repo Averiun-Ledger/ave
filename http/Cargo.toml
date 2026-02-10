@@ -34,7 +34,7 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { version = "0.8.7" }
 axum-extra = "0.12.1"
 tower = "0.5.2"
-tower-http = {version = "0.6.7", features = ["trace", "metrics", "cors"]}
+tower-http = {version = "0.6.7", features = ["trace", "metrics", "cors", "set-header"]}
 utoipa = { version = "5.4.0", features = ["axum_extras"]}
 utoipa-rapidoc = { version = "6.0.0", features = ["axum"]}
 bytes = "1.11.0"
@@ -47,6 +47,10 @@ hex = "0.4.3"
 rand = "0.9.2"
 time = "0.3.36"
 thiserror = "2.0.9"
+
+# Self-signed certificate generation
+rcgen = "0.14"
+x509-parser = "0.18"
 
 [dev-dependencies]
 tempfile = "3.10.1"

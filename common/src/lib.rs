@@ -6,8 +6,6 @@
 //! such as identity and cryptography, without pulling in heavy dependencies
 //! like wasmtime that don't compile on all architectures.
 
-// Internal modules
-// Internal modules
 #[cfg(feature = "common")]
 pub mod error;
 

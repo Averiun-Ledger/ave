@@ -37,7 +37,7 @@ use crate::auth::integration::{
 
 const TARGET_HTTP: &str = "AveHttp";
 const MIN_LENGTH: usize = 8;
-const MAX_LENGTH: usize = 20;
+const MAX_LENGTH: usize = 128;
 const REQUIRE_UPPERCASE: bool = true;
 const REQUIRE_LOWERCASE: bool = true;
 const REQUIRE_DIGIT: bool = true;

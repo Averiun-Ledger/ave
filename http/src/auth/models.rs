@@ -60,7 +60,6 @@ pub struct User {
     pub username: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
-    pub is_superadmin: bool,
     pub is_active: bool,
     pub is_deleted: bool,
     pub must_change_password: bool,
@@ -81,8 +80,6 @@ pub struct UserInfo {
     pub id: i64,
     /// Username
     pub username: String,
-    /// Is superadmin
-    pub is_superadmin: bool,
     /// Is account active
     pub is_active: bool,
     /// Must change password on next login
@@ -103,7 +100,6 @@ pub struct UserInfo {
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
-    pub is_superadmin: Option<bool>,
     pub role_ids: Option<Vec<i64>>,
     pub must_change_password: Option<bool>,
 }
@@ -187,6 +183,14 @@ pub struct Permission {
     pub resource: String,
     pub action: String,
     pub allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_system: Option<bool>,
+    /// Source of the permission: 'direct' (user-specific) or 'role' (inherited from role)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// If source is 'role', the name of the role providing this permission
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -202,7 +206,9 @@ pub struct SetPermissionRequest {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiKeyInfo {
-    pub id: i64,
+    /// UUID identifier - serves as both public ID and primary key
+    pub id: String,
+    #[serde(skip_serializing)]
     pub user_id: i64,
     pub username: String,
     pub key_prefix: String,
@@ -259,7 +265,7 @@ pub struct AuditLog {
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub timestamp: i64,
     pub user_id: Option<i64>,
-    pub api_key_id: Option<i64>,
+    pub api_key_id: Option<String>,
     pub action_type: String,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
@@ -274,7 +280,7 @@ pub struct AuditLog {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditLogQuery {
     pub user_id: Option<i64>,
-    pub api_key_id: Option<i64>,
+    pub api_key_id: Option<String>,
     pub endpoint: Option<String>,
     pub http_method: Option<String>,
     pub ip_address: Option<String>,
@@ -284,6 +290,11 @@ pub struct AuditLogQuery {
     pub end_timestamp: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    // Exclusion filters (NOT conditions)
+    pub exclude_user_id: Option<i64>,
+    pub exclude_api_key_id: Option<String>,
+    pub exclude_ip_address: Option<String>,
+    pub exclude_endpoint: Option<String>,
 }
 
 // =============================================================================
@@ -311,19 +322,23 @@ pub struct LoginResponse {
 pub struct AuthContext {
     pub user_id: i64,
     pub username: String,
-    pub is_superadmin: bool,
     pub roles: Vec<String>,
     pub permissions: Vec<Permission>,
-    pub api_key_id: i64,
+    pub api_key_id: String,  // UUID
     pub is_management_key: bool,
     pub ip_address: Option<String>,
 }
 
 impl AuthContext {
+    /// Check if user has the superadmin role
+    pub fn is_superadmin(&self) -> bool {
+        self.roles.iter().any(|r| r == "superadmin")
+    }
+
     /// Check if user has permission for a specific resource and action
     pub fn has_permission(&self, resource: &str, action: &str) -> bool {
-        // Superadmin always has all permissions
-        if self.is_superadmin {
+        // Superadmin role always has all permissions
+        if self.is_superadmin() {
             return true;
         }
 

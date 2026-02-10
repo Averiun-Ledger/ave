@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
 pub mod config;
-pub use http::HttpConfig;
+pub use http::{CorsConfig, HttpConfig, SelfSignedCertConfig};
 pub mod conversions;
 pub mod error;
 pub mod http;

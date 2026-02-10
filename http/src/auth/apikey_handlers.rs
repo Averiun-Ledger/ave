@@ -67,6 +67,17 @@ pub async fn create_api_key_for_user(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
+    // SECURITY FIX: Prevent API key impersonation
+    // Only superadmin can create keys for other users
+    if user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can create API keys for other users".to_string(),
+            }),
+        ));
+    }
+
     let (api_key, key_info) = db
         .create_api_key(
             user_id,
@@ -82,7 +93,7 @@ pub async fn create_api_key_for_user(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
         endpoint: Some(&format!("/admin/api-keys/user/{}", user_id)),
         http_method: Some("POST"),
@@ -168,11 +179,11 @@ pub async fn list_user_api_keys_admin(
 /// Get API key info (admin)
 #[utoipa::path(
     get,
-    path = "/admin/api-keys/{key_id}",
+    path = "/admin/api-keys/{id}",
     operation_id = "getApiKey",
     tag = "API Key Management",
     params(
-        ("key_id" = i64, Path, description = "API Key ID")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
     responses(
         (status = 200, description = "API key information", body = ApiKeyInfo),
@@ -184,12 +195,12 @@ pub async fn list_user_api_keys_admin(
 pub async fn get_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key_id): Path<i64>,
+    Path(id): Path<String>,
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let key_info = db.get_api_key_info(key_id).map_err(db_error_to_response)?;
+    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
 
     Ok(Json(key_info))
 }
@@ -197,13 +208,13 @@ pub async fn get_api_key(
 /// Revoke API key (admin)
 #[utoipa::path(
     delete,
-    path = "/admin/api-keys/{key_id}",
+    path = "/admin/api-keys/{id}",
     operation_id = "revokeApiKey",
     tag = "API Key Management",
     params(
-        ("key_id" = i64, Path, description = "API Key ID")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
-    request_body = RevokeApiKeyRequest,
+    request_body(content = RevokeApiKeyRequest, description = "Optional revocation reason", content_type = "application/json"),
     responses(
         (status = 204, description = "API key revoked successfully"),
         (status = 403, description = "Permission denied", body = ErrorResponse),
@@ -214,26 +225,55 @@ pub async fn get_api_key(
 pub async fn revoke_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key_id): Path<i64>,
-    Json(req): Json<RevokeApiKeyRequest>,
+    Path(id): Path<String>,
+    req: Option<Json<RevokeApiKeyRequest>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
 
-    db.revoke_api_key(key_id, Some(auth_ctx.user_id), req.reason.as_deref())
+    // SECURITY FIX: Prevent revoking the currently used API key
+    if &id == &auth_ctx.api_key_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot revoke the currently used API key".to_string(),
+            }),
+        ));
+    }
+
+    // SECURITY FIX: Prevent API key DoS by revoking other users' keys
+    // Get the key to check ownership
+    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+
+    // Only superadmin can revoke keys of other users
+    if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can revoke API keys of other users".to_string(),
+            }),
+        ));
+    }
+
+    let reason = req.as_ref().and_then(|r| r.reason.as_deref());
+
+    db.revoke_api_key(&id, Some(auth_ctx.user_id), reason)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
-        endpoint: Some(&format!("/admin/api-keys/{}", key_id)),
+        endpoint: Some(&format!("/admin/api-keys/{}", id)),
         http_method: Some("DELETE"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(
+            &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+                .unwrap_or_default(),
+        ),
         success: true,
         error_message: None,
     });
@@ -244,11 +284,11 @@ pub async fn revoke_api_key(
 /// Rotate an existing API key (admin)
 #[utoipa::path(
     post,
-    path = "/admin/api-keys/{key_id}/rotate",
+    path = "/admin/api-keys/{id}/rotate",
     operation_id = "rotateApiKey",
     tag = "API Key Management",
     params(
-        ("key_id" = i64, Path, description = "API Key ID")
+        ("id" = String, Path, description = "API Key ID (UUID)")
     ),
     request_body = RotateApiKeyRequest,
     responses(
@@ -261,8 +301,8 @@ pub async fn revoke_api_key(
 pub async fn rotate_api_key(
     AuthContextExtractor(auth_ctx): AuthContextExtractor,
     Extension(db): Extension<Arc<AuthDatabase>>,
-    Path(key_id): Path<i64>,
-    Json(req): Json<RotateApiKeyRequest>,
+    Path(id): Path<String>,
+    req: Option<Json<RotateApiKeyRequest>>,
 ) -> Result<
     (StatusCode, Json<CreateApiKeyResponse>),
     (StatusCode, Json<ErrorResponse>),
@@ -271,21 +311,41 @@ pub async fn rotate_api_key(
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
     // Fetch existing key for user and defaults
-    let existing = db.get_api_key_info(key_id).map_err(db_error_to_response)?;
+    let existing = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent API key theft via rotation of other users' keys
+    // Only superadmin can rotate keys of other users
+    if existing.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can rotate API keys of other users".to_string(),
+            }),
+        ));
+    }
+
+    // Extract request body or use defaults
+    let req = req.as_ref().map(|r| &r.0);
 
     // Revoke old key first
-    db.revoke_api_key(key_id, Some(auth_ctx.user_id), req.reason.as_deref())
+    db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.and_then(|r| r.reason.as_deref()))
         .map_err(db_error_to_response)?;
 
     // Create replacement key
+    // Use provided values or fall back to existing values
+    let new_name = req.and_then(|r| r.name.as_deref()).unwrap_or(existing.name.as_str());
+    let new_description = req.and_then(|r| r.description.as_deref())
+        .or(existing.description.as_deref());
+
+    // Handle expires_in_seconds: if provided in request, use it; otherwise keep existing TTL
+    let new_expires_in = req.and_then(|r| r.expires_in_seconds);
+
     let (api_key, key_info) = db
         .create_api_key(
             existing.user_id,
-            req.name.as_deref().or(Some(existing.name.as_str())),
-            req.description
-                .as_deref()
-                .or(existing.description.as_deref()),
-            req.expires_in_seconds,
+            Some(new_name),
+            new_description,
+            new_expires_in,
             existing.is_management,
         )
         .map_err(db_error_to_response)?;
@@ -295,9 +355,9 @@ pub async fn rotate_api_key(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_rotated",
-        endpoint: Some(&format!("/admin/api-keys/{}/rotate", key_id)),
+        endpoint: Some(&format!("/admin/api-keys/{}/rotate", id)),
         http_method: Some("POST"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
@@ -370,7 +430,7 @@ pub async fn create_my_api_key(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
         endpoint: Some("/me/api-keys"),
         http_method: Some("POST"),
@@ -479,7 +539,7 @@ pub async fn revoke_my_api_key(
         .map_err(db_error_to_response)?;
 
     // Cannot revoke the current key
-    if key_info.id == auth_ctx.api_key_id {
+    if &key_info.id == &auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -500,13 +560,13 @@ pub async fn revoke_my_api_key(
 
     let reason = req.as_ref().and_then(|r| r.reason.as_deref());
 
-    db.revoke_api_key(key_info.id, Some(auth_ctx.user_id), reason)
+    db.revoke_api_key(&key_info.id, Some(auth_ctx.user_id), reason)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
         endpoint: Some(&format!("/me/api-keys/{}", name)),
         http_method: Some("DELETE"),

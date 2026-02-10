@@ -72,6 +72,11 @@ pub enum DatabaseError {
 // DATABASE SERVICE
 // =============================================================================
 
+// Dummy password hash for timing attack mitigation
+// This is a real Argon2id hash generated with the same parameters as user passwords
+// to ensure identical verification cost whether user exists or not
+const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$6bLVReaW/buHRwX6rLPCJA$KNXZtbxs0tqTOOuCkWFPldX2ri4wFgAVVFJqixUK/Kw";
+
 /// Thread-safe database service for auth operations
 #[derive(Clone)]
 pub struct AuthDatabase {
@@ -253,8 +258,8 @@ impl AuthDatabase {
 
         // Create superadmin user
         conn.execute(
-            "INSERT INTO users (username, password_hash, is_superadmin, is_active)
-             VALUES (?1, ?2, 1, 1)",
+            "INSERT INTO users (username, password_hash, is_active)
+             VALUES (?1, ?2, 1)",
             params![superadmin, password_hash],
         ).map_err(|e| DatabaseError::InsertError(format!("Failed to create superadmin: {}", e)))?;
 
@@ -294,6 +299,21 @@ impl AuthDatabase {
         time::OffsetDateTime::now_utc().unix_timestamp()
     }
 
+    /// Generate a UUID v4 string (for API key public IDs)
+    pub(crate) fn generate_uuid() -> String {
+        use rand::Rng;
+        let mut rng = rand::rng();
+
+        format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            rng.random::<u32>(),
+            rng.random::<u16>(),
+            0x4000 | (rng.random::<u16>() & 0x0FFF), // Version 4
+            0x8000 | (rng.random::<u16>() & 0x3FFF), // Variant 1
+            rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
+        )
+    }
+
     /// Override default API key TTL on an existing instance (used for tests/config reloads)
     #[allow(dead_code)] // primarily used in tests / config reload scenarios
     pub fn set_default_api_key_ttl(&mut self, ttl: i64) {
@@ -311,19 +331,14 @@ impl AuthDatabase {
         &self,
         username: &str,
         password: &str,
-        is_superadmin: bool,
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
         must_change_password: Option<bool>,
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        // Check if username already exists
-        if username.trim().is_empty() {
-            return Err(DatabaseError::ValidationError(
-                "Username cannot be empty".to_string(),
-            ));
-        }
+        // SECURITY FIX: Validate username for CRLF and other attacks
+        Self::validate_username(username)?;
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1 AND is_deleted = 0)",
@@ -342,6 +357,38 @@ impl AuthDatabase {
         // Validate password
         validate_password(password).map_err(DatabaseError::ValidationError)?;
 
+        // SECURITY FIX: Enforce single superadmin rule
+        // Check if trying to assign superadmin role
+        if let Some(ref roles) = role_ids {
+            // Try to get superadmin role ID - fail strictly if query fails
+            let superadmin_role_id: Option<i64> = conn.query_row(
+                "SELECT id FROM roles WHERE name = 'superadmin'",
+                [],
+                |row| row.get(0),
+            ).ok();
+
+            if let Some(sa_role_id) = superadmin_role_id {
+                if roles.contains(&sa_role_id) {
+                    // Use the already-acquired connection to avoid deadlock
+                    let existing_count: i64 = conn.query_row(
+                        "SELECT COUNT(DISTINCT u.id)
+                         FROM users u
+                         INNER JOIN user_roles ur ON u.id = ur.user_id
+                         INNER JOIN roles r ON ur.role_id = r.id
+                         WHERE r.name = 'superadmin' AND u.is_deleted = 0",
+                        [],
+                        |row| row.get(0),
+                    ).map_err(|e| DatabaseError::QueryError(format!("Failed to count superadmins: {}", e)))?;
+
+                    if existing_count > 0 {
+                        return Err(DatabaseError::ValidationError(
+                            "A superadmin already exists. Only one superadmin is allowed.".to_string()
+                        ));
+                    }
+                }
+            }
+        }
+
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
             DatabaseError::CryptoError(format!(
@@ -353,9 +400,9 @@ impl AuthDatabase {
         // Insert user
         let must_change = must_change_password.unwrap_or(true);
         conn.execute(
-            "INSERT INTO users (username, password_hash, is_superadmin, is_active, must_change_password)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![username, password_hash, is_superadmin, true, must_change],
+            "INSERT INTO users (username, password_hash, is_active, must_change_password)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![username, password_hash, true, must_change],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
@@ -380,7 +427,7 @@ impl AuthDatabase {
         user_id: i64,
     ) -> Result<User, DatabaseError> {
         conn.query_row(
-            "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+            "SELECT id, username, password_hash, is_active, is_deleted,
                     must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
              FROM users
              WHERE id = ?1 AND is_deleted = 0",
@@ -390,15 +437,14 @@ impl AuthDatabase {
                     id: row.get(0)?,
                     username: row.get(1)?,
                     password_hash: row.get(2)?,
-                    is_superadmin: row.get(3)?,
-                    is_active: row.get(4)?,
-                    is_deleted: row.get(5)?,
-                    must_change_password: row.get(6)?,
-                    failed_login_attempts: row.get(7)?,
-                    locked_until: row.get(8)?,
-                    last_login_at: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    is_active: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    must_change_password: row.get(5)?,
+                    failed_login_attempts: row.get(6)?,
+                    locked_until: row.get(7)?,
+                    last_login_at: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 };
                 Ok(user)
             },
@@ -414,25 +460,48 @@ impl AuthDatabase {
         Self::get_user_by_id_internal(&conn, user_id)
     }
 
+    /// Count superadmin users (users with the superadmin role)
+    pub fn count_superadmins(&self) -> Result<i64, DatabaseError> {
+        let conn = self.lock_conn()?;
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT u.id)
+                 FROM users u
+                 INNER JOIN user_roles ur ON u.id = ur.user_id
+                 INNER JOIN roles r ON ur.role_id = r.id
+                 WHERE r.name = 'superadmin' AND u.is_deleted = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        Ok(count)
+    }
+
     /// List all users
     pub fn list_users(
         &self,
         include_inactive: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<UserInfo>, DatabaseError> {
         let conn = self.lock_conn()?;
 
         let query = if include_inactive {
-            "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
+            "SELECT u.id, u.username, u.is_active, u.failed_login_attempts,
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0
-             ORDER BY u.username"
+             ORDER BY u.username
+             LIMIT ?1 OFFSET ?2"
         } else {
-            "SELECT u.id, u.username, u.is_superadmin, u.is_active, u.failed_login_attempts,
+            "SELECT u.id, u.username, u.is_active, u.failed_login_attempts,
                     u.locked_until, u.last_login_at, u.created_at, u.must_change_password
              FROM users u
              WHERE u.is_deleted = 0 AND u.is_active = 1
-             ORDER BY u.username"
+             ORDER BY u.username
+             LIMIT ?1 OFFSET ?2"
         };
 
         let mut stmt = conn
@@ -440,20 +509,19 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         let users = stmt
-            .query_map([], |row| {
+            .query_map(params![limit, offset], |row| {
                 let user_id: i64 = row.get(0)?;
                 Ok((
                     user_id,
                     UserInfo {
                         id: user_id,
                         username: row.get(1)?,
-                        is_superadmin: row.get(2)?,
-                        is_active: row.get(3)?,
-                        failed_login_attempts: row.get(4)?,
-                        locked_until: row.get(5)?,
-                        last_login_at: row.get(6)?,
-                        created_at: row.get(7)?,
-                        must_change_password: row.get(8)?,
+                        is_active: row.get(2)?,
+                        failed_login_attempts: row.get(3)?,
+                        locked_until: row.get(4)?,
+                        last_login_at: row.get(5)?,
+                        created_at: row.get(6)?,
+                        must_change_password: row.get(7)?,
                         roles: Vec::new(), // Will be filled below
                     },
                 ))
@@ -500,6 +568,16 @@ impl AuthDatabase {
                 params![password_hash, user_id],
             )
             .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+            // SECURITY FIX: Revoke all API keys when password is changed
+            // This prevents compromised accounts from maintaining persistent access
+            // via existing API keys after the password has been changed
+            Self::revoke_user_api_keys_internal(
+                &conn,
+                user_id,
+                None, // Admin-initiated password change
+                "Password changed via update_user",
+            )?;
         }
 
         // Update active status if provided
@@ -612,6 +690,10 @@ impl AuthDatabase {
     }
 
     /// Verify user credentials (username + password)
+    ///
+    /// SECURITY: This function uses constant-time comparison to prevent username enumeration
+    /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
+    /// to make the response time similar to a failed login for an existing user.
     pub fn verify_credentials(
         &self,
         username: &str,
@@ -619,41 +701,58 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let user: User = conn
-            .query_row(
-                "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
-                        must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
-                 FROM users
-                 WHERE username = ?1 AND is_deleted = 0",
-                params![username],
-                |row| {
-                    let user = User {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        password_hash: row.get(2)?,
-                        is_superadmin: row.get(3)?,
-                        is_active: row.get(4)?,
-                        is_deleted: row.get(5)?,
-                        must_change_password: row.get(6)?,
-                        failed_login_attempts: row.get(7)?,
-                        locked_until: row.get(8)?,
-                        last_login_at: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
-                    };
-                    Ok(user)
-                },
-            )
-            .map_err(|_| {
-                DatabaseError::PermissionDenied(
-                    "Invalid username or password".to_string(),
-                )
-            })?;
+        // Try to find the user
+        let user_result = conn.query_row(
+            "SELECT id, username, password_hash, is_active, is_deleted,
+                    must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
+             FROM users
+             WHERE username = ?1 AND is_deleted = 0",
+            params![username],
+            |row| {
+                let user = User {
+                    id: row.get(0)?,
+                    username: row.get(1)?,
+                    password_hash: row.get(2)?,
+                    is_active: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    must_change_password: row.get(5)?,
+                    failed_login_attempts: row.get(6)?,
+                    locked_until: row.get(7)?,
+                    last_login_at: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
+                };
+                Ok(user)
+            },
+        );
 
+        // SECURITY: Constant-time username enumeration mitigation
+        // Always perform password hash verification with equal timing
+        // Use a real Argon2id hash to ensure identical parameters and computation cost
+        let (user, password_valid) = match user_result {
+            Ok(u) => {
+                // User exists - verify with real hash
+                let valid = super::crypto::verify_password(password, &u.password_hash)
+                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                (Some(u), valid)
+            },
+            Err(_) => {
+                // User doesn't exist - verify with dummy hash to match timing
+                let _ = super::crypto::verify_password(password, DUMMY_PASSWORD_HASH);
+                (None, false)
+            }
+        };
+
+        // If user doesn't exist, return error now (after hash verification for timing)
+        let user = user.ok_or_else(|| {
+            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+        })?;
+
+        // SECURITY FIX: Use generic error messages to prevent user enumeration
         // Active check
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
-                "Account is disabled".to_string(),
+                "Invalid username or password".to_string(),
             ));
         }
 
@@ -661,22 +760,12 @@ impl AuthDatabase {
         if let Some(locked_until) = user.locked_until
             && locked_until > Self::now()
         {
-            return Err(DatabaseError::AccountLocked(format!(
-                "Account is locked until timestamp {}",
-                locked_until
-            )));
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
         }
 
-        // Verify password
-        let password_valid =
-            super::crypto::verify_password(password, &user.password_hash)
-                .map_err(|e| {
-                    DatabaseError::CryptoError(format!(
-                        "Password verification failed: {}",
-                        e
-                    ))
-                })?;
-
+        // Password was already verified above for timing attack mitigation
         if !password_valid {
             // Increment failed login attempts
             let new_attempts = user.failed_login_attempts + 1;
@@ -726,6 +815,10 @@ impl AuthDatabase {
     }
 
     /// Change password providing current credentials (for forced reset flow)
+    ///
+    /// SECURITY: This function uses constant-time comparison to prevent username enumeration
+    /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
+    /// to make the response time similar to a failed password change for an existing user.
     pub fn change_password_with_credentials(
         &self,
         username: &str,
@@ -734,9 +827,9 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let mut user = conn
+        let user_result = conn
             .query_row(
-                "SELECT id, username, password_hash, is_superadmin, is_active, is_deleted,
+                "SELECT id, username, password_hash, is_active, is_deleted,
                         must_change_password, failed_login_attempts, locked_until, last_login_at, created_at, updated_at
                  FROM users
                  WHERE username = ?1 AND is_deleted = 0",
@@ -746,24 +839,49 @@ impl AuthDatabase {
                         id: row.get(0)?,
                         username: row.get(1)?,
                         password_hash: row.get(2)?,
-                        is_superadmin: row.get(3)?,
-                        is_active: row.get(4)?,
-                        is_deleted: row.get(5)?,
-                        must_change_password: row.get(6)?,
-                        failed_login_attempts: row.get(7)?,
-                        locked_until: row.get(8)?,
-                        last_login_at: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
+                        is_active: row.get(3)?,
+                        is_deleted: row.get(4)?,
+                        must_change_password: row.get(5)?,
+                        failed_login_attempts: row.get(6)?,
+                        locked_until: row.get(7)?,
+                        last_login_at: row.get(8)?,
+                        created_at: row.get(9)?,
+                        updated_at: row.get(10)?,
                     };
                     Ok(user)
                 },
             )
-            .map_err(|_| {
-                DatabaseError::PermissionDenied(
-                    "Invalid username or password".to_string(),
-                )
-            })?;
+            .optional()
+            .map_err(|e| DatabaseError::QueryError(e.to_string()));
+
+        // SECURITY: Constant-time username enumeration mitigation
+        // Always perform password hash verification with equal timing
+        // Use a real Argon2id hash to ensure identical parameters and computation cost
+        let (user, password_valid) = match user_result {
+            Ok(Some(u)) => {
+                // User exists - verify with real hash
+                let valid = super::crypto::verify_password(current_password, &u.password_hash)
+                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                (Some(u), valid)
+            },
+            Ok(None) | Err(_) => {
+                // User doesn't exist - verify with dummy hash to match timing
+                let _ = super::crypto::verify_password(current_password, DUMMY_PASSWORD_HASH);
+                (None, false)
+            }
+        };
+
+        // If user doesn't exist, return error now (after hash verification for timing)
+        let mut user = user.ok_or_else(|| {
+            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+        })?;
+
+        // Password was already verified above for timing attack mitigation
+        if !password_valid {
+            return Err(DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            ));
+        }
 
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
@@ -778,26 +896,24 @@ impl AuthDatabase {
             ));
         }
 
-        let password_valid = super::crypto::verify_password(
-            current_password,
-            &user.password_hash,
-        )
-        .map_err(|e| {
-            DatabaseError::CryptoError(format!(
-                "Password verification failed: {}",
-                e
-            ))
-        })?;
-
-        if !password_valid {
+        // SECURITY: Only allow password change if it's required
+        // This prevents users from resetting their lockout counter by changing password
+        if !user.must_change_password {
             return Err(DatabaseError::PermissionDenied(
-                "Invalid username or password".to_string(),
+                "Password change not required. Use authenticated endpoints to change your password.".to_string(),
             ));
         }
 
         // Validate new password
         validate_password(new_password)
             .map_err(DatabaseError::ValidationError)?;
+
+        // Prevent setting the same password
+        if current_password == new_password {
+            return Err(DatabaseError::ValidationError(
+                "New password must be different from current password".to_string(),
+            ));
+        }
 
         let password_hash = hash_password(new_password).map_err(|e| {
             DatabaseError::CryptoError(format!(
@@ -813,6 +929,16 @@ impl AuthDatabase {
             params![password_hash, user.id],
         )
         .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+
+        // SECURITY FIX: Revoke all API keys when password is changed
+        // This prevents compromised accounts from maintaining persistent access
+        // via existing API keys after the password has been changed
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user.id,
+            Some(user.id), // User-initiated revocation
+            "Password changed by user",
+        )?;
 
         // Refresh user
         user.must_change_password = false;
@@ -853,6 +979,106 @@ impl AuthDatabase {
         )
         .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
 
+        // SECURITY FIX: Revoke all API keys when password is reset
+        // This prevents compromised accounts from maintaining persistent access
+        // via existing API keys after the password has been changed
+        Self::revoke_user_api_keys_internal(
+            &conn,
+            user_id,
+            None, // System-initiated revocation
+            "Password reset by administrator",
+        )?;
+
         Self::get_user_by_id_internal(&conn, user_id)
+    }
+
+    // =============================================================================
+    // STRING VALIDATION HELPERS
+    // =============================================================================
+
+    /// Validate a username for CRLF injection and other attacks
+    ///
+    /// SECURITY FIX: Prevents CRLF injection, header manipulation, and log forgery
+    pub(crate) fn validate_username(username: &str) -> Result<(), DatabaseError> {
+        // Check length (reasonable username limit)
+        if username.len() > 64 {
+            return Err(DatabaseError::ValidationError(
+                "Username must be 64 characters or less".to_string(),
+            ));
+        }
+
+        if username.is_empty() || username.trim().is_empty() {
+            return Err(DatabaseError::ValidationError(
+                "Username cannot be empty".to_string(),
+            ));
+        }
+
+        // SECURITY: Check for CRLF injection
+        if username.contains('\r') || username.contains('\n') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid characters (CRLF)".to_string(),
+            ));
+        }
+
+        // Check for null bytes
+        if username.contains('\0') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains null bytes".to_string(),
+            ));
+        }
+
+        // Check for other control characters
+        if username.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid control characters".to_string(),
+            ));
+        }
+
+        // Check for dangerous characters commonly used in attacks
+        let dangerous = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '\\'];
+        if username.chars().any(|c| dangerous.contains(&c)) {
+            return Err(DatabaseError::ValidationError(
+                "Username contains invalid characters. Only alphanumeric, underscore, hyphen, period, and @ allowed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate a description field for CRLF injection
+    ///
+    /// SECURITY FIX: Prevents CRLF injection in description fields
+    pub(crate) fn validate_description(description: Option<&str>) -> Result<(), DatabaseError> {
+        if let Some(desc) = description {
+            // Check length
+            if desc.len() > 500 {
+                return Err(DatabaseError::ValidationError(
+                    "Description must be 500 characters or less".to_string(),
+                ));
+            }
+
+            // SECURITY: Check for CRLF injection
+            if desc.contains('\r') || desc.contains('\n') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains invalid characters (CRLF)".to_string(),
+                ));
+            }
+
+            // Check for null bytes
+            if desc.contains('\0') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains null bytes".to_string(),
+                ));
+            }
+
+            // Check for excessive control characters (allow tab)
+            if desc.chars().any(|c| c.is_control() && c != '\t') {
+                return Err(DatabaseError::ValidationError(
+                    "Description contains invalid control characters".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }

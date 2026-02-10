@@ -97,10 +97,10 @@ pub struct RateLimitConfig {
     /// Enable rate limiting
     pub enable: bool,
 
-    /// Time window in seconds
+    /// Time window in seconds (default for all endpoints)
     pub window_seconds: i64,
 
-    /// Maximum requests per window
+    /// Maximum requests per window (default for all endpoints)
     pub max_requests: u32,
 
     /// Rate limit by API key
@@ -111,6 +111,24 @@ pub struct RateLimitConfig {
 
     /// Cleanup old rate limit entries interval in seconds
     pub cleanup_interval_seconds: i64,
+
+    /// Sensitive endpoints with stricter rate limits
+    /// Map of endpoint path to EndpointRateLimit
+    #[serde(default)]
+    pub sensitive_endpoints: Vec<EndpointRateLimit>,
+}
+
+/// Rate limit configuration for a specific endpoint
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EndpointRateLimit {
+    /// Endpoint path (e.g., "/login", "/change-password")
+    pub endpoint: String,
+
+    /// Maximum requests per window for this endpoint
+    pub max_requests: u32,
+
+    /// Optional: Custom window size for this endpoint (None = use default)
+    pub window_seconds: Option<i64>,
 }
 
 impl Default for RateLimitConfig {
@@ -122,6 +140,24 @@ impl Default for RateLimitConfig {
             limit_by_key: true,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            // Default sensitive endpoints with stricter limits
+            sensitive_endpoints: vec![
+                EndpointRateLimit {
+                    endpoint: "/login".to_string(),
+                    max_requests: 10,
+                    window_seconds: None, // Use default 60 seconds
+                },
+                EndpointRateLimit {
+                    endpoint: "/change-password".to_string(),
+                    max_requests: 5,
+                    window_seconds: None,
+                },
+                EndpointRateLimit {
+                    endpoint: "/admin/users".to_string(),
+                    max_requests: 20,
+                    window_seconds: None,
+                },
+            ],
         }
     }
 }
@@ -136,8 +172,9 @@ pub struct SessionConfig {
     /// Audit log retention in days (0 = keep forever)
     pub audit_retention_days: u32,
 
-    /// Log all API calls
-    pub log_all_requests: bool,
+    /// Maximum number of audit logs to keep (0 = unlimited)
+    /// When exceeded, oldest logs are deleted (LRU cache behavior)
+    pub audit_max_entries: u32,
 }
 
 impl Default for SessionConfig {
@@ -145,7 +182,9 @@ impl Default for SessionConfig {
         Self {
             audit_enable: true,
             audit_retention_days: 90,
-            log_all_requests: false,
+            // Limit to 1 million entries (prevents unbounded growth)
+            // Approximately 11.5 days at 1 req/sec, or 1 day at 11.5 req/sec
+            audit_max_entries: 1_000_000,
         }
     }
 }

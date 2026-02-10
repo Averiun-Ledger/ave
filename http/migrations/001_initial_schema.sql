@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    is_superadmin BOOLEAN NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT 1,
     is_deleted BOOLEAN NOT NULL DEFAULT 0,
     must_change_password BOOLEAN NOT NULL DEFAULT 0,
@@ -98,6 +97,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     resource_id INTEGER NOT NULL,
     action_id INTEGER NOT NULL,
     allowed BOOLEAN NOT NULL DEFAULT 1, -- TRUE = allow, FALSE = deny
+    is_system BOOLEAN NOT NULL DEFAULT 0, -- System permissions cannot be modified/deleted
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
     FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
@@ -135,8 +135,9 @@ CREATE INDEX IF NOT EXISTS idx_user_permissions_action ON user_permissions(actio
 -- =============================================================================
 -- API_KEYS TABLE
 -- =============================================================================
+-- SECURITY: Using UUID as PRIMARY KEY prevents IDOR and enumeration attacks
 CREATE TABLE IF NOT EXISTS api_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY, -- UUID v4 as primary key (e.g., "550e8400-e29b-41d4-a716-446655440000")
     user_id INTEGER NOT NULL,
     key_hash TEXT NOT NULL UNIQUE, -- SHA-256 hash of the actual key
     key_prefix TEXT NOT NULL, -- First 8 chars for identification (e.g., "ave_v1_a")
@@ -170,7 +171,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     user_id INTEGER, -- NULL for anonymous/failed auth attempts
-    api_key_id INTEGER,
+    api_key_id TEXT, -- UUID reference to api_keys
     action_type TEXT NOT NULL, -- e.g., "login_success", "login_failed", "api_key_created"
     endpoint TEXT, -- HTTP endpoint called
     http_method TEXT, -- GET, POST, PUT, DELETE, etc.
@@ -195,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type)
 -- Track rate limiting per API key and IP
 CREATE TABLE IF NOT EXISTS rate_limits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    api_key_id INTEGER,
+    api_key_id TEXT, -- UUID reference to api_keys
     ip_address TEXT,
     endpoint TEXT, -- NULL = global limit
     window_start INTEGER NOT NULL, -- Unix timestamp of current window
@@ -331,6 +332,24 @@ BEGIN
         revoked_reason = 'User account deleted'
     WHERE user_id = NEW.id AND revoked = 0;
 END;
+
+-- =============================================================================
+-- API KEY LIMIT ENFORCEMENT
+-- =============================================================================
+-- SECURITY NOTE: The max_keys_per_user limit is enforced at application level
+-- (see database_apikeys.rs:85-99). A database-level trigger was considered but
+-- removed because:
+-- 1. It would require hardcoding the limit (20) or using a config table
+-- 2. The race condition window is extremely small and difficult to exploit
+-- 3. Application-level check is more flexible and respects config changes
+-- 4. SQLite transactions already provide isolation for the check+insert operation
+--
+-- The application performs the check within a transaction, making the race
+-- condition very unlikely. If stricter enforcement is needed in the future,
+-- consider using:
+-- - SERIALIZABLE transaction isolation mode
+-- - A database-level config table with trigger reading from it
+-- - Row-level locking (though SQLite uses database-level locks)
 
 -- =============================================================================
 -- END OF MIGRATION

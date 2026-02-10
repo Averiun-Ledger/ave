@@ -49,15 +49,16 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
         rate_limit: RateLimitConfig {
             enable: true,
             window_seconds: 60,
-            max_requests: 100,
+            max_requests: 10000,  // Very high limit for tests to avoid blocking
             limit_by_key: true,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![], // No sensitive endpoints in basic tests
         },
         session: SessionConfig {
             audit_enable: true,
             audit_retention_days: 90,
-            log_all_requests: false,
+            audit_max_entries: 1_000_000,
         },
     };
 
@@ -161,7 +162,7 @@ impl TestServer {
             "rate_limit": {{
                 "enable": true,
                 "window_seconds": 60,
-                "max_requests": 20,
+                "max_requests": 10000,
                 "limit_by_key": true,
                 "limit_by_ip": true,
                 "cleanup_interval_seconds": 1800
@@ -169,7 +170,7 @@ impl TestServer {
             "session": {{
                 "audit_enable": true,
                 "audit_retention_days": 30,
-                "log_all_requests": true
+                "audit_max_entries": 1000000
             }}
         }},
         "http": {{

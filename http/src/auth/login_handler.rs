@@ -61,6 +61,22 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (ip_address, user_agent) = extract_request_meta(&headers, addr);
 
+    // SECURITY FIX: Check rate limit BEFORE credential verification
+    // This prevents brute force attacks by limiting requests per IP
+    db.check_rate_limit(
+        None, // No API key for pre-auth requests
+        ip_address.as_deref(),
+        "/login".into(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: format!("Rate limit exceeded: {}", e),
+            }),
+        )
+    })?;
+
     // Verify credentials and get user
     let user = db
         .verify_credentials(&req.username, &req.password)
@@ -111,7 +127,6 @@ pub async fn login(
     let user_info = UserInfo {
         id: user.id,
         username: user.username.clone(),
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -124,7 +139,7 @@ pub async fn login(
     // Log successful login
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(user.id),
-        api_key_id: Some(key_info.id),
+        api_key_id: Some(&key_info.id),
         action_type: "login_success",
         endpoint: Some("/login"),
         http_method: Some("POST"),
@@ -157,12 +172,10 @@ fn extract_request_meta(
     headers: &HeaderMap,
     addr: SocketAddr,
 ) -> (Option<String>, Option<String>) {
-    let header_ip = headers
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("X-Real-IP").and_then(|v| v.to_str().ok()))
-        .map(|s| s.to_string());
-    let ip_address = header_ip.or_else(|| Some(addr.ip().to_string()));
+    // SECURITY FIX: Use socket address directly instead of trusting client headers
+    // X-Forwarded-For can be spoofed by attackers to bypass rate limiting
+    // Only trust proxy headers if explicitly configured (future enhancement)
+    let ip_address = Some(addr.ip().to_string());
 
     let user_agent = headers
         .get("User-Agent")
@@ -188,8 +201,28 @@ fn extract_request_meta(
 )]
 pub async fn change_password(
     Extension(db): Extension<Arc<AuthDatabase>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let (ip_address, _user_agent) = extract_request_meta(&headers, addr);
+
+    // SECURITY FIX: Check rate limit BEFORE credential verification
+    // This prevents brute force attacks on password change endpoint
+    db.check_rate_limit(
+        None, // No API key for pre-auth requests
+        ip_address.as_deref(),
+        "/change-password".into(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: format!("Rate limit exceeded: {}", e),
+            }),
+        )
+    })?;
+
     db.change_password_with_credentials(
         &req.username,
         &req.current_password,
