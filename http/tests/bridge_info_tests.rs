@@ -4,8 +4,9 @@ use ave_common::{
     ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
     BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
     BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
-    EventRequestInfo, GovsData, Namespace, PaginatorEvents, SubjsData,
-    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData,
+    RequestInfo, RequestState, SignaturesInfo, SubjectInfo, SubjsData,
+    TransferSubject,
     identity::{KeyPair, keys::Ed25519Signer},
 };
 use ave_http::config_types::ConfigHttp;
@@ -174,7 +175,6 @@ async fn fact_req_schema(
                         [
                         {
                             "schema_id": "Example1",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -212,12 +212,11 @@ async fn fact_req_schema(
                                             "namespace": []
                                         }
                                     ]
-                                }
+
                             }
                         },
                             {
                             "schema_id": "Example2",
-                            "roles": {
                                 "add": {
                                     "evaluator": [
                                         {
@@ -256,7 +255,7 @@ async fn fact_req_schema(
                                         }
                                     ]
                                 }
-                            }
+
                         }
                     ]
                 },
@@ -264,7 +263,7 @@ async fn fact_req_schema(
                     "schema": [
                         {
                             "schema_id": "Example1",
-                            "policies": {
+
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -273,11 +272,10 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+
                         },
                         {
                             "schema_id": "Example2",
-                            "policies": {
                                 "change": {
                                    "evaluate": {
                                         "fixed": 1
@@ -286,7 +284,7 @@ async fn fact_req_schema(
                                         "fixed": 1
                                    }
                                 }
-                            }
+
                         }
                     ]
                 }
@@ -447,7 +445,7 @@ async fn test_request_state_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             res = body;
             break;
         } else {
@@ -456,7 +454,7 @@ async fn test_request_state_deserialization() {
     }
 
     let request_info: RequestInfo = serde_json::from_value(res).unwrap();
-    assert_eq!(request_info.status, "Finish");
+    assert_eq!(request_info.state.to_string(), "Finish");
     assert_eq!(request_info.version, 0);
     assert_eq!(request_info.error, None);
 }
@@ -509,11 +507,11 @@ async fn test_approval_request_deserialization() {
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
     assert_eq!(
-        approval.request.event_request.content.subject_id,
+        approval.request.event_request.content().subject_id,
         request_data.subject_id
     );
     assert_eq!(
-        approval.request.event_request.content.payload,
+        approval.request.event_request.content().payload,
         json!({
             "members": {
                 "add": [
@@ -704,7 +702,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -731,7 +729,7 @@ async fn test_update_and_transfer_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -809,7 +807,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -836,7 +834,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -898,7 +896,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -919,7 +917,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -940,7 +938,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1119,7 +1117,7 @@ async fn test_gov_sub_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1182,7 +1180,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1260,7 +1258,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1339,7 +1337,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1373,7 +1371,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1420,7 +1418,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1454,7 +1452,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1488,7 +1486,7 @@ async fn test_subject_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1810,7 +1808,7 @@ async fn test_signatures_deserialization() {
         .await;
 
         assert!(status.is_success());
-        if body["status"] == "Finish" {
+        if body["state"] == format!("{}", RequestState::Finish) {
             break;
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
@@ -1897,7 +1895,7 @@ async fn test_system_info_deserialization() {
 
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);
-    assert_eq!(config.node.garbage_collector, 120);
+    assert_eq!(config.node.tracking_size, 100);
 
     assert_eq!(config.node.network.node_type, "Bootstrap");
     assert_eq!(

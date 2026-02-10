@@ -1,35 +1,31 @@
 use ave_actors::Message;
-use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
+use ave_common::{
+    identity::{DigestIdentifier, Signed},
+};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Event as AveEvent,
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
-    model::{event::ProtocolsSignatures, request::SchemaType},
-    subject::{LastStateData, SignedLedger},
-    update::TransferResponse,
-    validation::{
-        proof::ValidationProof, request::ValidationReq, response::ValidationRes,
-    },
+    subject::SignedLedger,
+    validation::{request::ValidationReq, response::ValidationRes},
 };
 
+pub mod error;
 pub mod intermediary;
 pub mod service;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActorMessage {
     ValidationReq {
-        req: Box<Signed<ValidationReq>>,
-        schema_id: SchemaType,
+        req: Signed<ValidationReq>,
     },
     ValidationRes {
         res: Signed<ValidationRes>,
     },
     EvaluationReq {
         req: Signed<EvaluationReq>,
-        schema_id: SchemaType,
     },
     EvaluationRes {
         res: Signed<EvaluationRes>,
@@ -42,36 +38,21 @@ pub enum ActorMessage {
     },
     DistributionLastEventReq {
         ledger: Box<SignedLedger>,
-        event: Box<Signed<AveEvent>>,
-        last_proof: ValidationProof,
-        last_vali_res: Vec<ProtocolsSignatures>,
     },
-    DistributionLastEventRes {
-        signer: PublicKey,
-    },
+    DistributionLastEventRes,
     DistributionLedgerReq {
-        gov_version: Option<u64>,
         actual_sn: Option<u64>,
         subject_id: DigestIdentifier,
     },
     DistributionLedgerRes {
         ledger: Vec<SignedLedger>,
-        last_state: Option<LastStateData>,
-        namespace: String,
-        schema_id: SchemaType,
-        governance_id: DigestIdentifier,
+        is_all: bool,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,
     },
     AuthLastSn {
         sn: u64,
-    },
-    Transfer {
-        subject_id: DigestIdentifier,
-    },
-    TransferRes {
-        res: TransferResponse,
     },
 }
 

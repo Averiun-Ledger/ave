@@ -207,9 +207,7 @@ where
         let db = match ctx.system().get_helper::<Database>("store").await {
             Some(db) => db,
             None => {
-                return Err(ActorError::CreateStore(
-                    "Database not found".to_string(),
-                ));
+                return Err(ActorError::Helper { name: "store".to_string(), reason: "Not found".to_string() });
             }
         };
         // Encrypted store?
@@ -221,9 +219,7 @@ where
             {
                 Some(encrypt_key)
             } else {
-                return Err(ActorError::CreateStore(
-                    "Can not obtain encrypted_key helper".to_string(),
-                ));
+                return Err(ActorError::Helper { name: "encrypted_key".to_string(), reason: "Not found".to_string() });
             }
         } else {
             None

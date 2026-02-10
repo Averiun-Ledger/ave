@@ -1,24 +1,28 @@
+pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ave_actors::{ActorSystem, EncryptedKey, PersistentActor, SystemRef};
-use ave_common::identity::{HashAlgorithm, hash_borsh};
+use ave_actors::{ActorSystem, EncryptedKey, SystemRef};
+use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use wasmtime::Engine;
 
 use crate::{
-    Error,config::{Config, SinkAuth},
+    config::{Config, SinkAuth},
     db::Database,
     external_db::DBManager,
-    helpers::{db::ExternalDB, sink::AveSink}, model::common::contract::create_secure_wasmtime_config,
+    helpers::{db::ExternalDB, sink::AveSink},
+    model::common::contract::create_secure_wasmtime_config,
 };
+
+pub mod error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
-    pub hash_algorithm: HashAlgorithm
+    pub tracking_size: usize,
 }
 
 impl From<Config> for ConfigHelper {
@@ -26,7 +30,7 @@ impl From<Config> for ConfigHelper {
         Self {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
-            hash_algorithm: value.hash_algorithm
+            tracking_size: value.tracking_size,
         }
     }
 }
@@ -36,25 +40,28 @@ pub async fn system(
     sink_auth: SinkAuth,
     password: &str,
     token: CancellationToken,
-) -> Result<(SystemRef, JoinHandle<()>), Error> {
+) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
     let (system, mut runner) = ActorSystem::create(token);
 
-    system.add_helper("config", ConfigHelper::from(config.clone())).await;
+    system
+        .add_helper("config", ConfigHelper::from(config.clone()))
+        .await;
 
     // Create secure Wasmtime configuration with resource limits
-    let engine = Engine::new(&create_secure_wasmtime_config()).map_err(|e| {
-        Error::System(format!("Error creating the engine: {}", e))
-    })?;
+    let engine = Engine::new(&create_secure_wasmtime_config())
+        .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
 
     system.add_helper("engine", Arc::new(engine)).await;
 
-    let contracts: HashMap::<String, Vec<u8>> = HashMap::new();
-    system.add_helper("contracts", Arc::new(RwLock::new(contracts))).await;
+    let contracts: HashMap<String, Vec<u8>> = HashMap::new();
+    system
+        .add_helper("contracts", Arc::new(RwLock::new(contracts)))
+        .await;
 
     // Build database manager.
     let db = Database::open(&config.ave_db)
-        .map_err(|e| Error::System(format!("Can not open DB: {}", e)))?;
+        .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
     system.add_helper("store", db).await;
 
     // Build sink manager.
@@ -69,33 +76,28 @@ pub async fn system(
 
     let pass_hash =
         hash_borsh(&*config.hash_algorithm.hasher(), &password.to_string())
-            .map_err(|e| {
-                Error::System(format!("Can not obtain password hash: {}", e))
-            })?;
+            .map_err(|e| SystemError::PasswordHash(e.to_string()))?;
 
-    let array_hash: [u8; 32] = pass_hash.hash_array().map_err(|e| {
-        Error::System(format!("Can not obtain password hash as array: {}", e))
-    })?;
+    let array_hash: [u8; 32] = pass_hash
+        .hash_array()
+        .map_err(|e| SystemError::HashArrayConversion(e.to_string()))?;
 
     // Helper memory encryption for passwords to be used in secure stores.
-    let encrypted_key = EncryptedKey::new(&array_hash).map_err(|e| {
-        Error::System(format!("Can not create EncryptedKey: {}", e))
-    })?;
+    let encrypted_key = EncryptedKey::new(&array_hash)
+        .map_err(|e| SystemError::EncryptedKeyCreation(e.to_string()))?;
 
     system.add_helper("encrypted_key", encrypted_key).await;
 
     let db_manager_actor = system
-        .create_root_actor(
-            "db_manager",
-            DBManager::initial(config.garbage_collector),
-        )
+        .create_root_actor("db_manager", DBManager)
         .await
-        .map_err(|e| Error::System(e.to_string()))?;
+        .map_err(|e| SystemError::RootActorCreation(e.to_string()))?;
 
-    let ext_db =
-        ExternalDB::build(config.external_db, db_manager_actor).await?;
+    let ext_db = ExternalDB::build(config.external_db, db_manager_actor)
+        .await
+        .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?;
 
-    system.add_helper("ext_db", ext_db).await;
+    system.add_helper("ext_db", Arc::new(ext_db)).await;
 
     let runner = tokio::spawn(async move {
         runner.run().await;
@@ -109,8 +111,7 @@ pub mod tests {
 
     use crate::config::{AveDbConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::{Config as NetworkConfig};
-    use std::time::Duration;
+    use network::Config as NetworkConfig;
     use tempfile::TempDir;
     use test_log::test;
 
@@ -153,7 +154,7 @@ pub mod tests {
             vec![],
             vec![],
             vec![],
-            None
+            None,
         );
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
@@ -163,7 +164,8 @@ pub mod tests {
             network: newtork_config,
             contracts_path: contracts_path,
             always_accept: false,
-            garbage_collector: Duration::from_secs(500),
+            tracking_size: 100,
+            is_service: true
         };
 
         let (sys, handlers) = system(

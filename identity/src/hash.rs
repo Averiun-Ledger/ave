@@ -6,7 +6,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use ave_common::identity::hash::{Hash, Blake3Hasher, DigestIdentifier};
+//! use ave_identity::hash::{Hash, Blake3Hasher, DigestIdentifier};
 //!
 //! let hasher = Blake3Hasher;
 //! let data = b"Hello, World!";
@@ -59,7 +59,7 @@ pub trait Hash {
 /// # Example
 ///
 /// ```
-/// use ave_common::identity::{hash_borsh, BLAKE3_HASHER};
+/// use ave_identity::{hash_borsh, BLAKE3_HASHER};
 /// use borsh::BorshSerialize;
 ///
 /// #[derive(BorshSerialize)]
@@ -195,7 +195,7 @@ impl DigestIdentifier {
     ///
     /// # Example
     /// ```
-    /// use ave_common::identity::{BLAKE3_HASHER, hash::{BLAKE3_OUTPUT_LENGTH, Hash}};
+    /// use ave_identity::{BLAKE3_HASHER, hash::{BLAKE3_OUTPUT_LENGTH, Hash}};
     ///
     /// let hash = BLAKE3_HASHER.hash(b"Hello, World!");
     /// let array: [u8; 32] = hash.hash_array().unwrap();

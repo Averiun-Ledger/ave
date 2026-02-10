@@ -252,7 +252,7 @@ pub struct AveConfigHttp {
     /// Whether to automatically accept all events (development mode)
     pub always_accept: bool,
     /// Garbage collector interval in seconds
-    pub garbage_collector: u64,
+    pub tracking_size: usize,
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -265,7 +265,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             network: NetworkConfigHttp::from(value.network),
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
-            garbage_collector: value.garbage_collector.as_secs(),
+            tracking_size: value.tracking_size,
         }
     }
 }
@@ -285,8 +285,7 @@ pub struct NetworkConfigHttp {
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
 
-    pub memory_limit: Option<MemoryLimitHttp>
-
+    pub memory_limit: Option<MemoryLimitHttp>,
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -312,13 +311,15 @@ pub enum MemoryLimitHttp {
     /// Ram in percentage.
     Percentage(f64),
     /// Ram in bytes.
-    Bytes(usize)
+    Bytes(usize),
 }
 
 impl From<MemoryLimit> for MemoryLimitHttp {
     fn from(value: MemoryLimit) -> Self {
         match value {
-            MemoryLimit::Percentage(percentage) => MemoryLimitHttp::Percentage(percentage),
+            MemoryLimit::Percentage(percentage) => {
+                MemoryLimitHttp::Percentage(percentage)
+            }
             MemoryLimit::Bytes(bytes) => MemoryLimitHttp::Bytes(bytes),
         }
     }

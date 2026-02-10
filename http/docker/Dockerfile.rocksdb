@@ -105,6 +105,7 @@ COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
 COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
 COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/protocols/tell/Cargo.toml ./ave/protocols/tell/Cargo.toml
+COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
@@ -121,6 +122,7 @@ COPY ./ave/core/src ./ave/core/src
 COPY ./ave/core/migrations ./ave/core/migrations
 COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
+COPY ./ave/common/src ./ave/common/src
 COPY ./ave/protocols/tell/src ./ave/protocols/tell/src
 
 COPY ./ave-actors/actor/src ./ave-actors/actor/src

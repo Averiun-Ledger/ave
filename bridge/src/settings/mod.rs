@@ -93,7 +93,7 @@ ave_db = "/data/ave.db"
 external_db = "/data/ext.db"
 contracts_path = "/contracts"
 always_accept = true
-garbage_collector = 900
+tracking_size = 200
 
 [node.network]
 node_type = "Addressable"
@@ -193,7 +193,7 @@ node:
   external_db: /data/ext.db
   contracts_path: /contracts
   always_accept: true
-  garbage_collector: 900
+  tracking_size: 200
   network:
     node_type: Addressable
     listen_addresses:
@@ -296,7 +296,7 @@ http:
     "external_db": "/data/ext.db",
     "contracts_path": "/contracts",
     "always_accept": true,
-    "garbage_collector": 900,
+    "tracking_size": 200,
     "network": {
       "node_type": "Addressable",
       "listen_addresses": [
@@ -509,7 +509,7 @@ http:
         assert_eq!(node.hash_algorithm, HashAlgorithm::Blake3);
         assert!(node.always_accept);
         assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
-        assert_eq!(node.garbage_collector, Duration::from_secs(900));
+        assert_eq!(node.tracking_size, 200);
         assert_eq!(
             node.ave_db,
             AveDbConfig::build(&PathBuf::from("/data/ave.db"))
@@ -581,7 +581,9 @@ http:
             Duration::from_secs(42)
         );
         match &node.network.memory_limit {
-            Some(network::MemoryLimit::Bytes(bytes)) => assert_eq!(*bytes, 1073741824),
+            Some(network::MemoryLimit::Bytes(bytes)) => {
+                assert_eq!(*bytes, 1073741824)
+            }
             _ => panic!("Expected Some(Bytes) variant for memory_limit"),
         }
 
@@ -677,7 +679,7 @@ http:
         assert_eq!(config.node.contracts_path, PathBuf::new());
         assert_eq!(config.node.ave_db, AveDbConfig::default());
         assert_eq!(config.node.external_db, ExternalDbConfig::default());
-        assert_eq!(config.node.garbage_collector, Duration::from_secs(120));
+        assert_eq!(config.node.tracking_size, 100);
         assert_eq!(config.node.network.node_type, NodeType::Bootstrap);
         assert!(config.node.network.listen_addresses.is_empty());
         assert!(config.node.network.external_addresses.is_empty());

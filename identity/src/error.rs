@@ -8,8 +8,8 @@
 //! ### Handling Signature Verification Errors
 //!
 //! ```rust
-//! use ave_common::identity::keys::{KeyPair, KeyPairAlgorithm};
-//! use ave_common::identity::error::CryptoError;
+//! use ave_identity::keys::{KeyPair, KeyPairAlgorithm};
+//! use ave_identity::error::CryptoError;
 //!
 //! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
 //! let message = b"Hello, World!";
@@ -32,8 +32,8 @@
 //! ### Handling Key Parsing Errors
 //!
 //! ```rust
-//! use ave_common::identity::keys::PublicKey;
-//! use ave_common::identity::error::CryptoError;
+//! use ave_identity::keys::PublicKey;
+//! use ave_identity::error::CryptoError;
 //!
 //! let key_str = "EInvalidData";
 //!
@@ -55,8 +55,8 @@
 //! ### Handling Hash Parsing Errors
 //!
 //! ```rust
-//! use ave_common::identity::hash::DigestIdentifier;
-//! use ave_common::identity::error::CryptoError;
+//! use ave_identity::hash::DigestIdentifier;
+//! use ave_identity::error::CryptoError;
 //!
 //! let hash_str = "BInvalidHashData";
 //!
@@ -78,8 +78,8 @@
 //! ### Handling Serialization Errors
 //!
 //! ```rust
-//! use ave_common::identity::{hash_borsh, BLAKE3_HASHER};
-//! use ave_common::identity::error::CryptoError;
+//! use ave_identity::{hash_borsh, BLAKE3_HASHER};
+//! use ave_identity::error::CryptoError;
 //! use borsh::BorshSerialize;
 //!
 //! #[derive(BorshSerialize)]

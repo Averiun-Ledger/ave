@@ -1,6 +1,6 @@
 [package]
 name = "ave-identity"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 description = "Generic cryptographic primitives with algorithm identification"

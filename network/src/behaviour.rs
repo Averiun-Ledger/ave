@@ -2,14 +2,18 @@
 //!
 
 use crate::{
-    Config, Error, MemoryLimit, NodeType, control_list::{self, build_control_lists_updaters}, routing::{self}, utils::{
+    Config, Error, MemoryLimit, NodeType,
+    control_list::{self, build_control_lists_updaters},
+    routing::{self},
+    utils::{
         IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
         TELL_PROTOCOL, USER_AGENT,
-    }
+    },
 };
 
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, connection_limits::{self, ConnectionLimits},
+    Multiaddr, PeerId, StreamProtocol,
+    connection_limits::{self, ConnectionLimits},
     identify::{self, Info as IdentifyInfo, UpgradeError},
     identity::PublicKey,
     kad::PeerInfo,
@@ -17,7 +21,10 @@ use libp2p::{
     request_response::{
         self, Config as ReqResConfig, ProtocolSupport, ResponseChannel,
     },
-    swarm::{ConnectionId, NetworkBehaviour, StreamUpgradeError, behaviour::toggle::Toggle},
+    swarm::{
+        ConnectionId, NetworkBehaviour, StreamUpgradeError,
+        behaviour::toggle::Toggle,
+    },
 };
 use tell::{
     Event as TellEvent, ProtocolSupport as TellProtocol, binary as TellBinary,
@@ -59,7 +66,7 @@ impl Behaviour {
         config: Config,
         token: CancellationToken,
         limits: LimitsConfig,
-        memory_limit: Option<MemoryLimit>
+        memory_limit: Option<MemoryLimit>,
     ) -> Self {
         let stream_tell = StreamProtocol::new(TELL_PROTOCOL);
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
@@ -108,21 +115,33 @@ impl Behaviour {
 
         let conn_limmits = ConnectionLimits::default()
             .with_max_established(limits.conn_limmits_max_established_total)
-            .with_max_established_incoming(limits.conn_limmits_max_established_incoming)
-            .with_max_established_outgoing(limits.conn_limmits_max_established_outgoing)
+            .with_max_established_incoming(
+                limits.conn_limmits_max_established_incoming,
+            )
+            .with_max_established_outgoing(
+                limits.conn_limmits_max_established_outgoing,
+            )
             .with_max_pending_incoming(limits.conn_limmits_max_pending_incoming)
             .with_max_pending_outgoing(limits.conn_limmits_max_pending_outgoing)
-            .with_max_established_per_peer(limits.conn_limmits_max_established_per_peer);
+            .with_max_established_per_peer(
+                limits.conn_limmits_max_established_per_peer,
+            );
 
         let mem_limits = if let Some(memory_limit) = memory_limit {
             match memory_limit {
-                MemoryLimit::Percentage(percentage) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_percentage(percentage))),
-                MemoryLimit::Bytes(bytes) => Toggle::from(Some(memory_connection_limits::Behaviour::with_max_bytes(bytes))),
+                MemoryLimit::Percentage(percentage) => Toggle::from(Some(
+                    memory_connection_limits::Behaviour::with_max_percentage(
+                        percentage,
+                    ),
+                )),
+                MemoryLimit::Bytes(bytes) => Toggle::from(Some(
+                    memory_connection_limits::Behaviour::with_max_bytes(bytes),
+                )),
             }
         } else {
             Toggle::from(None)
         };
-        
+
         Self {
             control_list: control_list::Behaviour::new(
                 config.control_list,
@@ -148,7 +167,7 @@ impl Behaviour {
             tell,
             req_res,
             mem_limits,
-            conn_limits: connection_limits::Behaviour::new(conn_limmits)
+            conn_limits: connection_limits::Behaviour::new(conn_limmits),
         }
     }
 
@@ -269,7 +288,9 @@ pub enum Event {
 }
 
 impl From<Infallible> for Event {
-    fn from(v: Infallible) -> Self { match v {} }
+    fn from(v: Infallible) -> Self {
+        match v {}
+    }
 }
 
 impl From<control_list::Event> for Event {
@@ -699,7 +720,7 @@ mod tests {
             config,
             CancellationToken::new(),
             limits,
-            None
+            None,
         );
         Swarm::new(
             transport,

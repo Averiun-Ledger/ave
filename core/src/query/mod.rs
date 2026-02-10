@@ -1,62 +1,58 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::identity::PublicKey;
+use ave_common::{identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange}};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{Span, info_span};
 
 use crate::helpers::db::{
-    ExternalDB, Querys,
-    common::{
-        ApproveInfo, EventInfo, PaginatorEvents, RequestInfo, SignaturesInfo,
-        SubjectInfo,
-    },
+    ExternalDB, Querys
 };
 
-const TARGET_QUERY: &str = "Ave-Query";
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Query {
-    key: PublicKey,
+    db: Arc<ExternalDB>,
 }
 
 impl Query {
-    pub fn new(key: PublicKey) -> Self {
-        Self { key }
+    pub fn new(db: Arc<ExternalDB>) -> Self {
+        Self { db }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum QueryMessage {
-    GetSubject {
-        subject_id: String,
-    },
-    GetSignatures {
-        subject_id: String,
-    },
     GetEvents {
-        subject_id: String,
+        subject_id: DigestIdentifier,
         quantity: Option<u64>,
         page: Option<u64>,
-        reverese: Option<bool>,
+        reverse: Option<bool>,
+        event_request_ts: Option<TimeRange>,
+        event_ledger_ts: Option<TimeRange>,
+        sink_ts: Option<TimeRange>,
+    },
+    GetAborts {
+        subject_id: DigestIdentifier,
+        request_id: Option<String>,
+        sn: Option<u64>,
+        quantity: Option<u64>,
+        page: Option<u64>,
+        reverse: Option<bool>,
     },
     GetEventSn {
-        subject_id: String,
+        subject_id: DigestIdentifier,
         sn: u64,
     },
     GetFirstOrEndEvents {
-        subject_id: String,
+        subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        success: Option<bool>,
     },
-    GetRequestState {
-        request_id: String,
-    },
-    GetApproval {
-        subject_id: String,
+    GetSubject {
+        subject_id: DigestIdentifier,
     },
 }
 
@@ -64,13 +60,12 @@ impl Message for QueryMessage {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum QueryResponse {
-    Signatures(SignaturesInfo),
-    Subject(SubjectInfo),
-    PaginatorEvents(PaginatorEvents),
-    Event(EventInfo),
-    Events(Vec<EventInfo>),
-    RequestState(RequestInfo),
-    ApprovalState(ApproveInfo),
+    Error(String),
+    PagEvents(PaginatorEvents),
+    PagAborts(PaginatorAborts),
+    Event(LedgerDB),
+    Events(Vec<LedgerDB>),
+    Subject(SubjectDB),
 }
 
 impl Response for QueryResponse {}
@@ -83,19 +78,14 @@ impl Actor for Query {
     type Event = ();
     type Response = QueryResponse;
 
-    async fn pre_start(
-        &mut self,
-        _ctx: &mut ave_actors::ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
+    fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
+        if let Some(parent_span) = parent_span {
+            info_span!(parent: parent_span, "Query")
+        } else {
+            info_span!("Query")
+        }
     }
 
-    async fn pre_stop(
-        &mut self,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -104,107 +94,39 @@ impl Handler<Query> for Query {
         &mut self,
         _sender: ActorPath,
         msg: QueryMessage,
-        ctx: &mut ave_actors::ActorContext<Query>,
+        _ctx: &mut ave_actors::ActorContext<Query>,
     ) -> Result<QueryResponse, ActorError> {
-        let Some(helper): Option<ExternalDB> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!(TARGET_QUERY, "Can not obtain ext_db helper");
-            ctx.system().stop_system();
-            return Err(ActorError::NotHelper("ext_db".to_owned()));
-        };
-
         match msg {
-            QueryMessage::GetSignatures { subject_id } => {
-                let signatures =
-                    helper.get_signatures(&subject_id).await.map_err(|e| {
-                        warn!(
-                            TARGET_QUERY,
-                            "GetSignatures, Can not obtain signatures: {}", e
-                        );
-                        ActorError::Functional(e.to_string())
-                    })?;
-                Ok(QueryResponse::Signatures(signatures))
-            }
-            QueryMessage::GetSubject { subject_id } => {
-                let subject = helper
-                    .get_subject_state(&subject_id)
-                    .await
-                    .map_err(|e| {
-                        warn!(
-                            TARGET_QUERY,
-                            "GetSubject, Can not obtain subject state: {}", e
-                        );
-                        ActorError::Functional(e.to_string())
-                    })?;
-                Ok(QueryResponse::Subject(subject))
-            }
-            QueryMessage::GetEvents {
-                subject_id,
-                quantity,
-                page,
-                reverese,
-            } => {
-                let data = helper
-                    .get_events(&subject_id, quantity, page, reverese)
-                    .await
-                    .map_err(|e| {
-                        warn!(
-                            TARGET_QUERY,
-                            "GetEvents, Can not obtain events: {}", e
-                        );
-                        ActorError::Functional(e.to_string())
-                    })?;
-                Ok(QueryResponse::PaginatorEvents(data))
-            }
+            QueryMessage::GetEvents { subject_id, quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts } => {
+                match self.db.get_events(&subject_id.to_string(), quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts).await {
+                    Ok(data) => Ok(QueryResponse::PagEvents(data)),
+                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                }
+            },
+            QueryMessage::GetAborts { subject_id, request_id, sn, quantity, page, reverse } => {
+                match self.db.get_aborts(&subject_id.to_string(), request_id, sn, quantity, page, reverse).await {
+                    Ok(data) => Ok(QueryResponse::PagAborts(data)),
+                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                }
+            },
             QueryMessage::GetEventSn { subject_id, sn } => {
-                let data = helper
-                    .get_events_sn(&subject_id, sn)
-                    .await
-                    .map_err(|e| {
-                        warn!(
-                            TARGET_QUERY,
-                            "GetEventSn, Can not obtain event sn: {}", e
-                        );
-                        ActorError::Functional(e.to_string())
-                    })?;
-                Ok(QueryResponse::Event(data))
-            }
-            QueryMessage::GetFirstOrEndEvents {
-                subject_id,
-                quantity,
-                reverse,
-                success,
-            } => {
-                let data = helper
-                    .get_first_or_end_events(&subject_id, quantity, reverse, success)
-                    .await
-                    .map_err(|e| {
-                        warn!(TARGET_QUERY, "GetFirstOrEndEvents, Can not obtain first or end events: {}", e);
-                        ActorError::Functional(e.to_string())})?;
-                Ok(QueryResponse::Events(data))
-            }
-            QueryMessage::GetRequestState { request_id } => {
-                let res = helper
-                    .get_request_id_status(&request_id)
-                    .await
-                    .map_err(|e| {
-                        warn!(TARGET_QUERY, "GetRequestState, Can not obtain request status: {}", e);
-                        ActorError::Functional(e.to_string())})?;
-                Ok(QueryResponse::RequestState(res))
-            }
-            QueryMessage::GetApproval { subject_id } => {
-                let data =
-                    helper.get_approve_req(&subject_id).await.map_err(|e| {
-                        warn!(
-                            TARGET_QUERY,
-                            "GetApproval, Can not obtain approve request: {}",
-                            e
-                        );
-                        ActorError::Functional(e.to_string())
-                    })?;
-                Ok(QueryResponse::ApprovalState(data))
-            }
+                match self.db.get_event_sn(&subject_id.to_string(), sn).await {
+                    Ok(data) => Ok(QueryResponse::Event(data)),
+                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                }
+            },
+            QueryMessage::GetFirstOrEndEvents { subject_id, quantity, reverse } => {
+                match self.db.get_first_or_end_events(&subject_id.to_string(), quantity, reverse).await {
+                    Ok(data) => Ok(QueryResponse::Events(data)),
+                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                }
+            },
+            QueryMessage::GetSubject { subject_id } => {
+                match self.db.get_subject_state(&subject_id.to_string()).await {
+                    Ok(data) => Ok(QueryResponse::Subject(data)),
+                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                }
+            },
         }
     }
 }

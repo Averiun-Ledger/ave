@@ -1,7 +1,6 @@
-use crate::model::request::EventRequest;
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, Signed},
+    identity::{DigestIdentifier, PublicKey},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -20,17 +19,13 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct ApprovalReq {
     /// The signed event request.
-    pub event_request: Signed<EventRequest>,
+    pub subject_id: DigestIdentifier,
     /// The sequence number of the event.
     pub sn: u64,
     /// The version of the governance contract.
     pub gov_version: u64,
     /// The patch to apply to the state.
     pub patch: ValueWrapper,
-    /// The hash of the state after applying the patch.
-    pub state_hash: DigestIdentifier,
-    /// The hash of the previous event.
-    pub hash_prev_event: DigestIdentifier,
-    /// The hash of the previous event.
-    pub subject_id: DigestIdentifier,
+
+    pub signer: PublicKey,
 }

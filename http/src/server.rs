@@ -10,8 +10,8 @@ use crate::{
     error::Error,
 };
 use ave_bridge::{
-    ApproveInfo, EventInfo, GovsData, PaginatorEvents, SubjsData,
-    RequestData, RequestInfo, SignaturesInfo, SubjectInfo, TransferSubject,
+    ApproveInfo, EventInfo, GovsData, PaginatorEvents, RequestData,
+    RequestInfo, SignaturesInfo, SubjectInfo, SubjsData, TransferSubject,
 };
 use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use axum::{
