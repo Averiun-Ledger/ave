@@ -40,6 +40,136 @@ fn db_error_to_response(
     (status, Json(ErrorResponse { error: message }))
 }
 
+/// Check if a user has the superadmin role
+fn is_superadmin_user(
+    db: &AuthDatabase,
+    user: &User,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    let roles = db.get_user_roles(user.id).map_err(db_error_to_response)?;
+    Ok(roles.iter().any(|r| r == "superadmin"))
+}
+
+/// Get superadmin role ID from database
+fn get_superadmin_role_id(
+    db: &AuthDatabase,
+) -> Result<Option<i64>, (StatusCode, Json<ErrorResponse>)> {
+    let role_id = db
+        .lock_conn()
+        .map_err(db_error_to_response)?
+        .query_row(
+            "SELECT id FROM roles WHERE name = 'superadmin'",
+            [],
+            |row| row.get(0)
+        )
+        .ok();
+    Ok(role_id)
+}
+
+/// Validate superadmin role assignment
+/// Returns Ok(()) if assignment is allowed, Err otherwise
+fn validate_superadmin_assignment(
+    db: &AuthDatabase,
+    auth_ctx: &AuthContext,
+    target_user_id: i64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    // Only superadmin can assign superadmin role
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can assign superadmin role".to_string(),
+            }),
+        ));
+    }
+
+    // Get target user to check if already superadmin
+    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+    let is_target_already_superadmin = is_superadmin_user(db, &target_user)?;
+
+    if !is_target_already_superadmin {
+        // Trying to make someone else superadmin - verify only one exists
+        let existing_superadmin_count = db.count_superadmins()
+            .map_err(db_error_to_response)?;
+
+        if existing_superadmin_count > 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                }),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate superadmin role removal
+/// Returns Ok(()) if removal is allowed, Err otherwise
+fn validate_superadmin_removal(
+    db: &AuthDatabase,
+    auth_ctx: &AuthContext,
+    target_user_id: i64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    // Only superadmin can remove superadmin role
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can remove superadmin role".to_string(),
+            }),
+        ));
+    }
+
+    // Get target user
+    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+
+    // Check if target is superadmin
+    if is_superadmin_user(db, &target_user)? {
+        // Cannot remove superadmin role from the only superadmin
+        let superadmin_count = db.count_superadmins()
+            .map_err(db_error_to_response)?;
+
+        if superadmin_count <= 1 {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot remove superadmin role from the only superadmin. System must have at least one superadmin.".to_string(),
+                }),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Determine if a user has admin-level permissions (superadmin role or admin resources)
+fn is_admin_account(
+    db: &AuthDatabase,
+    user: &User,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    // Check if user has superadmin role
+    if is_superadmin_user(db, user)? {
+        return Ok(true);
+    }
+
+    let admin_resources = [
+        "admin_users",
+        "admin_roles",
+        "admin_api_key",
+        "admin_system",
+        "user_api_key",
+    ];
+
+    let effective_permissions = db
+        .get_effective_permissions(user.id)
+        .map_err(db_error_to_response)?;
+
+    Ok(effective_permissions.iter().any(|perm| {
+        perm.allowed && admin_resources.contains(&perm.resource.as_str())
+    }))
+}
+
 // =============================================================================
 // USER MANAGEMENT ENDPOINTS
 // =============================================================================
@@ -67,12 +197,54 @@ pub async fn create_user(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "post")?;
 
+    // SECURITY FIX: Enforce single superadmin rule
+    // Check if trying to assign superadmin role
+    if let Some(ref role_ids) = req.role_ids {
+        let superadmin_role_id: Option<i64> = db
+            .lock_conn()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT id FROM roles WHERE name = 'superadmin'",
+                    [],
+                    |row| row.get(0)
+                ).ok()
+            });
+
+        if let Some(sa_role_id) = superadmin_role_id {
+            if role_ids.contains(&sa_role_id) {
+                // Only one superadmin is allowed in the system
+                // Only the current superadmin can attempt this operation
+                if !auth_ctx.is_superadmin() {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "Only superadmin can assign superadmin role".to_string(),
+                        }),
+                    ));
+                }
+
+                // Verify that no other superadmin exists
+                let existing_superadmin_count = db.count_superadmins()
+                    .map_err(db_error_to_response)?;
+
+                if existing_superadmin_count > 0 {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse {
+                            error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
     // Create user
     let user = db
         .create_user(
             &req.username,
             &req.password,
-            req.is_superadmin.unwrap_or(false),
             req.role_ids.clone(),
             Some(auth_ctx.user_id),
             req.must_change_password,
@@ -85,7 +257,6 @@ pub async fn create_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -96,16 +267,22 @@ pub async fn create_user(
     };
 
     // Audit log
+    // SECURITY FIX: Sanitize request to avoid logging password
+    let audit_details = serde_json::json!({
+        "username": req.username,
+        "role_ids": req.role_ids,
+        "must_change_password": req.must_change_password,
+    });
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_created",
         endpoint: Some("/admin/users"),
         http_method: Some("POST"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
     });
@@ -120,7 +297,9 @@ pub async fn create_user(
     operation_id = "listUsers",
     tag = "User Management",
     params(
-        ("include_inactive" = Option<bool>, Query, description = "Include inactive users")
+        ("include_inactive" = Option<bool>, Query, description = "Include inactive users"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 100, max: 1000)"),
+        ("offset" = Option<i64>, Query, description = "Number of users to skip for pagination (default: 0)")
     ),
     responses(
         (status = 200, description = "List of users", body = Vec<UserInfo>),
@@ -136,8 +315,22 @@ pub async fn list_users(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "get")?;
 
+    // Set defaults and limits for pagination
+    const DEFAULT_LIMIT: i64 = 100;
+    const MAX_LIMIT: i64 = 1000;
+
+    let limit = params.limit
+        .unwrap_or(DEFAULT_LIMIT)
+        .min(MAX_LIMIT)
+        .max(1);
+    let offset = params.offset.unwrap_or(0).max(0);
+
     let users = db
-        .list_users(params.include_inactive.unwrap_or(false))
+        .list_users(
+            params.include_inactive.unwrap_or(false),
+            limit,
+            offset,
+        )
         .map_err(db_error_to_response)?;
 
     Ok(Json(users))
@@ -146,6 +339,10 @@ pub async fn list_users(
 #[derive(Deserialize, ToSchema)]
 pub struct ListUsersQuery {
     pub include_inactive: Option<bool>,
+    /// Maximum number of users to return (default: 100, max: 1000)
+    pub limit: Option<i64>,
+    /// Number of users to skip (default: 0)
+    pub offset: Option<i64>,
 }
 
 /// Get user by ID
@@ -178,7 +375,6 @@ pub async fn get_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -218,6 +414,44 @@ pub async fn update_user(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "put")?;
 
+    // SECURITY FIX: Protect superadmin account
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let is_target_superadmin = is_superadmin_user(&db, &target_user)?;
+
+    if is_target_superadmin {
+        // Prevent deactivating superadmin
+        if req.is_active == Some(false) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot deactivate superadmin account".to_string(),
+                }),
+            ));
+        }
+
+        // SECURITY FIX: Block ALL password changes for superadmin account
+        // Password can only be changed directly in the database for security
+        if req.password.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot change superadmin password through API. Use direct database access.".to_string(),
+                }),
+            ));
+        }
+
+        // SECURITY FIX: Block role changes for superadmin account
+        // Superadmin always has all permissions, roles are unnecessary
+        if req.role_ids.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cannot modify superadmin roles. Superadmin has all permissions automatically.".to_string(),
+                }),
+            ));
+        }
+    }
+
     // Update user
     let user = db
         .update_user(user_id, req.password.as_deref(), req.is_active)
@@ -225,6 +459,34 @@ pub async fn update_user(
 
     // Update roles if provided
     if let Some(role_ids) = &req.role_ids {
+        // SECURITY FIX: Prevent non-superadmin from modifying roles of other admins
+        if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Only superadmin can modify roles of other admins".to_string(),
+                }),
+            ));
+        }
+
+        // SECURITY FIX: Protect superadmin role assignment and removal
+        let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+        if let Some(sa_role_id) = superadmin_role_id {
+            // Check if target user currently has superadmin role
+            let is_target_currently_superadmin = is_superadmin_user(&db, &target_user)?;
+
+            // Validate if trying to ADD superadmin role
+            if role_ids.contains(&sa_role_id) {
+                validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
+            }
+            // Validate if trying to REMOVE superadmin role (user has it but new roles don't)
+            else if is_target_currently_superadmin {
+                // Trying to remove superadmin role via update
+                validate_superadmin_removal(&db, &auth_ctx, user_id)?;
+            }
+        }
+
         // Remove all current roles
         let current_roles =
             db.get_user_roles(user_id).map_err(db_error_to_response)?;
@@ -246,7 +508,6 @@ pub async fn update_user(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -257,16 +518,22 @@ pub async fn update_user(
     };
 
     // Audit log
+    // SECURITY FIX: Sanitize request to avoid logging password
+    let audit_details = serde_json::json!({
+        "is_active": req.is_active,
+        "role_ids": req.role_ids,
+        "password_changed": req.password.is_some(),
+    });
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_updated",
         endpoint: Some(&format!("/admin/users/{}", user_id)),
         http_method: Some("PUT"),
         ip_address: auth_ctx.ip_address.as_deref(),
         user_agent: None,
         request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+        details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
     });
@@ -304,13 +571,25 @@ pub async fn reset_user_password(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "post")?;
 
+    // SECURITY FIX: Block ALL password resets for superadmin account
+    // Password can only be changed directly in the database for security
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    if is_superadmin_user(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Cannot reset superadmin password through API. Use direct database access.".to_string(),
+            }),
+        ));
+    }
+
     db.admin_reset_password(user_id, &req.password)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_password_reset",
         endpoint: Some(&format!("/admin/users/{}/password", user_id)),
         http_method: Some("POST"),
@@ -359,12 +638,23 @@ pub async fn delete_user(
         ));
     }
 
+    // SECURITY FIX: Protect superadmin account from deletion
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    if is_superadmin_user(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Cannot delete superadmin account".to_string(),
+            }),
+        ));
+    }
+
     db.delete_user(user_id).map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_deleted",
         endpoint: Some(&format!("/admin/users/{}", user_id)),
         http_method: Some("DELETE"),
@@ -404,13 +694,35 @@ pub async fn assign_role(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from assigning roles to other admins
+    // Get target user to check if they're an admin
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify roles of other admins".to_string(),
+            }),
+        ));
+    }
+
+    // SECURITY FIX: Protect superadmin role assignment
+    let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+    if let Some(sa_role_id) = superadmin_role_id {
+        if role_id == sa_role_id {
+            validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
+        }
+    }
+
     db.assign_role_to_user(user_id, role_id, Some(auth_ctx.user_id))
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_assigned",
         endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         http_method: Some("POST"),
@@ -450,13 +762,35 @@ pub async fn remove_role(
     // Check permission
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from removing roles from other admins
+    // Get target user to check if they're an admin
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify roles of other admins".to_string(),
+            }),
+        ));
+    }
+
+    // SECURITY FIX: Protect superadmin role removal
+    let superadmin_role_id = get_superadmin_role_id(&db)?;
+
+    if let Some(sa_role_id) = superadmin_role_id {
+        if role_id == sa_role_id {
+            validate_superadmin_removal(&db, &auth_ctx, user_id)?;
+        }
+    }
+
     db.remove_role_from_user(user_id, role_id)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_removed",
         endpoint: Some(&format!("/admin/users/{}/roles/{}", user_id, role_id)),
         http_method: Some("DELETE"),
@@ -505,7 +839,7 @@ pub async fn create_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_created",
         endpoint: Some("/admin/roles"),
         http_method: Some("POST"),
@@ -607,7 +941,7 @@ pub async fn update_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_updated",
         endpoint: Some(&format!("/admin/roles/{}", role_id)),
         http_method: Some("PUT"),
@@ -651,7 +985,7 @@ pub async fn delete_role(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_deleted",
         endpoint: Some(&format!("/admin/roles/{}", role_id)),
         http_method: Some("DELETE"),
@@ -724,13 +1058,25 @@ pub async fn set_role_permission(
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
 
+    // SECURITY FIX: Prevent privilege escalation via role permission modification
+    // Only superadmin can modify role permissions to prevent users from
+    // granting themselves additional privileges by editing their own roles
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify role permissions".to_string(),
+            }),
+        ));
+    }
+
     db.set_role_permission(role_id, &req.resource, &req.action, req.allowed)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_set",
         endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
         http_method: Some("POST"),
@@ -803,8 +1149,30 @@ pub async fn set_user_permission(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
+    // Superadmins are exempt because they get permissions implicitly (always have all)
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot modify your own permissions".to_string(),
+            }),
+        ));
+    }
+
     // Ensure user exists
-    db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
+    // Only superadmins can modify permissions of other admins (separation of duties)
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify permissions of other admins".to_string(),
+            }),
+        ));
+    }
 
     db.set_user_permission(
         user_id,
@@ -818,7 +1186,7 @@ pub async fn set_user_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_set",
         endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
         http_method: Some("POST"),
@@ -859,8 +1227,29 @@ pub async fn remove_user_permission(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_users", "all")?;
 
+    // SECURITY FIX: Prevent non-superadmin from modifying their own permissions
+    // Superadmins are exempt because they get permissions implicitly (always have all)
+    if user_id == auth_ctx.user_id && !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot modify your own permissions".to_string(),
+            }),
+        ));
+    }
+
     // Ensure user exists
-    db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+
+    // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
+    if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify permissions of other admins".to_string(),
+            }),
+        ));
+    }
 
     db.remove_user_permission(user_id, &params.resource, &params.action)
         .map_err(db_error_to_response)?;
@@ -868,7 +1257,7 @@ pub async fn remove_user_permission(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_removed",
         endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
         http_method: Some("DELETE"),
@@ -910,13 +1299,25 @@ pub async fn remove_role_permission(
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "all")?;
 
+    // SECURITY FIX: Prevent privilege escalation via role permission modification
+    // Only superadmin can modify role permissions to prevent users from
+    // granting themselves additional privileges by editing their own roles
+    if !auth_ctx.is_superadmin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can modify role permissions".to_string(),
+            }),
+        ));
+    }
+
     db.remove_role_permission(role_id, &params.resource, &params.action)
         .map_err(db_error_to_response)?;
 
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_removed",
         endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
         http_method: Some("DELETE"),

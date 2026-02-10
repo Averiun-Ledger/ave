@@ -95,7 +95,7 @@ pub async fn list_actions(
     tag = "Audit Logs",
     params(
         ("user_id" = Option<i64>, Query, description = "Filter by user ID"),
-        ("api_key_id" = Option<i64>, Query, description = "Filter by API key ID"),
+        ("api_key_id" = Option<String>, Query, description = "Filter by API key ID"),
         ("endpoint" = Option<String>, Query, description = "Filter by endpoint path"),
         ("http_method" = Option<String>, Query, description = "Filter by HTTP method"),
         ("ip_address" = Option<String>, Query, description = "Filter by IP address"),
@@ -225,7 +225,7 @@ pub async fn update_system_config(
     // Audit log
     let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(auth_ctx.api_key_id),
+        api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "config_updated",
         endpoint: Some(&format!("/admin/config/{}", key)),
         http_method: Some("PUT"),
@@ -269,7 +269,6 @@ pub async fn get_me(
     let user_info = UserInfo {
         id: user.id,
         username: user.username,
-        is_superadmin: user.is_superadmin,
         is_active: user.is_active,
         must_change_password: user.must_change_password,
         failed_login_attempts: user.failed_login_attempts,
@@ -337,7 +336,7 @@ pub async fn get_my_permissions_detailed(
     let response = DetailedPermissionsResponse {
         user_id: auth_ctx.user_id,
         username: auth_ctx.username.clone(),
-        is_superadmin: auth_ctx.is_superadmin,
+        is_superadmin: auth_ctx.is_superadmin(),
         roles: auth_ctx.roles.clone(),
         role_permissions,
         user_overrides,
@@ -372,7 +371,7 @@ pub async fn get_rate_limit_stats(
     let hours = query.hours.unwrap_or(24);
 
     let stats = db
-        .get_rate_limit_stats(None, hours)
+        .get_rate_limit_details(hours)
         .map_err(db_error_to_response)?;
     Ok(Json(stats))
 }

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use auth::AuthDatabase;
 use ave_bridge::{
@@ -15,7 +15,7 @@ use axum::{
     BoxError,
     handler::HandlerWithoutStateExt,
     http::{
-        HeaderName, Method, StatusCode, Uri, header,
+        HeaderName, HeaderValue, Method, StatusCode, Uri, header,
         uri::{Authority, Scheme},
     },
     response::Redirect,
@@ -27,10 +27,17 @@ use middleware::tower_trace;
 use server::build_routes;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower::ServiceBuilder;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    set_header::SetResponseHeaderLayer,
+};
 use tracing::{error, info};
 
 use crate::auth::build_auth;
+use crate::self_signed_cert::{
+    CertPaths, cert_needs_renewal, cert_renewal_task, generate_self_signed_cert,
+};
 
 mod auth;
 mod config_types;
@@ -38,6 +45,7 @@ mod doc;
 mod error;
 mod logging;
 mod middleware;
+mod self_signed_cert;
 mod server;
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
@@ -77,19 +85,84 @@ async fn main() {
             .await
             .expect("Can not build TCP listener with http address");
 
-    let cors = CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            HeaderName::from_static("x-api-key"),
-        ])
-        .allow_origin(Any);
+    // Build CORS layer based on configuration
+    let cors_config = &config.http.cors;
+    let cors = if cors_config.enabled {
+        let cors_layer = CorsLayer::new()
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                HeaderName::from_static("x-api-key"),
+            ])
+            .allow_credentials(cors_config.allow_credentials);
+
+        // Configure origins based on configuration
+        if cors_config.allow_any_origin {
+            // SECURITY WARNING: This allows ANY website to make requests (CVSS 6.5)
+            // Only use in development or if API is not accessed from browsers
+            tracing::warn!(
+                "CORS configured with allow_any_origin=true. This is a security risk in production!"
+            );
+            cors_layer.allow_origin(Any)
+        } else if !cors_config.allowed_origins.is_empty() {
+            // Parse allowed origins from configuration
+            let origins: Vec<HeaderValue> = cors_config
+                .allowed_origins
+                .iter()
+                .filter_map(|origin| {
+                    origin.parse::<HeaderValue>().inspect_err(|e| {
+                        tracing::error!("Invalid CORS origin '{}': {}", origin, e);
+                    }).ok()
+                })
+                .collect();
+
+            if origins.is_empty() {
+                // All origins failed to parse - this is a configuration error
+                panic!(
+                    "CORS enabled with allowed_origins but all origins are invalid. \
+                    Please check your CORS configuration in config.json. \
+                    Provided origins: {:?}",
+                    cors_config.allowed_origins
+                );
+            }
+
+            cors_layer.allow_origin(origins)
+        } else {
+            // CORS enabled but no origins configured and allow_any_origin is false
+            // This is a misconfiguration - fail fast
+            panic!(
+                "CORS is enabled but no valid configuration provided. \
+                Either set 'allow_any_origin: true' (development only) or \
+                provide 'allowed_origins' list in config.json"
+            );
+        }
+    } else {
+        // CORS disabled, use permissive layer
+        CorsLayer::permissive()
+    };
+
+    // SECURITY FIX: Add security headers to prevent API key leakage
+    // Referrer-Policy: no-referrer prevents API keys from leaking via Referer header
+    // This is critical when API keys are in headers, as browser may leak them
+    let security_headers = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ));
 
     let _log_handle = logging::init_logging(&config.logging).await;
 
@@ -127,23 +200,59 @@ async fn main() {
             .install_default()
             .expect("Can not install ring for RustTLS");
 
-        let (cert, private_key) = match (
-            config.http.https_cert_path,
-            config.http.https_private_key_path,
-        ) {
-            (Some(cert), Some(private_key)) => (cert, private_key),
-            _ => {
-                error!("Https must have cert and private key");
-                return;
-            }
-        };
+        // Certificate paths are validated in build_config, unwrap is safe here
+        let cert_path = config
+            .http
+            .https_cert_path
+            .expect("https_cert_path required for HTTPS (validated in build_config)");
+        let key_path = config
+            .http
+            .https_private_key_path
+            .expect("https_private_key_path required for HTTPS (validated in build_config)");
 
-        let tls = RustlsConfig::from_pem_file(
-            PathBuf::from(&cert),
-            PathBuf::from(&private_key),
-        )
-        .await
-        .expect("Can not build tls");
+        let self_signed_config = config.http.self_signed_cert.clone();
+
+        // If self-signed mode is enabled, generate certificate if needed
+        if self_signed_config.enabled {
+            info!(
+                target: TARGET_HTTP,
+                "Self-signed certificate mode enabled"
+            );
+
+            if cert_needs_renewal(&self_signed_config, &cert_path, &key_path).await {
+                match generate_self_signed_cert(&self_signed_config, &cert_path, &key_path).await {
+                    Ok(()) => {
+                        info!(
+                            target: TARGET_HTTP,
+                            "Self-signed certificate generated at {:?}",
+                            cert_path
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            target: TARGET_HTTP,
+                            "Failed to generate self-signed certificate: {}",
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let tls = RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .expect("Can not build tls");
+
+        // Start certificate renewal background task if self-signed mode is enabled
+        if self_signed_config.enabled {
+            let tls_clone = tls.clone();
+            let paths = CertPaths {
+                cert_path,
+                key_path,
+            };
+            tokio::spawn(cert_renewal_task(self_signed_config, paths, tls_clone));
+        }
 
         let handle = Handle::new();
 
@@ -162,6 +271,7 @@ async fn main() {
                     bridge,
                     auth_db,
                 ))
+                .layer(security_headers.clone())
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -171,6 +281,7 @@ async fn main() {
         axum::serve(
             listener_http,
             tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
+                .layer(security_headers)
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )

@@ -40,9 +40,9 @@ where
         let auth_db = parts.extensions.get::<Arc<AuthDatabase>>().cloned();
 
         // If no auth database, auth is disabled - allow request
-        if auth_db.is_none() {
+        let Some(db) = auth_db else {
             return Ok(ApiKeyAuthNew);
-        }
+        };
 
         // Auth is enabled - validate API key
         let api_key = parts
@@ -58,15 +58,25 @@ where
                 )
             })?;
 
-        // Verify API key and get auth context
-        let Some(db) = auth_db else {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Authentication database unavailable".to_string(),
-                }),
-            ));
-        };
+        // SECURITY FIX: Extract IP from socket address, not client headers
+        // X-Forwarded-For and X-Real-IP can be spoofed to bypass rate limiting
+        let ip_address = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|conn| conn.0.ip().to_string());
+
+        // SECURITY FIX: Pre-authentication rate limiting by IP
+        // Check rate limit BEFORE verifying credentials to prevent brute force attacks
+        db.check_rate_limit(None, ip_address.as_deref(), Some("/auth/*"))
+            .map_err(|e| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        error: format!("Rate limit exceeded: {}", e),
+                    }),
+                )
+            })?;
+
         let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
             (
                 StatusCode::UNAUTHORIZED,
@@ -76,25 +86,15 @@ where
             )
         })?;
 
-        // Extract IP address
-        let ip_address = parts
-            .headers
-            .get("X-Forwarded-For")
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| {
-                parts.headers.get("X-Real-IP").and_then(|v| v.to_str().ok())
-            })
-            .map(|s| s.to_string());
-
         auth_ctx.ip_address = ip_address.clone();
 
         // Update API key last used
         let _ =
-            db.update_api_key_usage(auth_ctx.api_key_id, ip_address.as_deref());
+            db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
 
-        // Check rate limit
+        // Post-authentication rate limit (per API key)
         db.check_rate_limit(
-            Some(auth_ctx.api_key_id),
+            Some(&auth_ctx.api_key_id),
             ip_address.as_deref(),
             parts.uri.path().into(),
         )
@@ -188,21 +188,12 @@ pub async fn audit_log_middleware(
     let path = req.uri().path().to_string();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // Get IP address from headers
-    let header_ip = req
-        .headers()
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            req.headers().get("X-Real-IP").and_then(|v| v.to_str().ok())
-        })
-        .map(|s| s.to_string());
-    // Fallback to socket address if available (ConnectInfo from axum)
-    let socket_ip = req
+    // SECURITY FIX: Get IP from socket address only, ignore client headers
+    // X-Forwarded-For and X-Real-IP can be spoofed
+    let ip_address = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip().to_string());
-    let ip_address = header_ip.or(socket_ip);
 
     // Get user agent
     let user_agent = req
@@ -219,8 +210,8 @@ pub async fn audit_log_middleware(
         return response;
     }
 
-    // Log to audit if database is available and logging is enabled
-    if let (Some(db), Some(ctx)) = (auth_db, auth_ctx) {
+    // Log to audit if database is available
+    if let Some(db) = auth_db {
         let success = response.status().is_success();
         let error_message = if !success {
             Some(format!("HTTP {}", response.status()))
@@ -228,18 +219,40 @@ pub async fn audit_log_middleware(
             None
         };
 
-        let _ = db.log_api_request(
-            &ctx,
-            crate::auth::database_audit::ApiRequestParams {
-                path: &path,
-                method: &method,
+        // If we have auth_ctx, use normal logging
+        if let Some(ctx) = auth_ctx {
+            let _ = db.log_api_request(
+                &ctx,
+                crate::auth::database_audit::ApiRequestParams {
+                    path: &path,
+                    method: &method,
+                    ip_address: ip_address.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    request_id: &request_id,
+                    success,
+                    error_message: error_message.as_deref(),
+                },
+            );
+        } else {
+            // No auth context - log as unauthenticated request
+            let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+                user_id: None,
+                api_key_id: None,
+                action_type: if success {
+                    "unauthenticated_request_success"
+                } else {
+                    "unauthenticated_request_failed"
+                },
+                endpoint: Some(&path),
+                http_method: Some(&method),
                 ip_address: ip_address.as_deref(),
                 user_agent: user_agent.as_deref(),
-                request_id: &request_id,
+                request_id: Some(&request_id),
+                details: Some(&format!("{} {}", method, path)),
                 success,
                 error_message: error_message.as_deref(),
-            },
-        );
+            });
+        }
     }
 
     response

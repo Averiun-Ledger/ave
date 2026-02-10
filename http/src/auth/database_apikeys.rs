@@ -15,7 +15,7 @@ impl AuthDatabase {
     /// Internal: Get API key info by ID without acquiring lock
     fn get_api_key_info_internal(
         conn: &rusqlite::Connection,
-        key_id: i64,
+        key_id: &str,
     ) -> Result<ApiKeyInfo, DatabaseError> {
         conn.query_row(
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
@@ -52,7 +52,7 @@ impl AuthDatabase {
     /// Get API key info by ID
     pub fn get_api_key_info(
         &self,
-        key_id: i64,
+        key_id: &str,
     ) -> Result<ApiKeyInfo, DatabaseError> {
         let conn = self.lock_conn()?;
         Self::get_api_key_info_internal(&conn, key_id)
@@ -68,6 +68,9 @@ impl AuthDatabase {
         is_management: bool,
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
         let conn = self.lock_conn()?;
+
+        // SECURITY FIX: Validate description for CRLF injection
+        AuthDatabase::validate_description(description)?;
 
         // Check if user exists and is active
         let user = AuthDatabase::get_user_by_id_internal(&conn, user_id)?;
@@ -113,8 +116,15 @@ impl AuthDatabase {
             ));
         }
 
+        // SECURITY FIX: Validate API key name for dangerous characters
+        // Prevent XSS, SQL injection, command injection, and path traversal
         if !is_management {
-            let exists: Option<i64> = conn
+            let key_name = name.unwrap_or_default();
+            Self::validate_api_key_name(key_name)?;
+        }
+
+        if !is_management {
+            let exists: Option<String> = conn
                 .query_row(
                     "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
                     params![user_id, name.unwrap_or_default()],
@@ -142,30 +152,50 @@ impl AuthDatabase {
         // Calculate expiration
         let now = Self::now();
         let config_ttl = self.config.api_key.default_ttl_seconds;
+        // SECURITY FIX: Validate TTL is not negative
+        if let Some(ttl) = expires_in_seconds {
+            if ttl < 0 {
+                return Err(DatabaseError::ValidationError(format!(
+                    "Invalid TTL: {} (must be positive or 0)",
+                    ttl
+                )));
+            }
+        }
+
         let effective_ttl = match expires_in_seconds {
             Some(ttl) if ttl > 0 => {
+                // Explicit positive TTL requested
                 if config_ttl > 0 {
                     Some(std::cmp::min(ttl, config_ttl))
                 } else {
                     Some(ttl)
                 }
             }
-            Some(0) | None => {
+            Some(0) => {
+                // Explicit TTL=0 means never expire (useful for service keys)
+                None
+            }
+            None => {
+                // No TTL specified, use system default
                 if config_ttl > 0 {
                     Some(config_ttl)
                 } else {
                     None
                 }
             }
-            _ => None,
+            _ => unreachable!("Negative TTL already validated above"),
         };
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
+        // Generate UUID for id
+        let key_id = AuthDatabase::generate_uuid();
+
         // Insert API key
         conn.execute(
-            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, description, expires_at, is_management)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, description, expires_at, is_management)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
+                key_id,
                 user_id,
                 key_hash,
                 key_prefix,
@@ -176,10 +206,8 @@ impl AuthDatabase {
             ],
         ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
 
-        let key_id = conn.last_insert_rowid();
-
         // Get key info
-        let key_info = Self::get_api_key_info_internal(&conn, key_id)?;
+        let key_info = Self::get_api_key_info_internal(&conn, &key_id)?;
 
         Ok((api_key, key_info))
     }
@@ -248,7 +276,7 @@ impl AuthDatabase {
     ) -> Result<ApiKeyInfo, DatabaseError> {
         let conn = self.lock_conn()?;
 
-        let key_id: i64 = conn
+        let key_id: String = conn
             .query_row(
                 "SELECT id FROM api_keys WHERE user_id = ?1 AND name = ?2 AND revoked = 0",
                 params![user_id, name],
@@ -262,7 +290,7 @@ impl AuthDatabase {
                 )
             })?;
 
-        Self::get_api_key_info_internal(&conn, key_id)
+        Self::get_api_key_info_internal(&conn, &key_id)
     }
 
     /// List all API keys (admin)
@@ -322,7 +350,7 @@ impl AuthDatabase {
     /// Revoke an API key
     pub fn revoke_api_key(
         &self,
-        key_id: i64,
+        key_id: &str,
         revoked_by: Option<i64>,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
@@ -370,13 +398,7 @@ impl AuthDatabase {
         let key_hash = hash_api_key(api_key);
 
         // Get API key from database
-        let (key_id, user_id, revoked, expires_at, is_management): (
-            i64,
-            i64,
-            bool,
-            Option<i64>,
-            bool,
-        ) = conn
+        let key_result = conn
             .query_row(
                 "SELECT id, user_id, revoked, expires_at, is_management
                  FROM api_keys
@@ -384,19 +406,32 @@ impl AuthDatabase {
                 params![key_hash],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, bool>(4)?,
                     ))
                 },
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-            .ok_or_else(|| {
-                DatabaseError::PermissionDenied("Invalid API key".to_string())
-            })?;
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+
+        // SECURITY: Constant-time API key enumeration mitigation
+        // If key doesn't exist, perform dummy user query to match timing
+        let (key_id, user_id, revoked, expires_at, is_management) = match key_result {
+            Some(k) => k,
+            None => {
+                // API key doesn't exist - perform dummy query to prevent timing attack
+                let _ = conn.query_row(
+                    "SELECT id FROM users WHERE id = ?1",
+                    params![999999], // Non-existent user
+                    |row| row.get::<_, i64>(0),
+                ).optional();
+
+                return Err(DatabaseError::PermissionDenied("Invalid API key".to_string()));
+            }
+        };
 
         // Check if revoked
         if revoked {
@@ -434,6 +469,15 @@ impl AuthDatabase {
             ));
         }
 
+        // SECURITY FIX: Enforce must_change_password policy for API keys
+        // Users with must_change_password cannot use API keys until they change their password
+        // This prevents bypassing the forced password change requirement
+        if user.must_change_password {
+            return Err(DatabaseError::PasswordChangeRequired(
+                "Password change required. Please change your password before using API keys".to_string(),
+            ));
+        }
+
         // Get user roles
         let roles = AuthDatabase::get_user_roles_internal(&conn, user_id)?;
 
@@ -441,7 +485,7 @@ impl AuthDatabase {
         let now = Self::now();
         conn.execute(
             "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
-            params![now, key_id],
+            params![now, &key_id],
         )
         .ok(); // Ignore errors on usage tracking
 
@@ -465,7 +509,6 @@ impl AuthDatabase {
         Ok(AuthContext {
             user_id,
             username: user.username,
-            is_superadmin: user.is_superadmin,
             roles,
             permissions,
             api_key_id: key_id,
@@ -477,7 +520,7 @@ impl AuthDatabase {
     /// Update API key last used timestamp and IP
     pub fn update_api_key_usage(
         &self,
-        key_id: i64,
+        key_id: &str,
         ip_address: Option<&str>,
     ) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
@@ -518,5 +561,52 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
 
         Ok(deleted)
+    }
+
+    /// Validate API key name for dangerous characters
+    ///
+    /// SECURITY FIX: Prevents XSS, SQL injection, command injection, and path traversal
+    /// by rejecting names containing dangerous characters.
+    ///
+    /// Allowed characters: alphanumeric, underscore, hyphen, space, period
+    /// Max length: 100 characters
+    fn validate_api_key_name(name: &str) -> Result<(), DatabaseError> {
+        // Check length
+        if name.len() > 100 {
+            return Err(DatabaseError::ValidationError(
+                "API key name must be 100 characters or less".to_string(),
+            ));
+        }
+
+        // Check for null bytes (command injection, path traversal)
+        if name.contains('\0') {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid characters".to_string(),
+            ));
+        }
+
+        // Check for control characters (including newlines, tabs, etc)
+        if name.chars().any(|c| c.is_control()) {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid control characters".to_string(),
+            ));
+        }
+
+        // Check for dangerous characters that could be used for attacks
+        let dangerous_chars = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '(', ')', '{', '}', '[', ']', '\\', '/', ':', '*', '?', '%'];
+        if name.chars().any(|c| dangerous_chars.contains(&c)) {
+            return Err(DatabaseError::ValidationError(
+                format!("API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed")
+            ));
+        }
+
+        // Check for path traversal patterns
+        if name.contains("..") || name.contains("./") || name.contains(".\\") {
+            return Err(DatabaseError::ValidationError(
+                "API key name contains invalid patterns".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }

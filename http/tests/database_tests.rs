@@ -15,7 +15,7 @@ mod tests {
     use super::*;
 
     use ave_bridge::auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, SessionConfig,
+        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, SessionConfig,
     };
     use ave_http::auth::database::AuthDatabase;
     use tempfile::TempDir;
@@ -43,7 +43,7 @@ mod tests {
             session: SessionConfig {
                 audit_enable: true,
                 audit_retention_days: 90,
-                log_all_requests: false,
+            audit_max_entries: 1_000_000,
             },
         };
 
@@ -59,11 +59,10 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         assert_eq!(user.username, "testuser");
-        assert!(!user.is_superadmin);
         assert!(user.is_active);
         assert_eq!(user.failed_login_attempts, 0);
     }
@@ -72,10 +71,10 @@ mod tests {
     fn test_create_user_duplicate() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let result =
-            db.create_user("testuser", "TestPass123!", false, None, None, None);
+            db.create_user("testuser", "TestPass123!", None, None, Some(false));
 
         assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
     }
@@ -85,7 +84,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let created = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let fetched = db.get_user_by_id(created.id).unwrap();
 
@@ -98,7 +97,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Update password
@@ -114,7 +113,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Deactivate
@@ -129,15 +128,61 @@ mod tests {
     fn test_list_users() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("user1", "TestPass123!", false, None, None, None)
+        db.create_user("user1", "TestPass123!", None, None, Some(false))
             .unwrap();
-        db.create_user("user2", "TestPass123!", false, None, None, None)
+        db.create_user("user2", "TestPass123!", None, None, Some(false))
             .unwrap();
 
-        let users = db.list_users(false).unwrap();
+        let users = db.list_users(false, 100, 0).unwrap();
 
         // At least 3 users (admin + user1 + user2)
         assert!(users.len() >= 3);
+    }
+
+    #[test]
+    fn test_list_users_pagination() {
+        let (db, _dirs) = create_test_db();
+
+        // Create 5 test users
+        for i in 1..=5 {
+            db.create_user(
+                &format!("user{}", i),
+                "TestPass123!",
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap();
+        }
+
+        // Test limit
+        let page1 = db.list_users(false, 2, 0).unwrap();
+        assert_eq!(page1.len(), 2, "First page should have 2 users");
+
+        // Test offset
+        let page2 = db.list_users(false, 2, 2).unwrap();
+        assert_eq!(page2.len(), 2, "Second page should have 2 users");
+
+        // Verify different users on different pages
+        assert_ne!(
+            page1[0].username, page2[0].username,
+            "Pages should have different users"
+        );
+
+        // Test getting all users
+        let all_users = db.list_users(false, 100, 0).unwrap();
+        assert!(
+            all_users.len() >= 6,
+            "Should have at least 6 users (admin + 5 created)"
+        );
+
+        // Test offset beyond available users
+        let beyond = db.list_users(false, 10, 100).unwrap();
+        assert_eq!(beyond.len(), 0, "Offset beyond users should return empty");
+
+        // Test limit of 1
+        let single = db.list_users(false, 1, 0).unwrap();
+        assert_eq!(single.len(), 1, "Limit 1 should return exactly 1 user");
     }
 
     #[test]
@@ -145,7 +190,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         db.delete_user(user.id).unwrap();
@@ -163,16 +208,21 @@ mod tests {
     fn test_verify_credentials_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        let user = db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
+
+        // Force password change requirement
+        db.admin_reset_password(user.id, "NewPass456!").unwrap();
+
+        // Change password with different value
         db.change_password_with_credentials(
             "testuser",
-            "TestPass123!",
-            "TestPass123!",
+            "NewPass456!",
+            "FinalPass789!",
         )
         .unwrap();
 
-        let user = db.verify_credentials("testuser", "TestPass123!").unwrap();
+        let user = db.verify_credentials("testuser", "FinalPass789!").unwrap();
         assert_eq!(user.username, "testuser");
     }
 
@@ -180,7 +230,7 @@ mod tests {
     fn test_verify_credentials_wrong_password() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let result = db.verify_credentials("testuser", "WrongPassword");
@@ -191,7 +241,7 @@ mod tests {
     fn test_account_lockout_after_failed_attempts() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // 5 failed attempts (lockout threshold)
@@ -199,23 +249,17 @@ mod tests {
             let _ = db.verify_credentials("testuser", "WrongPassword");
         }
 
-        // Even correct password should fail now
+        // Even correct password should fail now (generic error to avoid enumeration)
         let result = db.verify_credentials("testuser", "TestPass123!");
-        assert!(matches!(result, Err(DatabaseError::AccountLocked(_))));
+        assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
     }
 
     #[test]
     fn test_failed_attempts_reset_on_success() {
         let (db, _dirs) = create_test_db();
 
-        db.create_user("testuser", "TestPass123!", false, None, None, None)
+        db.create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
-        db.change_password_with_credentials(
-            "testuser",
-            "TestPass123!",
-            "TestPass123!",
-        )
-        .unwrap();
 
         // 2 failed attempts
         let _ = db.verify_credentials("testuser", "Wrong1");
@@ -263,7 +307,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -278,7 +322,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -294,7 +338,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role1 = db.create_role("editor", None).unwrap();
         let role2 = db.create_role("viewer", None).unwrap();
@@ -328,7 +372,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (api_key, key_info) = db
@@ -345,7 +389,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, _) = db
             .create_api_key(user.id, Some("key_verify"), None, None, false)
@@ -371,7 +415,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Create key with 1 second TTL
@@ -407,7 +451,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // No TTL provided -> should use system default
@@ -416,11 +460,11 @@ mod tests {
             .unwrap();
         assert_eq!(info1.expires_at, Some(info1.created_at + 100));
 
-        // TTL = 0 provided -> should still use system default
+        // TTL = 0 provided -> should NEVER expire (explicit permanent key)
         let (_, info2) = db
             .create_api_key(user.id, Some("default2"), None, Some(0), false)
             .unwrap();
-        assert_eq!(info2.expires_at, Some(info2.created_at + 100));
+        assert_eq!(info2.expires_at, None, "TTL=0 should create permanent key (never expires)");
     }
 
     #[test]
@@ -434,7 +478,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (_, capped) = db
@@ -451,7 +495,7 @@ mod tests {
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("testuser2", "TestPass123!", false, None, None, None)
+            .create_user("testuser2", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         let (_, info) = db
@@ -465,14 +509,14 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, key_info) = db
             .create_api_key(user.id, Some("revoke"), None, None, false)
             .unwrap();
 
         // Revoke the key
-        db.revoke_api_key(key_info.id, None, None).unwrap();
+        db.revoke_api_key(&key_info.id, None, None).unwrap();
 
         // Should no longer verify
         let result = db.verify_api_key(&api_key);
@@ -484,7 +528,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         db.create_api_key(user.id, Some("key1"), None, None, false)
@@ -502,7 +546,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (api_key, key_info) = db
             .create_api_key(user.id, Some("tracking"), None, None, false)
@@ -525,21 +569,21 @@ mod tests {
         let (mut db, _dir) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("perm_effective"), None, None, false)
             .unwrap();
 
         // Verify no expiration was set
-        let info = db.get_api_key_info(key_info.id).unwrap();
+        let info = db.get_api_key_info(&key_info.id).unwrap();
         assert!(info.expires_at.is_none());
 
         // Enable TTL and run cleanup to backfill
         db.set_default_api_key_ttl(100);
 
         let _ = db.cleanup_expired_api_keys().unwrap();
-        let info = db.get_api_key_info(key_info.id).unwrap();
+        let info = db.get_api_key_info(&key_info.id).unwrap();
 
         assert_eq!(info.expires_at, Some(info.created_at + 100));
     }
@@ -573,7 +617,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
 
         // Set user-specific permission
@@ -595,7 +639,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -619,7 +663,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let role = db.create_role("editor", None).unwrap();
 
@@ -651,7 +695,7 @@ mod tests {
         let (db, _dirs) = create_test_db();
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rate1"), None, None, false)
@@ -660,7 +704,7 @@ mod tests {
         // Make 10 requests (well under limit of 100)
         for _ in 0..10 {
             let result = db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("127.0.0.1"),
                 Some("/api/test"),
             );
@@ -670,10 +714,20 @@ mod tests {
 
     #[test]
     fn test_rate_limit_exceeded() {
-        let (db, _dirs) = create_test_db();
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 100,
+            limit_by_key: true,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rate2"), None, None, false)
@@ -682,7 +736,7 @@ mod tests {
         // Hit rate limit (100 requests)
         for _ in 0..100 {
             let _ = db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("127.0.0.1"),
                 Some("/api/test"),
             );
@@ -690,7 +744,7 @@ mod tests {
 
         // 101st request should fail
         let result = db.check_rate_limit(
-            Some(key_info.id),
+            Some(&key_info.id),
             Some("127.0.0.1"),
             Some("/api/test"),
         );
@@ -706,12 +760,13 @@ mod tests {
             limit_by_key: false,
             limit_by_ip: true,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key1) = db
             .create_api_key(user.id, Some("rlip1"), None, None, false)
@@ -723,7 +778,7 @@ mod tests {
         // Two requests from same IP should pass
         assert!(
             db.check_rate_limit(
-                Some(key1.id),
+                Some(&key1.id),
                 Some("127.0.0.1"),
                 Some("/api/test")
             )
@@ -731,7 +786,7 @@ mod tests {
         );
         assert!(
             db.check_rate_limit(
-                Some(key1.id),
+                Some(&key1.id),
                 Some("127.0.0.1"),
                 Some("/api/test")
             )
@@ -740,7 +795,7 @@ mod tests {
 
         // Third request from same IP but different key should exceed (IP-only limit)
         let result = db.check_rate_limit(
-            Some(key2.id),
+            Some(&key2.id),
             Some("127.0.0.1"),
             Some("/api/test"),
         );
@@ -756,12 +811,13 @@ mod tests {
             limit_by_key: true,
             limit_by_ip: false,
             cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
         };
 
         let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
 
         let user = db
-            .create_user("testuser", "TestPass123!", false, None, None, None)
+            .create_user("testuser", "TestPass123!", None, None, Some(false))
             .unwrap();
         let (_, key_info) = db
             .create_api_key(user.id, Some("rlkey"), None, None, false)
@@ -770,7 +826,7 @@ mod tests {
         // First request from any IP should pass
         assert!(
             db.check_rate_limit(
-                Some(key_info.id),
+                Some(&key_info.id),
                 Some("10.0.0.1"),
                 Some("/api/test")
             )
@@ -779,11 +835,101 @@ mod tests {
 
         // Second request with the same key but different IP should still be limited
         let result = db.check_rate_limit(
-            Some(key_info.id),
+            Some(&key_info.id),
             Some("10.0.0.2"),
             Some("/api/test"),
         );
         assert!(matches!(result, Err(DatabaseError::RateLimitExceeded(_))));
+    }
+
+    #[test]
+    fn test_rate_limit_by_both_key_and_ip() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 2,
+            limit_by_key: true,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
+
+        let user1 = db
+            .create_user("user1", "TestPass123!", None, None, Some(false))
+            .unwrap();
+        let user2 = db
+            .create_user("user2", "TestPass123!", None, None, Some(false))
+            .unwrap();
+
+        let (_, key1) = db
+            .create_api_key(user1.id, Some("key1"), None, None, false)
+            .unwrap();
+        let (_, key2) = db
+            .create_api_key(user2.id, Some("key2"), None, None, false)
+            .unwrap();
+
+        // Scenario 1: Same key, different IPs - each IP should have independent limit
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@10.0.0.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key1@10.0.0.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.1"), Some("/api/test"))
+                .is_err(),
+            "Third request from key1@10.0.0.1 should exceed limit"
+        );
+
+        // Same key from different IP should work (independent counter)
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@10.0.0.2 should pass (different IP)"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key1@10.0.0.2 should pass"
+        );
+
+        // Scenario 2: Different keys, same IP - each key should have independent limit
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key2@192.168.1.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "Second request from key2@192.168.1.1 should pass"
+        );
+        assert!(
+            db.check_rate_limit(Some(&key2.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_err(),
+            "Third request from key2@192.168.1.1 should exceed limit"
+        );
+
+        // Different key from same IP should work (independent counter)
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("192.168.1.1"), Some("/api/test"))
+                .is_ok(),
+            "First request from key1@192.168.1.1 should pass (different key)"
+        );
+
+        // Scenario 3: Verify that limit is per (key, IP) combination
+        // key1 from 10.0.0.2 already has 2 requests, should fail on 3rd
+        assert!(
+            db.check_rate_limit(Some(&key1.id), Some("10.0.0.2"), Some("/api/test"))
+                .is_err(),
+            "Third request from key1@10.0.0.2 should exceed limit"
+        );
     }
 
     // =============================================================================
@@ -795,7 +941,7 @@ mod tests {
         let session = SessionConfig {
             audit_enable: false,
             audit_retention_days: 90,
-            log_all_requests: true,
+            audit_max_entries: 1_000_000,
         };
 
         let dir =
@@ -821,6 +967,7 @@ mod tests {
                 limit_by_key: true,
                 limit_by_ip: true,
                 cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![],
             },
             session,
         };
@@ -857,6 +1004,10 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
@@ -873,13 +1024,12 @@ mod tests {
 
         config.enable = true;
         config.session.audit_enable = true;
-        config.session.log_all_requests = true;
         config.database_path = path;
 
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", false, None, None, None)
+            .create_user("apiuser", "Pass123!", None, None, Some(false))
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key"), None, None, false)
@@ -888,7 +1038,6 @@ mod tests {
         let ctx = AuthContext {
             user_id: user.id,
             username: user.username.clone(),
-            is_superadmin: false,
             roles: vec![],
             permissions: vec![],
             api_key_id: key.id,
@@ -924,6 +1073,10 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
@@ -933,7 +1086,9 @@ mod tests {
     }
 
     #[test]
-    fn test_log_api_request_disabled() {
+    fn test_log_api_request_always_enabled() {
+        // SECURITY: Audit logging is now ALWAYS enabled for full traceability
+        // This test verifies that all requests are logged regardless of config
         let mut config = AuthConfig::default();
 
         let dir =
@@ -942,13 +1097,12 @@ mod tests {
 
         config.enable = true;
         config.session.audit_enable = true;
-        config.session.log_all_requests = false;
         config.database_path = path;
 
         let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
 
         let user = db
-            .create_user("apiuser", "Pass123!", false, None, None, None)
+            .create_user("apiuser", "Pass123!", None, None, Some(false))
             .unwrap();
         let (_, key) = db
             .create_api_key(user.id, Some("test_key2"), None, None, false)
@@ -957,7 +1111,6 @@ mod tests {
         let ctx = AuthContext {
             user_id: user.id,
             username: user.username.clone(),
-            is_superadmin: false,
             roles: vec![],
             permissions: vec![],
             api_key_id: key.id,
@@ -979,7 +1132,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(log_id, 0);
+        // Verify log was created (log_id > 0 means it was logged)
+        assert!(log_id > 0, "Audit logging should always be active");
 
         let query = AuditLogQuery {
             user_id: Some(user.id),
@@ -993,10 +1147,16 @@ mod tests {
             end_timestamp: None,
             limit: None,
             offset: None,
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
         };
 
         let logs = db.query_audit_logs(&query).unwrap();
-        assert!(logs.is_empty());
+        assert_eq!(logs.len(), 1, "Should have logged exactly one request");
+        assert_eq!(logs[0].endpoint.as_deref(), Some("/api/test"));
+        assert_eq!(logs[0].http_method.as_deref(), Some("POST"));
     }
 
     // =============================================================================
@@ -1020,5 +1180,87 @@ mod tests {
         let result = db.update_system_config("read_only_mode", "1", None);
 
         assert!(result.is_err());
+    }
+
+    /// Test endpoint-specific rate limiting with sensitive endpoints
+    #[test]
+    fn test_endpoint_specific_rate_limiting() {
+        let rate_limit = RateLimitConfig {
+            enable: true,
+            window_seconds: 60,
+            max_requests: 100, // Default limit: 100 requests
+            limit_by_key: false,
+            limit_by_ip: true,
+            cleanup_interval_seconds: 3600,
+            sensitive_endpoints: vec![
+                EndpointRateLimit {
+                    endpoint: "/login".to_string(),
+                    max_requests: 5, // Login limited to 5 requests
+                    window_seconds: None, // Use default window
+                },
+                EndpointRateLimit {
+                    endpoint: "/change-password".to_string(),
+                    max_requests: 3, // Password change limited to 3 requests
+                    window_seconds: Some(120), // Custom 2-minute window
+                },
+            ],
+        };
+
+        let (db, _dirs) = create_test_db_with_rate_limit(rate_limit);
+
+        // Test 1: Regular endpoint should allow 100 requests
+        for i in 1..=100 {
+            assert!(
+                db.check_rate_limit(None, Some("1.2.3.4"), Some("/api/regular"))
+                    .is_ok(),
+                "Regular endpoint request {} should pass", i
+            );
+        }
+
+        // 101st request should fail
+        let result = db.check_rate_limit(None, Some("1.2.3.4"), Some("/api/regular"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "Regular endpoint should be rate limited at 100 requests"
+        );
+
+        // Test 2: /login endpoint should only allow 5 requests
+        for i in 1..=5 {
+            assert!(
+                db.check_rate_limit(None, Some("2.3.4.5"), Some("/login"))
+                    .is_ok(),
+                "/login request {} should pass", i
+            );
+        }
+
+        // 6th request should fail
+        let result = db.check_rate_limit(None, Some("2.3.4.5"), Some("/login"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "/login should be rate limited at 5 requests"
+        );
+
+        // Test 3: /change-password should only allow 3 requests
+        for i in 1..=3 {
+            assert!(
+                db.check_rate_limit(None, Some("3.4.5.6"), Some("/change-password"))
+                    .is_ok(),
+                "/change-password request {} should pass", i
+            );
+        }
+
+        // 4th request should fail
+        let result = db.check_rate_limit(None, Some("3.4.5.6"), Some("/change-password"));
+        assert!(
+            matches!(result, Err(DatabaseError::RateLimitExceeded(_))),
+            "/change-password should be rate limited at 3 requests"
+        );
+
+        // Test 4: Different IP should have independent limits
+        assert!(
+            db.check_rate_limit(None, Some("4.5.6.7"), Some("/login"))
+                .is_ok(),
+            "Different IP should have independent /login limit"
+        );
     }
 }

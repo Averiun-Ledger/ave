@@ -105,15 +105,16 @@ async fn test_create_user() {
         Some(&api_key),
         Some(json!({
             "username": username,
-            "password": "TestPass123!",
-            "is_superadmin": false
+            "password": "TestPass123!"
         })),
     )
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["username"], username);
-    assert_eq!(body["is_superadmin"], false);
+    // Verify user has no superadmin role
+    assert!(body["roles"].as_array().unwrap().is_empty() ||
+            !body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
@@ -200,7 +201,8 @@ async fn test_get_user_by_id() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
-    assert_eq!(body["is_superadmin"], true);
+    // Verify admin has superadmin role
+    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
@@ -674,12 +676,12 @@ async fn test_get_api_key_info() {
         Some(json!({"name": "infokey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let id = key_body["key_info"]["id"].as_str().unwrap();
 
     // Get key info
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}", key_id)),
+        &server.url(&format!("/admin/api-keys/{}", id)),
         "GET",
         Some(&api_key),
         None,
@@ -719,12 +721,12 @@ async fn test_revoke_api_key() {
         Some(json!({"name": "revokekey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let id = key_body["key_info"]["id"].as_str().unwrap();
 
     // Revoke key
     let (status, _) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}", key_id)),
+        &server.url(&format!("/admin/api-keys/{}", id)),
         "DELETE",
         Some(&api_key),
         Some(json!({"reason": "Test revocation"})),
@@ -763,13 +765,13 @@ async fn test_rotate_api_key() {
         Some(json!({"name": "rotatekey"})),
     )
     .await;
-    let key_id = key_body["key_info"]["id"].as_i64().unwrap();
+    let id = key_body["key_info"]["id"].as_str().unwrap();
     let old_key = key_body["api_key"].as_str().unwrap();
 
     // Rotate key
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/admin/api-keys/{}/rotate", key_id)),
+        &server.url(&format!("/admin/api-keys/{}/rotate", id)),
         "POST",
         Some(&api_key),
         Some(json!({"reason": "Test rotation"})),
@@ -799,7 +801,8 @@ async fn test_get_me() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
-    assert_eq!(body["is_superadmin"], true);
+    // Verify admin has superadmin role
+    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
 #[tokio::test]
