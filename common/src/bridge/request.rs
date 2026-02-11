@@ -13,8 +13,13 @@ use serde_json::Value;
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum ApprovalStateRes {
     /// Request for approval which is in responded status and accepted
     RespondedAccepted,
@@ -51,6 +56,8 @@ impl Display for ApprovalStateRes {
     BorshSerialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum ApprovalState {
     /// The approval entity is pending a response.
     #[default]
@@ -78,6 +85,8 @@ impl Display for ApprovalState {
 /// Signed event request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeSignedEventRequest {
     /// Event request
     pub request: BridgeEventRequest,
@@ -88,6 +97,8 @@ pub struct BridgeSignedEventRequest {
 /// Event request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum BridgeEventRequest {
     Create(BridgeCreateRequest),
@@ -100,6 +111,8 @@ pub enum BridgeEventRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeRejectRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -107,6 +120,8 @@ pub struct BridgeRejectRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeCreateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -120,6 +135,8 @@ pub struct BridgeCreateRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeFactRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -129,6 +146,8 @@ pub struct BridgeFactRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeTransferRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -139,6 +158,8 @@ pub struct BridgeTransferRequest {
 /// EOL request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeEOLRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -146,6 +167,8 @@ pub struct BridgeEOLRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeConfirmRequest {
     /// Subject identifier
     pub subject_id: String,

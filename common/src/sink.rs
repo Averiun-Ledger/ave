@@ -3,8 +3,12 @@ use serde_json::Value;
 
 use crate::SchemaType;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DataToSink {
     pub event: DataToSinkEvent,
     pub public_key: String,
@@ -14,12 +18,15 @@ pub struct DataToSink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum DataToSinkEvent {
     Create {
         governance_id: Option<String>,
         subject_id: String,
         owner: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         namespace: String,
         sn: u64,
@@ -27,6 +34,7 @@ pub enum DataToSinkEvent {
     Fact {
         governance_id: Option<String>,
         subject_id: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         issuer: String,
         owner: String,
@@ -36,6 +44,7 @@ pub enum DataToSinkEvent {
     Transfer {
         governance_id: Option<String>,
         subject_id: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         owner: String,
         new_owner: String,
@@ -44,18 +53,21 @@ pub enum DataToSinkEvent {
     Confirm {
         governance_id: Option<String>,
         subject_id: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         sn: u64,
     },
     Reject {
         governance_id: Option<String>,
         subject_id: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         sn: u64,
     },
     EOL {
         governance_id: Option<String>,
         subject_id: String,
+        #[cfg_attr(feature = "typescript", ts(as = "String"))]
         schema_id: SchemaType,
         sn: u64,
     },
