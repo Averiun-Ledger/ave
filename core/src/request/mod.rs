@@ -4,7 +4,7 @@ use ave_actors::{
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh,
 };
@@ -33,7 +33,6 @@ use crate::model::common::subject::get_version;
 use crate::model::common::{
     check_signature, check_subject_creation, emit_fail, send_to_tracking,
 };
-use crate::model::request::EventRequestType;
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
 use crate::request::manager::InitRequestManager;
 use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
@@ -582,7 +581,7 @@ impl RequestHandler {
                 }
             }
             EventRequestType::Reject => ReqManInitMessage::Validate,
-            EventRequestType::EOL => ReqManInitMessage::Validate,
+            EventRequestType::Eol => ReqManInitMessage::Validate,
         }
     }
 

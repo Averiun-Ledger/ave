@@ -1,9 +1,7 @@
 mod error;
 
 use crate::{
-    external_db::DBManager,
-    request::{tracking::{RequestTrackingEvent}},
-    subject::{SignedLedger, sinkdata::SinkDataEvent},
+    external_db::DBManager, request::tracking::RequestTrackingEvent, subject::{SignedLedger, sinkdata::SinkDataEvent}
 };
 
 use crate::config::ExternalDbConfig;
@@ -11,9 +9,9 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 
-use ave_common::response::{
+use ave_common::{bridge::request::EventRequestType, response::{
     LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange,
-};
+}};
 pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
@@ -35,6 +33,7 @@ pub trait Querys {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     ) -> Result<PaginatorEvents, DatabaseError>;
 
     async fn get_aborts(
@@ -60,6 +59,7 @@ pub trait Querys {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     ) -> Result<Vec<LedgerDB>, DatabaseError>;
 
     // subject
@@ -174,6 +174,7 @@ impl Querys for ExternalDB {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -187,6 +188,7 @@ impl Querys for ExternalDB {
                         event_request_ts,
                         event_ledger_ts,
                         sink_ts,
+                        event_type
                     )
                     .await
             }
@@ -211,12 +213,13 @@ impl Querys for ExternalDB {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_first_or_end_events(subject_id, quantity, reverse)
+                    .get_first_or_end_events(subject_id, quantity, reverse, event_type)
                     .await
             }
         }

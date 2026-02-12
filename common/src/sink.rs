@@ -53,7 +53,7 @@ pub enum DataToSinkEvent {
         schema_id: SchemaType,
         sn: u64,
     },
-    EOL {
+    Eol {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
@@ -89,7 +89,7 @@ impl DataToSinkEvent {
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::EOL {
+            | DataToSinkEvent::Eol {
                 subject_id,
                 schema_id,
                 ..

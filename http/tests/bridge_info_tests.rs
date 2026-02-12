@@ -1,19 +1,20 @@
-use std::{collections::BTreeSet, time::Duration};
-
-use ave_common::{
-    ApproveInfo, BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
-    BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
-    BridgeSignedEventRequest, BridgeTransferRequest, EventInfo,
-    EventRequestInfo, GovsData, Namespace, PaginatorEvents, RequestData,
-    RequestInfo, RequestState, SignaturesInfo, SubjectInfo, SubjsData,
-    TransferSubject,
-    identity::{KeyPair, keys::Ed25519Signer},
-};
 use ave_http::config_types::ConfigHttp;
-// Ave HTTP - Bridge Info Tests
-//
-// Tests that initialize a Bridge and retrieve peer-id and controller-id
-// Also tests for business logic endpoint deserialization
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
+use test_log::test;
+
+use ave_bridge::ave_common::{
+    SchemaType,
+    bridge::request::ApprovalState,
+    identity::{KeyPair, keys::Ed25519Signer},
+    response::{
+        ApprovalEntry, GovsData, LedgerDB, PaginatorEvents, RequestData,
+        RequestInfo, RequestInfoExtend, RequestState, SubjectDB, SubjsData,
+        TransferSubject,
+    },
+};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -29,23 +30,23 @@ mod common;
 // (that's tested in core), but rather the HTTP layer deserialization.
 
 async fn create_req(client: &Client, server: &TestServer) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Create(BridgeCreateRequest {
-            name: Some("Governance".to_string()),
-            description: Some("A governance".to_string()),
-            governance_id: None,
-            schema_id: "governance".to_string(),
-            namespace: None,
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "create",
+            "data": {
+                "name": "Governance",
+                "description": "A governance",
+                "schema_id": "governance"
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
-        Some(serde_json::to_value(request).unwrap()),
+        Some(request),
     )
     .await;
     assert!(status.is_success());
@@ -60,20 +61,21 @@ async fn create_req_schema(
     governance_id: &str,
     name: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Create(BridgeCreateRequest {
-            name: Some(name.to_string()),
-            description: Some("A subject".to_string()),
-            governance_id: Some(governance_id.to_string()),
-            schema_id: schema_id.to_string(),
-            namespace: None,
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "create",
+            "data": {
+                "name": name.to_string(),
+                "description": "A subject",
+                "schema_id": schema_id.to_string(),
+                "governance_id": governance_id.to_string()
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -91,11 +93,13 @@ async fn fact_req(
     subject_id: &str,
     public_key: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Fact(BridgeFactRequest {
-            subject_id: subject_id.to_string(),
-            payload: json!({
-                "members": {
+    let request = json!({
+        "request": {
+            "event": "fact",
+            "data": {
+                "subject_id": subject_id.to_string(),
+                "payload": {
+                    "members": {
                     "add": [
                         {
                             "name": "Node1",
@@ -112,14 +116,14 @@ async fn fact_req(
                     }
                 },
             }
-            }),
-        }),
-        signature: None,
-    };
+                }
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -136,10 +140,12 @@ async fn fact_req_schema(
     subject_id: &str,
     public_key: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Fact(BridgeFactRequest {
-            subject_id: subject_id.to_string(),
-            payload: json!({
+    let request = json!({
+        "request": {
+            "event": "fact",
+            "data": {
+                "subject_id": subject_id.to_string(),
+                "payload": {
                 "members": {
                     "add": [
                         {
@@ -288,14 +294,14 @@ async fn fact_req_schema(
                         }
                     ]
                 }
-            }),
-        }),
-        signature: None,
-    };
+            }
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -312,17 +318,19 @@ async fn transfer_req(
     subject_id: &str,
     public_key: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Transfer(BridgeTransferRequest {
-            subject_id: subject_id.to_string(),
-            new_owner: public_key.to_string(),
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "transfer",
+            "data": {
+                "subject_id": subject_id.to_string(),
+                "new_owner": public_key.to_string()
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -338,16 +346,18 @@ async fn reject_req(
     server: &TestServer,
     subject_id: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Reject(BridgeRejectRequest {
-            subject_id: subject_id.to_string(),
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "reject",
+            "data": {
+                "subject_id": subject_id.to_string()
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -363,17 +373,19 @@ async fn confirm_req(
     server: &TestServer,
     subject_id: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::Confirm(BridgeConfirmRequest {
-            subject_id: subject_id.to_string(),
-            name_old_owner: Some("Old_Owner".to_string()),
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "confirm",
+            "data": {
+                "subject_id": subject_id.to_string(),
+                "name_old_owner": "Old_Owner"
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -389,16 +401,18 @@ async fn eol_req(
     server: &TestServer,
     subject_id: &str,
 ) -> Value {
-    let request = BridgeSignedEventRequest {
-        request: BridgeEventRequest::EOL(BridgeEOLRequest {
-            subject_id: subject_id.to_string(),
-        }),
-        signature: None,
-    };
+    let request = json!({
+        "request": {
+            "event": "eol",
+            "data": {
+                "subject_id": subject_id.to_string(),
+            }
+        }
+    });
 
     let (status, body) = make_request(
         &client,
-        &server.url("/event-request"),
+        &server.url("/request"),
         "POST",
         None,
         Some(serde_json::to_value(request).unwrap()),
@@ -409,24 +423,11 @@ async fn eol_req(
     body
 }
 
-// --- Request Endpoints ---
-#[tokio::test]
-async fn test_event_request_deserialization() {
-    // POST /event-request - BridgeSignedEventRequest -> RequestData
-
-    let (server, _dirs) = TestServer::build(false, false, None).await;
-    let client = Client::new();
-
-    let body = create_req(&client, &server).await;
-    let request_data: RequestData = serde_json::from_value(body).unwrap();
-    assert!(!request_data.request_id.is_empty());
-    assert!(!request_data.subject_id.is_empty());
-    assert_eq!(request_data.request_id, request_data.subject_id);
-}
-
-#[tokio::test]
-async fn test_request_state_deserialization() {
-    // GET /event-request/{request-id} -> RequestInfo
+#[test(tokio::test)]
+async fn test_request_deserialization() {
+    // GET /request/{request-id} -> RequestInfo
+    // GET /request -> Vec<RequestInfo>
+    // POST /request -> RequestData
     let (server, _dirs) = TestServer::build(false, false, None).await;
     let client = Client::new();
 
@@ -437,7 +438,7 @@ async fn test_request_state_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -454,16 +455,26 @@ async fn test_request_state_deserialization() {
     }
 
     let request_info: RequestInfo = serde_json::from_value(res).unwrap();
-    assert_eq!(request_info.state.to_string(), "Finish");
+    assert_eq!(request_info.state, RequestState::Finish);
     assert_eq!(request_info.version, 0);
-    assert_eq!(request_info.error, None);
+
+    let (.., body) =
+        make_request(&client, &server.url("/request"), "GET", None, None).await;
+
+    let request_info: Vec<RequestInfoExtend> =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(request_info.len(), 1);
+    assert_eq!(request_info[0].state, RequestState::Finish);
+    assert_eq!(request_info[0].version, 0);
+    assert_eq!(request_info[0].request_id, request_data.request_id);
 }
 
 // --- Approval Endpoints ---
-#[tokio::test]
-async fn test_approval_request_deserialization() {
-    // GET /approval-request/{subject_id} -> ApproveInfo
-    // PATCH /approval-request/{subject_id} + Json<String> -> String
+#[test(tokio::test)]
+async fn test_approval_deserialization() {
+    // GET /approval/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
+    // GET /approval?state={ApprovalState} -> Vec<ApprovalEntry>
+    // PATCH /approval/{subject_id} + Json<String> -> String
 
     let (server, _dirs) = TestServer::build(false, false, None).await;
     let client = Client::new();
@@ -476,16 +487,14 @@ async fn test_approval_request_deserialization() {
         .to_string();
 
     let body =
-        fact_req(&client, &server, &request_data.subject_id, &public_key)
-            .await;
+        fact_req(&client, &server, &request_data.subject_id, &public_key).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     let res: Value;
     loop {
         let (status, body) = make_request(
             &client,
-            &server
-                .url(&format!("/approval-request/{}", request_data.subject_id)),
+            &server.url(&format!("/approval/{}", request_data.subject_id)),
             "GET",
             None,
             None,
@@ -500,56 +509,64 @@ async fn test_approval_request_deserialization() {
         }
     }
 
-    let approval: ApproveInfo = serde_json::from_value(res).unwrap();
+    let approval: Option<ApprovalEntry> = serde_json::from_value(res).unwrap();
+    let approval = approval.unwrap();
 
-    assert_eq!(approval.state, "Pending");
+    assert_eq!(approval.state, ApprovalState::Pending);
     assert_eq!(approval.request.sn, 1);
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
-    assert_eq!(
-        approval.request.event_request.content().subject_id,
-        request_data.subject_id
-    );
-    assert_eq!(
-        approval.request.event_request.content().payload,
-        json!({
-            "members": {
-                "add": [
-                    {
-                        "name": "Node1",
-                        "key": public_key
-                    }
-                ]
-            },
-                    "roles": {
-            "governance": {
-                "add": {
-                    "witness": [
-                        "Node1"
-                    ]
-                }
-            },
-        }
-        })
-    );
-    assert!(
-        !approval
-            .request
-            .event_request
-            .signature
-            .content_hash
-            .is_empty()
-    );
-    assert!(!approval.request.event_request.signature.value.is_empty());
-    assert!(!approval.request.state_hash.is_empty());
-    assert!(!approval.request.hash_prev_event.is_empty());
+
+    let (.., body) = make_request(
+        &client,
+        &server.url(&format!(
+            "/approval/{}?state=accepted",
+            request_data.subject_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    let approval_empty: Option<ApprovalEntry> =
+        serde_json::from_value(body).unwrap();
+    assert!(approval_empty.is_none());
+
+    let (.., body) = make_request(
+        &client,
+        &server.url(&format!("/approval")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    let approvals: Vec<ApprovalEntry> = serde_json::from_value(body).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].state, ApprovalState::Pending);
+    assert_eq!(approvals[0].request.sn, 1);
+    assert_eq!(approvals[0].request.gov_version, 0);
+    assert_eq!(approvals[0].request.subject_id, request_data.subject_id);
+
+    let (.., body) = make_request(
+        &client,
+        &server.url(&format!("/approval?state=accepted")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    let approvals_empty: Vec<ApprovalEntry> =
+        serde_json::from_value(body).unwrap();
+    assert!(approvals_empty.is_empty());
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/approval-request/{}", request_data.subject_id)),
+        &server.url(&format!("/approval/{}", request_data.subject_id)),
         "PATCH",
         None,
-        Some(json!("Accepted")),
+        Some(json!("accepted")),
     )
     .await;
 
@@ -559,19 +576,55 @@ async fn test_approval_request_deserialization() {
     assert_eq!(
         res,
         format!(
-            "The approval request for subject {} has changed to RespondedAccepted",
+            "The approval request for subject {} has changed to accepted",
             request_data.subject_id
         )
     );
+
+    let (.., body) = make_request(
+        &client,
+        &server.url(&format!(
+            "/approval/{}?state=accepted",
+            request_data.subject_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    let approval: Option<ApprovalEntry> = serde_json::from_value(body).unwrap();
+    let approval = approval.unwrap();
+    assert_eq!(approval.state, ApprovalState::Accepted);
+    assert_eq!(approval.request.sn, 1);
+    assert_eq!(approval.request.gov_version, 0);
+    assert_eq!(approval.request.subject_id, request_data.subject_id);
+
+    let (.., body) = make_request(
+        &client,
+        &server.url(&format!("/approval?state=accepted")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    let approvals: Vec<ApprovalEntry> = serde_json::from_value(body).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].state, ApprovalState::Accepted);
+    assert_eq!(approvals[0].request.sn, 1);
+    assert_eq!(approvals[0].request.gov_version, 0);
+    assert_eq!(approvals[0].request.subject_id, request_data.subject_id);
 }
 
 // --- Authorization Endpoints ---
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_auth_endpoints_deserialization() {
-    // PUT /auth/{subject_id} + Json<Vec<String>> -> String
     // GET /auth -> Vec<String>
-    // GET /auth/{subject_id} -> Vec<String>
+    // PUT /auth/{subject_id} + Json<Vec<String>> -> String
+    // GET /auth/{subject_id} -> HashSet<String>
     // DELETE /auth/{subject_id} -> String
+
     let (server, _dirs) = TestServer::build(false, false, None).await;
     let client = Client::new();
 
@@ -618,10 +671,12 @@ async fn test_auth_endpoints_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let public_key: Vec<String> = serde_json::from_value(body).unwrap();
+    let public_key: HashSet<String> = serde_json::from_value(body).unwrap();
     assert_eq!(
         public_key,
-        vec!["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"]
+        HashSet::from_iter([
+            "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk".to_string()
+        ])
     );
 
     let (status, _body) = make_request(
@@ -646,10 +701,9 @@ async fn test_auth_endpoints_deserialization() {
 }
 
 // --- Subject Update & Transfer Endpoints ---
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_update_and_transfer_deserialization() {
     // POST /update/{subject_id} -> String
-    // POST /check-transfer/{subject_id} -> String
     // POST /manual-distribution/{subject_id} -> String
     // GET /pending-transfers -> Vec<TransferSubject>
 
@@ -686,15 +740,14 @@ async fn test_update_and_transfer_deserialization() {
         .to_string();
 
     let body =
-        fact_req(&client, &server, &request_data.subject_id, &public_key)
-            .await;
+        fact_req(&client, &server, &request_data.subject_id, &public_key).await;
 
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -709,19 +762,15 @@ async fn test_update_and_transfer_deserialization() {
         }
     }
 
-    let body = transfer_req(
-        &client,
-        &server,
-        &request_data.subject_id,
-        &public_key,
-    )
-    .await;
+    let body =
+        transfer_req(&client, &server, &request_data.subject_id, &public_key)
+            .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let subject_id = request_data.subject_id.clone();
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -735,18 +784,6 @@ async fn test_update_and_transfer_deserialization() {
             tokio::time::sleep(Duration::from_secs(1)).await
         }
     }
-
-    let (status, body) = make_request(
-        &client,
-        &server.url(&format!("/check-transfer/{}", request_data.subject_id)),
-        "POST",
-        None,
-        None,
-    )
-    .await;
-    assert!(status.is_success());
-    let res: String = serde_json::from_value(body).unwrap();
-    assert!(!res.is_empty());
 
     let (status, body) = make_request(
         &client,
@@ -762,7 +799,7 @@ async fn test_update_and_transfer_deserialization() {
     assert!(!res.is_empty());
 
     let (status, body) =
-        make_request(&client, &server.url("/controller-id"), "GET", None, None)
+        make_request(&client, &server.url("/public-key"), "GET", None, None)
             .await;
     assert!(status.is_success());
     let owner: String = serde_json::from_value(body).unwrap();
@@ -778,17 +815,17 @@ async fn test_update_and_transfer_deserialization() {
     assert!(status.is_success());
     let res: Vec<TransferSubject> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
-    assert_eq!(res[0].name, "Governance");
+    assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].actual_owner, owner);
     assert_eq!(res[0].new_owner, public_key);
     assert_eq!(res[0].subject_id, subject_id);
 }
 
 // --- Gov Sub Endpoints ---
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_gov_sub_deserialization() {
-    // GET /register-subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
-    // GET /register-governances?active={bool} -> Vec<GovsData>
+    // GET /subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
+    // GET /subjects?active={bool} -> Vec<GovsData>
 
     let (server, _dirs) = TestServer::build(false, true, None).await;
     let client = Client::new();
@@ -799,7 +836,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -826,7 +863,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -888,7 +925,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -909,7 +946,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -930,7 +967,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -947,7 +984,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/register-subjects/{governance_id}")),
+        &server.url(&format!("/subjects/{governance_id}")),
         "GET",
         None,
         None,
@@ -960,28 +997,28 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from([
             &SubjsData {
                 subject_id: subject_id_1_1.clone(),
-                schema_id: "Example1".to_string(),
+                schema_id: SchemaType::Type("Example1".to_string()),
                 active: true,
                 name: Some("Subject1_1".to_string()),
                 description: Some("A subject".to_string())
             },
             &SubjsData {
                 subject_id: subject_id_2_1.clone(),
-                schema_id: "Example1".to_string(),
+                schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
                 name: Some("Subject2_1".to_string()),
                 description: Some("A subject".to_string())
             },
             &SubjsData {
                 subject_id: subject_id_1_2.clone(),
-                schema_id: "Example2".to_string(),
+                schema_id: SchemaType::Type("Example2".to_string()),
                 active: true,
                 name: Some("Subject1_2".to_string()),
                 description: Some("A subject".to_string())
             },
             &SubjsData {
                 subject_id: subject_id_2_2.clone(),
-                schema_id: "Example2".to_string(),
+                schema_id: SchemaType::Type("Example2".to_string()),
                 active: false,
                 name: Some("Subject2_2".to_string()),
                 description: Some("A subject".to_string())
@@ -991,8 +1028,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server
-            .url(&format!("/register-subjects/{governance_id}?active=false")),
+        &server.url(&format!("/subjects/{governance_id}?active=false")),
         "GET",
         None,
         None,
@@ -1005,14 +1041,14 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from([
             &SubjsData {
                 subject_id: subject_id_2_1.clone(),
-                schema_id: "Example1".to_string(),
+                schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
                 name: Some("Subject2_1".to_string()),
                 description: Some("A subject".to_string())
             },
             &SubjsData {
                 subject_id: subject_id_2_2.clone(),
-                schema_id: "Example2".to_string(),
+                schema_id: SchemaType::Type("Example2".to_string()),
                 active: false,
                 name: Some("Subject2_2".to_string()),
                 description: Some("A subject".to_string())
@@ -1022,9 +1058,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url(&format!(
-            "/register-subjects/{governance_id}?schema=Example1"
-        )),
+        &server.url(&format!("/subjects/{governance_id}?schema_id=Example1")),
         "GET",
         None,
         None,
@@ -1036,26 +1070,26 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
             &SubjsData {
-                subject_id: subject_id_1_1.clone(),
-                schema_id: "Example1".to_string(),
-                active: true,
-                name: Some("Subject1_1".to_string()),
-                description: Some("A subject".to_string())
-            },
-            &SubjsData {
                 subject_id: subject_id_2_1.clone(),
-                schema_id: "Example1".to_string(),
+                schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
                 name: Some("Subject2_1".to_string()),
                 description: Some("A subject".to_string())
             },
+            &SubjsData {
+                subject_id: subject_id_1_1.clone(),
+                schema_id: SchemaType::Type("Example1".to_string()),
+                active: true,
+                name: Some("Subject1_1".to_string()),
+                description: Some("A subject".to_string())
+            }
         ])
     );
 
     let (status, body) = make_request(
         &client,
         &server.url(&format!(
-            "/register-subjects/{governance_id}?active=false&schema=Example2"
+            "/subjects/{governance_id}?active=false&schema_id=Example2"
         )),
         "GET",
         None,
@@ -1068,21 +1102,16 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([&SubjsData {
             subject_id: subject_id_2_2.clone(),
-            schema_id: "Example2".to_string(),
+            schema_id: SchemaType::Type("Example2".to_string()),
             active: false,
             name: Some("Subject2_2".to_string()),
             description: Some("A subject".to_string())
         },])
     );
 
-    let (status, body) = make_request(
-        &client,
-        &server.url("/register-governances"),
-        "GET",
-        None,
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_request(&client, &server.url("/subjects"), "GET", None, None)
+            .await;
     assert!(status.is_success());
     let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
@@ -1093,7 +1122,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/register-governances?active=false"),
+        &server.url("/subjects?active=false"),
         "GET",
         None,
         None,
@@ -1109,7 +1138,7 @@ async fn test_gov_sub_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
+            &server.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1126,7 +1155,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/register-governances?active=true"),
+        &server.url("/subjects?active=true"),
         "GET",
         None,
         None,
@@ -1138,7 +1167,7 @@ async fn test_gov_sub_deserialization() {
 
     let (status, body) = make_request(
         &client,
-        &server.url("/register-governances?active=false"),
+        &server.url("/subjects?active=false"),
         "GET",
         None,
         None,
@@ -1154,12 +1183,13 @@ async fn test_gov_sub_deserialization() {
 }
 
 // --- Event Endpoints ---
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_subject_deserialization() {
-    // GET /events/{subject_id}?quantity={u64}&page={u64}&reverse={bool} -> PaginatorEvents
-    // GET /event/{subject_id}?sn={u64} -> EventInfo
+    // GET /events/{subject_id}? -> PaginatorEvents
+    // GET /events/{subject_id}/{sn} -> EventInfo
+    // GET /aborts/{subject_id}
     // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
-    // GET /state/{subject_id} -> SubjectInfo
+    // GET /state/{subject_id} -> SubjectDB
 
     let (server1, _dirs) = TestServer::build(false, true, None).await;
     let client = Client::new();
@@ -1171,8 +1201,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server1.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1200,25 +1229,15 @@ async fn test_subject_deserialization() {
     )
     .await;
 
-    let (status, body) = make_request(
-        &client,
-        &server2.url("/controller-id"),
-        "GET",
-        None,
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_request(&client, &server2.url("/public-key"), "GET", None, None)
+            .await;
     assert!(status.is_success());
     let public_key_2: String = serde_json::from_value(body).unwrap();
 
-    let (status, body) = make_request(
-        &client,
-        &server1.url("/controller-id"),
-        "GET",
-        None,
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_request(&client, &server1.url("/public-key"), "GET", None, None)
+            .await;
     assert!(status.is_success());
     let public_key_1: String = serde_json::from_value(body).unwrap();
 
@@ -1242,15 +1261,13 @@ async fn test_subject_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let body =
-        fact_req(&client, &server1, &governance_id, &public_key_2).await;
+    let body = fact_req(&client, &server1, &governance_id, &public_key_2).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
         let (status, body) = make_request(
             &client,
-            &server1
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server1.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1275,14 +1292,14 @@ async fn test_subject_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert!(subject.active);
     assert_eq!(subject.subject_id, governance_id);
-    assert!(subject.governance_id.is_empty());
+    assert_eq!(subject.governance_id, governance_id);
     assert_eq!(subject.sn, 1);
     assert_eq!(subject.schema_id, "governance");
-    assert_eq!(subject.name, "Governance");
-    assert_eq!(subject.description, "A governance");
+    assert_eq!(subject.name, Some("Governance".to_string()));
+    assert_eq!(subject.description, Some("A governance".to_string()));
     assert_eq!(subject.namespace, "");
     assert_eq!(subject.genesis_gov_version, 0);
     assert_eq!(subject.owner, public_key_1);
@@ -1303,14 +1320,14 @@ async fn test_subject_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert!(subject.active);
     assert_eq!(subject.subject_id, governance_id);
-    assert!(subject.governance_id.is_empty());
+    assert_eq!(subject.governance_id, governance_id);
     assert_eq!(subject.sn, 1);
     assert_eq!(subject.schema_id, "governance");
-    assert_eq!(subject.name, "Governance");
-    assert_eq!(subject.description, "A governance");
+    assert_eq!(subject.name, Some("Governance".to_string()));
+    assert_eq!(subject.description, Some("A governance".to_string()));
     assert_eq!(subject.namespace, "");
     assert_eq!(subject.genesis_gov_version, 0);
     assert_eq!(subject.owner, public_key_1);
@@ -1328,8 +1345,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server1.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1353,7 +1369,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 2);
 
     let body = reject_req(&client, &server2, &governance_id).await;
@@ -1362,8 +1378,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server2.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1399,7 +1414,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 3);
 
     let body =
@@ -1409,8 +1424,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server1
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server1.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1434,7 +1448,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 4);
 
     let body = confirm_req(&client, &server2, &governance_id).await;
@@ -1443,8 +1457,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server2.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1468,7 +1481,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 5);
 
     let body = eol_req(&client, &server2, &governance_id).await;
@@ -1477,8 +1490,7 @@ async fn test_subject_deserialization() {
     loop {
         let (status, body) = make_request(
             &client,
-            &server2
-                .url(&format!("/event-request/{}", request_data.request_id)),
+            &server2.url(&format!("/request/{}", request_data.request_id)),
             "GET",
             None,
             None,
@@ -1502,7 +1514,7 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let subject: SubjectInfo = serde_json::from_value(body).unwrap();
+    let subject: SubjectDB = serde_json::from_value(body).unwrap();
     assert_eq!(subject.sn, 6);
     assert_eq!(subject.active, false);
 
@@ -1556,140 +1568,56 @@ async fn test_subject_deserialization() {
     assert_eq!(paginator_reverse.events.len(), 7);
     assert_eq!(paginator_reverse.events[0].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[0].sn, 6);
-    assert!(paginator_reverse.events[0].patch.is_some());
-    assert!(paginator_reverse.events[0].error.is_none());
-    assert!(paginator_reverse.events[0].succes);
-    let EventRequestInfo::EOL(request) =
-        paginator_reverse.events[0].event_req.clone()
-    else {
-        panic!("Invalid Request expect EOL");
-    };
-    assert_eq!(request.subject_id, governance_id);
+    assert_eq!(paginator_reverse.events[0].event_type.to_string(), "eol");
 
     assert_eq!(paginator_reverse.events[1].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[1].sn, 5);
-    assert!(paginator_reverse.events[1].patch.is_some());
-    assert!(paginator_reverse.events[1].error.is_none());
-    assert!(paginator_reverse.events[1].succes);
-    let EventRequestInfo::Confirm(request) =
-        paginator_reverse.events[1].event_req.clone()
-    else {
-        panic!("Invalid Request expect Confirm");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.name_old_owner, Some("Old_Owner".to_string()));
+    assert_eq!(
+        paginator_reverse.events[1].event_type.to_string(),
+        "confirm"
+    );
 
     assert_eq!(paginator_reverse.events[2].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[2].sn, 4);
-    assert!(paginator_reverse.events[2].patch.is_some());
-    assert!(paginator_reverse.events[2].error.is_none());
-    assert!(paginator_reverse.events[2].succes);
-    let EventRequestInfo::Transfer(request) =
-        paginator_reverse.events[2].event_req.clone()
-    else {
-        panic!("Invalid Request expect Transfer");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, public_key_2);
+    assert_eq!(
+        paginator_reverse.events[2].event_type.to_string(),
+        "transfer"
+    );
 
     assert_eq!(paginator_reverse.events[3].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[3].sn, 3);
-    assert!(paginator_reverse.events[3].patch.is_some());
-    assert!(paginator_reverse.events[3].error.is_none());
-    assert!(paginator_reverse.events[3].succes);
-    let EventRequestInfo::Reject(request) =
-        paginator_reverse.events[3].event_req.clone()
-    else {
-        panic!("Invalid Request expect Reject");
-    };
-    assert_eq!(request.subject_id, governance_id);
+    assert_eq!(paginator_reverse.events[3].event_type.to_string(), "reject");
 
     assert_eq!(paginator_reverse.events[4].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[4].sn, 2);
-    assert!(paginator_reverse.events[4].patch.is_some());
-    assert!(paginator_reverse.events[4].error.is_none());
-    assert!(paginator_reverse.events[4].succes);
-    let EventRequestInfo::Transfer(request) =
-        paginator_reverse.events[4].event_req.clone()
-    else {
-        panic!("Invalid Request expect Transfer");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, public_key_2);
+    assert_eq!(
+        paginator_reverse.events[4].event_type.to_string(),
+        "transfer"
+    );
 
     assert_eq!(paginator_reverse.events[5].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[5].sn, 1);
-    assert!(paginator_reverse.events[5].patch.is_some());
-    assert!(paginator_reverse.events[5].error.is_none());
-    assert!(paginator_reverse.events[5].succes);
-    let EventRequestInfo::Fact(request) =
-        paginator_reverse.events[5].event_req.clone()
-    else {
-        panic!("Invalid Request expect Fact");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(
-        request.payload,
-        json!({
-            "members": {
-                "add": [
-                    {
-                        "name": "Node1",
-                        "key": public_key_2
-                    }
-                ]
-            },
-                    "roles": {
-            "governance": {
-                "add": {
-                    "witness": [
-                        "Node1"
-                    ]
-                }
-            },
-        }
-        })
-    );
+    assert_eq!(paginator_reverse.events[5].event_type.to_string(), "fact");
 
     assert_eq!(paginator_reverse.events[6].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[6].sn, 0);
-    assert!(paginator_reverse.events[6].patch.is_some());
-    assert!(paginator_reverse.events[6].error.is_none());
-    assert!(paginator_reverse.events[6].succes);
-    let EventRequestInfo::Create(request) =
-        paginator_reverse.events[6].event_req.clone()
-    else {
-        panic!("Invalid Request expect Create");
-    };
-
-    assert_eq!(request.name, Some("Governance".to_string()));
-    assert_eq!(request.description, Some("A governance".to_string()));
-    assert_eq!(request.governance_id, String::default());
-    assert_eq!(request.schema_id, "governance".to_string());
-    assert_eq!(request.namespace, Namespace::new());
+    assert_eq!(paginator_reverse.events[6].event_type.to_string(), "create");
 
     // GET /event/{subject_id}?sn={u64} -> EventInfo
     let (status, body) = make_request(
         &client,
-        &server2.url(&format!("/event/{}?sn=2", governance_id)),
+        &server2.url(&format!("/events/{}/2", governance_id)),
         "GET",
         None,
         None,
     )
     .await;
     assert!(status.is_success());
-    let event: EventInfo = serde_json::from_value(body).unwrap();
+    let event: LedgerDB = serde_json::from_value(body).unwrap();
 
     assert_eq!(event.subject_id, governance_id);
     assert_eq!(event.sn, 2);
-    assert!(event.patch.is_some());
-    assert!(event.error.is_none());
-    assert!(event.succes);
-    let EventRequestInfo::Transfer(request) = event.event_req.clone() else {
-        panic!("Invalid Request expect Transfer");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.new_owner, public_key_2);
+    assert_eq!(event.event_type.to_string(), "transfer");
 
     // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
     let (status, body) = make_request(
@@ -1703,29 +1631,17 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
+
     assert!(status.is_success());
-    let events: Vec<EventInfo> = serde_json::from_value(body).unwrap();
+    let events: Vec<LedgerDB> = serde_json::from_value(body).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].subject_id, governance_id);
     assert_eq!(events[0].sn, 6);
-    assert!(events[0].patch.is_some());
-    assert!(events[0].error.is_none());
-    assert!(events[0].succes);
-    let EventRequestInfo::EOL(request) = events[0].event_req.clone() else {
-        panic!("Invalid Request expect EOL");
-    };
-    assert_eq!(request.subject_id, governance_id);
+    assert_eq!(events[0].event_type.to_string(), "eol");
 
     assert_eq!(events[1].subject_id, governance_id);
     assert_eq!(events[1].sn, 5);
-    assert!(events[1].patch.is_some());
-    assert!(events[1].error.is_none());
-    assert!(events[1].succes);
-    let EventRequestInfo::Confirm(request) = events[1].event_req.clone() else {
-        panic!("Invalid Request expect Confirm");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(request.name_old_owner, Some("Old_Owner".to_string()));
+    assert_eq!(events[1].event_type.to_string(), "confirm");
 
     let (status, body) = make_request(
         &client,
@@ -1737,106 +1653,21 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert!(status.is_success());
-    let events: Vec<EventInfo> = serde_json::from_value(body).unwrap();
+    let events: Vec<LedgerDB> = serde_json::from_value(body).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].subject_id, governance_id);
     assert_eq!(events[0].sn, 0);
-    assert!(events[0].patch.is_some());
-    assert!(events[0].error.is_none());
-    assert!(events[0].succes);
-    let EventRequestInfo::Create(request) = events[0].event_req.clone() else {
-        panic!("Invalid Request expect Create");
-    };
-
-    assert_eq!(request.name, Some("Governance".to_string()));
-    assert_eq!(request.description, Some("A governance".to_string()));
-    assert_eq!(request.governance_id, String::default());
-    assert_eq!(request.schema_id, "governance".to_string());
-    assert_eq!(request.namespace, Namespace::new());
+    assert_eq!(events[0].event_type.to_string(), "create");
 
     assert_eq!(events[1].subject_id, governance_id);
     assert_eq!(events[1].sn, 1);
-    assert!(events[1].patch.is_some());
-    assert!(events[1].error.is_none());
-    assert!(events[1].succes);
-    let EventRequestInfo::Fact(request) = events[1].event_req.clone() else {
-        panic!("Invalid Request expect Fact");
-    };
-    assert_eq!(request.subject_id, governance_id);
-    assert_eq!(
-        request.payload,
-        json!({
-            "members": {
-                "add": [
-                    {
-                        "name": "Node1",
-                        "key": public_key_2
-                    }
-                ]
-            },
-                    "roles": {
-            "governance": {
-                "add": {
-                    "witness": [
-                        "Node1"
-                    ]
-                }
-            },
-        }
-        })
-    );
-}
-
-// --- Signature Endpoints ---
-#[tokio::test]
-async fn test_signatures_deserialization() {
-    // GET /signatures/{subject_id} -> SignaturesInfo
-    let (server, _dirs) = TestServer::build(false, true, None).await;
-    let client = Client::new();
-
-    let body = create_req(&client, &server).await;
-    let request_data: RequestData = serde_json::from_value(body).unwrap();
-    let governance_id = request_data.subject_id;
-    loop {
-        let (status, body) = make_request(
-            &client,
-            &server.url(&format!("/event-request/{}", request_data.request_id)),
-            "GET",
-            None,
-            None,
-        )
-        .await;
-
-        assert!(status.is_success());
-        if body["state"] == format!("{}", RequestState::Finish) {
-            break;
-        } else {
-            tokio::time::sleep(Duration::from_secs(1)).await
-        }
-    }
-
-    let (status, body) = make_request(
-        &client,
-        &server.url(&format!("/signatures/{}", governance_id)),
-        "GET",
-        None,
-        None,
-    )
-    .await;
-    assert!(status.is_success());
-
-    let res: SignaturesInfo = serde_json::from_value(body).unwrap();
-    assert_eq!(res.subject_id, governance_id);
-    assert_eq!(res.sn, 0);
-    assert_eq!(res.signatures_appr, None);
-    assert_eq!(res.signatures_eval, None);
-    assert_eq!(res.signatures_vali.len(), 1);
+    assert_eq!(events[1].event_type.to_string(), "fact");
 }
 
 // --- System Info Endpoints ---
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_system_info_deserialization() {
-    // GET /controller-id -> String
+    // GET /public-key -> String
     // GET /peer-id -> String
     // GET /config -> ConfigHttp
     // GET /keys -> Binary (application/pkcs8)
@@ -1844,9 +1675,8 @@ async fn test_system_info_deserialization() {
     let (server, dirs) = TestServer::build(false, false, None).await;
     let client = Client::new();
 
-    // CONTROLLER-ID
     let (status, body) =
-        make_request(&client, &server.url("/controller-id"), "GET", None, None)
+        make_request(&client, &server.url("/public-key"), "GET", None, None)
             .await;
     assert!(status.is_success());
     let public_key: String = serde_json::from_value(body).unwrap();
@@ -1858,10 +1688,7 @@ async fn test_system_info_deserialization() {
     let peer_id: String = serde_json::from_value(body).unwrap();
 
     assert!(!peer_id.is_empty(), "Peer ID should not be empty");
-    assert!(
-        !public_key.is_empty(),
-        "Controller ID should not be empty"
-    );
+    assert!(!public_key.is_empty(), "Controller ID should not be empty");
 
     // Verify they are different (peer-id and controller-id should be different)
     assert_ne!(
@@ -1893,9 +1720,11 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.external_db, "Sqlite");
     assert_eq!(config.node.hash_algorithm, "Blake3");
 
+    assert_eq!(config.node.tracking_size, 200);
+    assert!(config.node.is_service);
+
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);
-    assert_eq!(config.node.tracking_size, 100);
 
     assert_eq!(config.node.network.node_type, "Bootstrap");
     assert_eq!(
@@ -1977,58 +1806,4 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.http.self_signed_cert.common_name, "localhost");
     assert_eq!(config.http.self_signed_cert.validity_days, 365);
     assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
-
-    // KEYS - Verify PKCS#8 with PKCS#5 encryption
-    // First check if the key file actually exists in the keys_path directory
-    let key_file_path =
-        std::path::Path::new(&expected_keys_path).join("node_private.der");
-    println!("Checking if key file exists at: {:?}", key_file_path);
-    println!("Key file exists: {}", key_file_path.exists());
-
-    if key_file_path.exists() {
-        println!(
-            "Key file size: {} bytes",
-            std::fs::metadata(&key_file_path).unwrap().len()
-        );
-    } else {
-        println!("ERROR: Key file does not exist!");
-        println!("Keys directory contents:");
-        if let Ok(entries) = std::fs::read_dir(&expected_keys_path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    println!("  - {:?}", entry.file_name());
-                }
-            }
-        }
-    }
-
-    // Get the encrypted private key from /keys endpoint
-    let response = client
-        .get(&server.url("/keys"))
-        .send()
-        .await
-        .expect("Failed to fetch keys");
-
-    assert!(
-        response.status().is_success(),
-        "Keys endpoint should return success"
-    );
-
-    // Get the encrypted key bytes
-    let key_bytes = response.bytes().await.expect("Failed to read key bytes");
-
-    // Parse as PKCS#8 EncryptedPrivateKeyInfo
-    use pkcs8::EncryptedPrivateKeyInfo;
-    let encrypted_key = EncryptedPrivateKeyInfo::try_from(key_bytes.as_ref())
-        .expect("Should be valid PKCS#8 EncryptedPrivateKeyInfo");
-
-    // Decrypt with password "test"
-    let decrypted_pk = encrypted_key
-        .decrypt("test")
-        .expect("Failed to decrypt private key with password 'test'");
-
-    // Convert to KeyPair (Ed25519)
-    use ave_common::identity::KeyPair;
-    let _key_pair = KeyPair::from_secret_der(decrypted_pk.as_bytes())
-        .expect("Failed to create KeyPair from decrypted DER");
 }

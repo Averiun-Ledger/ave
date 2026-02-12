@@ -4,7 +4,7 @@ use libp2p::{
         CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm, dummy,
     },
 };
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
     fmt,
@@ -25,7 +25,7 @@ use crate::{RoutingNode, utils::request_update_lists};
 const TARGET_CONTROL_LIST: &str = "AveNetwork-Control-list";
 
 /// Configuration for the control list behaviour.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// Activate allow and block lists

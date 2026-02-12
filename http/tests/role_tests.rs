@@ -7,321 +7,317 @@ mod common;
 use ave_http::auth::database::DatabaseError;
 use reqwest::{Client, StatusCode};
 use serde_json::json;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_api_keys_revoked_when_role_added() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let (api_key, _) = db
-            .create_api_key(user.id, Some("key1"), None, None, false)
-            .unwrap();
-
-        // Verify key works
-        assert!(db.verify_api_key(&api_key).is_ok());
-
-        let role = db.create_role("editor", None).unwrap();
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // API key should be revoked
-        let result = db.verify_api_key(&api_key);
-        assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
-    }
-
-    #[test]
-    fn test_api_keys_revoked_when_role_removed() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role = db.create_role("editor", None).unwrap();
-
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        let (api_key, _) = db
-            .create_api_key(user.id, Some("key1"), None, None, false)
-            .unwrap();
-
-        // Verify key works
-        assert!(db.verify_api_key(&api_key).is_ok());
-
-        // Remove role from user
-        db.remove_role_from_user(user.id, role.id).unwrap();
-
-        // API key should be revoked
-        let result = db.verify_api_key(&api_key);
-        assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
-    }
-
-    #[test]
-    fn test_permissions_change_when_role_added() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role = db.create_role("editor", None).unwrap();
-
-        // Role has read permission
-        db.set_role_permission(role.id, "node_subject", "get", true)
-            .unwrap();
-
-        // User doesn't have permission yet
-        let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_before.iter().any(|p| p.resource == "node_subject"
-            && p.action == "get"
-            && p.allowed));
-
-        // Assign role
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // User should now have permission
-        let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_after.iter().any(|p| p.resource == "node_subject"
-            && p.action == "get"
-            && p.allowed));
-    }
-
-    #[test]
-    fn test_permissions_change_when_role_removed() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role = db.create_role("editor", None).unwrap();
-
-        // Role has update permission
-        db.set_role_permission(role.id, "node_request", "post", true)
-            .unwrap();
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // User has permission
-        let perms_before = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(perms_before.iter().any(|p| p.resource == "node_request"
-            && p.action == "post"
-            && p.allowed));
-
-        // Remove role
-        db.remove_role_from_user(user.id, role.id).unwrap();
-
-        // User should no longer have permission
-        let perms_after = db.get_user_effective_permissions(user.id).unwrap();
-        assert!(!perms_after.iter().any(|p| p.resource == "node_request"
-            && p.action == "post"
-            && p.allowed));
-    }
-
-    #[test]
-    fn test_multiple_role_changes() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let (api_key1, _) = db
-            .create_api_key(user.id, Some("key1"), None, None, false)
-            .unwrap();
-
-        let role1 = db.create_role("role1", None).unwrap();
-        db.assign_role_to_user(user.id, role1.id, None).unwrap();
-
-        // First key should be revoked
-        assert!(matches!(
-            db.verify_api_key(&api_key1),
-            Err(DatabaseError::PermissionDenied(_))
-        ));
-
-        // Create new key
-        let (api_key2, _) = db
-            .create_api_key(user.id, Some("key2"), None, None, false)
-            .unwrap();
-
-        let role2 = db.create_role("role2", None).unwrap();
-        db.assign_role_to_user(user.id, role2.id, None).unwrap();
-
-        // Second key should be revoked
-        assert!(matches!(
-            db.verify_api_key(&api_key2),
-            Err(DatabaseError::PermissionDenied(_))
-        ));
-
-        // First key still revoked
-        assert!(matches!(
-            db.verify_api_key(&api_key1),
-            Err(DatabaseError::PermissionDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_user_with_multiple_roles_permission_merge() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role1 = db.create_role("reader", None).unwrap();
-        let role2 = db.create_role("writer", None).unwrap();
-
-        // role1 grants read
-        db.set_role_permission(role1.id, "node_subject", "get", true)
-            .unwrap();
-
-        // role2 grants update
-        db.set_role_permission(role2.id, "node_subject", "post", true)
-            .unwrap();
-
-        // Assign both roles
-        db.assign_role_to_user(user.id, role1.id, None).unwrap();
-        db.assign_role_to_user(user.id, role2.id, None).unwrap();
-
-        // User should have both permissions
-        let perms = db.get_user_effective_permissions(user.id).unwrap();
-
-        assert!(perms.iter().any(|p| p.resource == "node_subject"
-            && p.action == "get"
-            && p.allowed));
-        assert!(perms.iter().any(|p| p.resource == "node_subject"
-            && p.action == "post"
-            && p.allowed));
-    }
-
-    #[test]
-    fn test_user_override_persists_through_role_changes() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-
-        // User has explicit deny
-        db.set_user_permission(user.id, "admin_users", "delete", false, None)
-            .unwrap();
-
-        // Add role that grants delete
-        let role = db.create_role("user_admin", None).unwrap();
-        db.set_role_permission(role.id, "admin_users", "delete", true)
-            .unwrap();
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // User override should still deny
-        let perms = db.get_user_effective_permissions(user.id).unwrap();
-        let perm = perms
-            .iter()
-            .find(|p| p.resource == "admin_users" && p.action == "delete")
-            .unwrap();
-
-        assert!(!perm.allowed);
-    }
-
-    #[test]
-    fn test_role_permission_modification_affects_all_users() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user1 = db
-            .create_user("user1", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let user2 = db
-            .create_user("user2", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role = db.create_role("editor", None).unwrap();
-
-        db.assign_role_to_user(user1.id, role.id, None).unwrap();
-        db.assign_role_to_user(user2.id, role.id, None).unwrap();
-
-        // Grant permission to role
-        db.set_role_permission(role.id, "node_subject", "post", true)
-            .unwrap();
-
-        // Both users should have the permission
-        let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
-        let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
-
-        assert!(perms1.iter().any(|p| p.resource == "node_subject"
-            && p.action == "post"
-            && p.allowed));
-        assert!(perms2.iter().any(|p| p.resource == "node_subject"
-            && p.action == "post"
-            && p.allowed));
-
-        // Revoke permission from role
-        db.set_role_permission(role.id, "node_subject", "post", false)
-            .unwrap();
-
-        // Both users should lose the permission
-        let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
-        let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
-
-        assert!(!perms1.iter().any(|p| p.resource == "node_subject"
-            && p.action == "post"
-            && p.allowed));
-        assert!(!perms2.iter().any(|p| p.resource == "node_subject"
-            && p.action == "post"
-            && p.allowed));
-    }
-
-    #[test]
-    fn test_deny_permission_overrides_multiple_allows() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role1 = db.create_role("role1", None).unwrap();
-        let role2 = db.create_role("role2", None).unwrap();
-
-        // Both roles grant permission
-        db.set_role_permission(role1.id, "node_subject", "delete", true)
-            .unwrap();
-        db.set_role_permission(role2.id, "node_subject", "delete", true)
-            .unwrap();
-
-        db.assign_role_to_user(user.id, role1.id, None).unwrap();
-        db.assign_role_to_user(user.id, role2.id, None).unwrap();
-
-        // User-specific deny
-        db.set_user_permission(user.id, "node_subject", "delete", false, None)
-            .unwrap();
-
-        // Deny should override both role allows
-        let perms = db.get_user_effective_permissions(user.id).unwrap();
-        let perm = perms
-            .iter()
-            .find(|p| p.resource == "node_subject" && p.action == "delete")
-            .unwrap();
-
-        assert!(!perm.allowed);
-    }
-
-    #[test]
-    fn test_deleted_roles_removed_from_users() {
-        let (db, _dirs) = common::create_test_db();
-
-        let user = db
-            .create_user("testuser", "TestPass123!", None, None, Some(false))
-            .unwrap();
-        let role = db.create_role("temp_role", None).unwrap();
-
-        db.assign_role_to_user(user.id, role.id, None).unwrap();
-
-        // User has the role
-        let roles_before = db.get_user_roles(user.id).unwrap();
-        assert!(roles_before.contains(&"temp_role".to_string()));
-
-        // Delete role
-        db.delete_role(role.id).unwrap();
-
-        // User should no longer have the role
-        let roles_after = db.get_user_roles(user.id).unwrap();
-        assert!(!roles_after.contains(&"temp_role".to_string()));
-    }
+use test_log::test;
+
+#[test(tokio::test)]
+async fn test_api_keys_revoked_when_role_added() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (api_key, _) = db
+        .create_api_key(user.id, Some("key1"), None, None, false)
+        .unwrap();
+
+    // Verify key works
+    assert!(db.verify_api_key(&api_key).is_ok());
+
+    let role = db.create_role("editor", None).unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // API key should be revoked
+    let result = db.verify_api_key(&api_key);
+    assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
+}
+
+#[test(tokio::test)]
+async fn test_api_keys_revoked_when_role_removed() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("editor", None).unwrap();
+
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    let (api_key, _) = db
+        .create_api_key(user.id, Some("key1"), None, None, false)
+        .unwrap();
+
+    // Verify key works
+    assert!(db.verify_api_key(&api_key).is_ok());
+
+    // Remove role from user
+    db.remove_role_from_user(user.id, role.id).unwrap();
+
+    // API key should be revoked
+    let result = db.verify_api_key(&api_key);
+    assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
+}
+
+#[test(tokio::test)]
+async fn test_permissions_change_when_role_added() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("editor", None).unwrap();
+
+    // Role has read permission
+    db.set_role_permission(role.id, "node_subject", "get", true)
+        .unwrap();
+
+    // User doesn't have permission yet
+    let perms_before = db.get_user_effective_permissions(user.id).unwrap();
+    assert!(!perms_before.iter().any(|p| p.resource == "node_subject"
+        && p.action == "get"
+        && p.allowed));
+
+    // Assign role
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // User should now have permission
+    let perms_after = db.get_user_effective_permissions(user.id).unwrap();
+    assert!(perms_after.iter().any(|p| p.resource == "node_subject"
+        && p.action == "get"
+        && p.allowed));
+}
+
+#[test(tokio::test)]
+async fn test_permissions_change_when_role_removed() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("editor", None).unwrap();
+
+    // Role has update permission
+    db.set_role_permission(role.id, "node_request", "post", true)
+        .unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // User has permission
+    let perms_before = db.get_user_effective_permissions(user.id).unwrap();
+    assert!(perms_before.iter().any(|p| p.resource == "node_request"
+        && p.action == "post"
+        && p.allowed));
+
+    // Remove role
+    db.remove_role_from_user(user.id, role.id).unwrap();
+
+    // User should no longer have permission
+    let perms_after = db.get_user_effective_permissions(user.id).unwrap();
+    assert!(!perms_after.iter().any(|p| p.resource == "node_request"
+        && p.action == "post"
+        && p.allowed));
+}
+
+#[test(tokio::test)]
+async fn test_multiple_role_changes() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (api_key1, _) = db
+        .create_api_key(user.id, Some("key1"), None, None, false)
+        .unwrap();
+
+    let role1 = db.create_role("role1", None).unwrap();
+    db.assign_role_to_user(user.id, role1.id, None).unwrap();
+
+    // First key should be revoked
+    assert!(matches!(
+        db.verify_api_key(&api_key1),
+        Err(DatabaseError::PermissionDenied(_))
+    ));
+
+    // Create new key
+    let (api_key2, _) = db
+        .create_api_key(user.id, Some("key2"), None, None, false)
+        .unwrap();
+
+    let role2 = db.create_role("role2", None).unwrap();
+    db.assign_role_to_user(user.id, role2.id, None).unwrap();
+
+    // Second key should be revoked
+    assert!(matches!(
+        db.verify_api_key(&api_key2),
+        Err(DatabaseError::PermissionDenied(_))
+    ));
+
+    // First key still revoked
+    assert!(matches!(
+        db.verify_api_key(&api_key1),
+        Err(DatabaseError::PermissionDenied(_))
+    ));
+}
+
+#[test(tokio::test)]
+async fn test_user_with_multiple_roles_permission_merge() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role1 = db.create_role("reader", None).unwrap();
+    let role2 = db.create_role("writer", None).unwrap();
+
+    // role1 grants read
+    db.set_role_permission(role1.id, "node_subject", "get", true)
+        .unwrap();
+
+    // role2 grants update
+    db.set_role_permission(role2.id, "node_subject", "post", true)
+        .unwrap();
+
+    // Assign both roles
+    db.assign_role_to_user(user.id, role1.id, None).unwrap();
+    db.assign_role_to_user(user.id, role2.id, None).unwrap();
+
+    // User should have both permissions
+    let perms = db.get_user_effective_permissions(user.id).unwrap();
+
+    assert!(perms.iter().any(|p| p.resource == "node_subject"
+        && p.action == "get"
+        && p.allowed));
+    assert!(perms.iter().any(|p| p.resource == "node_subject"
+        && p.action == "post"
+        && p.allowed));
+}
+
+#[test(tokio::test)]
+async fn test_user_override_persists_through_role_changes() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    // User has explicit deny
+    db.set_user_permission(user.id, "admin_users", "delete", false, None)
+        .unwrap();
+
+    // Add role that grants delete
+    let role = db.create_role("user_admin", None).unwrap();
+    db.set_role_permission(role.id, "admin_users", "delete", true)
+        .unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // User override should still deny
+    let perms = db.get_user_effective_permissions(user.id).unwrap();
+    let perm = perms
+        .iter()
+        .find(|p| p.resource == "admin_users" && p.action == "delete")
+        .unwrap();
+
+    assert!(!perm.allowed);
+}
+
+#[test(tokio::test)]
+async fn test_role_permission_modification_affects_all_users() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user1 = db
+        .create_user("user1", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let user2 = db
+        .create_user("user2", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("editor", None).unwrap();
+
+    db.assign_role_to_user(user1.id, role.id, None).unwrap();
+    db.assign_role_to_user(user2.id, role.id, None).unwrap();
+
+    // Grant permission to role
+    db.set_role_permission(role.id, "node_subject", "post", true)
+        .unwrap();
+
+    // Both users should have the permission
+    let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
+    let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
+
+    assert!(perms1.iter().any(|p| p.resource == "node_subject"
+        && p.action == "post"
+        && p.allowed));
+    assert!(perms2.iter().any(|p| p.resource == "node_subject"
+        && p.action == "post"
+        && p.allowed));
+
+    // Revoke permission from role
+    db.set_role_permission(role.id, "node_subject", "post", false)
+        .unwrap();
+
+    // Both users should lose the permission
+    let perms1 = db.get_user_effective_permissions(user1.id).unwrap();
+    let perms2 = db.get_user_effective_permissions(user2.id).unwrap();
+
+    assert!(!perms1.iter().any(|p| p.resource == "node_subject"
+        && p.action == "post"
+        && p.allowed));
+    assert!(!perms2.iter().any(|p| p.resource == "node_subject"
+        && p.action == "post"
+        && p.allowed));
+}
+
+#[test(tokio::test)]
+async fn test_deny_permission_overrides_multiple_allows() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role1 = db.create_role("role1", None).unwrap();
+    let role2 = db.create_role("role2", None).unwrap();
+
+    // Both roles grant permission
+    db.set_role_permission(role1.id, "node_subject", "delete", true)
+        .unwrap();
+    db.set_role_permission(role2.id, "node_subject", "delete", true)
+        .unwrap();
+
+    db.assign_role_to_user(user.id, role1.id, None).unwrap();
+    db.assign_role_to_user(user.id, role2.id, None).unwrap();
+
+    // User-specific deny
+    db.set_user_permission(user.id, "node_subject", "delete", false, None)
+        .unwrap();
+
+    // Deny should override both role allows
+    let perms = db.get_user_effective_permissions(user.id).unwrap();
+    let perm = perms
+        .iter()
+        .find(|p| p.resource == "node_subject" && p.action == "delete")
+        .unwrap();
+
+    assert!(!perm.allowed);
+}
+
+#[test(tokio::test)]
+async fn test_deleted_roles_removed_from_users() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("temp_role", None).unwrap();
+
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    // User has the role
+    let roles_before = db.get_user_roles(user.id).unwrap();
+    assert!(roles_before.contains(&"temp_role".to_string()));
+
+    // Delete role
+    db.delete_role(role.id).unwrap();
+
+    // User should no longer have the role
+    let roles_after = db.get_user_roles(user.id).unwrap();
+    assert!(!roles_after.contains(&"temp_role".to_string()));
 }
 
 // =============================================================================
@@ -346,7 +342,7 @@ async fn test_node_endpoints(
 ) {
     let endpoints = vec![
         // Node-System
-        ("GET", "/controller-id", None),
+        ("GET", "/public-key", None),
         ("GET", "/peer-id", None),
         ("GET", "/config", None),
         // Node-keys
@@ -428,12 +424,12 @@ async fn test_node_endpoints(
         // Node-Request
         (
             "POST",
-            "/event-request",
+            "/request",
             Some(json!({"request": {}, "signature": null})),
         ),
         (
             "GET",
-            "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
         ),
     ];
@@ -615,7 +611,12 @@ async fn test_admin_roles_endpoints(
     let endpoints = vec![
         // Role CRUD operations - anyone with admin_roles permission can do these
         ("GET", "/admin/roles", None, should_have_access),
-        ("POST", "/admin/roles", Some(json!({"name": "test_role"})), should_have_access),
+        (
+            "POST",
+            "/admin/roles",
+            Some(json!({"name": "test_role"})),
+            should_have_access,
+        ),
         ("GET", "/admin/roles/999", None, should_have_access),
         (
             "PUT",
@@ -624,8 +625,12 @@ async fn test_admin_roles_endpoints(
             should_have_access,
         ),
         ("DELETE", "/admin/roles/999", None, should_have_access),
-        ("GET", "/admin/roles/999/permissions", None, should_have_access),
-
+        (
+            "GET",
+            "/admin/roles/999/permissions",
+            None,
+            should_have_access,
+        ),
         // Role permission modification - ONLY superadmin can do these
         // Non-superadmin will get 403 Forbidden (blocked by security check)
         (
@@ -681,9 +686,13 @@ async fn test_admin_apikeys_endpoints(
             None,
             should_have_access,
         ),
-        ("GET", "/admin/api-keys?include_revoked=false", None, should_have_access),
+        (
+            "GET",
+            "/admin/api-keys?include_revoked=false",
+            None,
+            should_have_access,
+        ),
         ("GET", "/admin/api-keys/999", None, should_have_access),
-
         // POST create for other user (user 999):
         // - Non-superadmin: Gets 403 Forbidden (blocked by ownership check) → NO ACCESS
         // - Superadmin: Gets 404 Not Found (user doesn't exist) → HAS ACCESS
@@ -693,7 +702,6 @@ async fn test_admin_apikeys_endpoints(
             Some(json!({"name": "test_key"})),
             should_have_access && is_superadmin,
         ),
-
         // DELETE/rotate for non-existent key (999):
         // - Gets 404 Not Found (key doesn't exist, checked before ownership) → HAS ACCESS
         // - Anyone with the permission will get 404
@@ -775,410 +783,407 @@ async fn test_admin_system_endpoints(
     }
 }
 
-#[cfg(test)]
-mod endpoint_access_tests {
-    use super::*;
+#[test(tokio::test)]
+async fn test_superadmin_all_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
 
-    #[tokio::test]
-    async fn test_superadmin_all_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
+    // Login as default admin (which is a superadmin)
+    let (status, login_response) = common::make_request(
+        &client,
+        &server.url("/login"),
+        "POST",
+        None,
+        Some(json!({"username": "admin", "password": "AdminPass123!"})),
+    )
+    .await;
 
-        // Login as default admin (which is a superadmin)
-        let (status, login_response) = common::make_request(
-            &client,
-            &server.url("/login"),
-            "POST",
-            None,
-            Some(json!({"username": "admin", "password": "AdminPass123!"})),
-        )
+    assert!(status.is_success(), "Login failed with status: {}", status);
+    let mgmt_key = login_response["api_key"]
+        .as_str()
+        .expect("No api_key in login response")
+        .to_string();
+
+    // Create service key using management key
+    let (status, service_key_response) = common::make_request(
+        &client,
+        &server.url("/me/api-keys"),
+        "POST",
+        Some(&mgmt_key),
+        Some(json!({"name": "service_test"})),
+    )
+    .await;
+
+    assert!(
+        status.is_success(),
+        "Service key creation failed with status: {}",
+        status
+    );
+    let service_key = service_key_response["api_key"]
+        .as_str()
+        .expect("No api_key in service key response")
+        .to_string();
+
+    // Test with management key - should have access to EVERYTHING
+    test_node_endpoints(&client, &base_url, &mgmt_key, true, &[]).await;
+    test_user_endpoints(&client, &base_url, &mgmt_key, true, true).await;
+    test_admin_users_endpoints(&client, &base_url, &mgmt_key, true).await;
+    test_admin_roles_endpoints(&client, &base_url, &mgmt_key, true, true).await;
+    test_admin_apikeys_endpoints(&client, &base_url, &mgmt_key, true, true)
         .await;
+    test_admin_system_endpoints(&client, &base_url, &mgmt_key, true).await;
 
-        assert!(status.is_success(), "Login failed with status: {}", status);
-        let mgmt_key = login_response["api_key"]
-            .as_str()
-            .expect("No api_key in login response")
-            .to_string();
-
-        // Create service key using management key
-        let (status, service_key_response) = common::make_request(
-            &client,
-            &server.url("/me/api-keys"),
-            "POST",
-            Some(&mgmt_key),
-            Some(json!({"name": "service_test"})),
-        )
+    // Test with service key - should have access to node endpoints and /me (except /me/api-keys)
+    // but NO access to /admin/* endpoints (service keys cannot carry admin permissions)
+    test_node_endpoints(&client, &base_url, &service_key, true, &[]).await;
+    test_user_endpoints(&client, &base_url, &service_key, true, false).await;
+    test_admin_users_endpoints(&client, &base_url, &service_key, false).await;
+    test_admin_roles_endpoints(&client, &base_url, &service_key, false, true)
         .await;
-
-        assert!(
-            status.is_success(),
-            "Service key creation failed with status: {}",
-            status
-        );
-        let service_key = service_key_response["api_key"]
-            .as_str()
-            .expect("No api_key in service key response")
-            .to_string();
-
-        // Test with management key - should have access to EVERYTHING
-        test_node_endpoints(&client, &base_url, &mgmt_key, true, &[]).await;
-        test_user_endpoints(&client, &base_url, &mgmt_key, true, true).await;
-        test_admin_users_endpoints(&client, &base_url, &mgmt_key, true).await;
-        test_admin_roles_endpoints(&client, &base_url, &mgmt_key, true, true).await;
-        test_admin_apikeys_endpoints(&client, &base_url, &mgmt_key, true, true).await;
-        test_admin_system_endpoints(&client, &base_url, &mgmt_key, true).await;
-
-        // Test with service key - should have access to node endpoints and /me (except /me/api-keys)
-        // but NO access to /admin/* endpoints (service keys cannot carry admin permissions)
-        test_node_endpoints(&client, &base_url, &service_key, true, &[]).await;
-        test_user_endpoints(&client, &base_url, &service_key, true, false)
-            .await;
-        test_admin_users_endpoints(&client, &base_url, &service_key, false)
-            .await;
-        test_admin_roles_endpoints(&client, &base_url, &service_key, false, true)
-            .await;
-        test_admin_apikeys_endpoints(&client, &base_url, &service_key, false, true)
-            .await;
-        test_admin_system_endpoints(&client, &base_url, &service_key, false)
-            .await;
-    }
-
-    #[tokio::test]
-
-    async fn test_admin_role_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
-
-        // Login as default admin to create test user
-        let login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let admin_api_key = login_response["api_key"].as_str().unwrap();
-
-        // Get Admin role ID
-        let roles_response: serde_json::Value = client
-            .get(&server.url("/admin/roles"))
-            .header("X-API-Key", admin_api_key)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let admin_role_id = roles_response
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == "admin")
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap();
-
-        // Create test user with Admin role via HTTP
-        let _create_user_response: serde_json::Value = client
-            .post(&server.url("/admin/users"))
-            .header("X-API-Key", admin_api_key)
-            .json(&json!({
-                "username": "test_admin_user",
-                "password": "TestPass123!",
-                "is_superadmin": false,
-                "role_ids": [admin_role_id],
-                "must_change_password": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        // Login as test admin user to get management key
-        let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "test_admin_user", "password": "TestPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
-
-        // Create service key via /me/api-keys
-        let service_key_response: serde_json::Value = client
-            .post(&server.url("/me/api-keys"))
-            .header("X-API-Key", test_mgmt_key)
-            .json(&json!({
-                "name": "service_key",
-                "is_management": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        eprintln!(
-            "ADMIN TEST - Service key response: {:?}",
-            service_key_response
-        );
-        let test_service_key =
-            service_key_response["api_key"].as_str().unwrap();
-
-        // Admin should have access to:
-        // - User resources
-        // - All Admin-* resources
-        // But NOT to Node-* resources
-
-        // Test with management key
-        test_user_endpoints(&client, &base_url, test_mgmt_key, true, true)
-            .await;
-        test_admin_users_endpoints(&client, &base_url, test_mgmt_key, true)
-            .await;
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, true, false)
-            .await;
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, true, false)
-            .await;
-        test_admin_system_endpoints(&client, &base_url, test_mgmt_key, true)
-            .await;
-        test_node_endpoints(&client, &base_url, test_mgmt_key, false, &[])
-            .await; // Should NOT have access
-
-        // Test with service key
-        test_user_endpoints(&client, &base_url, test_service_key, true, false)
-            .await;
-        test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-            .await;
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
-            .await;
-        test_admin_apikeys_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            false,
-        )
+    test_admin_apikeys_endpoints(&client, &base_url, &service_key, false, true)
         .await;
-        test_admin_system_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
+    test_admin_system_endpoints(&client, &base_url, &service_key, false).await;
+}
+
+#[test(tokio::test)]
+
+async fn test_admin_role_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
+
+    // Login as default admin to create test user
+    let login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let admin_api_key = login_response["api_key"].as_str().unwrap();
+
+    // Get Admin role ID
+    let roles_response: serde_json::Value = client
+        .get(&server.url("/admin/roles"))
+        .header("X-API-Key", admin_api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let admin_role_id = roles_response
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "admin")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    // Create test user with Admin role via HTTP
+    let _create_user_response: serde_json::Value = client
+        .post(&server.url("/admin/users"))
+        .header("X-API-Key", admin_api_key)
+        .json(&json!({
+            "username": "test_admin_user",
+            "password": "TestPass123!",
+            "is_superadmin": false,
+            "role_ids": [admin_role_id],
+            "must_change_password": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Login as test admin user to get management key
+    let test_login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(
+            &json!({"username": "test_admin_user", "password": "TestPass123!"}),
         )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
+
+    // Create service key via /me/api-keys
+    let service_key_response: serde_json::Value = client
+        .post(&server.url("/me/api-keys"))
+        .header("X-API-Key", test_mgmt_key)
+        .json(&json!({
+            "name": "service_key",
+            "is_management": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    eprintln!(
+        "ADMIN TEST - Service key response: {:?}",
+        service_key_response
+    );
+    let test_service_key = service_key_response["api_key"].as_str().unwrap();
+
+    // Admin should have access to:
+    // - User resources
+    // - All Admin-* resources
+    // But NOT to Node-* resources
+
+    // Test with management key
+    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
+    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, true).await;
+    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, true, false)
         .await;
-        test_node_endpoints(&client, &base_url, test_service_key, false, &[])
-            .await; // Should NOT have access
-    }
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        true,
+        false,
+    )
+    .await;
+    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, true).await;
+    test_node_endpoints(&client, &base_url, test_mgmt_key, false, &[]).await; // Should NOT have access
 
-    #[tokio::test]
+    // Test with service key
+    test_user_endpoints(&client, &base_url, test_service_key, true, false)
+        .await;
+    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
+        .await;
+    test_admin_roles_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await;
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await;
+    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
+        .await;
+    test_node_endpoints(&client, &base_url, test_service_key, false, &[]).await; // Should NOT have access
+}
 
-    async fn test_owner_role_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
+#[test(tokio::test)]
 
-        // Login as default admin to create test user
-        let login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+async fn test_owner_role_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
 
-        let admin_api_key = login_response["api_key"].as_str().unwrap();
+    // Login as default admin to create test user
+    let login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        // Get Owner role ID
-        let roles_response: serde_json::Value = client
-            .get(&server.url("/admin/roles"))
-            .header("X-API-Key", admin_api_key)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let admin_api_key = login_response["api_key"].as_str().unwrap();
 
-        let owner_role_id = roles_response
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == "owner")
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap();
+    // Get Owner role ID
+    let roles_response: serde_json::Value = client
+        .get(&server.url("/admin/roles"))
+        .header("X-API-Key", admin_api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        // Create test user with Owner role via HTTP
-        let _create_user_response: serde_json::Value = client
-            .post(&server.url("/admin/users"))
-            .header("X-API-Key", admin_api_key)
-            .json(&json!({
-                "username": "test_owner_user",
-                "password": "TestPass123!",
-                "is_superadmin": false,
-                "role_ids": [owner_role_id],
-                "must_change_password": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let owner_role_id = roles_response
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "owner")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
 
-        // Login as test owner user to get management key
-        let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "test_owner_user", "password": "TestPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Create test user with Owner role via HTTP
+    let _create_user_response: serde_json::Value = client
+        .post(&server.url("/admin/users"))
+        .header("X-API-Key", admin_api_key)
+        .json(&json!({
+            "username": "test_owner_user",
+            "password": "TestPass123!",
+            "is_superadmin": false,
+            "role_ids": [owner_role_id],
+            "must_change_password": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
-
-        // Create service key via /me/api-keys
-        let service_key_response: serde_json::Value = client
-            .post(&server.url("/me/api-keys"))
-            .header("X-API-Key", test_mgmt_key)
-            .json(&json!({
-                "name": "service_key",
-                "is_management": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let test_service_key =
-            service_key_response["api_key"].as_str().unwrap();
-
-        // Owner should have access to:
-        // - User resources (all actions)
-        // - All Node-* resources (all actions)
-        // But NOT to Admin-* resources
-
-        // Test with management key
-        test_user_endpoints(&client, &base_url, test_mgmt_key, true, true)
-            .await;
-        test_node_endpoints(&client, &base_url, test_mgmt_key, true, &[]).await;
-        test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-
-        // Test with service key
-        test_user_endpoints(&client, &base_url, test_service_key, true, false)
-            .await;
-        test_node_endpoints(&client, &base_url, test_service_key, true, &[])
-            .await;
-        test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            false,
+    // Login as test owner user to get management key
+    let test_login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(
+            &json!({"username": "test_owner_user", "password": "TestPass123!"}),
         )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
+
+    // Create service key via /me/api-keys
+    let service_key_response: serde_json::Value = client
+        .post(&server.url("/me/api-keys"))
+        .header("X-API-Key", test_mgmt_key)
+        .json(&json!({
+            "name": "service_key",
+            "is_management": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let test_service_key = service_key_response["api_key"].as_str().unwrap();
+
+    // Owner should have access to:
+    // - User resources (all actions)
+    // - All Node-* resources (all actions)
+    // But NOT to Admin-* resources
+
+    // Test with management key
+    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
+    test_node_endpoints(&client, &base_url, test_mgmt_key, true, &[]).await;
+    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
         .await; // Should NOT have access
-        test_admin_system_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-        )
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+
+    // Test with service key
+    test_user_endpoints(&client, &base_url, test_service_key, true, false)
+        .await;
+    test_node_endpoints(&client, &base_url, test_service_key, true, &[]).await;
+    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
         .await; // Should NOT have access
-    }
+    test_admin_roles_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
+        .await; // Should NOT have access
+}
 
-    #[tokio::test]
+#[test(tokio::test)]
 
-    async fn test_sender_role_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
+async fn test_sender_role_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
 
-        // Login as default admin to create test user
-        let login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Login as default admin to create test user
+    let login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let admin_api_key = login_response["api_key"].as_str().unwrap();
+    let admin_api_key = login_response["api_key"].as_str().unwrap();
 
-        // Get Sender role ID
-        let roles_response: serde_json::Value = client
-            .get(&server.url("/admin/roles"))
-            .header("X-API-Key", admin_api_key)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Get Sender role ID
+    let roles_response: serde_json::Value = client
+        .get(&server.url("/admin/roles"))
+        .header("X-API-Key", admin_api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let sender_role_id = roles_response
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == "sender")
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap();
+    let sender_role_id = roles_response
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "sender")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
 
-        // Create test user with Sender role via HTTP
-        let _create_user_response: serde_json::Value = client
-            .post(&server.url("/admin/users"))
-            .header("X-API-Key", admin_api_key)
-            .json(&json!({
-                "username": "test_sender_user",
-                "password": "TestPass123!",
-                "is_superadmin": false,
-                "role_ids": [sender_role_id],
-                "must_change_password": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Create test user with Sender role via HTTP
+    let _create_user_response: serde_json::Value = client
+        .post(&server.url("/admin/users"))
+        .header("X-API-Key", admin_api_key)
+        .json(&json!({
+            "username": "test_sender_user",
+            "password": "TestPass123!",
+            "is_superadmin": false,
+            "role_ids": [sender_role_id],
+            "must_change_password": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        // Login as test sender user to get management key
-        let test_login_response: serde_json::Value = client
+    // Login as test sender user to get management key
+    let test_login_response: serde_json::Value = client
             .post(&server.url("/login"))
             .json(&json!({"username": "test_sender_user", "password": "TestPass123!"}))
             .send()
@@ -1188,153 +1193,155 @@ mod endpoint_access_tests {
             .await
             .unwrap();
 
-        let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
+    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
 
-        // Create service key via /me/api-keys
-        let service_key_response: serde_json::Value = client
-            .post(&server.url("/me/api-keys"))
-            .header("X-API-Key", test_mgmt_key)
-            .json(&json!({
-                "name": "service_key",
-                "is_management": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Create service key via /me/api-keys
+    let service_key_response: serde_json::Value = client
+        .post(&server.url("/me/api-keys"))
+        .header("X-API-Key", test_mgmt_key)
+        .json(&json!({
+            "name": "service_key",
+            "is_management": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let test_service_key =
-            service_key_response["api_key"].as_str().unwrap();
+    let test_service_key = service_key_response["api_key"].as_str().unwrap();
 
-        // Sender should have access to:
-        // - User resources (all actions)
-        // - Node-Request (get, post only)
-        // But NOT to other Node-* resources or Admin-* resources
+    // Sender should have access to:
+    // - User resources (all actions)
+    // - Node-Request (get, post only)
+    // But NOT to other Node-* resources or Admin-* resources
 
-        let sender_node_access = [
-            ("POST", "/event-request", true),
-            (
-                "GET",
-                "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-        ];
+    let sender_node_access = [
+        ("POST", "/request", true),
+        (
+            "GET",
+            "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+    ];
 
-        // Test with management key - limited Node access
-        test_user_endpoints(&client, &base_url, test_mgmt_key, true, true)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_mgmt_key,
-            false,
-            &sender_node_access,
-        )
-        .await; // Only Node-Request should pass
-        test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-
-        // Test with service key
-        test_user_endpoints(&client, &base_url, test_service_key, true, false)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            &sender_node_access,
-        )
-        .await; // Only Node-Request should pass
-        test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            false,
-        )
+    // Test with management key - limited Node access
+    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        &sender_node_access,
+    )
+    .await; // Only Node-Request should pass
+    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
         .await; // Should NOT have access
-        test_admin_system_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-        )
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+
+    // Test with service key
+    test_user_endpoints(&client, &base_url, test_service_key, true, false)
+        .await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        &sender_node_access,
+    )
+    .await; // Only Node-Request should pass
+    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
         .await; // Should NOT have access
-    }
+    test_admin_roles_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
+        .await; // Should NOT have access
+}
 
-    #[tokio::test]
+#[test(tokio::test)]
 
-    async fn test_manager_role_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
+async fn test_manager_role_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
 
-        // Login as default admin to create test user
-        let login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Login as default admin to create test user
+    let login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let admin_api_key = login_response["api_key"].as_str().unwrap();
+    let admin_api_key = login_response["api_key"].as_str().unwrap();
 
-        // Get Manager role ID
-        let roles_response: serde_json::Value = client
-            .get(&server.url("/admin/roles"))
-            .header("X-API-Key", admin_api_key)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Get Manager role ID
+    let roles_response: serde_json::Value = client
+        .get(&server.url("/admin/roles"))
+        .header("X-API-Key", admin_api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let manager_role_id = roles_response
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == "manager")
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap();
+    let manager_role_id = roles_response
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "manager")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
 
-        // Create test user with Manager role via HTTP
-        let _create_user_response: serde_json::Value = client
-            .post(&server.url("/admin/users"))
-            .header("X-API-Key", admin_api_key)
-            .json(&json!({
-                "username": "test_manager_user",
-                "password": "TestPass123!",
-                "is_superadmin": false,
-                "role_ids": [manager_role_id],
-                "must_change_password": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Create test user with Manager role via HTTP
+    let _create_user_response: serde_json::Value = client
+        .post(&server.url("/admin/users"))
+        .header("X-API-Key", admin_api_key)
+        .json(&json!({
+            "username": "test_manager_user",
+            "password": "TestPass123!",
+            "is_superadmin": false,
+            "role_ids": [manager_role_id],
+            "must_change_password": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        // Login as test manager user to get management key
-        let test_login_response: serde_json::Value = client
+    // Login as test manager user to get management key
+    let test_login_response: serde_json::Value = client
             .post(&server.url("/login"))
             .json(&json!({"username": "test_manager_user", "password": "TestPass123!"}))
             .send()
@@ -1344,369 +1351,375 @@ mod endpoint_access_tests {
             .await
             .unwrap();
 
-        let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
+    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
 
-        // Create service key via /me/api-keys
-        let service_key_response: serde_json::Value = client
-            .post(&server.url("/me/api-keys"))
-            .header("X-API-Key", test_mgmt_key)
-            .json(&json!({
-                "name": "service_key",
-                "is_management": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    // Create service key via /me/api-keys
+    let service_key_response: serde_json::Value = client
+        .post(&server.url("/me/api-keys"))
+        .header("X-API-Key", test_mgmt_key)
+        .json(&json!({
+            "name": "service_key",
+            "is_management": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-        let test_service_key =
-            service_key_response["api_key"].as_str().unwrap();
+    let test_service_key = service_key_response["api_key"].as_str().unwrap();
 
-        // Manager should have access to:
-        // - User resources (all actions)
-        // - Node-Request (all actions)
-        // - Node-Subject (all actions)
-        // - Node-System (all actions)
-        // But NOT to Node-Keys or Admin-* resources
+    // Manager should have access to:
+    // - User resources (all actions)
+    // - Node-Request (all actions)
+    // - Node-Subject (all actions)
+    // - Node-System (all actions)
+    // But NOT to Node-Keys or Admin-* resources
 
-        let manager_node_access = [
-            ("GET", "/controller-id", true),
-            ("GET", "/peer-id", true),
-            ("GET", "/config", true),
-            (
-                "GET",
-                "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "GET",
-                "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
-                true,
-            ),
-            (
-                "GET",
-                "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
-                true,
-            ),
-            (
-                "GET",
-                "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
-                true,
-            ),
-            ("GET", "/register-governances?active=true", true),
-            (
-                "GET",
-                "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
-                true,
-            ),
-            (
-                "GET",
-                "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "GET",
-                "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "PATCH",
-                "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            ("GET", "/auth", true),
-            (
-                "GET",
-                "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "PUT",
-                "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "DELETE",
-                "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "POST",
-                "/check-transfer/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "POST",
-                "/update/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "POST",
-                "/manual-distribution/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            ("GET", "/pending-transfers", true),
-            (
-                "GET",
-                "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            ("POST", "/event-request", true),
-        ];
+    let manager_node_access = [
+        ("GET", "/public-key", true),
+        ("GET", "/peer-id", true),
+        ("GET", "/config", true),
+        (
+            "GET",
+            "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "GET",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
+            true,
+        ),
+        (
+            "GET",
+            "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
+            true,
+        ),
+        (
+            "GET",
+            "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
+            true,
+        ),
+        ("GET", "/register-governances?active=true", true),
+        (
+            "GET",
+            "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
+            true,
+        ),
+        (
+            "GET",
+            "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "GET",
+            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "PATCH",
+            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/auth", true),
+        (
+            "GET",
+            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "PUT",
+            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "DELETE",
+            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "POST",
+            "/check-transfer/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "POST",
+            "/update/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "POST",
+            "/manual-distribution/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/pending-transfers", true),
+        (
+            "GET",
+            "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("POST", "/request", true),
+    ];
 
-        // Test with management key - limited Node access
-        test_user_endpoints(&client, &base_url, test_mgmt_key, true, true)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_mgmt_key,
-            false,
-            &manager_node_access,
-        )
-        .await; // Allowed node/system actions should pass
-        test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-
-        // Test with service key
-        test_user_endpoints(&client, &base_url, test_service_key, true, false)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            &manager_node_access,
-        )
-        .await; // Allowed node/system actions should pass
-        test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            false,
-        )
+    // Test with management key - limited Node access
+    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        &manager_node_access,
+    )
+    .await; // Allowed node/system actions should pass
+    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
         .await; // Should NOT have access
-        test_admin_system_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-        )
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+
+    // Test with service key
+    test_user_endpoints(&client, &base_url, test_service_key, true, false)
+        .await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        &manager_node_access,
+    )
+    .await; // Allowed node/system actions should pass
+    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
         .await; // Should NOT have access
-    }
-
-    #[tokio::test]
-    async fn test_data_role_endpoints_access() {
-        let (server, _dirs) =
-            common::TestServer::build(true, false, None).await;
-        let client = Client::new();
-        let base_url = server.url("");
-
-        // Login as default admin to create test user
-        let login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let admin_api_key = login_response["api_key"].as_str().unwrap();
-
-        // Get Data role ID
-        let roles_response: serde_json::Value = client
-            .get(&server.url("/admin/roles"))
-            .header("X-API-Key", admin_api_key)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let data_role_id = roles_response
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == "data")
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap();
-
-        // Create test user with Data role via HTTP
-        let _create_user_response: serde_json::Value = client
-            .post(&server.url("/admin/users"))
-            .header("X-API-Key", admin_api_key)
-            .json(&json!({
-                "username": "test_data_user",
-                "password": "TestPass123!",
-                "is_superadmin": false,
-                "role_ids": [data_role_id],
-                "must_change_password": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        // Login as test data user to get management key
-        let test_login_response: serde_json::Value = client
-            .post(&server.url("/login"))
-            .json(&json!({"username": "test_data_user", "password": "TestPass123!"}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
-
-        // Create service key via /me/api-keys
-        let service_key_response: serde_json::Value = client
-            .post(&server.url("/me/api-keys"))
-            .header("X-API-Key", test_mgmt_key)
-            .json(&json!({
-                "name": "service_key",
-                "is_management": false
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-
-        let test_service_key =
-            service_key_response["api_key"].as_str().unwrap();
-
-        // Data should have access to:
-        // - User resources (all actions)
-        // - Node-Request (get only - read-only)
-        // - Node-Subject (get only - read-only)
-        // - Node-System (get only - read-only)
-        // But NOT to Node-Keys or Admin-* resources
-
-        let data_read_access = [
-            ("GET", "/controller-id", true),
-            ("GET", "/peer-id", true),
-            ("GET", "/config", true),
-            (
-                "GET",
-                "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "GET",
-                "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
-                true,
-            ),
-            (
-                "GET",
-                "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
-                true,
-            ),
-            (
-                "GET",
-                "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
-                true,
-            ),
-            ("GET", "/register-governances?active=true", true),
-            (
-                "GET",
-                "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
-                true,
-            ),
-            (
-                "GET",
-                "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            (
-                "GET",
-                "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            ("GET", "/auth", true),
-            (
-                "GET",
-                "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-            ("GET", "/pending-transfers", true),
-            (
-                "GET",
-                "/event-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-                true,
-            ),
-        ];
-
-        // Test with management key - read-only Node access
-        test_user_endpoints(&client, &base_url, test_mgmt_key, true, true)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_mgmt_key,
-            false,
-            &data_read_access,
-        )
-        .await; // Read-only node/system access
-        test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(&client, &base_url, test_mgmt_key, false, false)
-            .await; // Should NOT have access
-        test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false)
-            .await; // Should NOT have access
-
-        // Test with service key
-        test_user_endpoints(&client, &base_url, test_service_key, true, false)
-            .await;
-        test_node_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            &data_read_access,
-        )
-        .await; // Read-only node/system access
-        test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-            .await; // Should NOT have access
-        test_admin_roles_endpoints(&client, &base_url, test_service_key, false, false)
-            .await; // Should NOT have access
-        test_admin_apikeys_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
-            false,
-        )
+    test_admin_roles_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
         .await; // Should NOT have access
-        test_admin_system_endpoints(
-            &client,
-            &base_url,
-            test_service_key,
-            false,
+}
+
+#[test(tokio::test)]
+async fn test_data_role_endpoints_access() {
+    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let client = Client::new();
+    let base_url = server.url("");
+
+    // Login as default admin to create test user
+    let login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let admin_api_key = login_response["api_key"].as_str().unwrap();
+
+    // Get Data role ID
+    let roles_response: serde_json::Value = client
+        .get(&server.url("/admin/roles"))
+        .header("X-API-Key", admin_api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let data_role_id = roles_response
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "data")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    // Create test user with Data role via HTTP
+    let _create_user_response: serde_json::Value = client
+        .post(&server.url("/admin/users"))
+        .header("X-API-Key", admin_api_key)
+        .json(&json!({
+            "username": "test_data_user",
+            "password": "TestPass123!",
+            "is_superadmin": false,
+            "role_ids": [data_role_id],
+            "must_change_password": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Login as test data user to get management key
+    let test_login_response: serde_json::Value = client
+        .post(&server.url("/login"))
+        .json(
+            &json!({"username": "test_data_user", "password": "TestPass123!"}),
         )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
+
+    // Create service key via /me/api-keys
+    let service_key_response: serde_json::Value = client
+        .post(&server.url("/me/api-keys"))
+        .header("X-API-Key", test_mgmt_key)
+        .json(&json!({
+            "name": "service_key",
+            "is_management": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let test_service_key = service_key_response["api_key"].as_str().unwrap();
+
+    // Data should have access to:
+    // - User resources (all actions)
+    // - Node-Request (get only - read-only)
+    // - Node-Subject (get only - read-only)
+    // - Node-System (get only - read-only)
+    // But NOT to Node-Keys or Admin-* resources
+
+    let data_read_access = [
+        ("GET", "/public-key", true),
+        ("GET", "/peer-id", true),
+        ("GET", "/config", true),
+        (
+            "GET",
+            "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "GET",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
+            true,
+        ),
+        (
+            "GET",
+            "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
+            true,
+        ),
+        (
+            "GET",
+            "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
+            true,
+        ),
+        ("GET", "/register-governances?active=true", true),
+        (
+            "GET",
+            "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
+            true,
+        ),
+        (
+            "GET",
+            "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "GET",
+            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/auth", true),
+        (
+            "GET",
+            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/pending-transfers", true),
+        (
+            "GET",
+            "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+    ];
+
+    // Test with management key - read-only Node access
+    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        &data_read_access,
+    )
+    .await; // Read-only node/system access
+    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
         .await; // Should NOT have access
-    }
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_mgmt_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
+
+    // Test with service key
+    test_user_endpoints(&client, &base_url, test_service_key, true, false)
+        .await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        &data_read_access,
+    )
+    .await; // Read-only node/system access
+    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
+        .await; // Should NOT have access
+    test_admin_roles_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_apikeys_endpoints(
+        &client,
+        &base_url,
+        test_service_key,
+        false,
+        false,
+    )
+    .await; // Should NOT have access
+    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
+        .await; // Should NOT have access
 }

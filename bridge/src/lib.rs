@@ -4,15 +4,12 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
-        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
+        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
     response::{
-        ApprovalReq, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
-        RequestData as RequestDataRes, RequestInfo, RequestsInManager,
-        RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange,
-        TransferSubject,
+        ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestData as RequestDataRes, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange, TransferSubject
     },
 };
 use config::Config;
@@ -54,6 +51,8 @@ pub mod prometheus;
 use prometheus::run_prometheus;
 
 pub use error::BridgeError;
+
+pub use ave_common;
 
 use crate::conversions::{
     core_approval_req_to_common, core_tranfer_subject_to_common,
@@ -183,13 +182,13 @@ impl Bridge {
 
     ///////// Request
     ////////////////////////////
-    pub async fn get_handling_in_queue_requests(
+    pub async fn get_requests_in_manager(
         &self,
     ) -> Result<RequestsInManager, BridgeError> {
-        Ok(self.api.get_handling_in_queue_requests().await?)
+        Ok(self.api.get_requests_in_manager().await?)
     }
 
-    pub async fn get_handling_in_queue_requests_subject_id(
+    pub async fn get_requests_in_manager_subject_id(
         &self,
         subject_id: String,
     ) -> Result<RequestsInManagerSubject, BridgeError> {
@@ -198,11 +197,11 @@ impl Bridge {
 
         Ok(self
             .api
-            .get_handling_in_queue_requests_subject_id(subject_id)
+            .get_requests_in_manager_subject_id(subject_id)
             .await?)
     }
 
-    pub async fn post_send_event_request(
+    pub async fn post_event_request(
         &self,
         request: BridgeSignedEventRequest,
     ) -> Result<RequestDataRes, BridgeError> {
@@ -226,7 +225,7 @@ impl Bridge {
         &self,
         subject_id: String,
         state: Option<ApprovalState>,
-    ) -> Result<Option<(ApprovalReq, ApprovalState)>, BridgeError> {
+    ) -> Result<Option<ApprovalEntry>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -234,18 +233,18 @@ impl Bridge {
             .api
             .get_approval(subject_id, state)
             .await?
-            .map(|x| (core_approval_req_to_common(x.0), x.1)))
+            .map(|x| ApprovalEntry {request: core_approval_req_to_common(x.0), state: x.1}))
     }
 
     pub async fn get_approvals(
         &self,
         state: Option<ApprovalState>,
-    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, BridgeError> {
+    ) -> Result<Vec<ApprovalEntry>, BridgeError> {
         let res = self.api.get_approvals(state).await?;
 
         Ok(res
             .iter()
-            .map(|x| (core_approval_req_to_common(x.0.clone()), x.1.clone()))
+            .map(|x| ApprovalEntry {request: core_approval_req_to_common(x.0.clone()), state: x.1.clone()})
             .collect())
     }
 
@@ -284,7 +283,7 @@ impl Bridge {
 
     pub async fn get_all_request_state(
         &self,
-    ) -> Result<Vec<RequestInfo>, BridgeError> {
+    ) -> Result<Vec<RequestInfoExtend>, BridgeError> {
         Ok(self.api.all_request_state().await?)
     }
 
@@ -416,6 +415,7 @@ impl Bridge {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     ) -> Result<PaginatorEvents, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
@@ -430,6 +430,7 @@ impl Bridge {
                 event_request_ts,
                 event_ledger_ts,
                 sink_ts,
+                event_type
             )
             .await?)
     }
@@ -476,13 +477,14 @@ impl Bridge {
         subject_id: String,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     ) -> Result<Vec<LedgerDB>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         Ok(self
             .api
-            .get_first_or_end_events(subject_id, quantity, reverse)
+            .get_first_or_end_events(subject_id, quantity, reverse, event_type)
             .await?)
     }
 

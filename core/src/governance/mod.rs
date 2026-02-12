@@ -445,6 +445,7 @@ impl Subject for Governance {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
                         .await?;
                     self.up_owner(ctx, &hash, &network).await?;
+
                 }
 
                 // Seguimos sin ser owner ni new owner,
@@ -1133,7 +1134,7 @@ impl Governance {
             who: (*our_key).clone(),
             role: RoleTypes::Evaluator,
         }) {
-            let actor = ctx.get_child::<ValiWorker>("evaluator").await?;
+            let actor = ctx.get_child::<EvalWorker>("evaluator").await?;
 
             actor.ask_stop().await?;
         }

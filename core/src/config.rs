@@ -8,12 +8,12 @@ use std::{
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
 use network::Config as NetworkConfig;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{helpers::sink::TokenResponse, subject::sinkdata::SinkTypes};
 
 /// Node configuration.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// Key derivator.
@@ -55,7 +55,7 @@ impl Default for Config {
 }
 
 /// Database configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub enum AveDbConfig {
     /// Rocksdb database.
     #[cfg(feature = "rocksdb")]
@@ -126,7 +126,7 @@ impl fmt::Display for AveDbConfig {
 }
 
 /// Database configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub enum ExternalDbConfig {
     /// Sqlite database.
     #[cfg(feature = "ext-sqlite")]
@@ -173,7 +173,7 @@ impl fmt::Display for ExternalDbConfig {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct LoggingOutput {
     pub stdout: bool,
     pub file: bool,
@@ -190,7 +190,7 @@ impl Default for LoggingOutput {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LoggingRotation {
     #[default]
@@ -217,7 +217,7 @@ impl Display for LoggingRotation {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub output: LoggingOutput,
@@ -247,7 +247,7 @@ impl LoggingConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
 pub struct SinkServer {
     pub server: String,
     pub events: BTreeSet<SinkTypes>,
@@ -262,7 +262,7 @@ pub struct SinkAuth {
     pub password: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct SinkConfig {
     pub sinks: BTreeMap<String, Vec<SinkServer>>,

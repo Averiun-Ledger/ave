@@ -713,12 +713,12 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(state.to_string(), "Pending");
+        assert_eq!(state.to_string(), "pending");
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
                 subject_id: subject_id.clone(),
-                state: ApprovalStateRes::RespondedAccepted,
+                state: ApprovalStateRes::Accepted,
             })
             .await
             .unwrap()
@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(
             res,
             format!(
-                "The approval request for subject {} has changed to RespondedAccepted",
+                "The approval request for subject {} has changed to accepted",
                 subject_id.to_string()
             )
         );
@@ -1056,7 +1056,7 @@ mod tests {
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
                 subject_id: subject_id.clone(),
-                state: ApprovalStateRes::RespondedAccepted,
+                state: ApprovalStateRes::Accepted,
             })
             .await
             .unwrap()
@@ -1067,7 +1067,7 @@ mod tests {
         assert_eq!(
             res,
             format!(
-                "The approval request for subject {} has changed to RespondedAccepted",
+                "The approval request for subject {} has changed to accepted",
                 subject_id.to_string()
             )
         );
@@ -1271,7 +1271,7 @@ mod tests {
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
                 subject_id: subject_id.clone(),
-                state: ApprovalStateRes::RespondedAccepted,
+                state: ApprovalStateRes::Accepted,
             })
             .await
             .unwrap()
@@ -1282,7 +1282,7 @@ mod tests {
         assert_eq!(
             res,
             format!(
-                "The approval request for subject {} has changed to RespondedAccepted",
+                "The approval request for subject {} has changed to accepted",
                 subject_id.to_string()
             )
         );
@@ -1564,12 +1564,12 @@ mod tests {
             panic!("Invalid response")
         };
 
-        assert_eq!(state.to_string(), "Pending");
+        assert_eq!(state.to_string(), "pending");
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
                 subject_id: subject_id.clone(),
-                state: ApprovalStateRes::RespondedAccepted,
+                state: ApprovalStateRes::Accepted,
             })
             .await
             .unwrap()
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(
             res,
             format!(
-                "The approval request for subject {} has changed to RespondedAccepted",
+                "The approval request for subject {} has changed to accepted",
                 subject_id.to_string()
             )
         );

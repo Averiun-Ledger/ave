@@ -1,3 +1,4 @@
+use ave_common::bridge::request::EventRequestType;
 use ave_common::{Namespace, SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
@@ -26,7 +27,6 @@ use crate::governance::witnesses_register::{
     WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::model::common::subject::get_gov;
-use crate::model::request::EventRequestType;
 use crate::node::SubjectData;
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
@@ -574,7 +574,7 @@ where
         | EventRequestType::Transfer
         | EventRequestType::Confirm
         | EventRequestType::Reject
-        | EventRequestType::EOL => {
+        | EventRequestType::Eol => {
             if signer != our_key {
                 return Err(ActorError::Functional { description: "In the events of Create, Transfer, Confirm, Reject or EOL, the event must be signed by the node.".to_string() });
             }

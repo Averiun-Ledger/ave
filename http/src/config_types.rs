@@ -253,6 +253,8 @@ pub struct AveConfigHttp {
     pub always_accept: bool,
     /// Garbage collector interval in seconds
     pub tracking_size: usize,
+    /// Is a service node
+    pub is_service: bool
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -266,6 +268,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
+            is_service: value.is_service
         }
     }
 }

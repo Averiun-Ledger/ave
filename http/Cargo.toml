@@ -36,7 +36,7 @@ axum-extra = "0.12.1"
 tower = "0.5.2"
 tower-http = {version = "0.6.7", features = ["trace", "metrics", "cors", "set-header"]}
 utoipa = { version = "5.4.0", features = ["axum_extras"]}
-utoipa-rapidoc = { version = "6.0.0", features = ["axum"]}
+utoipa-swagger-ui = { version = "9", features = ["axum"]}
 bytes = "1.11.0"
 
 # Auth system dependencies
@@ -53,10 +53,10 @@ rcgen = "0.14"
 x509-parser = "0.18"
 
 [dev-dependencies]
+test-log = { workspace = true } 
 tempfile = "3.10.1"
 chrono = "0.4"
 pkcs8 = "0.10.2"
-ave-common = { path = "../common" }
 ave-bridge = { path = "../bridge", default-features = false, features = ["openapi", "test"] }
 
 [features]

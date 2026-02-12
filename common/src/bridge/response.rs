@@ -1,14 +1,26 @@
 //! Response types from Ave API
 
+use crate::{SchemaType, bridge::request::{ApprovalState, EventRequestType}};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, fmt::Display};
-use crate::SchemaType;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Approval entry combining the request details and its current state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ApprovalEntry {
+    /// The approval request details
+    pub request: ApprovalReq,
+    /// Current state of the approval
+    pub state: ApprovalState,
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd,
+)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SubjsData {
     pub subject_id: String,
@@ -73,6 +85,7 @@ pub struct LedgerDB {
     pub event_ledger_timestamp: u64,
     pub sink_timestamp: u64,
     pub event: RequestEventDB,
+    pub event_type: EventRequestType
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,9 +110,8 @@ pub struct AbortDB {
     pub sn: Option<u64>,
     pub error: String,
     pub who: String,
-    pub abort_type: String
+    pub abort_type: String,
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -109,7 +121,7 @@ pub enum RequestEventDB {
         name: Option<String>,
         description: Option<String>,
         schema_id: String,
-        namespace: String
+        namespace: String,
     },
     TrackerFact {
         payload: Value,
@@ -127,17 +139,32 @@ pub enum RequestEventDB {
     TrackerConfirm,
     GovernanceConfirm {
         name_old_owner: Option<String>,
-        evaluation_response: EvalResDB
+        evaluation_response: EvalResDB,
     },
     Reject,
     EOL,
+}
+
+impl RequestEventDB {
+    pub fn get_event_type(&self) -> EventRequestType {
+        match self {
+            RequestEventDB::Create { .. } => EventRequestType::Create,
+            RequestEventDB::TrackerFact { .. }
+            | RequestEventDB::GovernanceFact { .. } => EventRequestType::Fact,
+            RequestEventDB::Transfer { .. } => EventRequestType::Transfer,
+            RequestEventDB::TrackerConfirm
+            | RequestEventDB::GovernanceConfirm { .. } => EventRequestType::Confirm,
+            RequestEventDB::Reject => EventRequestType::Reject,
+            RequestEventDB::EOL => EventRequestType::Eol,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum EvalResDB {
     Patch(Value),
-    Error(String)
+    Error(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,7 +193,6 @@ pub struct PaginatorEvents {
     pub events: Vec<LedgerDB>,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct PaginatorAborts {
@@ -189,6 +215,14 @@ pub struct RequestInfo {
     pub version: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct RequestInfoExtend {
+    pub request_id: String,
+    pub state: RequestState,
+    pub version: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum RequestState {
@@ -199,18 +233,24 @@ pub enum RequestState {
         subject_id: String,
         who: String,
         sn: Option<u64>,
-        error: String
+        error: String,
     },
     // Manager
     Abort {
         subject_id: String,
         who: String,
         sn: Option<u64>,
-        error: String
+        error: String,
     },
     Reboot,
-    RebootDiff { seconds: u64, count: u64 },
-    RebootTimeOut { seconds: u64, count: u64 },
+    RebootDiff {
+        seconds: u64,
+        count: u64,
+    },
+    RebootTimeOut {
+        seconds: u64,
+        count: u64,
+    },
     Evaluation,
     Approval,
     Validation,
@@ -222,25 +262,43 @@ impl Display for RequestState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RequestState::Handling => write!(f, "Handling"),
-            RequestState::Abort { subject_id, who, sn, error } => {
+            RequestState::Abort {
+                subject_id,
+                who,
+                sn,
+                error,
+            } => {
                 let sn_text = if let Some(sn) = sn {
                     format!("{sn}")
                 } else {
                     "None".to_string()
                 };
 
-                write!(f, "Abort, subject_id: {}, who: {}, sn: {}, error: {}",subject_id, who, sn_text, error )
-            },
+                write!(
+                    f,
+                    "Abort, subject_id: {}, who: {}, sn: {}, error: {}",
+                    subject_id, who, sn_text, error
+                )
+            }
             RequestState::InQueue => write!(f, "In Queue"),
-            RequestState::Invalid{ subject_id, who, sn, error } => {
+            RequestState::Invalid {
+                subject_id,
+                who,
+                sn,
+                error,
+            } => {
                 let sn_text = if let Some(sn) = sn {
                     format!("{sn}")
                 } else {
                     "None".to_string()
                 };
 
-                write!(f, "Abort, subject_id: {}, who: {}, sn: {}, error: {}",subject_id, who, sn_text, error )
-            },
+                write!(
+                    f,
+                    "Abort, subject_id: {}, who: {}, sn: {}, error: {}",
+                    subject_id, who, sn_text, error
+                )
+            }
             RequestState::Finish => write!(f, "Finish"),
             RequestState::Reboot => write!(f, "Reboot"),
             RequestState::RebootDiff { seconds, count } => {

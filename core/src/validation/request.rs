@@ -1,15 +1,12 @@
 use crate::{
     model::{
         event::{ApprovalData, EvaluationData, ValidationData},
-        request::EventRequestType,
     },
     subject::Metadata,
 };
 
 use ave_common::{
-    Namespace, SchemaType,
-    identity::{DigestIdentifier, Signed},
-    request::EventRequest,
+    Namespace, SchemaType, bridge::request::EventRequestType, identity::{DigestIdentifier, Signed}, request::EventRequest
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -198,8 +195,8 @@ impl ActualProtocols {
             | (ActualProtocols::None, false, EventRequestType::Confirm)
             | (ActualProtocols::None, true, EventRequestType::Reject)
             | (ActualProtocols::None, false, EventRequestType::Reject)
-            | (ActualProtocols::None, true, EventRequestType::EOL)
-            | (ActualProtocols::None, false, EventRequestType::EOL) => true,
+            | (ActualProtocols::None, true, EventRequestType::Eol)
+            | (ActualProtocols::None, false, EventRequestType::Eol) => true,
             (
                 ActualProtocols::Eval { eval_data },
                 true,

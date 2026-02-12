@@ -113,7 +113,7 @@ async fn test_governance_and_subject_copy_with_approve() {
     emit_approve(
         node1,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id,
         true,
     )
@@ -162,6 +162,7 @@ async fn test_governance_and_subject_copy_with_approve() {
             subject_id.clone(),
             Some(11),
             Some(false),
+            None
         )
         .await
         .unwrap();
@@ -668,7 +669,7 @@ async fn test_governance_fail_approve() {
     emit_approve(
         node1,
         governance_id.clone(),
-        ApprovalStateRes::RespondedRejected,
+        ApprovalStateRes::Rejected,
         request_id,
         true,
     )
@@ -753,7 +754,7 @@ async fn test_governance_manual_many_approvers() {
     emit_approve(
         owner,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id,
         true,
     )
@@ -782,7 +783,7 @@ async fn test_governance_manual_many_approvers() {
     emit_approve(
         owner,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id.clone(),
         true,
     )
@@ -792,7 +793,7 @@ async fn test_governance_manual_many_approvers() {
     emit_approve(
         approver_1,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id.clone(),
         false,
     )
@@ -802,7 +803,7 @@ async fn test_governance_manual_many_approvers() {
     emit_approve(
         approver_2,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id.clone(),
         false,
     )
@@ -923,7 +924,7 @@ async fn test_governance_auto_many_approvers() {
     emit_approve(
         owner,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id,
         true,
     )
@@ -1064,7 +1065,7 @@ async fn test_governance_not_quorum_many_approvers() {
     emit_approve(
         owner,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id,
         true,
     )
@@ -1093,7 +1094,7 @@ async fn test_governance_not_quorum_many_approvers() {
     emit_approve(
         owner,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id.clone(),
         true,
     )
@@ -1103,7 +1104,7 @@ async fn test_governance_not_quorum_many_approvers() {
     emit_approve(
         approver_1,
         governance_id.clone(),
-        ApprovalStateRes::RespondedAccepted,
+        ApprovalStateRes::Accepted,
         request_id.clone(),
         false,
     )
@@ -1113,7 +1114,7 @@ async fn test_governance_not_quorum_many_approvers() {
     emit_approve(
         approver_2,
         governance_id.clone(),
-        ApprovalStateRes::RespondedRejected,
+        ApprovalStateRes::Rejected,
         request_id.clone(),
         false,
     )

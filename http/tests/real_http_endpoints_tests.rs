@@ -10,6 +10,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::json;
 
 use crate::common::{TestServer, login, make_request};
+use test_log::test;
 
 mod common;
 
@@ -17,7 +18,7 @@ mod common;
 // PHASE 1: AUTHENTICATION TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_login_success() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -27,7 +28,7 @@ async fn test_login_success() {
     assert!(!result.unwrap().is_empty(), "API key should not be empty");
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_login_wrong_password() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -45,7 +46,7 @@ async fn test_login_wrong_password() {
     assert!(body["error"].as_str().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_login_nonexistent_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -66,7 +67,7 @@ async fn test_login_nonexistent_user() {
 // PHASE 2: USER MANAGEMENT TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_users() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -88,7 +89,7 @@ async fn test_list_users() {
     assert!(!body.as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -117,7 +118,7 @@ async fn test_create_user() {
             !body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_user_duplicate() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -153,7 +154,7 @@ async fn test_create_user_duplicate() {
     assert!(body2["error"].as_str().unwrap().contains("already exists"));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_user_weak_password() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -181,7 +182,7 @@ async fn test_create_user_weak_password() {
     );
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_user_by_id() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -205,7 +206,7 @@ async fn test_get_user_by_id() {
     assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_update_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -240,7 +241,7 @@ async fn test_update_user() {
     assert_eq!(body["is_active"], false);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_delete_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -289,7 +290,7 @@ async fn test_delete_user() {
 // PHASE 3: ROLE MANAGEMENT TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_roles() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -310,7 +311,7 @@ async fn test_list_roles() {
     assert!(body.as_array().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_role() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -333,7 +334,7 @@ async fn test_create_role() {
     assert_eq!(body["name"], rolename);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_role_duplicate() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -367,7 +368,7 @@ async fn test_create_role_duplicate() {
     assert!(body["error"].as_str().unwrap().contains("already exists"));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_role() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -401,7 +402,7 @@ async fn test_get_role() {
     assert_eq!(body["name"], rolename);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_update_role() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -436,7 +437,7 @@ async fn test_update_role() {
     assert_eq!(body["description"], "Updated description");
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_delete_role() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -474,7 +475,7 @@ async fn test_delete_role() {
 // PHASE 4: PERMISSION TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_resources() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -496,7 +497,7 @@ async fn test_list_resources() {
     assert!(!body.as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_actions() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -518,7 +519,7 @@ async fn test_list_actions() {
     assert!(!body.as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_set_role_permission() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -552,7 +553,7 @@ async fn test_set_role_permission() {
     assert_eq!(status, StatusCode::OK);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_role_permissions() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -591,7 +592,7 @@ async fn test_get_role_permissions() {
 // PHASE 5: API KEY MANAGEMENT TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_all_api_keys() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -612,7 +613,7 @@ async fn test_list_all_api_keys() {
     assert!(body.as_array().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_api_key_for_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -648,7 +649,7 @@ async fn test_create_api_key_for_user() {
     assert!(!body["api_key"].as_str().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_api_key_info() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -692,7 +693,7 @@ async fn test_get_api_key_info() {
     assert_eq!(body["name"], "infokey");
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_revoke_api_key() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -736,7 +737,7 @@ async fn test_revoke_api_key() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_rotate_api_key() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -787,7 +788,7 @@ async fn test_rotate_api_key() {
 // PHASE 6: USER INTROSPECTION TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_me() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -805,7 +806,7 @@ async fn test_get_me() {
     assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_my_permissions() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -826,7 +827,7 @@ async fn test_get_my_permissions() {
     assert!(body.as_array().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_my_permissions_detailed() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -852,7 +853,7 @@ async fn test_get_my_permissions_detailed() {
 // PHASE 7: AUDIT LOG TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_query_audit_logs() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -873,7 +874,7 @@ async fn test_query_audit_logs() {
     assert!(body.as_array().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_audit_stats() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -894,7 +895,7 @@ async fn test_get_audit_stats() {
     assert!(body["total_logs"].is_number());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_rate_limit_stats() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -920,7 +921,7 @@ async fn test_get_rate_limit_stats() {
 // PHASE 8: SYSTEM CONFIG TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_list_system_config() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -941,7 +942,7 @@ async fn test_list_system_config() {
     assert!(body.as_array().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_update_system_config() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -965,7 +966,7 @@ async fn test_update_system_config() {
 // PHASE 9: ERROR HANDLING TESTS
 // =============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_protected_endpoint_without_auth() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -978,7 +979,7 @@ async fn test_protected_endpoint_without_auth() {
     assert!(body["error"].as_str().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_invalid_api_key() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -996,7 +997,7 @@ async fn test_invalid_api_key() {
     assert!(body["error"].as_str().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_get_nonexistent_user() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -1017,7 +1018,7 @@ async fn test_get_nonexistent_user() {
     assert!(body["error"].as_str().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_user_empty_username() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();
@@ -1038,7 +1039,7 @@ async fn test_create_user_empty_username() {
     assert!(body["error"].as_str().is_some());
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_role_empty_name() {
     let (server, _dir) = TestServer::build(true, true, None).await;
     let client = Client::new();

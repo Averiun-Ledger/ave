@@ -5,16 +5,13 @@ use super::network::TimeOut;
 
 use crate::{
     evaluation::response::{EvaluatorError, EvaluatorResponse},
-    model::request::EventRequestType,
     subject::Metadata,
     validation::request::ActualProtocols,
 };
 
 use ave_actors::ActorError;
 use ave_common::{
-    identity::{DigestIdentifier, Signature, Signed, TimeStamp},
-    request::EventRequest,
-    response::{EvalResDB, LedgerDB, RequestEventDB},
+    bridge::request::EventRequestType, identity::{DigestIdentifier, Signature, Signed, TimeStamp}, request::EventRequest, response::{EvalResDB, LedgerDB, RequestEventDB}
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -446,7 +443,7 @@ impl Protocols {
                 }
                 Ok(Self::Reject { validation })
             }
-            (EventRequestType::EOL, true) | (EventRequestType::EOL, false) => {
+            (EventRequestType::Eol, true) | (EventRequestType::Eol, false) => {
                 match actual_protocols {
                     ActualProtocols::Eval { .. } => {
                         return Err(ProtocolsError::InvalidActualProtocols {
@@ -508,7 +505,8 @@ impl Ledger {
                 .as_nanos(),
             event_ledger_timestamp: signature_timestamp,
             sink_timestamp: TimeStamp::now().as_nanos(),
-            event,
+            event_type: event.get_event_type(),
+            event
         }
     }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
+use ave_common::bridge::request::EventRequestType;
 use ave_common::response::{
     AbortDB, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, TimeRange,
@@ -19,6 +20,16 @@ use crate::external_db::{DBManager, DBManagerMessage};
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};
+
+/// Serializes an `EventRequestType` to its serde string representation.
+fn event_request_type_to_string(et: &EventRequestType) -> Result<String, DatabaseError> {
+    match serde_json::to_value(et) {
+        Ok(Value::String(s)) => Ok(s),
+        _ => Err(DatabaseError::JsonSerialize(
+            "Failed to serialize EventRequestType".to_owned(),
+        )),
+    }
+}
 
 /// Parses an ISO 8601 string and converts it to nanoseconds (i64 for SQLite).
 fn parse_iso8601_to_nanos(s: &str) -> Result<i64, DatabaseError> {
@@ -286,6 +297,7 @@ impl Querys for SqliteLocal {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     ) -> Result<PaginatorEvents, DatabaseError> {
         let quantity = quantity.unwrap_or(50).max(1);
         let mut page = page.unwrap_or(1).max(1);
@@ -325,6 +337,12 @@ impl Querys for SqliteLocal {
         add_ts_filter("event_request_timestamp", event_request_ts)?;
         add_ts_filter("event_ledger_timestamp", event_ledger_ts)?;
         add_ts_filter("sink_timestamp", sink_ts)?;
+
+        if let Some(et) = event_type {
+            params_values.push(event_request_type_to_string(&et)?.into());
+            where_clauses
+                .push(format!("event_type = ?{}", params_values.len()));
+        }
 
         let where_sql = where_clauses.join(" AND ");
 
@@ -388,7 +406,7 @@ impl Querys for SqliteLocal {
         let sql = format!(
             r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event, event_type
         FROM events
         WHERE {}
         ORDER BY {}
@@ -451,6 +469,19 @@ impl Querys for SqliteLocal {
                     )
                 })?;
 
+                let event_type_str: String = row.get(6)?;
+                let event_type: EventRequestType =
+                    serde_json::from_value(Value::String(
+                        event_type_str,
+                    ))
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
                     sn,
@@ -458,6 +489,7 @@ impl Querys for SqliteLocal {
                     event_ledger_timestamp,
                     sink_timestamp,
                     event,
+                    event_type,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -486,7 +518,7 @@ impl Querys for SqliteLocal {
 
         let sql = r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event, event_type
         FROM events
         WHERE subject_id = ?1 AND sn = ?2
     "#;
@@ -536,6 +568,19 @@ impl Querys for SqliteLocal {
                     )
                 })?;
 
+                let event_type_str: String = row.get(6)?;
+                let event_type: EventRequestType =
+                    serde_json::from_value(Value::String(
+                        event_type_str,
+                    ))
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
                     sn,
@@ -543,6 +588,7 @@ impl Querys for SqliteLocal {
                     event_ledger_timestamp,
                     sink_timestamp,
                     event,
+                    event_type,
                 })
             })
             .map_err(|e| match e {
@@ -563,6 +609,7 @@ impl Querys for SqliteLocal {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         let quantity = quantity.unwrap_or(50).max(1);
         let reverse = reverse.unwrap_or(false);
@@ -576,24 +623,44 @@ impl Querys for SqliteLocal {
             ))
         })?;
 
+        let mut where_clauses = vec!["subject_id = ?1".to_string()];
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![subject_id.to_string().into()];
+
+        if let Some(et) = event_type {
+            params_values.push(event_request_type_to_string(&et)?.into());
+            where_clauses
+                .push(format!("event_type = ?{}", params_values.len()));
+        }
+
+        let where_sql = where_clauses.join(" AND ");
+
+        params_values.push(limit_i64.into());
+        let limit_idx = params_values.len();
+
         let sql = format!(
             r#"
         SELECT
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event, event_type
         FROM events
-        WHERE subject_id = ?1
+        WHERE {}
         ORDER BY sn {}
-        LIMIT ?2
+        LIMIT ?{}
         "#,
-            order
+            where_sql, order, limit_idx
         );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let events: Vec<LedgerDB> = stmt
-            .query_map(params![subject_id, limit_i64], |row| {
+            .query_map(params_refs.as_slice(), |row| {
                 let event_str: String = row.get(5)?;
                 let event: RequestEventDB = serde_json::from_str(&event_str)
                     .map_err(|e| {
@@ -637,6 +704,19 @@ impl Querys for SqliteLocal {
                     )
                 })?;
 
+                let event_type_str: String = row.get(6)?;
+                let event_type: EventRequestType =
+                    serde_json::from_value(Value::String(
+                        event_type_str,
+                    ))
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
                     sn,
@@ -644,6 +724,7 @@ impl Querys for SqliteLocal {
                     event_ledger_timestamp,
                     sink_timestamp,
                     event,
+                    event_type,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -732,13 +813,15 @@ impl SqliteLocal {
         let event_json = serde_json::to_string(&event_db.event)
             .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
 
+        let event_type_str = event_request_type_to_string(&event_db.event_type)?;
+
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
         conn.execute(
             r#"
         INSERT INTO events (
-            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            subject_id, sn, event_request_timestamp, event_ledger_timestamp, sink_timestamp, event, event_type
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
             params![
                 event_db.subject_id,
@@ -746,7 +829,8 @@ impl SqliteLocal {
                 req_ts_i64,
                 ledger_ts_i64,
                 sink_timestamp_i64,
-                event_json
+                event_json,
+                event_type_str
             ],
         )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;

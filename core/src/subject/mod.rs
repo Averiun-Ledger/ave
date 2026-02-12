@@ -15,7 +15,6 @@ use crate::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
         event::{Ledger, Protocols, ValidationMetadata},
-        request::EventRequestType,
     },
     node::register::{Register, RegisterMessage},
     tracker::Tracker,
@@ -31,11 +30,9 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, PersistentActor,
 };
 use ave_common::{
-    DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
-    identity::{
+    DataToSinkEvent, Namespace, SchemaType, ValueWrapper, bridge::request::EventRequestType, identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    },
-    request::EventRequest,
+    }, request::EventRequest
 };
 
 use async_trait::async_trait;
@@ -793,7 +790,7 @@ where
                 schema_id: data.schema_id,
                 sn: data.sn,
             },
-            EventRequest::EOL(..) => DataToSinkEvent::EOL {
+            EventRequest::EOL(..) => DataToSinkEvent::Eol {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,

@@ -43,7 +43,7 @@ compile_error!(
 );
 
 /// The network configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// The node type.
@@ -69,7 +69,7 @@ pub struct Config {
 }
 
 /// Ram Limits.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum MemoryLimit {
     /// Ram in percentage.
     Percentage(f64),
@@ -99,7 +99,7 @@ impl Config {
 }
 
 /// Type of a node.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Serialize)]
 pub enum NodeType {
     /// Bootstrap node.
     #[default]

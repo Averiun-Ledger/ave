@@ -26,12 +26,12 @@ use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor};
-use ave_common::bridge::request::{ApprovalState, ApprovalStateRes};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use ave_common::request::EventRequest;
 use ave_common::response::{
-    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange
+    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange
 };
 use config::Config as AveBaseConfig;
 use error::Error;
@@ -300,7 +300,7 @@ impl Api {
     ///////// Request
     ////////////////////////////
 
-    pub async fn get_handling_in_queue_requests(
+    pub async fn get_requests_in_manager(
         &self,
     ) -> Result<RequestsInManager,Error> {
         let response = self
@@ -329,7 +329,7 @@ impl Api {
         }
     }
 
-    pub async fn get_handling_in_queue_requests_subject_id(
+    pub async fn get_requests_in_manager_subject_id(
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<RequestsInManagerSubject, Error>
@@ -585,7 +585,7 @@ impl Api {
         }
     }
 
-    pub async fn all_request_state(&self) -> Result<Vec<RequestInfo>, Error> {
+    pub async fn all_request_state(&self) -> Result<Vec<RequestInfoExtend>, Error> {
         let response = self
             .tracking
             .ask(RequestTrackingMessage::AllRequests)
@@ -851,6 +851,7 @@ impl Api {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     ) -> Result<PaginatorEvents, Error> {
         let response = self
             .query
@@ -862,6 +863,7 @@ impl Api {
                 quantity,
                 reverse,
                 sink_ts,
+                event_type
             })
             .await
             .map_err(|e| {
@@ -976,6 +978,7 @@ impl Api {
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     ) -> Result<Vec<LedgerDB>, Error> {
         let response = self
             .query
@@ -983,6 +986,7 @@ impl Api {
                 subject_id,
                 quantity,
                 reverse,
+                event_type
             })
             .await
             .map_err(|e| {

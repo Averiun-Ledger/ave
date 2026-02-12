@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.6"
+version = "0.8.0"
 edition = "2024"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
 description = "Averiun Ledger library"
@@ -24,7 +24,7 @@ keywords = ["traceability", "distributed-ledger", "Averiun", "sustainability"]
 rust-version = "1.91.0"
 
 [workspace.dependencies]
-ave-identity = { path = "identity", version = "0.1.0" }
+ave-identity = { path = "identity", version = "0.2.0" }
 async-trait = "0.1.88"
 bs58 = "0.5"
 base64 = "0.22"

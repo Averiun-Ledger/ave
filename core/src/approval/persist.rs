@@ -443,10 +443,10 @@ impl Handler<ApprPersist> for ApprPersist {
 
                 if state == ApprovalState::Pending {
                     let (response, state) =
-                        if ApprovalStateRes::RespondedAccepted == response {
-                            (true, ApprovalState::RespondedAccepted)
+                        if ApprovalStateRes::Accepted == response {
+                            (true, ApprovalState::Accepted)
                         } else {
-                            (false, ApprovalState::RespondedRejected)
+                            (false, ApprovalState::Rejected)
                         };
 
                     let Some(approval_req) = self.request.clone() else {
@@ -517,7 +517,7 @@ impl Handler<ApprPersist> for ApprPersist {
                                 return Err(emit_fail(ctx, e).await);
                             }
 
-                            ApprovalState::RespondedAccepted
+                            ApprovalState::Accepted
                         } else {
                             ApprovalState::Pending
                         };
@@ -544,10 +544,10 @@ impl Handler<ApprPersist> for ApprPersist {
                 } else {
                     if let Some(state) = self.state.clone() {
                         let response = if state
-                            == ApprovalState::RespondedAccepted
+                            == ApprovalState::Accepted
                         {
                             true
-                        } else if state == ApprovalState::RespondedRejected {
+                        } else if state == ApprovalState::Rejected {
                             false
                         } else {
                             return Ok(ApprPersistResponse::Ok);
@@ -634,7 +634,7 @@ impl Handler<ApprPersist> for ApprPersist {
 
                     let state =
                         if self.pass_votation == VotationType::AlwaysAccept {
-                            ApprovalState::RespondedAccepted
+                            ApprovalState::Accepted
                         } else {
                             ApprovalState::Pending
                         };
@@ -651,7 +651,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     )
                     .await;
 
-                    if state == ApprovalState::RespondedAccepted
+                    if state == ApprovalState::Accepted
                         && let Err(e) = self
                             .send_response(
                                 ctx,
@@ -691,10 +691,10 @@ impl Handler<ApprPersist> for ApprPersist {
                         return Err(emit_fail(ctx, e).await);
                     };
 
-                    let response = if ApprovalState::RespondedAccepted == state
+                    let response = if ApprovalState::Accepted == state
                     {
                         true
-                    } else if ApprovalState::RespondedRejected == state {
+                    } else if ApprovalState::Rejected == state {
                         false
                     } else {
                         return Ok(ApprPersistResponse::Ok);

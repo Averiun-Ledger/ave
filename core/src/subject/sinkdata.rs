@@ -51,7 +51,7 @@ impl From<&DataToSink> for SinkTypes {
             DataToSinkEvent::Transfer { .. } => SinkTypes::Transfer,
             DataToSinkEvent::Confirm { .. } => SinkTypes::Confirm,
             DataToSinkEvent::Reject { .. } => SinkTypes::Reject,
-            DataToSinkEvent::EOL { .. } => SinkTypes::EOL,
+            DataToSinkEvent::Eol { .. } => SinkTypes::EOL,
         }
     }
 }
@@ -103,7 +103,7 @@ impl SinkDataMessage {
                     schema_id,
                     ..
                 }
-                | DataToSinkEvent::EOL {
+                | DataToSinkEvent::Eol {
                     subject_id,
                     schema_id,
                     ..
@@ -174,7 +174,7 @@ impl Handler<SinkData> for SinkData {
                 DataToSinkEvent::Transfer { .. } => "Transfer",
                 DataToSinkEvent::Confirm { .. } => "Confirm",
                 DataToSinkEvent::Reject { .. } => "Reject",
-                DataToSinkEvent::EOL { .. } => "EOL",
+                DataToSinkEvent::Eol { .. } => "EOL",
             },
         };
 

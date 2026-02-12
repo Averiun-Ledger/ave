@@ -5,7 +5,7 @@
 
 use std::fmt::Display;
 
-use crate::signature::BridgeSignature;
+use crate::{request::EventRequest, signature::BridgeSignature};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,13 +13,54 @@ use serde_json::Value;
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum EventRequestType {
+    Create,
+    Fact,
+    Transfer,
+    Confirm,
+    Reject,
+    Eol,
+}
+
+impl From<&EventRequest> for EventRequestType {
+    fn from(value: &EventRequest) -> Self {
+        match value {
+            EventRequest::Create( .. ) => Self::Create,
+            EventRequest::Fact( .. ) => Self::Fact,
+            EventRequest::Transfer( .. ) => Self::Transfer,
+            EventRequest::Confirm( .. ) => Self::Confirm,
+            EventRequest::EOL( .. ) => Self::Eol,
+            EventRequest::Reject( .. ) => Self::Reject,
+        }
+    }
+}
+
+impl Display for EventRequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventRequestType::Create => write!(f, "create"),
+            EventRequestType::Fact => write!(f, "fact"),
+            EventRequestType::Transfer => write!(f, "transfer"),
+            EventRequestType::Confirm => write!(f, "confirm"),
+            EventRequestType::Reject => write!(f, "reject"),
+            EventRequestType::Eol => write!(f, "eol"),
+        }
+           
+    }
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalStateRes {
     /// Request for approval which is in responded status and accepted
-    RespondedAccepted,
+    Accepted,
     /// Request for approval which is in responded status and rejected
-    RespondedRejected,
+    Rejected,
     /// The approval entity is obsolete.
     Obsolete,
 }
@@ -27,13 +68,13 @@ pub enum ApprovalStateRes {
 impl Display for ApprovalStateRes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let string = match self {
-            ApprovalStateRes::RespondedAccepted => {
-                "RespondedAccepted".to_owned()
+            ApprovalStateRes::Accepted => {
+                "accepted".to_owned()
             }
-            ApprovalStateRes::RespondedRejected => {
-                "RespondedRejected".to_owned()
+            ApprovalStateRes::Rejected => {
+                "rejected".to_owned()
             }
-            ApprovalStateRes::Obsolete => "Obsolete".to_owned(),
+            ApprovalStateRes::Obsolete => "obsolete".to_owned(),
         };
         write!(f, "{}", string,)
     }
@@ -51,14 +92,15 @@ impl Display for ApprovalStateRes {
     BorshSerialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
     /// The approval entity is pending a response.
     #[default]
     Pending,
     /// Request for approval which is in responded status and accepted
-    RespondedAccepted,
+    Accepted,
     /// Request for approval which is in responded status and rejected
-    RespondedRejected,
+    Rejected,
     /// The approval entity is obsolete.
     Obsolete,
 }
@@ -66,10 +108,10 @@ pub enum ApprovalState {
 impl Display for ApprovalState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let string = match self {
-            ApprovalState::RespondedAccepted => "RespondedAccepted".to_owned(),
-            ApprovalState::RespondedRejected => "RespondedRejected".to_owned(),
-            ApprovalState::Obsolete => "Obsolete".to_owned(),
-            ApprovalState::Pending => "Pending".to_owned(),
+            ApprovalState::Accepted => "accepted".to_owned(),
+            ApprovalState::Rejected => "rejected".to_owned(),
+            ApprovalState::Obsolete => "obsolete".to_owned(),
+            ApprovalState::Pending => "pending".to_owned(),
         };
         write!(f, "{}", string,)
     }
@@ -93,7 +135,7 @@ pub enum BridgeEventRequest {
     Create(BridgeCreateRequest),
     Fact(BridgeFactRequest),
     Transfer(BridgeTransferRequest),
-    EOL(BridgeEOLRequest),
+    Eol(BridgeEOLRequest),
     Confirm(BridgeConfirmRequest),
     Reject(BridgeRejectRequest),
 }

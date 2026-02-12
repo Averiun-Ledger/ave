@@ -129,6 +129,8 @@ impl TestServer {
         "keys_path": "{keys_path}",
         "prometheus": "127.0.0.1:0",
         "node": {{
+            "is_service": true,
+            "tracking_size": 200,
             "always_accept": {always_accept},
             "ave_db": "{ave_db_path}",
             "external_db": "{external_db_path}",

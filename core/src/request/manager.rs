@@ -4,6 +4,7 @@ use ave_actors::{
     Message,
 };
 use ave_actors::{LightPersistence, PersistentActor};
+use ave_common::bridge::request::EventRequestType;
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
 };
@@ -35,7 +36,6 @@ use crate::model::common::subject::{
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
 };
-use crate::model::request::EventRequestType;
 use crate::node::SubjectData;
 use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;

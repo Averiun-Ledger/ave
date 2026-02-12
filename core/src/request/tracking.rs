@@ -7,7 +7,7 @@ use ave_actors::{
 };
 use ave_common::{
     identity::DigestIdentifier,
-    response::{RequestInfo, RequestState},
+    response::{RequestInfo, RequestInfoExtend, RequestState},
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use lru::LruCache;
@@ -48,7 +48,7 @@ pub enum RequestTrackingMessage {
 #[derive(Debug, Clone)]
 pub enum RequestTrackingResponse {
     Ok,
-    AllInfo(Vec<RequestInfo>),
+    AllInfo(Vec<RequestInfoExtend>),
     Info(RequestInfo),
     NotFound,
 }
@@ -103,7 +103,7 @@ impl Handler<RequestTracking> for RequestTracking {
                     "Retrieving all tracked requests"
                 );
                 Ok(RequestTrackingResponse::AllInfo(
-                    self.cache.iter().map(|x| x.1.clone()).collect(),
+                    self.cache.iter().map(|x| RequestInfoExtend { request_id: x.0.to_string(), state: x.1.state.clone(), version: x.1.version.clone() }).collect(),
                 ))
             }
             RequestTrackingMessage::UpdateState { request_id, state } => {

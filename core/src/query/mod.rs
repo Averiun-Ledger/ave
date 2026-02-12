@@ -5,7 +5,7 @@ use ave_actors::{
     Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::{identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange}};
+use ave_common::{bridge::request::EventRequestType, identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange}};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, info_span};
 
@@ -33,6 +33,7 @@ pub enum QueryMessage {
         event_request_ts: Option<TimeRange>,
         event_ledger_ts: Option<TimeRange>,
         sink_ts: Option<TimeRange>,
+        event_type: Option<EventRequestType>
     },
     GetAborts {
         subject_id: DigestIdentifier,
@@ -50,6 +51,7 @@ pub enum QueryMessage {
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
+        event_type: Option<EventRequestType>
     },
     GetSubject {
         subject_id: DigestIdentifier,
@@ -97,8 +99,8 @@ impl Handler<Query> for Query {
         _ctx: &mut ave_actors::ActorContext<Query>,
     ) -> Result<QueryResponse, ActorError> {
         match msg {
-            QueryMessage::GetEvents { subject_id, quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts } => {
-                match self.db.get_events(&subject_id.to_string(), quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts).await {
+            QueryMessage::GetEvents { subject_id, quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type } => {
+                match self.db.get_events(&subject_id.to_string(), quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type).await {
                     Ok(data) => Ok(QueryResponse::PagEvents(data)),
                     Err(e) => Ok(QueryResponse::Error(e.to_string()))
                 }
@@ -115,8 +117,8 @@ impl Handler<Query> for Query {
                     Err(e) => Ok(QueryResponse::Error(e.to_string()))
                 }
             },
-            QueryMessage::GetFirstOrEndEvents { subject_id, quantity, reverse } => {
-                match self.db.get_first_or_end_events(&subject_id.to_string(), quantity, reverse).await {
+            QueryMessage::GetFirstOrEndEvents { subject_id, quantity, reverse, event_type } => {
+                match self.db.get_first_or_end_events(&subject_id.to_string(), quantity, reverse, event_type).await {
                     Ok(data) => Ok(QueryResponse::Events(data)),
                     Err(e) => Ok(QueryResponse::Error(e.to_string()))
                 }

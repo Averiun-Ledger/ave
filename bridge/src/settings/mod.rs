@@ -1,5 +1,5 @@
 use config::Config;
-use tracing::error;
+use tracing::{error, warn};
 
 pub mod command;
 use crate::config::Config as BridgeConfig;
@@ -14,12 +14,12 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
         config = config.add_source(config::File::with_name(file));
 
         let config = config.build().map_err(|e| {
-            error!(error = %e, "Failed to build configuration");
+            error!(file = %file, error = %e, "Failed to build configuration");
             BridgeError::ConfigBuild(e.to_string())
         })?;
 
         bridge_config = config.try_deserialize().map_err(|e| {
-            error!(error = %e, "Failed to deserialize configuration");
+            error!(file = %file, error = %e, "Failed to deserialize configuration");
             BridgeError::ConfigDeserialize(e.to_string())
         })?;
     }
@@ -32,25 +32,23 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
 }
 
 /// Validate HTTPS configuration consistency
-fn validate_https_config(config: &BridgeConfig) -> Result<(), Error> {
+fn validate_https_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     let http = &config.http;
 
-    // If HTTPS is enabled, cert paths are required
-    if http.https_address.is_some() {
-        if http.https_cert_path.is_none() || http.https_private_key_path.is_none() {
-            let e = "HTTPS is enabled (https_address is set) but https_cert_path and/or \
-                     https_private_key_path are missing. Both are required for HTTPS.";
-            error!(TARGET_SETTING, e);
-            return Err(Error::Bridge(e.to_string()));
-        }
+    if http.https_address.is_some()
+        && (http.https_cert_path.is_none()
+            || http.https_private_key_path.is_none())
+    {
+        let msg = "HTTPS is enabled (https_address is set) but https_cert_path \
+                   and/or https_private_key_path are missing";
+        error!(error = %msg, "Invalid HTTPS configuration");
+        return Err(BridgeError::ConfigBuild(msg.to_owned()));
     }
 
-    // Warn if self_signed_cert is enabled but HTTPS is not
     if http.self_signed_cert.enabled && http.https_address.is_none() {
-        tracing::warn!(
-            target: TARGET_SETTING,
-            "self_signed_cert.enabled is true but https_address is not set. \
-             Self-signed certificates will not be used."
+        warn!(
+            "self_signed_cert.enabled is true but https_address is not set, \
+             self-signed certificates will not be used"
         );
     }
 

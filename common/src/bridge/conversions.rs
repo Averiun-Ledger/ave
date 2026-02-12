@@ -50,7 +50,7 @@ impl From<EventRequest> for BridgeEventRequest {
             EventRequest::Transfer(req) => {
                 BridgeEventRequest::Transfer(req.into())
             }
-            EventRequest::EOL(req) => BridgeEventRequest::EOL(req.into()),
+            EventRequest::EOL(req) => BridgeEventRequest::Eol(req.into()),
             EventRequest::Confirm(req) => {
                 BridgeEventRequest::Confirm(req.into())
             }
@@ -73,7 +73,7 @@ impl TryFrom<BridgeEventRequest> for EventRequest {
             BridgeEventRequest::Transfer(req) => {
                 Ok(EventRequest::Transfer(req.try_into()?))
             }
-            BridgeEventRequest::EOL(req) => {
+            BridgeEventRequest::Eol(req) => {
                 Ok(EventRequest::EOL(req.try_into()?))
             }
             BridgeEventRequest::Confirm(req) => {
@@ -106,26 +106,22 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
     type Error = ConversionError;
 
     fn try_from(request: BridgeCreateRequest) -> Result<Self, Self::Error> {
-        let governance_id = request
-            .governance_id
-            .ok_or(ConversionError::MissingGovernanceId)?;
-
-        let governance_id = DigestIdentifier::from_str(&governance_id)
-            .map_err(|e| ConversionError::InvalidGovernanceId(e.to_string()))?;
+        let governance_id = if let Some(governance_id) = request
+            .governance_id {
+                DigestIdentifier::from_str(&governance_id)
+            .map_err(|e| ConversionError::InvalidGovernanceId(e.to_string()))?
+            } else {
+                DigestIdentifier::default()
+            };
 
         let schema_id = SchemaType::from_str(&request.schema_id)
             .map_err(ConversionError::InvalidSchemaId)?;
 
-        let namespace =
-            request.namespace.ok_or(ConversionError::MissingNamespace)?;
-
-        let namespace = Namespace::from(namespace);
-
-        if !namespace.check() {
-            return Err(ConversionError::InvalidNamespace(
-                "Namespace validation failed".to_string(),
-            ));
-        }
+        let namespace = if let Some(namespace) = request.namespace {
+            Namespace::from(namespace)
+        } else {
+            Namespace::new()
+        };
 
         Ok(CreateRequest {
             name: request.name,

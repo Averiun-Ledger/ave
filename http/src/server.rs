@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     auth::{
@@ -7,666 +7,767 @@ use crate::{
         models::{AuthContext, ErrorResponse},
         system_handlers,
     },
-    error::Error,
+    config_types::ConfigHttp,
+    error::HttpError,
+};
+
+use ave_bridge::ave_common::{
+    bridge::request::{BridgeSignedEventRequest, EventRequestType}, response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
 use ave_bridge::{
-    ApproveInfo, EventInfo, GovsData, PaginatorEvents, RequestData,
-    RequestInfo, SignaturesInfo, SubjectInfo, SubjsData, TransferSubject,
+    Bridge, MonitorNetworkState,
+    ave_common::{
+        bridge::request::{ApprovalState, ApprovalStateRes},
+        response::{
+            GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
+            RequestInfo, RequestsInManager, RequestsInManagerSubject,
+            SubjectDB, SubjsData, TimeRange, TransferSubject,
+        },
+    },
 };
-use ave_bridge::{Bridge, BridgeSignedEventRequest};
 use axum::{
     Extension, Json, Router,
     body::Body,
     extract::{FromRequestParts, Path, Query},
-    http::{Request, StatusCode, header},
+    http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use bytes::Bytes;
-use serde::Deserialize;
+use serde::{Deserialize};
 use tower::ServiceBuilder;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 pub struct SubjectQuery {
-    active: Option<bool>,
-    schema: Option<String>,
+    pub active: Option<bool>,
+    pub schema_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 pub struct GovQuery {
-    active: Option<bool>,
+    pub active: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct ApprovalQuery {
+    pub state: Option<ApprovalState>,
+}
+
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 pub struct EventsQuery {
-    quantity: Option<u64>,
-    page: Option<u64>,
-    reverse: Option<bool>,
+    pub quantity: Option<u64>,
+    pub page: Option<u64>,
+    pub reverse: Option<bool>,
+    #[param(style = DeepObject, explode)]
+    pub event_request_ts: Option<TimeRange>,
+    #[param(style = DeepObject, explode)]
+    pub event_ledger_ts: Option<TimeRange>,
+    #[param(style = DeepObject, explode)]
+    pub sink_ts: Option<TimeRange>,
+    pub event_type: Option<EventRequestType>
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-pub struct EventSnQuery {
-    sn: u64,
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct AbortsQuery {
+    pub request_id: Option<String>,
+    pub sn: Option<u64>,
+    pub quantity: Option<u64>,
+    pub page: Option<u64>,
+    pub reverse: Option<bool>,
 }
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-pub struct EventFirstLastQuery {
-    quantity: Option<u64>,
-    success: Option<bool>,
-    reverse: Option<bool>,
+
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct FirstEndEvents {
+    pub quantity: Option<u64>,
+    pub reverse: Option<bool>,
+    pub event_type: Option<EventRequestType>
 }
 
 use crate::doc::ApiDoc;
 use axum::http::Method;
 use utoipa::OpenApi;
-use utoipa_rapidoc::RapiDoc;
+use utoipa_swagger_ui::SwaggerUi;
 
-/// Send Event Request
+///////// General
+////////////////////////////
+
+/// Get peer ID
 ///
-/// Allows sending an event request for a subject to the Ave node.
-/// These requests can be of any type of event (fact, creation, transfer, or end of life).
-/// In case of external invocation, the requests can be signed.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The Bridge extension wrapped in an `Arc`.
-/// * `Json(request): Json<BridgeSignedEventRequest>` - The signed event request in JSON format.
-///
-/// # Returns
-///
-/// * `Result<Json<RequestData>, Error>` - The response to the event request wrapped in a JSON object, or an error.
-#[ utoipa::path(
-    post,
-    path = "/event-request",
-    operation_id = "Send Event Request",
-    tag = "Request",
-    request_body(content = String, content_type = "application/json", description = "The signed event request"),
+/// Returns the libp2p peer identifier of this node.
+#[utoipa::path(
+    get,
+    path = "/peer-id",
+    operation_id = "getPeerId",
+    tag = "Node",
     responses(
-        (status = 200, description = "Request Created Successfully", body = RequestData,
-        example = json!(
-            {
-                "request_id":"JemKGBkBjpV5Q34zL-KItY9g-RuY4_QJIn0PpIjy0e_E",
-                "subject_id":"Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w"
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "The libp2p peer ID of this node", body = String),
+    ),
+    security(("api_key" = []))
 )]
-async fn send_event_request(
+pub(crate) async fn get_peer_id(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Json<String> {
+    Json(bridge.get_peer_id().to_string())
+}
+
+/// Get public key
+///
+/// Returns the cryptographic public key of this node.
+#[utoipa::path(
+    get,
+    path = "/public-key",
+    operation_id = "getPublicKey",
+    tag = "Node",
+    responses(
+        (status = 200, description = "The public key of this node", body = String),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_public_key(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Json<String> {
+    Json(bridge.get_public_key().to_string())
+}
+
+/// Get node configuration
+///
+/// Returns the current configuration of the node.
+#[utoipa::path(
+    get,
+    path = "/config",
+    operation_id = "getConfig",
+    tag = "Node",
+    responses(
+        (status = 200, description = "Current node configuration", body = ConfigHttp),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_config(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Json<ConfigHttp> {
+    Json(ConfigHttp::from(bridge.get_config()))
+}
+
+///////// Network
+////////////////////////////
+
+/// Get network state
+///
+/// Returns the current state of the P2P network connections.
+#[utoipa::path(
+    get,
+    path = "/network-state",
+    operation_id = "getNetworkState",
+    tag = "Node",
+    responses(
+        (status = 200, description = "Current network state", body = MonitorNetworkState),
+        (status = 502, description = "Network error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_network_state(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<MonitorNetworkState>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_network_state()
+            .await?,
+    ))
+}
+
+///////// Request
+////////////////////////////
+
+/// Get all requests in manager
+///
+/// Returns all event requests currently being processed by the request manager.
+#[utoipa::path(
+    get,
+    path = "/requests-in-manager",
+    operation_id = "getRequestsInManager",
+    tag = "Request",
+    responses(
+        (status = 200, description = "All requests currently being managed", body = RequestsInManager),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_requests_in_manager(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<RequestsInManager>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_requests_in_manager()
+            .await?,
+    ))
+}
+
+/// Get requests in manager by subject
+///
+/// Returns event requests for a specific subject currently being processed.
+#[utoipa::path(
+    get,
+    path = "/requests-in-manager/{subject_id}",
+    operation_id = "getRequestsInManagerBySubject",
+    tag = "Request",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Requests for the specified subject", body = RequestsInManagerSubject),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_requests_in_manager_subject_id(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<RequestsInManagerSubject>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_requests_in_manager_subject_id(subject_id)
+            .await?,
+    ))
+}
+
+/// Submit an event request
+///
+/// Submits a signed event request to the ledger. Supports create, fact, transfer,
+/// confirm, reject, and EOL event types.
+#[utoipa::path(
+    post,
+    path = "/request",
+    operation_id = "postEventRequest",
+    tag = "Request",
+    request_body = BridgeSignedEventRequest,
+    responses(
+        (status = 200, description = "Event request accepted", body = RequestData),
+        (status = 400, description = "Invalid event request", body = ErrorResponse),
+        (status = 409, description = "Conflict with current state", body = ErrorResponse),
+        (status = 422, description = "Validation failed", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn post_event_request(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
-) -> Result<Json<RequestData>, Error> {
+) -> Result<Json<RequestData>, HttpError> {
     Ok(Json(
         bridge
-            .send_event_request(request)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .post_event_request(request)
+            .await?,
     ))
 }
 
-/// Request State
+/// Get approval for a subject
 ///
-/// Allows obtaining an event request by its identifier.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(request_id): Path<String>` - The identifier of the event request as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<RequestInfo>, Error>` - returns an Ok in a JSON or an error
+/// Returns the pending approval request for a specific subject, optionally filtered by state.
 #[utoipa::path(
     get,
-    path = "/event-request/{request-id}",
-    operation_id = "Request State",
-    tag = "Request",
+    path = "/approval/{subject_id}",
+    operation_id = "getApproval",
+    tag = "Approval",
     params(
-        ("request-id" = String, Path, description = "Event Request's unique id"),
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        ApprovalQuery
     ),
     responses(
-        (status = 200, description = "Request Data successfully retrieved", body = RequestInfo,
-        example = json!(
-            {
-                "status": "Finish",
-                "version": 0,
-                "error": null
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "Approval details for the subject", body = Option<ApprovalEntry>),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Approval not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_request_state(
+pub(crate) async fn get_approval(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Query(parameters): Query<ApprovalQuery>,
+) -> Result<Json<Option<ApprovalEntry>>, HttpError> {
+    Ok(Json(bridge
+        .get_approval(subject_id, parameters.state)
+        .await?))
+}
+
+/// List all approvals
+///
+/// Returns all pending approval requests, optionally filtered by state.
+#[utoipa::path(
+    get,
+    path = "/approval",
+    operation_id = "getApprovals",
+    tag = "Approval",
+    params(ApprovalQuery),
+    responses(
+        (status = 200, description = "List of all approvals", body = Vec<ApprovalEntry>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_approvals(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Query(parameters): Query<ApprovalQuery>,
+) -> Result<Json<Vec<ApprovalEntry>>, HttpError> {
+    Ok(Json(bridge
+        .get_approvals(parameters.state)
+        .await?))
+}
+
+/// Update approval state
+///
+/// Approves or rejects a pending approval for the specified subject.
+#[utoipa::path(
+    patch,
+    path = "/approval/{subject_id}",
+    operation_id = "patchApproval",
+    tag = "Approval",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    request_body = ApprovalStateRes,
+    responses(
+        (status = 200, description = "Approval state updated", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Approval not found", body = ErrorResponse),
+        (status = 409, description = "Invalid approval state transition", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn patch_approve(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Json(state): Json<ApprovalStateRes>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(
+        bridge
+            .patch_approve(subject_id, state)
+            .await?,
+    ))
+}
+
+/// Abort a pending request
+///
+/// Manually aborts a pending event request for the specified subject.
+#[utoipa::path(
+    post,
+    path = "/request-abort/{subject_id}",
+    operation_id = "postManualRequestAbort",
+    tag = "Approval",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Request aborted successfully", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn post_manual_request_abort(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(
+        bridge
+            .post_manual_request_abort(subject_id)
+            .await?,
+    ))
+}
+
+///////// Tracking
+////////////////////////////
+
+/// Get request state
+///
+/// Returns the current lifecycle state of a specific event request.
+#[utoipa::path(
+    get,
+    path = "/request/{request_id}",
+    operation_id = "getRequestState",
+    tag = "Tracking",
+    params(
+        ("request_id" = String, Path, description = "Request identifier")
+    ),
+    responses(
+        (status = 200, description = "Current state of the request", body = RequestInfo),
+        (status = 400, description = "Invalid request ID", body = ErrorResponse),
+        (status = 404, description = "Request not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
-) -> Result<Json<RequestInfo>, Error> {
+) -> Result<Json<RequestInfo>, HttpError> {
     Ok(Json(
         bridge
             .get_request_state(request_id)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .await?,
     ))
 }
 
-/// Approvals
+/// List all request states
 ///
-/// Allows obtaining the list of requests for approvals received by the node.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<ApproveInfo>, Error>` - returns an Ok in a JSON or an error
+/// Returns the lifecycle state of all tracked event requests.
 #[utoipa::path(
     get,
-    path = "/approval-request/{subject_id}",
-    operation_id = "One Approval Request Data",
-    tag = "Approval",
-    params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
-    ),
+    path = "/request",
+    operation_id = "getAllRequestStates",
+    tag = "Tracking",
     responses(
-        (status = 200, description = "Approval Data successfully retrieved", body = ApproveInfo),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "All tracked request states", body = Vec<RequestInfoExtend>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_approval(
+pub(crate) async fn get_all_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<ApproveInfo>, Error> {
+) -> Result<Json<Vec<RequestInfoExtend>>, HttpError> {
     Ok(Json(
         bridge
-            .get_approval(subject_id)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .get_all_request_state()
+            .await?,
+    ))
+}
+///////// Node
+////////////////////////////
+
+/// Get pending transfers
+///
+/// Returns all subjects with pending ownership transfers.
+#[utoipa::path(
+    get,
+    path = "/pending-transfers",
+    operation_id = "getPendingTransfers",
+    tag = "Transfer",
+    responses(
+        (status = 200, description = "List of pending transfers", body = Vec<TransferSubject>),
+        (status = 404, description = "No pending transfers", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_pending_transfers(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<TransferSubject>>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_pending_transfers()
+            .await?,
     ))
 }
 
-/// Approval
-///
-/// Allows issuing an affirmative or negative approval for a previously received request.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` -The identifier of the subject as a path parameter.
-/// * `Json(response): Json<String>` - The response (approval or rejection) in JSON format
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - The approval request in JSON format or an error if the request fails.
-#[ utoipa::path(
-    patch,
-    path = "/approval-request/{subject_id}",
-    operation_id = "Set your Approval for a request",
-    tag = "Approval",
-    request_body(content = String, content_type = "application/json", description = "Vote of the user for an existing request"),
-    params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
-    ),
-    responses(
-        (status = 200, description = "Request successfully voted", body = String,
-        example = json!(
-            "The approval request for subject Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w has changed to RespondedAccepted"
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn patch_approval(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Json(response): Json<String>,
-) -> Result<Json<String>, Error> {
-    match bridge.patch_approve(subject_id, response).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
+///////// Auth
+////////////////////////////
 
-/// Authorization
+/// Set witnesses for a subject
 ///
-/// Given a subject identifier and one or more witnesses, the witnesses authorize the subject to send them copy of the logs
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject to be authorized as a path parameter.
-/// * `Json(witnesses): Json<Vec<String>>` - The witnesses who will receive the copy of the logs in JSON format
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - The result of the approval as a JSON object or an error if the request fails.
-#[  utoipa::path(
+/// Configures the witness public keys authorized to approve events for the specified subject.
+#[utoipa::path(
     put,
     path = "/auth/{subject_id}",
-    operation_id = "Authorization",
-    tag = "Auth",
-    request_body(content = String, content_type = "application/json", description = "witnesses"),
+    operation_id = "putAuthSubject",
+    tag = "Authorization",
     params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
+        ("subject_id" = String, Path, description = "Subject identifier")
     ),
+    request_body = Vec<String>,
     responses(
-        (status = 200, description = "The result of the approval as a JSON object", body = String,
-        example = json!(
-            "Ok"
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "Witnesses set for subject", body = String),
+        (status = 400, description = "Invalid subject ID or public key", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn put_auth(
+pub(crate) async fn put_auth_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
-) -> Result<Json<String>, Error> {
-    match bridge.put_auth_subject(subject_id, witnesses).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Authorized Subjects
-///
-/// Allows obtaining the list of subjects that have been authorized by the node
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-///
-/// # Returns
-///
-/// * `Result<Json<Vec<String>>, Error>` - A list of authorized subjects in JSON format or an error if the request fails.
-#[ utoipa::path(
-    get,
-    path = "/auth",
-    operation_id = "Authorized subjects",
-    tag = "Auth",
-    responses(
-        (status = 200, description = "A list of authorized subjects in JSON ", body = [String],
-        example = json!(
-            [
-                "J6blziscpjD0pJXsRh6_ooPtBsvwEZhx-xO4hT7WoKg0"
-            ]
-        )),
-        (status = 500, description = "Internal Server Error", body = String),
-    )
-)]
-async fn get_all_auth_subjects(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Result<Json<Vec<String>>, Error> {
-    match bridge.get_all_auth_subjects().await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Witnesses Subject
-///
-/// Obtains a subject's witnesses
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<Vec<String>>, Error>` - a list of witness nodes in Json format or an error
-#[ utoipa::path(
-    get,
-    path = "/auth/{subject_id}",
-    operation_id = "Witnesses Subject",
-    tag = "Auth",
-    params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
-    ),
-    responses(
-        (status = 200, description = "A list of witness nodes in Json", body = [String],
-        example = json!(
-            [
-            "EehaWh_CuYvvvjr0dKUKRYMyCFJvDzumcLnUcUbIWwks"
-            ]
-        )),
-        (status = 500, description = "Internal Server Error", body = String,  example = json!(
-            "Api error: Can not get witnesses of subjects: Error: The subject has not been authorized"
-        )),
-    )
-)]
-async fn get_witnesses_subject(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<Vec<String>>, Error> {
-    match bridge.get_witnesses_subject(subject_id).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Authorized Subjects
-///
-/// Deletes an authorized subject given its identifier
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - Ok in JSON format or an error if the request fails.
-#[ utoipa::path(
-    delete,
-    path = "/auth/{subject_id}",
-    operation_id = "Authorized Subjects",
-    tag = "Auth",
-    params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
-    ),
-    responses(
-        (status = 200, description = "Ok in JSON format", body = String,
-        example = json!(
-            "Ok"
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn delete_auth_subject(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<String>, Error> {
-    match bridge.delete_auth_subject(subject_id).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Update Subject
-///
-/// Updates an authorized subject given its identifier
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - A message in JSON format or an error if the request fails.
-#[ utoipa::path(
-    post,
-    path = "/update/{subject_id}",
-    operation_id = "Update Subject",
-    tag = "Update",
-    params(
-        ("subject_id" = String, Path, description = "Subjects unique id"),
-    ),
-    responses(
-        (status = 200, description = "Subject Data successfully retrieved", body = String,
-        example = json!(
-            "Update in progress"
-        )),
-        (status = 500, description = "Internal Server Error", body = String, example = json!(
-            "Api error: Can not update subject: Error: The subject has not been authorized"
-        )),
-    )
-)]
-async fn update_subject(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<String>, Error> {
-    match bridge.update_subject(subject_id).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Check Transfer
-///
-/// Check transfer event for subject given its identifier
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - A message in JSON format or an error if the request fails.
-#[ utoipa::path(
-    post,
-    path = "/check-transfer/{subject_id}",
-    operation_id = "Check transfer",
-    tag = "Transfer",
-    params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-    ),
-    responses(
-        (status = 200, description = "Subject Data successfully retrieved", body = String),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn check_transfer(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<String>, Error> {
-    match bridge.check_transfer(subject_id).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// Update Manual Distribution
-///
-/// Throw to witnesses the last distribution of a subject
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<String>, Error>` - A message in JSON format or an error if the request fails.
-#[ utoipa::path(
-    post,
-    path = "/manual-distribution/{subject_id}",
-    operation_id = "Update Manual Distribution",
-    tag = "Update",
-    params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-    ),
-    responses(
-        (status = 200, description = "Subject Data successfully retrieved", body = String,
-        example = json!(
-            "Manual update in progress"
-        )
-        ),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn manual_distribution(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<String>, Error> {
-    match bridge.manual_distribution(subject_id).await {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => Err(Error::Ave(e.to_string())),
-    }
-}
-
-/// All Governances
-///
-/// Gets all the governorships to which the node belongs
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Query(parameters): Query<GovQuery>` - The query parameters for the request.
-///
-/// # Returns
-///
-/// * `Result<Json<Vec<GovsData>>, Error>` - A JSON with governance information or an error if the request fails.
-#[ utoipa::path(
-    get,
-    path = "/register-governances",
-    operation_id = "All Governances",
-    tag = "Governance",
-    params(
-        ("parameters" = GovQuery, Query, description = "The query parameters for the request"),
-    ),
-    responses(
-        (status = 200, description = "Gets all the governorships to which the node belongs", body = [GovsData],
-        example = json!(
-            [
-                {
-                    "governance_id": "JUH9HGYpqMgN3D3Wb43BCPKdb38K1ocDauupuvCN0plM",
-                    "active": true
-                },
-                {
-                    "governance_id": "Jl9LVUi8uVBmV9gitxEiiVeSWxEceZoOYT-Kx-t9DTVE",
-                    "active": true
-                }
-            ]
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_all_govs(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Query(parameters): Query<GovQuery>,
-) -> Result<Json<Vec<GovsData>>, Error> {
+) -> Result<Json<String>, HttpError> {
     Ok(Json(
         bridge
-            .get_all_govs(parameters.active)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .put_auth_subject(subject_id, witnesses)
+            .await?,
     ))
 }
 
-/// All Subjects
+/// List all authorized subjects
 ///
-/// Allows obtaining the list of subjects known by the node with pagination.
-/// It can also be used to obtain only the governances and all subjects belonging to a specific governance.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(governance_id): Path<String>` - The identifier of the governance as a path parameter.
-/// * `Query(parameters): Query<SubjectQuery>` - The query parameters for the request.
-///
-/// # Returns
-///
-/// * `Result<Json<Vec<RegisterData>>, Error>` - A list of subjects in JSON format or an error if the request fails.
-#[  utoipa::path(
+/// Returns the IDs of all subjects with authorization rules configured.
+#[utoipa::path(
     get,
-    path = "/register-subjects/{governance_id}",
-    operation_id = "All Subjects",
-    tag = "Subject",
+    path = "/auth",
+    operation_id = "getAllAuthSubjects",
+    tag = "Authorization",
+    responses(
+        (status = 200, description = "List of subject IDs with authorization rules", body = Vec<String>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_all_auth_subjects(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_all_auth_subjects()
+            .await?,
+    ))
+}
+
+/// Get witnesses for a subject
+///
+/// Returns the set of witness public keys configured for the specified subject.
+#[utoipa::path(
+    get,
+    path = "/auth/{subject_id}",
+    operation_id = "getWitnessesSubject",
+    tag = "Authorization",
     params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-        ("parameters" = SubjectQuery, Query, description = "The query parameters for the request"),
+        ("subject_id" = String, Path, description = "Subject identifier")
     ),
     responses(
-        (status = 200, description = "Subjects Data successfully retrieved", body = [SubjsData],
-        example = json!(
-            [
-                {
-                    "subject_id": "JukqvNApVZMlEBI5DrZlZWEUgZs9vdEC6MEmmAQpwmns",
-                    "schema": "Test",
-                    "active": true
-                }
-            ]
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "Set of witness public keys", body = Vec<String>),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Witnesses not found for subject", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_all_subjects(
+pub(crate) async fn get_witnesses_subject(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<HashSet<String>>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_witnesses_subject(subject_id)
+            .await?,
+    ))
+}
+
+/// Delete authorization for a subject
+///
+/// Removes all authorization rules for the specified subject.
+#[utoipa::path(
+    delete,
+    path = "/auth/{subject_id}",
+    operation_id = "deleteAuthSubject",
+    tag = "Authorization",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Authorization rules deleted", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn delete_auth_subject(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(
+        bridge
+            .delete_auth_subject(subject_id)
+            .await?,
+    ))
+}
+
+/// Trigger subject update
+///
+/// Triggers a manual synchronization update for the specified subject.
+#[utoipa::path(
+    post,
+    path = "/update/{subject_id}",
+    operation_id = "postUpdateSubject",
+    tag = "Authorization",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Subject update triggered", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn post_update_subject(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(
+        bridge
+            .post_update_subject(subject_id)
+            .await?,
+    ))
+}
+
+///////// manual distribution
+////////////////////////////
+
+/// Trigger manual distribution
+///
+/// Manually triggers event distribution to network peers for the specified subject.
+#[utoipa::path(
+    post,
+    path = "/manual-distribution/{subject_id}",
+    operation_id = "postManualDistribution",
+    tag = "Distribution",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Manual distribution triggered", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn post_manual_distribution(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(
+        bridge
+            .post_manual_distribution(subject_id)
+            .await?,
+    ))
+}
+
+///////// Register
+////////////////////////////
+
+/// List all governances
+///
+/// Returns all governance structures, optionally filtered by active status.
+#[utoipa::path(
+    get,
+    path = "/subjects",
+    operation_id = "getAllGovs",
+    tag = "Register",
+    params(GovQuery),
+    responses(
+        (status = 200, description = "List of governances", body = Vec<GovsData>),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_all_govs(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Query(parameters): Query<GovQuery>,
+) -> Result<Json<Vec<GovsData>>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_all_govs(parameters.active)
+            .await?,
+    ))
+}
+
+/// List subjects under a governance
+///
+/// Returns all subjects belonging to the specified governance, optionally
+/// filtered by active status and schema ID.
+#[utoipa::path(
+    get,
+    path = "/subjects/{governance_id}",
+    operation_id = "getAllSubjs",
+    tag = "Register",
+    params(
+        ("governance_id" = String, Path, description = "Governance identifier"),
+        SubjectQuery
+    ),
+    responses(
+        (status = 200, description = "List of subjects under the governance", body = Vec<SubjsData>),
+        (status = 400, description = "Invalid governance ID", body = ErrorResponse),
+        (status = 404, description = "Governance not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_all_subjs(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(governance_id): Path<String>,
     Query(parameters): Query<SubjectQuery>,
-) -> Result<Json<Vec<SubjsData>>, Error> {
+) -> Result<Json<Vec<SubjsData>>, HttpError> {
     Ok(Json(
         bridge
-            .get_all_subjs(governance_id, parameters.active, parameters.schema)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .get_all_subjs(
+                governance_id,
+                parameters.active,
+                parameters.schema_id,
+            )
+            .await?,
     ))
 }
 
-/// Subject Events
+///////// Query
+////////////////////////////
+
+/// Get events for a subject
 ///
-/// Allows obtaining specific events of a subject by its identifier.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-/// * `Query(parameters): Query<EventsQuery>` - The pagination parameters for the request.
-///
-/// # Returns
-///
-/// * `Result<Json<PaginatorEvents>, Error>` - A list of events in JSON format or an error if the request fails.
-#[ utoipa::path(
+/// Returns a paginated list of events for the specified subject with optional
+/// time range filters.
+#[utoipa::path(
     get,
     path = "/events/{subject_id}",
-    operation_id = "Subject Events",
-    tag = "Event",
+    operation_id = "getEvents",
+    tag = "Ledger",
     params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-        ("parameters" = EventsQuery, Query, description = "The query parameters for the request"),
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        EventsQuery
     ),
     responses(
-        (status = 200, description = "Allows obtaining specific events of a subject by its identifier.", body = [PaginatorEvents],
-        example = json!(
-            {
-                "events": [
-                    {
-                        "patch": "[]",
-                        "error": null,
-                        "event_req": {
-                            "Create": {
-                                "governance_id": "",
-                                "namespace": [],
-                                "schema_id": "governance"
-                            }
-                        },
-                        "sn": 0,
-                        "subject_id": "Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w",
-                        "succes": true
-                    }
-                ],
-                "paginator": {
-                    "next": null,
-                    "pages": 1,
-                    "prev": null
-                }
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "Paginated list of events", body = PaginatorEvents),
+        (status = 400, description = "Invalid subject ID or query params", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_events(
+pub(crate) async fn get_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
     Query(parameters): Query<EventsQuery>,
-) -> Result<Json<PaginatorEvents>, Error> {
+) -> Result<Json<PaginatorEvents>, HttpError> {
     Ok(Json(
         bridge
             .get_events(
@@ -674,511 +775,154 @@ async fn get_events(
                 parameters.quantity,
                 parameters.page,
                 parameters.reverse,
+                parameters.event_request_ts,
+                parameters.event_ledger_ts,
+                parameters.sink_ts,
+                parameters.event_type
             )
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .await?,
     ))
 }
 
-/// Subject State
+/// Get aborts for a subject
 ///
-/// Allows obtaining specific state of a subject by its identifier.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<SubjectInfo>, Error>` -the state of the subject in JSON format or an error if the request fails.
+/// Returns a paginated list of aborted events for the specified subject.
 #[utoipa::path(
     get,
-    path = "/state/{subject_id}",
-    operation_id = "Subject State",
-    tag = "State",
+    path = "/aborts/{subject_id}",
+    operation_id = "getAborts",
+    tag = "Ledger",
     params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        AbortsQuery
     ),
     responses(
-        (status = 200, description = "Allows obtaining specific state of a subject by its identifier.", body = [SubjectInfo],
-        example = json!(
-            {
-                "active": true,
-                "creator": "E2ZY7GjU14U3m-iAqvhQM6kiG62uqLdBMBwv4J-4tzwI",
-                "genesis_gov_version": 0,
-                "governance_id": "",
-                "namespace": "",
-                "owner": "E2ZY7GjU14U3m-iAqvhQM6kiG62uqLdBMBwv4J-4tzwI",
-                "properties": {
-                    "members": [
-                        {
-                            "id": "E2ZY7GjU14U3m-iAqvhQM6kiG62uqLdBMBwv4J-4tzwI",
-                            "name": "Owner"
-                        }
-                    ],
-                    "policies": [
-                        {
-                            "approve": {
-                                "quorum": "MAJORITY"
-                            },
-                            "evaluate": {
-                                "quorum": "MAJORITY"
-                            },
-                            "id": "governance",
-                            "validate": {
-                                "quorum": "MAJORITY"
-                            }
-                        }
-                    ],
-                    "roles": [
-                        {
-                            "namespace": "",
-                            "role": "WITNESS",
-                            "schema": {
-                                "ID": "governance"
-                            },
-                            "who": "MEMBERS"
-                        },
-                        {
-                            "namespace": "",
-                            "role": "EVALUATOR",
-                            "schema": "ALL",
-                            "who": {
-                                "NAME": "Owner"
-                            }
-                        },
-                        {
-                            "namespace": "",
-                            "role": "ISSUER",
-                            "schema": {
-                                "ID": "governance"
-                            },
-                            "who": {
-                                "NAME": "Owner"
-                            }
-                        },
-                        {
-                            "namespace": "",
-                            "role": "APPROVER",
-                            "schema": {
-                                "ID": "governance"
-                            },
-                            "who": {
-                                "NAME": "Owner"
-                            }
-                        },
-                        {
-                            "namespace": "",
-                            "role": "VALIDATOR",
-                            "schema": "ALL",
-                            "who": {
-                                "NAME": "Owner"
-                            }
-                        },
-                        {
-                            "namespace": "",
-                            "role": "WITNESS",
-                            "schema": "ALL",
-                            "who": {
-                                "NAME": "Owner"
-                            }
-                        }
-                    ],
-                    "schemas": [],
-                    "version": 0
-                },
-                "schema_id": "governance",
-                "sn": 0,
-                "subject_id": "Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w"
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "Paginated list of aborted events", body = PaginatorAborts),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_state(
+pub(crate) async fn get_aborts(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
-) -> Result<Json<SubjectInfo>, Error> {
+    Query(parameters): Query<AbortsQuery>,
+) -> Result<Json<PaginatorAborts>, HttpError> {
     Ok(Json(
         bridge
-            .get_subject(subject_id)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
-    ))
-}
-
-/// Subject Signatures
-///
-/// Allows obtaining signatures of the last event of subject.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-///
-/// # Returns
-///
-/// * `Result<Json<SignaturesInfo>, Error>` - the signature in JSON format or an error if the request fails.
-#[ utoipa::path(
-    get,
-    path = "/signatures/{subject_id}",
-    operation_id = "Subject Signatures",
-    tag = "Signature",
-    params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-    ),
-    responses(
-        (status = 200, description = "the signature in JSON format", body = SignaturesInfo,
-        example = json!(
-            {
-                "signatures_appr": null,
-                "signatures_eval": null,
-                "signatures_vali": [
-                    {
-                        "Signature": {
-                            "content_hash": "JLZZ0vv3xwydlcUSIyS2r1J3f8Gz9R03i6ofLTwltheE",
-                            "signer": "E2ZY7GjU14U3m-iAqvhQM6kiG62uqLdBMBwv4J-4tzwI",
-                            "timestamp": 17346911,
-                            "value": "SEySTR3fRiBzlps2Zc3r-Yb8HMiCV5kZJtAu7DYt4xczN8ogW5AZhVjhn6EOj3DmsNyBeFaGIHQrnVnPxA8vkBDA"
-                        }
-                    }
-                ],
-                "sn": 0,
-                "subject_id": "Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w"
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_signatures(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-) -> Result<Json<SignaturesInfo>, Error> {
-    Ok(Json(
-        bridge
-            .get_signatures(subject_id)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
-    ))
-}
-
-/// Controller-id
-///
-/// Gets the controller id of the node
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-///
-/// # Returns
-///
-/// * `Json<String>` - Returns the controller-id of the node in a Json
-
-#[ utoipa::path(
-    get,
-    path = "/controller-id",
-    operation_id = "Controller-id",
-    tag = "Other",
-    responses(
-        (status = 200, description = "Gets the controller id of the node",  body = String,
-        example = json!(
-            "E2ZY7GjU14U3m-iAqvhQM6kiG62uqLdBMBwv4J-4tzwI"
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_public_key(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<String> {
-    Json(bridge.public_key().to_string())
-}
-
-/// Peer-id
-///
-/// Gets the peer id of the node
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-///
-/// # Returns
-///
-/// * `Json<String>` - Returns the peer id of the node in a Json
-#[ utoipa::path(
-    get,
-    path = "/peer-id",
-    operation_id = "Peer-id",
-    tag = "Other",
-    responses(
-        (status = 200, description = "Gets the peer id of the node",  body = String,
-        example = json!(
-            "12D3KooWQTjWCGZa2f6ZVkwwcbEb4ghtS49AcssJSrATFBNxDpR7"
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_peer_id(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<String> {
-    Json(bridge.peer_id().to_string())
-}
-
-/// Config
-///
-/// Get the config of the node
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-///
-/// # Returns
-///
-/// * `Json<ConfigHttp>` - Returns the config of the node
-#[utoipa::path(
-    get,
-    path = "/config",
-    operation_id = "Config",
-    tag = "Other",
-    responses(
-        (status = 200, description = "Obtain config of node", body = crate::config_types::ConfigHttp),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_config(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<crate::config_types::ConfigHttp> {
-    Json(crate::config_types::ConfigHttp::from(bridge.config()))
-}
-
-/// keys
-///
-/// Gets private key of the node
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-///
-/// # Returns
-///
-/// * `Json<String>` - Returns the private key of the node in a Json
-#[ utoipa::path(
-    get,
-    path = "/keys",
-    operation_id = "Keys",
-    tag = "Other",
-    responses(
-        (status = 200, description = "Gets the private key of the node",  body = String),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_keys(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> impl IntoResponse {
-    let keys_path = bridge.config().keys_path.join("node_private.der");
-
-    // Lee el archivo como bytes
-    let keys = match std::fs::read(&keys_path) {
-        Ok(k) => k,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Error reading keys: {}", e),
+            .get_aborts(
+                subject_id,
+                parameters.request_id,
+                parameters.sn,
+                parameters.quantity,
+                parameters.page,
+                parameters.reverse,
             )
-                .into_response();
-        }
-    };
-
-    // Devuelve el archivo DER encriptado directamente
-    let body = Bytes::from(keys);
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = StatusCode::OK;
-    if let Ok(ct) = "application/pkcs8".parse() {
-        response.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
-    if let Ok(disposition) = "attachment; filename=\"node_private.der\"".parse()
-    {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_DISPOSITION, disposition);
-    }
-    response
-}
-
-/// Subject Events with SN
-///
-/// Allows obtaining specific events of a subject by its identifier and sn.
-///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-/// * `Query(parameters): Query<EventSnQuery>` - The query parameters for the request.
-///
-/// # Returns
-///
-/// * `Result<Json<EventInfo>, Error>` - A list of events in JSON format or an error if the request fails.
-#[utoipa::path(
-    get,
-    path = "/event/{subject_id}",
-    operation_id = "Subject Events with SN",
-    tag = "Event",
-    params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-        ("parameters" = EventSnQuery, Query, description = "The query parameters for the request"),
-    ),
-    responses(
-        (status = 200, description = "Allows obtaining specific events of a subject by its identifier and sn", body = [EventInfo],
-        example = json!(
-            {
-                "events": [
-                    {
-                        "patch": "[]",
-                        "error": null,
-                        "event_req": {
-                            "Create": {
-                                "governance_id": "",
-                                "namespace": [],
-                                "schema_id": "governance"
-                            }
-                        },
-                        "sn": 0,
-                        "subject_id": "Jd_vA5Dl1epomG7wyeHiqgKdOIBi28vNgHjRl6hy1N5w",
-                        "succes": true
-                    }
-                ],
-                "paginator": {
-                    "next": null,
-                    "pages": 1,
-                    "prev": null
-                }
-            }
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
-)]
-async fn get_event_sn(
-    _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-    Path(subject_id): Path<String>,
-    Query(parameters): Query<EventSnQuery>,
-) -> Result<Json<EventInfo>, Error> {
-    Ok(Json(
-        bridge
-            .get_event_sn(subject_id, parameters.sn)
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .await?,
     ))
 }
 
-/// First or End Events
+/// Get event by sequence number
 ///
-/// Given a subject id a specific number of events can be obtained, depending on the quantity, reverse and success parameters.
+/// Returns a specific event by its sequence number within a subject's ledger.
+#[utoipa::path(
+    get,
+    path = "/events/{subject_id}/{sn}",
+    operation_id = "getEventSn",
+    tag = "Ledger",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        ("sn" = u64, Path, description = "Event sequence number")
+    ),
+    responses(
+        (status = 200, description = "Event at the given sequence number", body = LedgerDB),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Event not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub(crate) async fn get_event_sn(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path((subject_id, sn)): Path<(String, u64)>,
+) -> Result<Json<LedgerDB>, HttpError> {
+    Ok(Json(
+        bridge
+            .get_event_sn(subject_id, sn)
+            .await?,
+    ))
+}
+
+/// Get first or last events
 ///
-/// # Parameters
-///
-/// * `Extension(bridge): Extension<Arc<Bridge>>` - The bridge extension wrapped in an `Arc`.
-/// * `Path(subject_id): Path<String>` - The identifier of the subject as a path parameter.
-/// * `Query(parameters): Query<EventFirstLastQuery>` - The query parameters for the request.
-///
-/// # Returns
-///
-/// * `Result<Json<EventInfo>, Error>` - A list of events in JSON format or an error if the request fails.
+/// Returns the first or last events for a subject, useful for finding the
+/// genesis event or the latest events.
 #[utoipa::path(
     get,
     path = "/events-first-last/{subject_id}",
-    operation_id = "First or End Events",
-    tag = "Event",
+    operation_id = "getFirstOrEndEvents",
+    tag = "Ledger",
     params(
-        ("subject_id" = String, Path, description =  "Subject unique id"),
-        ("parameters" = EventFirstLastQuery, Query, description = "The query parameters for the request"),
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        FirstEndEvents
     ),
     responses(
-        (status = 200, description = "Allows obtaining specific events of a subject by its identifier and sn", body = [EventInfo],
-        example = json!(
-            [
-            {
-                "subject_id": "JukqvNApVZMlEBI5DrZlZWEUgZs9vdEC6MEmmAQpwmns",
-                "sn": 0,
-                "patch": {
-                    "custom_types": {},
-                    "name": "",
-                    "unit_process": [],
-                    "version": 0
-                },
-                "error": null,
-                "event_req": {
-                    "Create": {
-                        "governance_id": "JecW6BjX8cG-hG4uv2L7nok1G8ABO_4cHhJiDG9qcgF0",
-                        "schema_id": "Test",
-                        "namespace": []
-                    }
-                },
-                "succes": true
-            },
-            ]
-        )),
-        (status = 500, description = "Internal Server Error"),
-    )
+        (status = 200, description = "First and/or last events for the subject", body = Vec<LedgerDB>),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found or no events", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_first_or_end_events(
+pub(crate) async fn get_first_or_end_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
-    Query(parameters): Query<EventFirstLastQuery>,
-) -> Result<Json<Vec<EventInfo>>, Error> {
+    Query(parameters): Query<FirstEndEvents>,
+) -> Result<Json<Vec<LedgerDB>>, HttpError> {
     Ok(Json(
         bridge
             .get_first_or_end_events(
                 subject_id,
                 parameters.quantity,
                 parameters.reverse,
-                parameters.success,
+                parameters.event_type
             )
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .await?,
     ))
 }
 
-/// Pending Transfers
+/// Get subject state
 ///
-/// # Returns
-///
-/// * `Result<Json<Vec<TransferSubject>>, Error>` - A list of pending transfers in JSON format or an error if the request fails.
+/// Returns the current state of a subject including its metadata and properties.
 #[utoipa::path(
-get,
-path = "/pending-transfers",
-operation_id = "Pending Transfers",
-tag = "Transfer",
-responses(
-    (status = 200, description = "Transfers pending to accept or reject", body = [TransferSubject],
-    example = json!(
-        [
-            {
-                "subject_id": "JWFHt_vWYF9mBGENP3AkAo3OEYMyId7M9n_sUubvBRVI",
-                "new_owner": "E8oP5rRi2T5g_Hr7-zVhRbHJ32nvGeBJqrsF7S3uN89Q",
-                "actual_owner": "EKHNpIpmzXI8fIzVUTsfUGMRsB_iGRDKZz4RrErcc4AU"
-            }
-        ]
-    )),
-    (status = 500, description = "Internal Server Error"),
-)
+    get,
+    path = "/state/{subject_id}",
+    operation_id = "getSubjectState",
+    tag = "Ledger",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Current state of the subject", body = SubjectDB),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
 )]
-async fn get_pending_transfers(
+pub(crate) async fn get_subject_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
-) -> Result<Json<Vec<TransferSubject>>, Error> {
+    Path(subject_id): Path<String>,
+) -> Result<Json<SubjectDB>, HttpError> {
     Ok(Json(
         bridge
-            .get_pending_transfers()
-            .await
-            .map_err(|e| Error::Ave(e.to_string()))?,
+            .get_subject_state(subject_id)
+            .await?,
     ))
 }
 
@@ -1190,41 +934,51 @@ pub fn build_routes(
     let bridge = Arc::new(bridge);
 
     let main_routes = Router::new()
-        .route("/signatures/{subject_id}", get(get_signatures))
-        .route("/state/{subject_id}", get(get_state))
+        .route("/peer-id", get(get_peer_id))
+        .route("/public-key", get(get_public_key))
+        .route("/config", get(get_config))
+        .route("/network-state", get(get_network_state))
+        .route("/requests-in-manager", get(get_requests_in_manager))
+        .route(
+            "/requests-in-manager/{subject_id}",
+            get(get_requests_in_manager_subject_id),
+        )
+        .route("/approval", get(get_approvals))
+        .route("/approval/{subject_id}", get(get_approval))
+        .route("/approval/{subject_id}", patch(patch_approve))
+        .route(
+            "/request-abort/{subject_id}",
+            post(post_manual_request_abort),
+        )
+        .route("/request", post(post_event_request))
+        .route("/request", get(get_all_request_state))
+        .route("/request/{request_id}", get(get_request_state))
+        .route("/pending-transfers", get(get_pending_transfers))
+        .route("/auth", get(get_all_auth_subjects))
+        .route("/auth/{subject_id}", put(put_auth_subject))
+        .route("/auth/{subject_id}", get(get_witnesses_subject))
+        .route("/auth/{subject_id}", delete(delete_auth_subject))
+        .route("/update/{subject_id}", post(post_update_subject))
+        .route(
+            "/manual-distribution/{subject_id}",
+            post(post_manual_distribution),
+        )
+        .route("/subjects", get(get_all_govs))
+        .route("/subjects/{governance_id}", get(get_all_subjs))
         .route("/events/{subject_id}", get(get_events))
-        .route("/event/{subject_id}", get(get_event_sn))
+        .route("/events/{subject_id}/{sn}", get(get_event_sn))
+        .route("/aborts/{subject_id}", get(get_aborts))
         .route(
             "/events-first-last/{subject_id}",
             get(get_first_or_end_events),
         )
-        .route("/register-subjects/{governance_id}", get(get_all_subjects))
-        .route("/register-governances", get(get_all_govs))
-        .route("/update/{subject_id}", post(update_subject))
-        .route("/check-transfer/{subject_id}", post(check_transfer))
-        .route(
-            "/manual-distribution/{subject_id}",
-            post(manual_distribution),
-        )
-        .route("/auth/{subject_id}", delete(delete_auth_subject))
-        .route("/auth/{subject_id}", get(get_witnesses_subject))
-        .route("/auth", get(get_all_auth_subjects))
-        .route("/auth/{subject_id}", put(put_auth))
-        .route("/approval-request/{subject_id}", patch(patch_approval))
-        .route("/approval-request/{subject_id}", get(get_approval))
-        .route("/event-request/{request_id}", get(get_request_state))
-        .route("/event-request", post(send_event_request))
-        .route("/controller-id", get(get_public_key))
-        .route("/peer-id", get(get_peer_id))
-        .route("/config", get(get_config))
-        .route("/keys", get(get_keys))
-        .route("/pending-transfers", get(get_pending_transfers))
+        .route("/state/{subject_id}", get(get_subject_state))
         .layer(ServiceBuilder::new().layer(Extension(bridge)));
 
     let doc_routes = if doc {
         Some(
-            RapiDoc::with_openapi("/doc/api.json", ApiDoc::openapi())
-                .path("/doc"),
+            SwaggerUi::new("/doc/{_:.*}")
+                .url("/doc/api.json", ApiDoc::openapi()),
         )
     } else {
         None
@@ -1457,8 +1211,8 @@ pub(crate) fn permission_for(
 
     match (method, path) {
         // Event requests
-        (&Method::POST, "/event-request") => Some(("node_request", "post")),
-        (&Method::GET, p) if p.starts_with("/event-request/") => {
+        (&Method::POST, "/request") => Some(("node_request", "post")),
+        (&Method::GET, p) if p.starts_with("/request/") => {
             Some(("node_request", "get"))
         }
 
@@ -1512,9 +1266,6 @@ pub(crate) fn permission_for(
         }
 
         // Ledger info
-        (&Method::GET, p) if p.starts_with("/signatures/") => {
-            Some(("node_subject", "get"))
-        }
         (&Method::GET, p) if p.starts_with("/state/") => {
             Some(("node_subject", "get"))
         }
@@ -1527,7 +1278,7 @@ pub(crate) fn permission_for(
         (&Method::GET, "/pending-transfers") => Some(("node_subject", "get")),
 
         // Node/system info
-        (&Method::GET, "/controller-id") => Some(("node_system", "get")),
+        (&Method::GET, "/public-key") => Some(("node_system", "get")),
         (&Method::GET, "/peer-id") => Some(("node_system", "get")),
         (&Method::GET, "/config") => Some(("node_system", "get")),
         (&Method::GET, "/keys") => Some(("node_keys", "get")),
@@ -1604,8 +1355,8 @@ mod tests {
     fn router() -> Router {
         Router::new()
             .route("/signatures/abc", get(ok_handler))
-            .route("/event-request", post(ok_handler))
-            .route("/event-request/123", get(ok_handler))
+            .route("/request", post(ok_handler))
+            .route("/request/123", get(ok_handler))
             .route("/manual-distribution/abc", post(ok_handler))
             .route("/auth/abc", delete(ok_handler))
             .layer(middleware::from_fn(permission_layer))
@@ -1634,7 +1385,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         let status =
-            call(&app, Method::GET, "/event-request/123", ctx.clone()).await;
+            call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         let status =
@@ -1642,7 +1393,7 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        let status = call(&app, Method::POST, "/event-request", ctx).await;
+        let status = call(&app, Method::POST, "/request", ctx).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -1657,7 +1408,7 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::OK);
 
-        let status = call(&app, Method::POST, "/event-request", ctx).await;
+        let status = call(&app, Method::POST, "/request", ctx).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -1668,11 +1419,11 @@ mod tests {
         let app = router();
 
         let ok_status =
-            call(&app, Method::POST, "/event-request", ctx.clone()).await;
+            call(&app, Method::POST, "/request", ctx.clone()).await;
         assert_eq!(ok_status, StatusCode::OK);
 
         let ok_get =
-            call(&app, Method::GET, "/event-request/123", ctx.clone()).await;
+            call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(ok_get, StatusCode::OK);
 
         let forbidden =

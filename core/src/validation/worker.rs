@@ -18,7 +18,6 @@ use crate::{
             },
         },
         event::{ApprovalData, EvaluationData, EvaluationResponse},
-        request::EventRequestType,
     },
     subject::{Metadata, RequestSubjectData},
     validation::{
@@ -31,11 +30,9 @@ use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
-    ValueWrapper,
-    identity::{
+    ValueWrapper, bridge::request::EventRequestType, identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    },
-    request::EventRequest,
+    }, request::EventRequest
 };
 
 use json_patch::{Patch, patch};
@@ -261,7 +258,7 @@ impl ValiWorker {
             }
             EventRequestType::Fact
             | EventRequestType::Transfer
-            | EventRequestType::EOL => {
+            | EventRequestType::Eol => {
                 if metadata.new_owner.is_some() {
                     return Err(ValidatorError::InvalidData {
                         value: "Event request type",

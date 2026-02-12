@@ -15,7 +15,7 @@ use libp2p::{
         NetworkBehaviour, THandler, ToSwarm,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -576,7 +576,7 @@ impl NetworkBehaviour for Behaviour {
 }
 
 /// Configuration for the routing behaviour.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// Whether to enable random walks in the Kademlia DHT.
@@ -689,7 +689,7 @@ impl Config {
 }
 
 /// A node in the routing table.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RoutingNode {
     /// Peer ID.
     pub peer_id: String,
