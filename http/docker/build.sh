@@ -9,7 +9,7 @@ export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 
 DOCKER_USERNAME="averiun"
 DOCKER_REPO="ave-http"
-PROD_TAG_ARRAY=("0.7.6-sqlite" "0.7.6-rocksdb")
+PROD_TAG_ARRAY=("0.8.0-sqlite" "0.8.0-rocksdb")
 PROD_DOCKERFILE_ARRAY=("./ave/http/docker/Dockerfile.sqlite" "./ave/http/docker/Dockerfile.rocksdb")
 PROD_FEATURES_ARRAY=("ext-sqlite sqlite prometheus" "ext-sqlite rocksdb prometheus")
 

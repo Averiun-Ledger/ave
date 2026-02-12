@@ -977,8 +977,8 @@ pub fn build_routes(
 
     let doc_routes = if doc {
         Some(
-            SwaggerUi::new("/doc/{_:.*}")
-                .url("/doc/api.json", ApiDoc::openapi()),
+            SwaggerUi::new("/doc/")
+                .url("/api-docs/openapi.json", ApiDoc::openapi()),
         )
     } else {
         None
