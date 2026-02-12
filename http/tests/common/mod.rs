@@ -186,7 +186,7 @@ impl TestServer {
             serde_json::from_str(&bridge_config_json)
                 .expect("Failed to parse bridge config");
 
-        let (bridge, runners) = Bridge::build(&bridge_config, "test", "", None)
+        let (bridge, runners) = Bridge::build(&bridge_config, "test", "", "", None)
             .await
             .expect("Failed to create bridge");
 

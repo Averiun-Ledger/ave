@@ -65,12 +65,18 @@ pub async fn system(
     system.add_helper("store", db).await;
 
     // Build sink manager.
+    let api_key = if sink_auth.api_key.is_empty() {
+        None
+    } else {
+        Some(sink_auth.api_key.clone())
+    };
     let ave_sink = AveSink::new(
         sink_auth.sink.sinks,
         sink_auth.token,
         &sink_auth.sink.auth,
         &sink_auth.sink.username,
         &sink_auth.password,
+        api_key,
     );
     system.add_helper("sink", ave_sink).await;
 

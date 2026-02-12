@@ -61,6 +61,7 @@ pub struct AveSink {
     auth: String,
     username: String,
     password: String,
+    api_key: Option<String>,
 }
 
 impl AveSink {
@@ -70,6 +71,7 @@ impl AveSink {
         auth: &str,
         username: &str,
         password: &str,
+        api_key: Option<String>,
     ) -> Self {
         Self {
             sinks,
@@ -77,6 +79,7 @@ impl AveSink {
             auth: auth.to_owned(),
             username: username.to_owned(),
             password: password.to_owned(),
+            api_key,
         }
     }
 
@@ -114,10 +117,10 @@ impl AveSink {
         client: &Client,
         url: &str,
         data: &DataToSink,
-        auth_header: Option<&str>,
+        auth_header: Option<(&str, &str)>,
     ) -> Result<(), SinkError> {
-        let req = if let Some(h) = auth_header {
-            client.post(url).header("Authorization", h).json(data)
+        let req = if let Some((header_name, header_value)) = auth_header {
+            client.post(url).header(header_name, header_value).json(data)
         } else {
             client.post(url).json(data)
         };
@@ -151,13 +154,24 @@ impl AveSink {
         event: &DataToSink,
         server_requires_auth: bool,
     ) {
-        let header = if server_requires_auth {
-            self.current_auth_header().await
+        // Build the auth header: either X-API-Key or Authorization (bearer token)
+        let header: Option<(String, String)> = if server_requires_auth {
+            if let Some(ref key) = self.api_key {
+                Some(("X-API-Key".to_owned(), key.clone()))
+            } else if let Some(bearer) = self.current_auth_header().await {
+                Some(("Authorization".to_owned(), bearer))
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        match Self::send_once(client, url, event, header.as_deref()).await {
+        let header_ref = header
+            .as_ref()
+            .map(|(n, v)| (n.as_str(), v.as_str()));
+
+        match Self::send_once(client, url, event, header_ref).await {
             Ok(_) => {
                 debug!(
                     url = %url,
@@ -170,8 +184,11 @@ impl AveSink {
                     "Sink rejected data format (422)"
                 );
             }
+            // Token refresh only applies to bearer token mode, not api_key
             Err(SinkError::Unauthorized)
-                if server_requires_auth && self.token.is_some() =>
+                if server_requires_auth
+                    && self.api_key.is_none()
+                    && self.token.is_some() =>
             {
                 warn!(
                     url = %url,
@@ -190,8 +207,13 @@ impl AveSink {
                         new_token.token_type, new_token.access_token
                     );
 
-                    match Self::send_once(client, url, event, Some(&new_header))
-                        .await
+                    match Self::send_once(
+                        client,
+                        url,
+                        event,
+                        Some(("Authorization", &new_header)),
+                    )
+                    .await
                     {
                         Ok(_) => {
                             debug!(

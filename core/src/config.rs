@@ -260,6 +260,7 @@ pub struct SinkAuth {
     pub sink: SinkConfig,
     pub token: Option<TokenResponse>,
     pub password: String,
+    pub api_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default, Serialize)]

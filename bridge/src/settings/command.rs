@@ -20,10 +20,18 @@ pub struct Args {
     /// Password to be used to auth for sinks.
     #[arg(short = 's', long, default_value_t = String::default())]
     pub sink_password: String,
+
+    /// API key to be used for sink authentication (alternative to password-based auth).
+    #[arg(short = 'S', long, default_value_t = String::default())]
+    pub sink_api_key: String,
 }
 
 pub fn build_sink_password() -> String {
     env::var("AVE_SINK_PASSWORD").unwrap_or_default()
+}
+
+pub fn build_sink_api_key() -> String {
+    env::var("AVE_SINK_API_KEY").unwrap_or_default()
 }
 
 pub fn build_auth_password() -> String {

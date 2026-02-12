@@ -7,7 +7,7 @@ use ave_bridge::{
     settings::{
         build_config,
         command::{
-            Args, build_config_path, build_key_password, build_sink_password,
+            Args, build_config_path, build_key_password, build_sink_password, build_sink_api_key,
         },
     },
 };
@@ -179,8 +179,13 @@ async fn main() {
         sink_password = build_sink_password();
     }
 
+    let mut sink_api_key = args.sink_api_key;
+    if sink_api_key.is_empty() {
+        sink_api_key = build_sink_api_key();
+    }
+
     let (bridge, runners) =
-        Bridge::build(&config, &key_password, &sink_password, None)
+        Bridge::build(&config, &key_password, &sink_password, &sink_api_key, None)
             .await
             .map_err(|e| {
                 error!("Can not build Bridge: {}", e);

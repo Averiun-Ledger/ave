@@ -244,7 +244,6 @@ INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
     ('admin_api_key', 'Administrative API key endpoints', 1),
     ('admin_roles', 'Administrative role and permission endpoints', 1),
     ('admin_users', 'Administrative user management endpoints', 1),
-    ('node_keys', 'Node key export endpoints', 1),
     ('node_system', 'Node information endpoints', 1),
     ('node_subject', 'Ledger subject and governance endpoints', 1),
     ('node_request', 'Ledger request submission endpoints', 1),
@@ -267,7 +266,6 @@ INSERT OR IGNORE INTO actions (name, description, is_system) VALUES
 INSERT OR IGNORE INTO roles (name, description, is_system) VALUES
     ('superadmin', 'Full system access with all privileges', 1),
     ('admin', 'Administrative access to users, roles, and API keys', 1),
-    ('owner', 'Full access to business endpoints (non-admin)', 1),
     ('sender', 'Limited to sending event requests', 1),
     ('manager', 'Business manager with operational control', 1),
     ('data', 'Read-only access to business data', 1);

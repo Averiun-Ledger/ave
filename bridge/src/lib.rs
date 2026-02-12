@@ -79,22 +79,26 @@ impl Bridge {
         settings: &Config,
         password: &str,
         password_sink: &str,
+        sink_api_key: &str,
         token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
         let keys = key_pair(settings, password)?;
 
-        let auth_token = if !settings.sink.auth.is_empty() {
-            Some(
-                obtain_token(
-                    &settings.sink.auth,
-                    &settings.sink.username,
-                    password_sink,
+        // Skip bearer token acquisition when using api_key mode
+        let auth_token =
+            if sink_api_key.is_empty() && !settings.sink.auth.is_empty()
+            {
+                Some(
+                    obtain_token(
+                        &settings.sink.auth,
+                        &settings.sink.username,
+                        password_sink,
+                    )
+                    .await?,
                 )
-                .await?,
-            )
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         let mut registry = <Registry>::default();
 
@@ -111,6 +115,7 @@ impl Bridge {
                 sink: settings.sink.clone(),
                 token: auth_token,
                 password: password_sink.to_owned(),
+                api_key: sink_api_key.to_owned(),
             },
             &mut registry,
             password,

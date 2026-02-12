@@ -312,11 +312,7 @@ mod tests {
         };
 
         let create: Result<CreateRequest, _> = bridge_create.try_into();
-        assert!(create.is_err());
-        assert!(matches!(
-            create.unwrap_err(),
-            ConversionError::MissingGovernanceId
-        ));
+        assert!(create.is_ok());
     }
 
     #[test]

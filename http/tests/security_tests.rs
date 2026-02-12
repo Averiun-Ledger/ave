@@ -852,7 +852,6 @@ async fn test_many_permissions_for_role() {
         "admin_api_key",
         "admin_roles",
         "admin_users",
-        "node_keys",
         "node_system",
         "node_subject",
         "node_request",
@@ -1865,19 +1864,17 @@ async fn test_cannot_escalate_privileges_via_role_permission_modification() {
     });
 
     // Try to escalate privileges by adding admin_users:all to their own role
-    let result =
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(set_role_permission(
-                AuthContextExtractor(auth_ctx),
-                Extension(db.clone()),
-                Path(role_manager_role.id),
-                Json(SetPermissionRequest {
-                    resource: "admin_users".to_string(),
-                    action: "all".to_string(),
-                    allowed: true,
-                }),
-            ));
+    let result = set_role_permission(
+        AuthContextExtractor(auth_ctx),
+        Extension(db.clone()),
+        Path(role_manager_role.id),
+        Json(SetPermissionRequest {
+            resource: "admin_users".to_string(),
+            action: "all".to_string(),
+            allowed: true,
+        }),
+    )
+    .await;
 
     // Should be forbidden - only superadmin can modify role permissions
     assert!(
@@ -1928,17 +1925,16 @@ async fn test_cannot_remove_role_permission_denials() {
     });
 
     // Try to escalate by removing the denial
-    let result = tokio::runtime::Runtime::new().unwrap().block_on(
-        remove_role_permission(
-            AuthContextExtractor(auth_ctx),
-            Extension(db.clone()),
-            Path(limited_admin_role.id),
-            Query(RemovePermissionQuery {
-                resource: "admin_system".to_string(),
-                action: "all".to_string(),
-            }),
-        ),
-    );
+    let result = remove_role_permission(
+        AuthContextExtractor(auth_ctx),
+        Extension(db.clone()),
+        Path(limited_admin_role.id),
+        Query(RemovePermissionQuery {
+            resource: "admin_system".to_string(),
+            action: "all".to_string(),
+        }),
+    )
+    .await;
 
     // Should be forbidden - only superadmin can modify role permissions
     assert!(
@@ -2001,13 +1997,13 @@ async fn test_cannot_modify_system_permissions() {
 }
 
 /// SECURITY TEST:
-/// Test that all system roles (superadmin, admin, owner, etc.) are protected
+/// Test that all system roles (superadmin, admin, etc.) are protected
 #[test(tokio::test)]
 async fn test_all_system_roles_are_protected() {
     let (db, _dirs) = common::create_test_db();
 
     let system_roles =
-        vec!["superadmin", "admin", "owner", "sender", "manager", "data"];
+        vec!["superadmin", "admin", "sender", "manager", "data"];
 
     for role_name in system_roles {
         let role = db.get_role_by_name(role_name).unwrap();

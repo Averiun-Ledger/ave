@@ -1190,6 +1190,17 @@ pub(crate) async fn permission_layer(
             .into_response();
     }
 
+    // /config is superadmin-only
+    if req.uri().path() == "/config" && !auth_ctx.is_superadmin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only superadmin can access node configuration".into(),
+            }),
+        )
+            .into_response();
+    }
+
     if let Some((resource, action)) =
         permission_for(req.method(), req.uri().path())
         && let Err(resp) = check_permission(&auth_ctx, resource, action)
@@ -1212,8 +1223,31 @@ pub(crate) fn permission_for(
     match (method, path) {
         // Event requests
         (&Method::POST, "/request") => Some(("node_request", "post")),
+        (&Method::GET, "/request") => Some(("node_request", "get")),
         (&Method::GET, p) if p.starts_with("/request/") => {
             Some(("node_request", "get"))
+        }
+
+        // Requests in manager
+        (&Method::GET, "/requests-in-manager") => {
+            Some(("node_request", "get"))
+        }
+        (&Method::GET, p) if p.starts_with("/requests-in-manager/") => {
+            Some(("node_request", "get"))
+        }
+
+        // Approvals
+        (&Method::GET, "/approval") => Some(("node_subject", "get")),
+        (&Method::GET, p) if p.starts_with("/approval/") => {
+            Some(("node_subject", "get"))
+        }
+        (&Method::PATCH, p) if p.starts_with("/approval/") => {
+            Some(("node_subject", "patch"))
+        }
+
+        // Request abort
+        (&Method::POST, p) if p.starts_with("/request-abort/") => {
+            Some(("node_subject", "post"))
         }
 
         // Ledger subject queries
@@ -1223,19 +1257,11 @@ pub(crate) fn permission_for(
         (&Method::GET, p) if p.starts_with("/events/") => {
             Some(("node_subject", "get"))
         }
-        (&Method::GET, p) if p.starts_with("/event/") => {
+        (&Method::GET, p) if p.starts_with("/aborts/") => {
             Some(("node_subject", "get"))
         }
 
-        // Approvals
-        (&Method::GET, p) if p.starts_with("/approval-request/") => {
-            Some(("node_subject", "get"))
-        }
-        (&Method::PATCH, p) if p.starts_with("/approval-request/") => {
-            Some(("node_subject", "patch"))
-        }
-
-        // Authorization / subjects
+        // Authorization / witnesses
         (&Method::GET, "/auth") => Some(("node_subject", "get")),
         (&Method::GET, p) if p.starts_with("/auth/") => {
             Some(("node_subject", "get"))
@@ -1247,11 +1273,8 @@ pub(crate) fn permission_for(
             Some(("node_subject", "delete"))
         }
 
-        // Updates / transfers
+        // Updates / distribution
         (&Method::POST, p) if p.starts_with("/update/") => {
-            Some(("node_subject", "post"))
-        }
-        (&Method::POST, p) if p.starts_with("/check-transfer/") => {
             Some(("node_subject", "post"))
         }
         (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
@@ -1269,19 +1292,21 @@ pub(crate) fn permission_for(
         (&Method::GET, p) if p.starts_with("/state/") => {
             Some(("node_subject", "get"))
         }
-        (&Method::GET, p) if p.starts_with("/register-subjects/") => {
+
+        // Register - governances and subjects
+        (&Method::GET, "/subjects") => Some(("node_subject", "get")),
+        (&Method::GET, p) if p.starts_with("/subjects/") => {
             Some(("node_subject", "get"))
         }
-        (&Method::GET, "/register-governances") => {
-            Some(("node_subject", "get"))
-        }
+
+        // Transfers
         (&Method::GET, "/pending-transfers") => Some(("node_subject", "get")),
 
         // Node/system info
         (&Method::GET, "/public-key") => Some(("node_system", "get")),
         (&Method::GET, "/peer-id") => Some(("node_system", "get")),
         (&Method::GET, "/config") => Some(("node_system", "get")),
-        (&Method::GET, "/keys") => Some(("node_keys", "get")),
+        (&Method::GET, "/network-state") => Some(("node_system", "get")),
 
         _ => None,
     }
@@ -1354,11 +1379,14 @@ mod tests {
 
     fn router() -> Router {
         Router::new()
-            .route("/signatures/abc", get(ok_handler))
-            .route("/request", post(ok_handler))
+            .route("/events/abc", get(ok_handler))
+            .route("/subjects", get(ok_handler))
+            .route("/request", post(ok_handler).get(ok_handler))
             .route("/request/123", get(ok_handler))
             .route("/manual-distribution/abc", post(ok_handler))
             .route("/auth/abc", delete(ok_handler))
+            .route("/approval/abc", get(ok_handler).patch(ok_handler))
+            .route("/peer-id", get(ok_handler))
             .layer(middleware::from_fn(permission_layer))
     }
 
@@ -1380,19 +1408,23 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "data");
         let app = router();
 
+        // data role has node_subject:get - should be allowed
         let status =
-            call(&app, Method::GET, "/signatures/abc", ctx.clone()).await;
+            call(&app, Method::GET, "/events/abc", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
+        // data role has node_request:get - should be allowed
         let status =
             call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
+        // data role does NOT have node_subject:post - should be forbidden
         let status =
             call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
                 .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
+        // data role does NOT have node_request:post - should be forbidden
         let status = call(&app, Method::POST, "/request", ctx).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
@@ -1429,20 +1461,6 @@ mod tests {
         let forbidden =
             call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn owner_role_allows_full_business_access() {
-        let db = build_db();
-        let ctx = auth_ctx_for_role(&db, "owner");
-        let app = router();
-
-        let status = call(&app, Method::DELETE, "/auth/abc", ctx.clone()).await;
-        assert_eq!(status, StatusCode::OK);
-
-        let status =
-            call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
-        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

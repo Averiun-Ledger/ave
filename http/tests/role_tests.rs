@@ -341,13 +341,13 @@ async fn test_node_endpoints(
     overrides: &[(&str, &str, bool)],
 ) {
     let endpoints = vec![
-        // Node-System
+        // Node-System (node_system)
         ("GET", "/public-key", None),
         ("GET", "/peer-id", None),
+        ("GET", "/network-state", None),
+        // Admin-System (admin_system) - /config requires admin_system:get
         ("GET", "/config", None),
-        // Node-keys
-        ("GET", "/keys", None),
-        // Node-Subject
+        // Node-Subject (node_subject) - reads
         (
             "GET",
             "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
@@ -360,7 +360,7 @@ async fn test_node_endpoints(
         ),
         (
             "GET",
-            "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI/1",
             None,
         ),
         (
@@ -368,32 +368,35 @@ async fn test_node_endpoints(
             "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
             None,
         ),
-        ("GET", "/register-governances?active=true", None),
         (
             "GET",
-            "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
+            "/aborts/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
         ),
+        ("GET", "/subjects?active=true", None),
         (
             "GET",
-            "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
             None,
         ),
+        ("GET", "/approval", None),
         (
             "GET",
-            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/approval/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
-        ),
-        (
-            "PATCH",
-            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            Some(json!("Accepted")),
         ),
         ("GET", "/auth", None),
         (
             "GET",
             "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
+        ),
+        ("GET", "/pending-transfers", None),
+        // Node-Subject (node_subject) - writes
+        (
+            "PATCH",
+            "/approval/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            Some(json!("Accepted")),
         ),
         (
             "PUT",
@@ -407,7 +410,7 @@ async fn test_node_endpoints(
         ),
         (
             "POST",
-            "/check-transfer/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/request-abort/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
         ),
         (
@@ -420,16 +423,22 @@ async fn test_node_endpoints(
             "/manual-distribution/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
         ),
-        ("GET", "/pending-transfers", None),
-        // Node-Request
+        // Node-Request (node_request)
         (
             "POST",
             "/request",
             Some(json!({"request": {}, "signature": null})),
         ),
+        ("GET", "/request", None),
         (
             "GET",
             "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            None,
+        ),
+        ("GET", "/requests-in-manager", None),
+        (
+            "GET",
+            "/requests-in-manager/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             None,
         ),
     ];
@@ -959,9 +968,11 @@ async fn test_admin_role_endpoints_access() {
     )
     .await;
     test_admin_system_endpoints(&client, &base_url, test_mgmt_key, true).await;
-    test_node_endpoints(&client, &base_url, test_mgmt_key, false, &[]).await; // Should NOT have access
+    // /config is superadmin-only, admin should NOT have access
+    test_node_endpoints(&client, &base_url, test_mgmt_key, false, &[]).await; // Should NOT have any node access
 
-    // Test with service key
+    // Test with service key - service keys strip admin_system permissions,
+    // so /config is NOT accessible even for admin service keys
     test_user_endpoints(&client, &base_url, test_service_key, true, false)
         .await;
     test_admin_users_endpoints(&client, &base_url, test_service_key, false)
@@ -984,144 +995,7 @@ async fn test_admin_role_endpoints_access() {
     .await;
     test_admin_system_endpoints(&client, &base_url, test_service_key, false)
         .await;
-    test_node_endpoints(&client, &base_url, test_service_key, false, &[]).await; // Should NOT have access
-}
-
-#[test(tokio::test)]
-
-async fn test_owner_role_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
-    let client = Client::new();
-    let base_url = server.url("");
-
-    // Login as default admin to create test user
-    let login_response: serde_json::Value = client
-        .post(&server.url("/login"))
-        .json(&json!({"username": "admin", "password": "AdminPass123!"}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let admin_api_key = login_response["api_key"].as_str().unwrap();
-
-    // Get Owner role ID
-    let roles_response: serde_json::Value = client
-        .get(&server.url("/admin/roles"))
-        .header("X-API-Key", admin_api_key)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let owner_role_id = roles_response
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "owner")
-        .unwrap()["id"]
-        .as_i64()
-        .unwrap();
-
-    // Create test user with Owner role via HTTP
-    let _create_user_response: serde_json::Value = client
-        .post(&server.url("/admin/users"))
-        .header("X-API-Key", admin_api_key)
-        .json(&json!({
-            "username": "test_owner_user",
-            "password": "TestPass123!",
-            "is_superadmin": false,
-            "role_ids": [owner_role_id],
-            "must_change_password": false
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    // Login as test owner user to get management key
-    let test_login_response: serde_json::Value = client
-        .post(&server.url("/login"))
-        .json(
-            &json!({"username": "test_owner_user", "password": "TestPass123!"}),
-        )
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let test_mgmt_key = test_login_response["api_key"].as_str().unwrap();
-
-    // Create service key via /me/api-keys
-    let service_key_response: serde_json::Value = client
-        .post(&server.url("/me/api-keys"))
-        .header("X-API-Key", test_mgmt_key)
-        .json(&json!({
-            "name": "service_key",
-            "is_management": false
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let test_service_key = service_key_response["api_key"].as_str().unwrap();
-
-    // Owner should have access to:
-    // - User resources (all actions)
-    // - All Node-* resources (all actions)
-    // But NOT to Admin-* resources
-
-    // Test with management key
-    test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
-    test_node_endpoints(&client, &base_url, test_mgmt_key, true, &[]).await;
-    test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
-    test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
-        .await; // Should NOT have access
-    test_admin_apikeys_endpoints(
-        &client,
-        &base_url,
-        test_mgmt_key,
-        false,
-        false,
-    )
-    .await; // Should NOT have access
-    test_admin_system_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
-
-    // Test with service key
-    test_user_endpoints(&client, &base_url, test_service_key, true, false)
-        .await;
-    test_node_endpoints(&client, &base_url, test_service_key, true, &[]).await;
-    test_admin_users_endpoints(&client, &base_url, test_service_key, false)
-        .await; // Should NOT have access
-    test_admin_roles_endpoints(
-        &client,
-        &base_url,
-        test_service_key,
-        false,
-        false,
-    )
-    .await; // Should NOT have access
-    test_admin_apikeys_endpoints(
-        &client,
-        &base_url,
-        test_service_key,
-        false,
-        false,
-    )
-    .await; // Should NOT have access
-    test_admin_system_endpoints(&client, &base_url, test_service_key, false)
-        .await; // Should NOT have access
+    test_node_endpoints(&client, &base_url, test_service_key, false, &[]).await; // No node or admin_system access
 }
 
 #[test(tokio::test)]
@@ -1218,12 +1092,71 @@ async fn test_sender_role_endpoints_access() {
     // But NOT to other Node-* resources or Admin-* resources
 
     let sender_node_access = [
+        // node_request:post
         ("POST", "/request", true),
+        // node_request:get
+        ("GET", "/request", true),
         (
             "GET",
             "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             true,
         ),
+        ("GET", "/requests-in-manager", true),
+        (
+            "GET",
+            "/requests-in-manager/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        // node_subject:get
+        (
+            "GET",
+            "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        (
+            "GET",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
+            true,
+        ),
+        (
+            "GET",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI/1",
+            true,
+        ),
+        (
+            "GET",
+            "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
+            true,
+        ),
+        (
+            "GET",
+            "/aborts/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/subjects?active=true", true),
+        (
+            "GET",
+            "/subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
+            true,
+        ),
+        ("GET", "/approval", true),
+        (
+            "GET",
+            "/approval/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/auth", true),
+        (
+            "GET",
+            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/pending-transfers", true),
+        // node_system:get
+        ("GET", "/public-key", true),
+        ("GET", "/peer-id", true),
+        ("GET", "/network-state", true),
+        // /config requires admin_system:get - sender does NOT have it
     ];
 
     // Test with management key - limited Node access
@@ -1377,101 +1310,22 @@ async fn test_manager_role_endpoints_access() {
     // - Node-System (all actions)
     // But NOT to Node-Keys or Admin-* resources
 
-    let manager_node_access = [
-        ("GET", "/public-key", true),
-        ("GET", "/peer-id", true),
-        ("GET", "/config", true),
-        (
-            "GET",
-            "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "GET",
-            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=10&page=1",
-            true,
-        ),
-        (
-            "GET",
-            "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
-            true,
-        ),
-        (
-            "GET",
-            "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
-            true,
-        ),
-        ("GET", "/register-governances?active=true", true),
-        (
-            "GET",
-            "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
-            true,
-        ),
-        (
-            "GET",
-            "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "GET",
-            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "PATCH",
-            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        ("GET", "/auth", true),
-        (
-            "GET",
-            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "PUT",
-            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "DELETE",
-            "/auth/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "POST",
-            "/check-transfer/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "POST",
-            "/update/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        (
-            "POST",
-            "/manual-distribution/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        ("GET", "/pending-transfers", true),
-        (
-            "GET",
-            "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
-            true,
-        ),
-        ("POST", "/request", true),
+    // Manager has node_request:all, node_subject:all, node_system:all
+    // but NOT admin_system:get, so /config is blocked
+    let manager_overrides: &[(&str, &str, bool)] = &[
+        ("GET", "/config", false),
     ];
 
-    // Test with management key - limited Node access
+    // Test with management key - full Node access except /config
     test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
     test_node_endpoints(
         &client,
         &base_url,
         test_mgmt_key,
-        false,
-        &manager_node_access,
+        true,
+        manager_overrides,
     )
-    .await; // Allowed node/system actions should pass
+    .await;
     test_admin_users_endpoints(&client, &base_url, test_mgmt_key, false).await; // Should NOT have access
     test_admin_roles_endpoints(&client, &base_url, test_mgmt_key, false, false)
         .await; // Should NOT have access
@@ -1492,10 +1346,10 @@ async fn test_manager_role_endpoints_access() {
         &client,
         &base_url,
         test_service_key,
-        false,
-        &manager_node_access,
+        true,
+        manager_overrides,
     )
-    .await; // Allowed node/system actions should pass
+    .await;
     test_admin_users_endpoints(&client, &base_url, test_service_key, false)
         .await; // Should NOT have access
     test_admin_roles_endpoints(
@@ -1615,9 +1469,12 @@ async fn test_data_role_endpoints_access() {
     // But NOT to Node-Keys or Admin-* resources
 
     let data_read_access = [
+        // node_system:get
         ("GET", "/public-key", true),
         ("GET", "/peer-id", true),
-        ("GET", "/config", true),
+        ("GET", "/network-state", true),
+        // /config requires admin_system:get - data does NOT have it
+        // node_subject:get
         (
             "GET",
             "/state/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
@@ -1630,7 +1487,7 @@ async fn test_data_role_endpoints_access() {
         ),
         (
             "GET",
-            "/event/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?sn=1",
+            "/events/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI/1",
             true,
         ),
         (
@@ -1638,20 +1495,21 @@ async fn test_data_role_endpoints_access() {
             "/events-first-last/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?quantity=5",
             true,
         ),
-        ("GET", "/register-governances?active=true", true),
         (
             "GET",
-            "/register-subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
+            "/aborts/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             true,
         ),
+        ("GET", "/subjects?active=true", true),
         (
             "GET",
-            "/signatures/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/subjects/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI?active=true",
             true,
         ),
+        ("GET", "/approval", true),
         (
             "GET",
-            "/approval-request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            "/approval/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             true,
         ),
         ("GET", "/auth", true),
@@ -1661,9 +1519,17 @@ async fn test_data_role_endpoints_access() {
             true,
         ),
         ("GET", "/pending-transfers", true),
+        // node_request:get
+        ("GET", "/request", true),
         (
             "GET",
             "/request/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
+            true,
+        ),
+        ("GET", "/requests-in-manager", true),
+        (
+            "GET",
+            "/requests-in-manager/JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI",
             true,
         ),
     ];
