@@ -42,12 +42,12 @@ pub async fn create_node(
         (local_db, ext_db)
     } else {
         let dir =
-            tempfile::tempdir().expect("Can not create temporal directory.");
+            tempfile::tempdir().expect("Can not create temporal directory");
         let local_db = dir.path().to_path_buf();
         vec_dirs.push(dir);
 
         let dir =
-            tempfile::tempdir().expect("Can not create temporal directory.");
+            tempfile::tempdir().expect("Can not create temporal directory");
         let ext_db = dir.path().to_path_buf();
         vec_dirs.push(dir);
 
@@ -63,7 +63,7 @@ pub async fn create_node(
     );
 
     let contract_dir =
-        tempfile::tempdir().expect("Can not create temporal directory.");
+        tempfile::tempdir().expect("Can not create temporal directory");
     let contracts_path = contract_dir.path().to_path_buf();
     vec_dirs.push(contract_dir);
 

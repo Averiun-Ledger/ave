@@ -352,7 +352,7 @@ impl Handler<Auth> for Auth {
                         "Subject has no witnesses to ask for update"
                     );
                     return Err(ActorError::Functional {
-                        description: "The subject has no witnesses to try to ask for an update.".to_owned(),
+                        description: "The subject has no witnesses to try to ask for an update".to_owned(),
                     });
                 } else if witnesses.len() == 1 {
                     let objetive = witnesses.iter().next().expect("len is 1");

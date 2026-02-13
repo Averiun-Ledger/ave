@@ -190,7 +190,7 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
                             "Evaluation response sender mismatch"
                         );
                         return Err(ActorError::Functional {
-                            description: "We received an evaluation where the request indicates one subject but the info indicates another.".to_string()
+                            description: "We received an evaluation where the request indicates one subject but the info indicates another".to_string()
                         });
                     }
 

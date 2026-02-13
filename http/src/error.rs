@@ -6,7 +6,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use tracing::error;
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -29,10 +28,6 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let status = status_for_bridge_error(&self.0);
         let message = self.0.to_string();
-
-        if status.is_server_error() {
-            error!(status = status.as_u16(), error = %message, "Request failed");
-        }
 
         (status, Json(ErrorBody { error: message })).into_response()
     }

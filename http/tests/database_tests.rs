@@ -20,7 +20,7 @@ use tempfile::TempDir;
 async fn create_test_db_with_rate_limit(
     rate_limit: RateLimitConfig,
 ) -> (AuthDatabase, TempDir) {
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {
@@ -984,7 +984,7 @@ async fn test_audit_logging_disabled() {
         audit_max_entries: 1_000_000,
     };
 
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {
@@ -1057,7 +1057,7 @@ async fn test_audit_logging_disabled() {
 async fn test_log_api_request_enabled() {
     let mut config = AuthConfig::default();
 
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     config.enable = true;
@@ -1129,7 +1129,7 @@ async fn test_log_api_request_always_enabled() {
     // This test verifies that all requests are logged regardless of config
     let mut config = AuthConfig::default();
 
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     config.enable = true;

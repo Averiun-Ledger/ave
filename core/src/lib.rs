@@ -65,17 +65,17 @@ use crate::request::tracking::{
 };
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
-compile_error!("Select only one: 'sqlite' or 'rocksdb'.");
+compile_error!("Select only one: 'sqlite' or 'rocksdb'");
 
 #[cfg(not(any(feature = "sqlite", feature = "rocksdb")))]
-compile_error!("You must enable 'sqlite' or 'rocksdb'.");
+compile_error!("You must enable 'sqlite' or 'rocksdb'");
 
 #[cfg(not(feature = "ext-sqlite"))]
-compile_error!("You must enable 'ext-sqlite'.");
+compile_error!("You must enable 'ext-sqlite'");
 
 #[cfg(all(feature = "test", not(test), not(debug_assertions)))]
 compile_error!(
-    "The 'test' feature should only be used during development/testing."
+    "The 'test' feature should only be used during development/testing"
 );
 
 #[derive(Clone)]
@@ -876,7 +876,6 @@ impl Api {
         match response {
             QueryResponse::PagEvents(data) => Ok(data),
             QueryResponse::Error(e) => {
-                warn!(error = %e, "Query failed");
                 Err(Error::QueryFailed(e))
             }
             _ => {
@@ -920,7 +919,6 @@ impl Api {
         match response {
             QueryResponse::PagAborts(data) => Ok(data),
             QueryResponse::Error(e) => {
-                warn!(error = %e, "Query failed");
                 Err(Error::QueryFailed(e))
             }
             _ => {
@@ -955,8 +953,7 @@ impl Api {
 
         match response {
             QueryResponse::Event(data) => Ok(data),
-            QueryResponse::Error(e) => {
-                warn!(error = %e, "Query failed");
+            QueryResponse::Error(_e) => {
                 Err(Error::EventNotFound {
                     subject: subject_id.to_string(),
                     sn,
@@ -999,7 +996,6 @@ impl Api {
         match response {
             QueryResponse::Events(data) => Ok(data),
             QueryResponse::Error(e) => {
-                warn!(error = %e, "Query failed");
                 Err(Error::QueryFailed(e))
             }
             _ => {
@@ -1032,8 +1028,7 @@ impl Api {
 
         match response {
             QueryResponse::Subject(data) => Ok(data),
-            QueryResponse::Error(e) => {
-                warn!(error = %e, "Query failed");
+            QueryResponse::Error(_e) => {
                 Err(Error::SubjectNotFound(subject_id.to_string()))
             }
             _ => {

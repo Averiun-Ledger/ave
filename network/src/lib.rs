@@ -39,7 +39,7 @@ pub use crate::utils::ReqResConfig;
 
 #[cfg(all(feature = "test", not(test), not(debug_assertions)))]
 compile_error!(
-    "The 'test' feature should only be used during development/testing."
+    "The 'test' feature should only be used during development/testing"
 );
 
 /// The network configuration.

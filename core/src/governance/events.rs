@@ -852,7 +852,7 @@ impl GovRoleEvent {
                     kind: error::InvalidEventKind::InvalidValue {
                         field: format!("{} role operation", role_type),
                         reason: format!(
-                            "Role {} appears multiple times in the same event. Only one operation per role is allowed.",
+                            "Role {} appears multiple times in the same event. Only one operation per role is allowed",
                             name
                         ),
                     },
@@ -1433,7 +1433,7 @@ impl SchemaIdRole {
                     kind: error::InvalidEventKind::InvalidValue {
                         field: format!("{} role operation", role_type),
                         reason: format!(
-                            "Role ({}, {}) appears multiple times in the same event. Only one operation per role is allowed.",
+                            "Role ({}, {}) appears multiple times in the same event. Only one operation per role is allowed",
                             name, namespace
                         ),
                     },

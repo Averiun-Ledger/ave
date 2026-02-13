@@ -539,7 +539,7 @@ impl AuthDatabase {
             if has_all {
                 return Err(DatabaseError::ValidationError(
                     format!(
-                        "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions.",
+                        "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions",
                         resource
                     )
                 ));

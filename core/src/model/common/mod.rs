@@ -1,5 +1,4 @@
-use ave_common::bridge::request::EventRequestType;
-use ave_common::{Namespace, SchemaType};
+use ave_common::{SchemaType};
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
@@ -15,7 +14,7 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
-use crate::governance::model::{HashThisRole, Quorum, RoleTypes};
+use crate::governance::model::{Quorum};
 use crate::governance::role_register::{
     RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
     SearchRole,
@@ -26,8 +25,6 @@ use crate::governance::subject_register::{
 use crate::governance::witnesses_register::{
     WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
-use crate::model::common::subject::get_gov;
-use crate::node::SubjectData;
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
 };
@@ -556,65 +553,4 @@ where
             expected: "StoreResponse::Events".to_owned(),
         }),
     }
-}
-
-pub async fn check_signature<A>(
-    ctx: &mut ActorContext<A>,
-    our_key: PublicKey,
-    signer: PublicKey,
-    governance_id: &DigestIdentifier,
-    event_request: &EventRequestType,
-    subject_data: SubjectData,
-) -> Result<(), ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    match event_request {
-        EventRequestType::Create
-        | EventRequestType::Transfer
-        | EventRequestType::Confirm
-        | EventRequestType::Reject
-        | EventRequestType::Eol => {
-            if signer != our_key {
-                return Err(ActorError::Functional { description: "In the events of Create, Transfer, Confirm, Reject or EOL, the event must be signed by the node.".to_string() });
-            }
-        }
-        EventRequestType::Fact => {
-            let gov = get_gov(ctx, governance_id).await?;
-            match subject_data {
-                SubjectData::Tracker {
-                    schema_id,
-                    namespace,
-                    ..
-                } => {
-                    if !gov.has_this_role(HashThisRole::Schema {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                        schema_id,
-                        namespace: Namespace::from(namespace),
-                    }) {
-                        return Err(ActorError::Functional {
-                            description:
-                                "In fact events, the signer has to be an issuer"
-                                    .to_string(),
-                        });
-                    }
-                }
-                SubjectData::Governance { .. } => {
-                    if !gov.has_this_role(HashThisRole::Gov {
-                        who: signer,
-                        role: RoleTypes::Issuer,
-                    }) {
-                        return Err(ActorError::Functional {
-                            description:
-                                "In fact events, the signer has to be an issuer"
-                                    .to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
 }

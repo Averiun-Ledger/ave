@@ -483,7 +483,7 @@ impl GovernanceData {
     }
 
     pub fn to_value_wrapper(&self) -> ValueWrapper {
-        ValueWrapper(serde_json::to_value(self).expect("It cannot fail; it does not contain a map with keys other than strings."))
+        ValueWrapper(serde_json::to_value(self).expect("It cannot fail; it does not contain a map with keys other than strings"))
     }
 
     pub fn check_basic_gov(&self) -> bool {

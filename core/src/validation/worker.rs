@@ -592,9 +592,7 @@ impl ValiWorker {
             .await
             .map_err(|e| {
                 if let ActorError::UnexpectedResponse { .. } = e {
-                    ValidatorError::InvalidData {
-                        value: "gov_version",
-                    }
+                    ValidatorError::OutOfVersion
                 } else {
                     ValidatorError::InternalError {
                         problem: e.to_string(),
@@ -1016,13 +1014,18 @@ impl Handler<ValiWorker> for ValiWorker {
                     match self.create_res(ctx, false, &validation_req).await {
                         Ok(vali) => vali,
                         Err(e) => {
-                            return Err(emit_fail(
+                            if let ValidatorError::OutOfVersion = e {
+                                ValidationRes::Reboot
+                            } else {
+                                return Err(emit_fail(
                                 ctx,
                                 ActorError::FunctionalCritical {
                                     description: e.to_string(),
                                 },
                             )
                             .await);
+                            }
+                            
                         }
                     };
 
@@ -1139,8 +1142,11 @@ impl Handler<ValiWorker> for ValiWorker {
                                     },
                                 )
                                 .await);
+                            } else if let ValidatorError::OutOfVersion = e {
+                                ValidationRes::Reboot
+                            } else {
+                                ValidationRes::Abort(e.to_string())
                             }
-                            ValidationRes::Abort(e.to_string())
                         }
                     }
                 };

@@ -382,7 +382,7 @@ impl AuthDatabase {
 
                     if existing_count > 0 {
                         return Err(DatabaseError::ValidationError(
-                            "A superadmin already exists. Only one superadmin is allowed.".to_string()
+                            "A superadmin already exists. Only one superadmin is allowed".to_string()
                         ));
                     }
                 }
@@ -900,7 +900,7 @@ impl AuthDatabase {
         // This prevents users from resetting their lockout counter by changing password
         if !user.must_change_password {
             return Err(DatabaseError::PermissionDenied(
-                "Password change not required. Use authenticated endpoints to change your password.".to_string(),
+                "Password change not required. Use authenticated endpoints to change your password".to_string(),
             ));
         }
 

@@ -31,7 +31,7 @@ static PORT_COUNTER: AtomicU16 = AtomicU16::new(7000);
 /// Create a test database with default configuration
 #[allow(dead_code)]
 pub fn create_test_db() -> (AuthDatabase, TempDir) {
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {

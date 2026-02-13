@@ -141,17 +141,17 @@ pub mod tests {
         let mut vec_dirs = vec![];
 
         let dir_ave_db =
-            tempfile::tempdir().expect("Can not create temporal directory.");
+            tempfile::tempdir().expect("Can not create temporal directory");
         let ave_path = dir_ave_db.path().to_path_buf();
         vec_dirs.push(dir_ave_db);
 
         let dir_ext_db =
-            tempfile::tempdir().expect("Can not create temporal directory.");
+            tempfile::tempdir().expect("Can not create temporal directory");
         let ext_path = dir_ext_db.path().to_path_buf();
         vec_dirs.push(dir_ext_db);
 
         let dir_contracts =
-            tempfile::tempdir().expect("Can not create temporal directory.");
+            tempfile::tempdir().expect("Can not create temporal directory");
         let contracts_path = dir_contracts.path().to_path_buf();
         vec_dirs.push(dir_contracts);
 

@@ -112,7 +112,7 @@ impl Ed25519Signer {
         // Reject empty data
         if data.is_empty() {
             return Err(CryptoError::InvalidSecretKey(
-                "Cannot derive keys from empty data. Use generate() for random keys.".to_string(),
+                "Cannot derive keys from empty data. Use generate() for random keys".to_string(),
             ));
         }
 

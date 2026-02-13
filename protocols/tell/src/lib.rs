@@ -487,14 +487,14 @@ where
         }: ConnectionClosed,
     ) {
         let connections = self.connected.get_mut(&peer_id).expect(
-            "Expected some established connection to peer before closing.",
+            "Expected some established connection to peer before closing",
         );
 
         let connection = connections
             .iter()
             .position(|c| c.id == connection_id)
             .map(|p: usize| connections.remove(p))
-            .expect("Expected connection to be established before closing.");
+            .expect("Expected connection to be established before closing");
 
         debug_assert_eq!(connections.is_empty(), remaining_established == 0);
         if connections.is_empty() {
@@ -549,14 +549,14 @@ where
             ConnectedPoint::Listener { .. } => None,
         };
         let connections = self.connected.get_mut(&peer_id).expect(
-            "Address change can only happen on an established connection.",
+            "Address change can only happen on an established connection",
         );
 
         let connection = connections
             .iter_mut()
             .find(|c| c.id == connection_id)
             .expect(
-                "Address change can only happen on an established connection.",
+                "Address change can only happen on an established connection",
             );
         connection.remote_address = new_address;
     }
@@ -687,7 +687,7 @@ where
                         // The connection was closed before the message was received.
                         // The message is dropped.
                         tracing::debug!(
-                            "Connection ({connection_id}) closed after `Event::Request` ({tell_id}) has been emitted."
+                            "Connection ({connection_id}) closed after `Event::Request` ({tell_id}) has been emitted"
                         );
                     }
                 }

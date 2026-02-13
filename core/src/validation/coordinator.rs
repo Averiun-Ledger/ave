@@ -96,8 +96,8 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                 validation_req,
                 node_key,
             } => {
-                let schema_id = validation_req.content().get_schema_id().expect("The build process verified that the event request is valid.");
-                let governance_id = validation_req.content().get_governance_id().expect("The build process verified that the event request is valid.");
+                let schema_id = validation_req.content().get_schema_id().expect("The build process verified that the event request is valid");
+                let governance_id = validation_req.content().get_governance_id().expect("The build process verified that the event request is valid");
 
                 let receiver_actor = if schema_id.is_gov() {
                     format!("/user/node/{}/validator", governance_id)
@@ -187,7 +187,7 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                             "Validation response sender mismatch"
                         );
                         return Err(ActorError::Functional {
-                            description: "We received a validation where the request indicates one subject but the info indicates another.".to_string()
+                            description: "We received a validation where the request indicates one subject but the info indicates another".to_string()
                         });
                     }
 

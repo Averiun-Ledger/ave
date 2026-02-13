@@ -954,7 +954,7 @@ async fn test_pre_auth_rate_limiting_on_login() {
     use ave_http::auth::database::AuthDatabase;
 
     // Create test DB with specific rate limit config (100 requests/minute)
-    let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {

@@ -34,6 +34,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use serde_qs::axum::QsQuery;
 use serde::{Deserialize};
 use tower::ServiceBuilder;
 use utoipa::{IntoParams, ToSchema};
@@ -766,7 +767,7 @@ pub(crate) async fn get_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
-    Query(parameters): Query<EventsQuery>,
+    QsQuery(parameters): QsQuery<EventsQuery>,
 ) -> Result<Json<PaginatorEvents>, HttpError> {
     Ok(Json(
         bridge

@@ -1662,6 +1662,52 @@ async fn test_subject_deserialization() {
     assert_eq!(events[1].subject_id, governance_id);
     assert_eq!(events[1].sn, 1);
     assert_eq!(events[1].event_type.to_string(), "fact");
+
+    // Test date filters deserialization with a future date that returns no events
+    let future_date = "2099-01-01T00:00:00Z";
+
+    // event_request_ts[from] with future date -> no events
+    let (status, ..) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/events/{}?event_request_ts[from]={}",
+            governance_id, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(!status.is_success());
+
+    // event_ledger_ts[from] with future date -> no events
+    let (status, ..) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/events/{}?event_ledger_ts[from]={}",
+            governance_id, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!status.is_success());
+
+    // sink_ts[from] with future date -> no events
+    let (status, ..) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/events/{}?sink_ts[from]={}",
+            governance_id, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(!status.is_success());
 }
 
 // --- System Info Endpoints ---

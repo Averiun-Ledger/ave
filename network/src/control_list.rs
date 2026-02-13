@@ -150,7 +150,7 @@ pub fn build_control_lists_updaters(
     token: CancellationToken,
 ) -> Option<Receiver<Event>> {
     if config.enable {
-        info!(TARGET_CONTROL_LIST, "Control list is enable.");
+        info!(TARGET_CONTROL_LIST, "Control list is enable");
 
         let (sender, receiver) = mpsc::channel(1000);
         let interval = config.interval_request;
@@ -178,7 +178,7 @@ pub fn build_control_lists_updaters(
                 } else {
                     warn!(
                         TARGET_CONTROL_LIST,
-                        "No get to the services providing the list of allowed peers was performed."
+                        "No get to the services providing the list of allowed peers was performed"
                     );
                 }
 
@@ -190,12 +190,12 @@ pub fn build_control_lists_updaters(
                 } else {
                     warn!(
                         TARGET_CONTROL_LIST,
-                        "No get to the services providing the list of block peers was performed."
+                        "No get to the services providing the list of block peers was performed"
                     );
                 }
                     }
                     _ = token.cancelled() => {
-                        info!(TARGET_CONTROL_LIST, "Control list updater cancelled.");
+                        info!(TARGET_CONTROL_LIST, "Control list updater cancelled");
                         break;
                     }
                 };
@@ -204,7 +204,7 @@ pub fn build_control_lists_updaters(
 
         Some(receiver)
     } else {
-        info!(TARGET_CONTROL_LIST, "Control list is not enable.");
+        info!(TARGET_CONTROL_LIST, "Control list is not enable");
         None
     }
 }
@@ -290,7 +290,7 @@ impl Behaviour {
 
         warn!(
             TARGET_CONTROL_LIST,
-            "Node {} has been blocked, it is not in the allowed list.", peer
+            "Node {} has been blocked, it is not in the allowed list", peer
         );
         Err(ConnectionDenied::new(NotAllowed { peer: *peer }))
     }
@@ -303,7 +303,7 @@ impl Behaviour {
 
         warn!(
             TARGET_CONTROL_LIST,
-            "Node {} has been blocked, it is in the blocked list.", peer
+            "Node {} has been blocked, it is in the blocked list", peer
         );
         Err(ConnectionDenied::new(Blocked { peer: *peer }))
     }

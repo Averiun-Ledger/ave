@@ -26,7 +26,7 @@ use crate::distribution::{
 use crate::evaluation::request::EvaluateData;
 use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
-use crate::governance::model::{ProtocolTypes, Quorum, WitnessesData};
+use crate::governance::model::{HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
@@ -534,7 +534,7 @@ impl RequestManager {
 
             return Err(RequestManagerError::NoValidatorsAvailable {
                 schema_id: schema_id.to_string(),
-                governance_id: vali_req.get_governance_id().expect("The build process verified that the event request is valid.")
+                governance_id: vali_req.get_governance_id().expect("The build process verified that the event request is valid")
             });
         }
 
@@ -1332,6 +1332,53 @@ impl RequestManager {
         }
     }
 
+    async fn check_signature(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), RequestManagerError> {
+        let Some(request) = self.request.clone() else {
+            return Err(RequestManagerError::RequestNotSet);
+        };
+
+        match request.content() {
+            EventRequest::Fact { .. } => {
+                let subject_data = get_subject_data(ctx, &self.subject_id).await?;
+                let Some(subject_data) = subject_data else {
+                    return Err(RequestManagerError::SubjecData);
+                };
+
+                let gov = get_gov(ctx, &self.subject_id).await?;
+                match subject_data {
+                    SubjectData::Tracker {
+                        schema_id,
+                        namespace,
+                        ..
+                    } => {
+                        if !gov.has_this_role(HashThisRole::Schema {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        }) {
+                            return Err(RequestManagerError::NotIssuer);
+                        }
+                    }
+                    SubjectData::Governance { .. } => {
+                        if !gov.has_this_role(HashThisRole::Gov {
+                            who: request.signature().signer.clone(),
+                            role: RoleTypes::Issuer,
+                        }) {
+                            return Err(RequestManagerError::NotIssuer);
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     async fn stops_childs(
         &self,
         ctx: &mut ActorContext<RequestManager>,
@@ -1692,6 +1739,17 @@ impl Handler<RequestManager> for RequestManager {
                         return Err(emit_fail(ctx, e).await);
                     }
 
+                    if let Err(e) = self.check_signature(ctx).await {
+                        error!(
+                            msg_type = "FinishReboot",
+                            request_id = %self.id,
+                            error = %e,
+                            "Failed to check signatures after reboot"
+                        );
+                        self.match_error(ctx, e).await;
+                        return Ok(());
+                    }
+
                     if let Err(e) = self.match_command(ctx).await {
                         error!(
                             msg_type = "FinishReboot",
@@ -1843,7 +1901,7 @@ impl Handler<RequestManager> for RequestManager {
                         eval_res,
                     } => {
                         if let Err(e) = self
-                                .build_approval(ctx, eval_req, eval_res.evaluator_res().expect("If the status is approval, it means that the evaluator's response is valid."))
+                                .build_approval(ctx, eval_req, eval_res.evaluator_res().expect("If the status is approval, it means that the evaluator's response is valid"))
                                 .await
                             {
                                 error!(

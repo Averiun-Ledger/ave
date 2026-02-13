@@ -141,7 +141,7 @@ impl Validation {
                         init_state: self.init_state.clone(),
                         governance_id: self
                             .request
-                            .content().get_governance_id().expect("The build process verified that the event request is valid.")
+                            .content().get_governance_id().expect("The build process verified that the event request is valid")
                             ,
                         gov_version: self.request.content().get_gov_version(),
                         sn: self.request.content().get_sn(),
@@ -414,7 +414,7 @@ impl Handler<Validation> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
                                     RebootType::Normal
                                 )
                                 .await
@@ -443,7 +443,7 @@ impl Handler<Validation> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
                                     RebootType::Diff
                                 )
                                 .await
@@ -517,7 +517,7 @@ impl Handler<Validation> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid."),
+                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
                                     RebootType::TimeOut
                                 )
                                 .await

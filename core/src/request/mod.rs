@@ -4,12 +4,17 @@ use ave_actors::{
     Message, Response, Sink,
 };
 use ave_actors::{LightPersistence, PersistentActor};
-use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType};
+use ave_common::Namespace;
+use ave_common::bridge::request::{
+    ApprovalState, ApprovalStateRes, EventRequestType,
+};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh,
 };
 use ave_common::request::EventRequest;
-use ave_common::response::{RequestState, RequestsInManager, RequestsInManagerSubject};
+use ave_common::response::{
+    RequestState, RequestsInManager, RequestsInManagerSubject,
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use error::RequestHandlerError;
@@ -26,12 +31,13 @@ use crate::approval::persist::{
 use crate::approval::request::ApprovalReq;
 use crate::db::Storable;
 use crate::governance::events::GovernanceEvent;
+use crate::governance::model::{HashThisRole, RoleTypes};
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
-use crate::model::common::subject::get_version;
+use crate::model::common::subject::{get_gov, get_version};
 use crate::model::common::{
-    check_signature, check_subject_creation, emit_fail, send_to_tracking,
+    check_subject_creation, emit_fail, send_to_tracking,
 };
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
 use crate::request::manager::InitRequestManager;
@@ -101,6 +107,64 @@ impl BorshDeserialize for RequestHandler {
 }
 
 impl RequestHandler {
+    async fn check_signature(
+        ctx: &mut ActorContext<Self>,
+        our_key: PublicKey,
+        signer: PublicKey,
+        governance_id: &DigestIdentifier,
+        event_request: &EventRequestType,
+        subject_data: SubjectData,
+    ) -> Result<(), ActorError> {
+        match event_request {
+            EventRequestType::Create
+            | EventRequestType::Transfer
+            | EventRequestType::Confirm
+            | EventRequestType::Reject
+            | EventRequestType::Eol => {
+                if signer != our_key {
+                    return Err(ActorError::Functional { description: "In the events of Create, Transfer, Confirm, Reject or EOL, the event must be signed by the node".to_string() });
+                }
+            }
+            EventRequestType::Fact => {
+                let gov = get_gov(ctx, governance_id).await?;
+                match subject_data {
+                    SubjectData::Tracker {
+                        schema_id,
+                        namespace,
+                        ..
+                    } => {
+                        if !gov.has_this_role(HashThisRole::Schema {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                            schema_id,
+                            namespace: Namespace::from(namespace),
+                        }) {
+                            return Err(ActorError::Functional {
+                            description:
+                                "In fact events, the signer has to be an issuer"
+                                    .to_string(),
+                        });
+                        }
+                    }
+                    SubjectData::Governance { .. } => {
+                        if !gov.has_this_role(HashThisRole::Gov {
+                            who: signer,
+                            role: RoleTypes::Issuer,
+                        }) {
+                            return Err(ActorError::Functional {
+                            description:
+                                "In fact events, the signer has to be an issuer"
+                                    .to_string(),
+                        });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn queued_event(
         ctx: &mut ActorContext<RequestHandler>,
         subject_id: &DigestIdentifier,
@@ -614,7 +678,7 @@ impl RequestHandler {
             ));
         }
 
-        check_signature(
+        Self::check_signature(
             ctx,
             our_key,
             signer.clone(),
@@ -915,18 +979,23 @@ impl Handler<RequestHandler> for RequestHandler {
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
             RequestHandlerMessage::RequestInManagerSubjectId { subject_id } => {
-                let handling = self.handling.get(&subject_id).map(|x| x.to_string());
+                let handling =
+                    self.handling.get(&subject_id).map(|x| x.to_string());
                 let in_queue = self.in_queue.get(&subject_id).map(|x| {
-                    x.iter()
-                            .map(|x| x.1.to_string())
-                            .collect::<Vec<String>>()
+                    x.iter().map(|x| x.1.to_string()).collect::<Vec<String>>()
                 });
 
-                Ok(RequestHandlerResponse::RequestInManagerSubjectId(RequestsInManagerSubject { handling, in_queue }))
+                Ok(RequestHandlerResponse::RequestInManagerSubjectId(
+                    RequestsInManagerSubject { handling, in_queue },
+                ))
             }
-            RequestHandlerMessage::RequestInManager => {
-                Ok(RequestHandlerResponse::RequestInManager(RequestsInManager {
-                    handling: self.handling.iter().map(|x| (x.0.to_string(), x.1.to_string())).collect(),
+            RequestHandlerMessage::RequestInManager => Ok(
+                RequestHandlerResponse::RequestInManager(RequestsInManager {
+                    handling: self
+                        .handling
+                        .iter()
+                        .map(|x| (x.0.to_string(), x.1.to_string()))
+                        .collect(),
                     in_queue: self
                         .in_queue
                         .iter()
@@ -938,9 +1007,9 @@ impl Handler<RequestHandler> for RequestHandler {
                                     .collect::<Vec<String>>(),
                             )
                         })
-                        .collect()
-                }))
-            }
+                        .collect(),
+                }),
+            ),
             RequestHandlerMessage::AbortRequest { subject_id } => {
                 self.manual_abort_request(ctx, &subject_id).await?;
                 Ok(RequestHandlerResponse::None)
@@ -967,13 +1036,7 @@ impl Handler<RequestHandler> for RequestHandler {
             RequestHandlerMessage::GetApproval { subject_id, state } => {
                 let res = Self::get_approval(ctx, &subject_id, state.clone())
                     .await
-                    .map_err(|e| {
-                        error!(
-                            error = %e,
-                            "GetApproval failed"
-                        );
-                        ActorError::from(e)
-                    })?;
+                    .map_err(|e| ActorError::from(e))?;
 
                 Ok(RequestHandlerResponse::Approval(res))
             }
@@ -1071,7 +1134,7 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                if let Err(e) = check_signature(
+                if let Err(e) = Self::check_signature(
                     ctx,
                     (*self.our_key).clone(),
                     signer.clone(),

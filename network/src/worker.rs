@@ -204,7 +204,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let messages_metric = Family::default();
         registry.register(
             "Messages",
-            "Counts messages sent or received from other peers.",
+            "Counts messages sent or received from other peers",
             messages_metric.clone(),
         );
 
@@ -525,10 +525,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     NetworkState::Dial => {
                         // Dial to boot node.
                         if self.boot_nodes.is_empty() {
-                            error!(TARGET_WORKER, "No bootstrap nodes.");
+                            error!(TARGET_WORKER, "No bootstrap nodes");
                             self.send_event(NetworkEvent::Error(
                                 Error::Network(
-                                    "No more bootstrap nodes.".to_owned(),
+                                    "No more bootstrap nodes".to_owned(),
                                 ),
                             ))
                             .await;
@@ -634,7 +634,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             DialError::LocalPeerId { .. } => {
                 error!(
                     TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, The peer identity obtained on the connection matches the local peer.",
+                    "Error dialing, try: {}, peer-id: {}, The peer identity obtained on the connection matches the local peer",
                     retrys,
                     peer
                 );
@@ -642,7 +642,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             DialError::NoAddresses => {
                 error!(
                     TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, No addresses have been provided.",
+                    "Error dialing, try: {}, peer-id: {}, No addresses have been provided",
                     retrys,
                     peer
                 );
@@ -650,7 +650,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             DialError::DialPeerConditionFalse(peer_condition) => {
                 error!(
                     TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, The provided {:?} evaluated to false and this the dial was aborted.",
+                    "Error dialing, try: {}, peer-id: {}, The provided {:?} evaluated to false and this the dial was aborted",
                     retrys,
                     peer,
                     peer_condition

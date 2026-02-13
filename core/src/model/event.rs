@@ -209,7 +209,7 @@ impl Protocols {
                             (EvalResDB::Patch(eval_res.patch.0.clone()), Some(appr.approved))
                         } else {
                             unreachable!(
-                                "In a factual governance event, if the assessment is correct, there should be approval."
+                                "In a factual governance event, if the assessment is correct, there should be approval"
                             )
                         }
                     }

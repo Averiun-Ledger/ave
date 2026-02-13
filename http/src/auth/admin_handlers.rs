@@ -95,7 +95,7 @@ fn validate_superadmin_assignment(
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
-                    error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                    error: "A superadmin already exists. Only one superadmin is allowed".to_string(),
                 }),
             ));
         }
@@ -134,7 +134,7 @@ fn validate_superadmin_removal(
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Cannot remove superadmin role from the only superadmin. System must have at least one superadmin.".to_string(),
+                    error: "Cannot remove superadmin role from the only superadmin. System must have at least one superadmin".to_string(),
                 }),
             ));
         }
@@ -232,7 +232,7 @@ pub async fn create_user(
                     return Err((
                         StatusCode::CONFLICT,
                         Json(ErrorResponse {
-                            error: "A superadmin already exists. Only one superadmin is allowed.".to_string(),
+                            error: "A superadmin already exists. Only one superadmin is allowed".to_string(),
                         }),
                     ));
                 }
@@ -435,7 +435,7 @@ pub async fn update_user(
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Cannot change superadmin password through API. Use direct database access.".to_string(),
+                    error: "Cannot change superadmin password through API. Use direct database access".to_string(),
                 }),
             ));
         }
@@ -446,7 +446,7 @@ pub async fn update_user(
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Cannot modify superadmin roles. Superadmin has all permissions automatically.".to_string(),
+                    error: "Cannot modify superadmin roles. Superadmin has all permissions automatically".to_string(),
                 }),
             ));
         }
@@ -578,7 +578,7 @@ pub async fn reset_user_password(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Cannot reset superadmin password through API. Use direct database access.".to_string(),
+                error: "Cannot reset superadmin password through API. Use direct database access".to_string(),
             }),
         ));
     }

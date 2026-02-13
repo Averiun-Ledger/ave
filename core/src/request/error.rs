@@ -183,6 +183,12 @@ pub enum RequestManagerError {
     // Wrapped ActorError for operations that return ActorError
     #[error("actor error: {0}")]
     ActorError(#[from] ActorError),
+
+    #[error("Can not obtain SubjectData, is None")]
+    SubjecData,
+
+    #[error("In fact events, the signer has to be an issuer")]
+    NotIssuer
 }
 
 /*

@@ -2344,7 +2344,7 @@ impl PersistentActor for Governance {
                             subject_id = %self.subject_metadata.subject_id,
                             "Evaluation successful but no approval present"
                         );
-                        return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval.".to_owned() });
+                        return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval".to_owned() });
                     }
                 }
             }
