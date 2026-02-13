@@ -21,7 +21,10 @@ pub struct Reboot {
 }
 
 impl Reboot {
-    pub fn new(governance_id: DigestIdentifier, request_id: DigestIdentifier) -> Self {
+    pub fn new(
+        governance_id: DigestIdentifier,
+        request_id: DigestIdentifier,
+    ) -> Self {
         Self {
             request_id,
             governance_id,
@@ -78,7 +81,9 @@ impl Reboot {
         };
 
         if let Err(e) = request_actor
-            .tell(RequestManagerMessage::FinishReboot {request_id: self.request_id.clone()})
+            .tell(RequestManagerMessage::FinishReboot {
+                request_id: self.request_id.clone(),
+            })
             .await
         {
             error!(
@@ -232,17 +237,16 @@ impl Handler<Reboot> for Reboot {
                         return Err(emit_fail(ctx, e).await);
                     }
                 } else if let Err(e) = self.sleep(ctx).await {
-                        error!(
-                            msg_type = "Update",
-                            request_id = %self.request_id,
-                            governance_id = %self.governance_id,
-                            count = self.count,
-                            error = %e,
-                            "Failed to schedule sleep"
-                        );
-                        return Err(emit_fail(ctx, e).await);
-                    };
-                
+                    error!(
+                        msg_type = "Update",
+                        request_id = %self.request_id,
+                        governance_id = %self.governance_id,
+                        count = self.count,
+                        error = %e,
+                        "Failed to schedule sleep"
+                    );
+                    return Err(emit_fail(ctx, e).await);
+                };
             }
         };
 

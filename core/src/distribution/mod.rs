@@ -158,8 +158,7 @@ impl Handler<Distribution> for Distribution {
         match msg {
             DistributionMessage::Create { ledger, witnesses } => {
                 self.witnesses.clone_from(&witnesses);
-                self.subject_id =
-                    ledger.content().get_subject_id();
+                self.subject_id = ledger.content().get_subject_id();
 
                 debug!(
                     msg_type = "Create",
@@ -193,7 +192,8 @@ impl Handler<Distribution> for Distribution {
                     "Distribution response received"
                 );
 
-                if self.check_witness(sender.clone()) && self.witnesses.is_empty()
+                if self.check_witness(sender.clone())
+                    && self.witnesses.is_empty()
                 {
                     debug!(
                         msg_type = "Response",

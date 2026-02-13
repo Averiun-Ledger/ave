@@ -48,7 +48,7 @@ impl Display for RequestManagerState {
             RequestManagerState::Approval { .. } => {
                 write!(f, "Approval")
             }
-            RequestManagerState::Validation {..} => write!(f, "Validation"),
+            RequestManagerState::Validation { .. } => write!(f, "Validation"),
             RequestManagerState::UpdateSubject { .. } => {
                 write!(f, "UpdateSubject")
             }

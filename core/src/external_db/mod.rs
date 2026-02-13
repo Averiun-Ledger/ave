@@ -5,7 +5,7 @@ use ave_actors::{
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::{helpers::db::DatabaseError};
+use crate::helpers::db::DatabaseError;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DBManager;

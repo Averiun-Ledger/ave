@@ -1,4 +1,4 @@
-use ave_common::{SchemaType};
+use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
@@ -14,7 +14,7 @@ use ave_actors::{
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
 
-use crate::governance::model::{Quorum};
+use crate::governance::model::Quorum;
 use crate::governance::role_register::{
     RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
     SearchRole,

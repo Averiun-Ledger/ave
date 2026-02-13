@@ -120,7 +120,10 @@ impl AveSink {
         auth_header: Option<(&str, &str)>,
     ) -> Result<(), SinkError> {
         let req = if let Some((header_name, header_value)) = auth_header {
-            client.post(url).header(header_name, header_value).json(data)
+            client
+                .post(url)
+                .header(header_name, header_value)
+                .json(data)
         } else {
             client.post(url).json(data)
         };
@@ -159,15 +162,15 @@ impl AveSink {
             if let Some(ref key) = self.api_key {
                 Some(("X-API-Key".to_owned(), key.clone()))
             } else {
-                self.current_auth_header().await.map(|bearer| ("Authorization".to_owned(), bearer))
+                self.current_auth_header()
+                    .await
+                    .map(|bearer| ("Authorization".to_owned(), bearer))
             }
         } else {
             None
         };
 
-        let header_ref = header
-            .as_ref()
-            .map(|(n, v)| (n.as_str(), v.as_str()));
+        let header_ref = header.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
 
         match Self::send_once(client, url, event, header_ref).await {
             Ok(_) => {
@@ -197,9 +200,7 @@ impl AveSink {
                     if let Some(arc) = &self.token {
                         *arc.write().await = new_token.clone();
                     }
-                    debug!(
-                        "Token refreshed, retrying request"
-                    );
+                    debug!("Token refreshed, retrying request");
                     let new_header = format!(
                         "{} {}",
                         new_token.token_type, new_token.access_token

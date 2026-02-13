@@ -46,10 +46,7 @@ pub struct OwnerSchema {
     BorshSerialize,
 )]
 pub struct SubjectRegister {
-    register: HashMap<
-        RegisterData,
-        (RegisterCreations, RegisterSubjects),
-    >,
+    register: HashMap<RegisterData, (RegisterCreations, RegisterSubjects)>,
 }
 
 type RegisterData = (PublicKey, SchemaType, String);

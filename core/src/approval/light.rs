@@ -15,8 +15,8 @@ use ave_actors::{
     CustomIntervalStrategy, Handler, Message, NotPersistentActor, RetryActor,
     RetryMessage, Strategy,
 };
-use ave_common::{
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp},
+use ave_common::identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
 };
 use network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
@@ -171,7 +171,9 @@ impl Handler<ApprLight> for ApprLight {
                 version,
                 sender,
             } => {
-                if request_id == self.request_id.to_string() && version == self.version {
+                if request_id == self.request_id.to_string()
+                    && version == self.version
+                {
                     if self.node_key != sender
                         || sender != approval_res.signature().signer
                     {

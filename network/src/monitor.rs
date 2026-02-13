@@ -31,8 +31,6 @@ impl Default for Monitor {
     }
 }
 
-
-
 /// Monitor actor messages
 #[derive(Debug, Clone)]
 pub enum MonitorMessage {

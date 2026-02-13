@@ -28,7 +28,6 @@ pub enum EventRequest {
     Reject(RejectRequest),
     /// A request to mark a subject as end-of-life.
     EOL(EOLRequest),
-
 }
 
 impl EventRequest {

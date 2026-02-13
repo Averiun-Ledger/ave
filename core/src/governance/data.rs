@@ -350,81 +350,83 @@ impl GovernanceData {
             for (schema_id, roles_schema) in self.roles_schema.iter() {
                 if !remove_schemas.contains(schema_id) {
                     for evaluators in roles_schema.evaluator.iter() {
-                        if remove_members.contains(&evaluators.name) && let Some(user) =
+                        if remove_members.contains(&evaluators.name)
+                            && let Some(user) =
                                 self.members.get(&evaluators.name)
-                            {
-                                remove_evaluators
-                                    .entry((schema_id.clone(), user.clone()))
-                                    .or_default()
-                                    .push(evaluators.namespace.clone());
-                            }
-                        
+                        {
+                            remove_evaluators
+                                .entry((schema_id.clone(), user.clone()))
+                                .or_default()
+                                .push(evaluators.namespace.clone());
+                        }
                     }
 
                     for validators in roles_schema.validator.iter() {
-                        if remove_members.contains(&validators.name) && let Some(user) =
+                        if remove_members.contains(&validators.name)
+                            && let Some(user) =
                                 self.members.get(&validators.name)
-                            {
-                                remove_validators
-                                    .entry((schema_id.clone(), user.clone()))
-                                    .or_default()
-                                    .push(validators.namespace.clone());
-                            }
-                        
+                        {
+                            remove_validators
+                                .entry((schema_id.clone(), user.clone()))
+                                .or_default()
+                                .push(validators.namespace.clone());
+                        }
                     }
 
                     for creators in roles_schema.creator.iter() {
-                        if remove_members.contains(&creators.name) &&let Some(user) = self.members.get(&creators.name)
-                            {
-                                remove_creator.insert((
-                                    schema_id.clone(),
-                                    creators.namespace.to_string(),
-                                    user.clone(),
-                                ));
-                            }
-                        
+                        if remove_members.contains(&creators.name)
+                            && let Some(user) = self.members.get(&creators.name)
+                        {
+                            remove_creator.insert((
+                                schema_id.clone(),
+                                creators.namespace.to_string(),
+                                user.clone(),
+                            ));
+                        }
                     }
                     for witness in roles_schema.witness.iter() {
-                        if remove_members.contains(&witness.name) && let Some(user) = self.members.get(&witness.name)
-                            {
-                                remove_witnesses
-                                    .entry((schema_id.clone(), user.clone()))
-                                    .or_default()
-                                    .push(witness.namespace.clone());
-                            }
-                        
+                        if remove_members.contains(&witness.name)
+                            && let Some(user) = self.members.get(&witness.name)
+                        {
+                            remove_witnesses
+                                .entry((schema_id.clone(), user.clone()))
+                                .or_default()
+                                .push(witness.namespace.clone());
+                        }
                     }
                 }
             }
 
             // all_schemas
             for evaluators in self.roles_all_schemas.evaluator.iter() {
-                if remove_members.contains(&evaluators.name) && let Some(user) = self.members.get(&evaluators.name) {
-                        remove_evaluators
-                            .entry((SchemaType::AllSchemas, user.clone()))
-                            .or_default()
-                            .push(evaluators.namespace.clone());
-                    }
-                
+                if remove_members.contains(&evaluators.name)
+                    && let Some(user) = self.members.get(&evaluators.name)
+                {
+                    remove_evaluators
+                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .or_default()
+                        .push(evaluators.namespace.clone());
+                }
             }
             for validators in self.roles_all_schemas.validator.iter() {
-                if remove_members.contains(&validators.name) && let Some(user) = self.members.get(&validators.name) {
-                        remove_validators
-                            .entry((SchemaType::AllSchemas, user.clone()))
-                            .or_default()
-                            .push(validators.namespace.clone());
-                    }
-                
+                if remove_members.contains(&validators.name)
+                    && let Some(user) = self.members.get(&validators.name)
+                {
+                    remove_validators
+                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .or_default()
+                        .push(validators.namespace.clone());
+                }
             }
             for witness in self.roles_all_schemas.witness.iter() {
-                if remove_members.contains(&witness.name) 
-                    && let Some(user) = self.members.get(&witness.name) {
-                        remove_witnesses
-                            .entry((SchemaType::AllSchemas, user.clone()))
-                            .or_default()
-                            .push(witness.namespace.clone());
-                    }
-                
+                if remove_members.contains(&witness.name)
+                    && let Some(user) = self.members.get(&witness.name)
+                {
+                    remove_witnesses
+                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .or_default()
+                        .push(witness.namespace.clone());
+                }
             }
         }
 
@@ -838,37 +840,33 @@ impl GovernanceData {
                         map.entry(schema_id.clone()).or_default();
                     for ns in namespace.iter() {
                         for user in roles.creator.iter() {
-                            if ns.is_ancestor_or_equal_of(&user.namespace) 
+                            if ns.is_ancestor_or_equal_of(&user.namespace)
                                 && let Some(pub_key) =
                                     self.members.get(&user.name)
-                                {
-                                    schema_entry
-                                        .entry(pub_key.clone())
-                                        .or_default()
-                                        .insert(user.namespace.clone());
-                                }
-                            
+                            {
+                                schema_entry
+                                    .entry(pub_key.clone())
+                                    .or_default()
+                                    .insert(user.namespace.clone());
+                            }
                         }
                     }
                 }
             } else if let Some(roles) = self.roles_schema.get(&schema_id) {
-                    let schema_entry = map.entry(schema_id).or_default();
-                    for ns in namespace.iter() {
-                        for user in roles.creator.iter() {
-                            if ns.is_ancestor_or_equal_of(&user.namespace) 
-                                && let Some(pub_key) =
-                                    self.members.get(&user.name)
-                                {
-                                    schema_entry
-                                        .entry(pub_key.clone())
-                                        .or_default()
-                                        .insert(user.namespace.clone());
-                                }
-                            
+                let schema_entry = map.entry(schema_id).or_default();
+                for ns in namespace.iter() {
+                    for user in roles.creator.iter() {
+                        if ns.is_ancestor_or_equal_of(&user.namespace)
+                            && let Some(pub_key) = self.members.get(&user.name)
+                        {
+                            schema_entry
+                                .entry(pub_key.clone())
+                                .or_default()
+                                .insert(user.namespace.clone());
                         }
                     }
                 }
-            
+            }
         }
 
         map

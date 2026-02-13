@@ -324,7 +324,7 @@ pub struct AuthContext {
     pub username: String,
     pub roles: Vec<String>,
     pub permissions: Vec<Permission>,
-    pub api_key_id: String,  // UUID
+    pub api_key_id: String, // UUID
     pub is_management_key: bool,
     pub ip_address: Option<String>,
 }

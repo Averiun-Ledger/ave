@@ -59,7 +59,7 @@ fn get_superadmin_role_id(
         .query_row(
             "SELECT id FROM roles WHERE name = 'superadmin'",
             [],
-            |row| row.get(0)
+            |row| row.get(0),
         )
         .ok();
     Ok(role_id)
@@ -83,13 +83,15 @@ fn validate_superadmin_assignment(
     }
 
     // Get target user to check if already superadmin
-    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+    let target_user = db
+        .get_user_by_id(target_user_id)
+        .map_err(db_error_to_response)?;
     let is_target_already_superadmin = is_superadmin_user(db, &target_user)?;
 
     if !is_target_already_superadmin {
         // Trying to make someone else superadmin - verify only one exists
-        let existing_superadmin_count = db.count_superadmins()
-            .map_err(db_error_to_response)?;
+        let existing_superadmin_count =
+            db.count_superadmins().map_err(db_error_to_response)?;
 
         if existing_superadmin_count > 0 {
             return Err((
@@ -122,13 +124,15 @@ fn validate_superadmin_removal(
     }
 
     // Get target user
-    let target_user = db.get_user_by_id(target_user_id).map_err(db_error_to_response)?;
+    let target_user = db
+        .get_user_by_id(target_user_id)
+        .map_err(db_error_to_response)?;
 
     // Check if target is superadmin
     if is_superadmin_user(db, &target_user)? {
         // Cannot remove superadmin role from the only superadmin
-        let superadmin_count = db.count_superadmins()
-            .map_err(db_error_to_response)?;
+        let superadmin_count =
+            db.count_superadmins().map_err(db_error_to_response)?;
 
         if superadmin_count <= 1 {
             return Err((
@@ -200,44 +204,44 @@ pub async fn create_user(
     // SECURITY FIX: Enforce single superadmin rule
     // Check if trying to assign superadmin role
     if let Some(ref role_ids) = req.role_ids {
-        let superadmin_role_id: Option<i64> = db
-            .lock_conn()
-            .ok()
-            .and_then(|conn| {
+        let superadmin_role_id: Option<i64> =
+            db.lock_conn().ok().and_then(|conn| {
                 conn.query_row(
                     "SELECT id FROM roles WHERE name = 'superadmin'",
                     [],
-                    |row| row.get(0)
-                ).ok()
+                    |row| row.get(0),
+                )
+                .ok()
             });
 
-        if let Some(sa_role_id) = superadmin_role_id 
-            && role_ids.contains(&sa_role_id) {
-                // Only one superadmin is allowed in the system
-                // Only the current superadmin can attempt this operation
-                if !auth_ctx.is_superadmin() {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        Json(ErrorResponse {
-                            error: "Only superadmin can assign superadmin role".to_string(),
-                        }),
-                    ));
-                }
+        if let Some(sa_role_id) = superadmin_role_id
+            && role_ids.contains(&sa_role_id)
+        {
+            // Only one superadmin is allowed in the system
+            // Only the current superadmin can attempt this operation
+            if !auth_ctx.is_superadmin() {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "Only superadmin can assign superadmin role"
+                            .to_string(),
+                    }),
+                ));
+            }
 
-                // Verify that no other superadmin exists
-                let existing_superadmin_count = db.count_superadmins()
-                    .map_err(db_error_to_response)?;
+            // Verify that no other superadmin exists
+            let existing_superadmin_count =
+                db.count_superadmins().map_err(db_error_to_response)?;
 
-                if existing_superadmin_count > 0 {
-                    return Err((
+            if existing_superadmin_count > 0 {
+                return Err((
                         StatusCode::CONFLICT,
                         Json(ErrorResponse {
                             error: "A superadmin already exists. Only one superadmin is allowed".to_string(),
                         }),
                     ));
-                }
             }
-        
+        }
     }
 
     // Create user
@@ -319,17 +323,11 @@ pub async fn list_users(
     const DEFAULT_LIMIT: i64 = 100;
     const MAX_LIMIT: i64 = 1000;
 
-    let limit = params.limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .clamp(1, MAX_LIMIT);
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let offset = params.offset.unwrap_or(0).max(0);
 
     let users = db
-        .list_users(
-            params.include_inactive.unwrap_or(false),
-            limit,
-            offset,
-        )
+        .list_users(params.include_inactive.unwrap_or(false), limit, offset)
         .map_err(db_error_to_response)?;
 
     Ok(Json(users))
@@ -414,7 +412,8 @@ pub async fn update_user(
     check_permission(&auth_ctx, "admin_users", "put")?;
 
     // SECURITY FIX: Protect superadmin account
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
     let is_target_superadmin = is_superadmin_user(&db, &target_user)?;
 
     if is_target_superadmin {
@@ -463,7 +462,8 @@ pub async fn update_user(
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Only superadmin can modify roles of other admins".to_string(),
+                    error: "Only superadmin can modify roles of other admins"
+                        .to_string(),
                 }),
             ));
         }
@@ -473,7 +473,8 @@ pub async fn update_user(
 
         if let Some(sa_role_id) = superadmin_role_id {
             // Check if target user currently has superadmin role
-            let is_target_currently_superadmin = is_superadmin_user(&db, &target_user)?;
+            let is_target_currently_superadmin =
+                is_superadmin_user(&db, &target_user)?;
 
             // Validate if trying to ADD superadmin role
             if role_ids.contains(&sa_role_id) {
@@ -572,7 +573,8 @@ pub async fn reset_user_password(
 
     // SECURITY FIX: Block ALL password resets for superadmin account
     // Password can only be changed directly in the database for security
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
     if is_superadmin_user(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
@@ -638,7 +640,8 @@ pub async fn delete_user(
     }
 
     // SECURITY FIX: Protect superadmin account from deletion
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
     if is_superadmin_user(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
@@ -695,13 +698,15 @@ pub async fn assign_role(
 
     // SECURITY FIX: Prevent non-superadmin from assigning roles to other admins
     // Get target user to check if they're an admin
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
     if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify roles of other admins".to_string(),
+                error: "Only superadmin can modify roles of other admins"
+                    .to_string(),
             }),
         ));
     }
@@ -709,9 +714,10 @@ pub async fn assign_role(
     // SECURITY FIX: Protect superadmin role assignment
     let superadmin_role_id = get_superadmin_role_id(&db)?;
 
-    if let Some(sa_role_id) = superadmin_role_id &&
-        role_id == sa_role_id {
-            validate_superadmin_assignment(&db, &auth_ctx, user_id)?;  
+    if let Some(sa_role_id) = superadmin_role_id
+        && role_id == sa_role_id
+    {
+        validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
     }
 
     db.assign_role_to_user(user_id, role_id, Some(auth_ctx.user_id))
@@ -762,13 +768,15 @@ pub async fn remove_role(
 
     // SECURITY FIX: Prevent non-superadmin from removing roles from other admins
     // Get target user to check if they're an admin
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
     if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify roles of other admins".to_string(),
+                error: "Only superadmin can modify roles of other admins"
+                    .to_string(),
             }),
         ));
     }
@@ -776,11 +784,11 @@ pub async fn remove_role(
     // SECURITY FIX: Protect superadmin role removal
     let superadmin_role_id = get_superadmin_role_id(&db)?;
 
-    if let Some(sa_role_id) = superadmin_role_id && 
-        role_id == sa_role_id {
-            validate_superadmin_removal(&db, &auth_ctx, user_id)?;
-        }
-    
+    if let Some(sa_role_id) = superadmin_role_id
+        && role_id == sa_role_id
+    {
+        validate_superadmin_removal(&db, &auth_ctx, user_id)?;
+    }
 
     db.remove_role_from_user(user_id, role_id)
         .map_err(db_error_to_response)?;
@@ -1063,7 +1071,8 @@ pub async fn set_role_permission(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify role permissions".to_string(),
+                error: "Only superadmin can modify role permissions"
+                    .to_string(),
             }),
         ));
     }
@@ -1159,7 +1168,8 @@ pub async fn set_user_permission(
     }
 
     // Ensure user exists
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
     // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
     // Only superadmins can modify permissions of other admins (separation of duties)
@@ -1167,7 +1177,8 @@ pub async fn set_user_permission(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify permissions of other admins".to_string(),
+                error: "Only superadmin can modify permissions of other admins"
+                    .to_string(),
             }),
         ));
     }
@@ -1237,14 +1248,16 @@ pub async fn remove_user_permission(
     }
 
     // Ensure user exists
-    let target_user = db.get_user_by_id(user_id).map_err(db_error_to_response)?;
+    let target_user =
+        db.get_user_by_id(user_id).map_err(db_error_to_response)?;
 
     // SECURITY FIX: Prevent non-superadmin from modifying other admin's permissions
     if !auth_ctx.is_superadmin() && is_admin_account(&db, &target_user)? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify permissions of other admins".to_string(),
+                error: "Only superadmin can modify permissions of other admins"
+                    .to_string(),
             }),
         ));
     }
@@ -1304,7 +1317,8 @@ pub async fn remove_role_permission(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can modify role permissions".to_string(),
+                error: "Only superadmin can modify role permissions"
+                    .to_string(),
             }),
         ));
     }

@@ -66,10 +66,7 @@ impl BorshDeserialize for Auth {
         let auth = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
         let network = None;
 
-        Ok(Self {
-            network,
-            auth,
-        })
+        Ok(Self { network, auth })
     }
 }
 
@@ -120,9 +117,8 @@ impl Auth {
                 }
                 SubjectData::Governance { .. } => {
                     let gov = get_gov(ctx, subject_id).await?;
-                    let witnesses = gov
-                        .get_witnesses(WitnessesData::Gov)
-                        .map_err(|e| {
+                    let witnesses =
+                        gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
                             error!(
                                 subject_id = %subject_id,
                                 error = %e,
@@ -284,20 +280,20 @@ impl Handler<Auth> for Auth {
                 witness,
             } => {
                 if !subject_id.is_empty() {
-                   self.on_event(
-                    AuthEvent::NewAuth {
-                        subject_id: subject_id.clone(),
-                        witness,
-                    },
-                    ctx,
-                )
-                .await;
+                    self.on_event(
+                        AuthEvent::NewAuth {
+                            subject_id: subject_id.clone(),
+                            witness,
+                        },
+                        ctx,
+                    )
+                    .await;
 
-                debug!(
-                    msg_type = "NewAuth",
-                    subject_id = %subject_id,
-                    "New auth created successfully"
-                ); 
+                    debug!(
+                        msg_type = "NewAuth",
+                        subject_id = %subject_id,
+                        "New auth created successfully"
+                    );
                 }
             }
             AuthMessage::GetAuths => {

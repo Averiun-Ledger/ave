@@ -261,7 +261,13 @@ impl AuthDatabase {
             "INSERT INTO users (username, password_hash, is_active)
              VALUES (?1, ?2, 1)",
             params![superadmin, password_hash],
-        ).map_err(|e| DatabaseError::InsertError(format!("Failed to create superadmin: {}", e)))?;
+        )
+        .map_err(|e| {
+            DatabaseError::InsertError(format!(
+                "Failed to create superadmin: {}",
+                e
+            ))
+        })?;
 
         let user_id = conn.last_insert_rowid();
 
@@ -361,16 +367,20 @@ impl AuthDatabase {
         // Check if trying to assign superadmin role
         if let Some(ref roles) = role_ids {
             // Try to get superadmin role ID - fail strictly if query fails
-            let superadmin_role_id: Option<i64> = conn.query_row(
-                "SELECT id FROM roles WHERE name = 'superadmin'",
-                [],
-                |row| row.get(0),
-            ).ok();
+            let superadmin_role_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM roles WHERE name = 'superadmin'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
 
-            if let Some(sa_role_id) = superadmin_role_id 
-                && roles.contains(&sa_role_id) {
-                    // Use the already-acquired connection to avoid deadlock
-                    let existing_count: i64 = conn.query_row(
+            if let Some(sa_role_id) = superadmin_role_id
+                && roles.contains(&sa_role_id)
+            {
+                // Use the already-acquired connection to avoid deadlock
+                let existing_count: i64 = conn
+                    .query_row(
                         "SELECT COUNT(DISTINCT u.id)
                          FROM users u
                          INNER JOIN user_roles ur ON u.id = ur.user_id
@@ -378,15 +388,20 @@ impl AuthDatabase {
                          WHERE r.name = 'superadmin' AND u.is_deleted = 0",
                         [],
                         |row| row.get(0),
-                    ).map_err(|e| DatabaseError::QueryError(format!("Failed to count superadmins: {}", e)))?;
+                    )
+                    .map_err(|e| {
+                        DatabaseError::QueryError(format!(
+                            "Failed to count superadmins: {}",
+                            e
+                        ))
+                    })?;
 
-                    if existing_count > 0 {
-                        return Err(DatabaseError::ValidationError(
+                if existing_count > 0 {
+                    return Err(DatabaseError::ValidationError(
                             "A superadmin already exists. Only one superadmin is allowed".to_string()
                         ));
-                    }
                 }
-            
+            }
         }
 
         // Hash password
@@ -732,20 +747,31 @@ impl AuthDatabase {
         let (user, password_valid) = match user_result {
             Ok(u) => {
                 // User exists - verify with real hash
-                let valid = super::crypto::verify_password(password, &u.password_hash)
-                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                let valid =
+                    super::crypto::verify_password(password, &u.password_hash)
+                        .map_err(|e| {
+                            DatabaseError::CryptoError(format!(
+                                "Password verification failed: {}",
+                                e
+                            ))
+                        })?;
                 (Some(u), valid)
-            },
+            }
             Err(_) => {
                 // User doesn't exist - verify with dummy hash to match timing
-                let _ = super::crypto::verify_password(password, DUMMY_PASSWORD_HASH);
+                let _ = super::crypto::verify_password(
+                    password,
+                    DUMMY_PASSWORD_HASH,
+                );
                 (None, false)
             }
         };
 
         // If user doesn't exist, return error now (after hash verification for timing)
         let user = user.ok_or_else(|| {
-            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+            DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            )
         })?;
 
         // SECURITY FIX: Use generic error messages to prevent user enumeration
@@ -860,20 +886,33 @@ impl AuthDatabase {
         let (user, password_valid) = match user_result {
             Ok(Some(u)) => {
                 // User exists - verify with real hash
-                let valid = super::crypto::verify_password(current_password, &u.password_hash)
-                    .map_err(|e| DatabaseError::CryptoError(format!("Password verification failed: {}", e)))?;
+                let valid = super::crypto::verify_password(
+                    current_password,
+                    &u.password_hash,
+                )
+                .map_err(|e| {
+                    DatabaseError::CryptoError(format!(
+                        "Password verification failed: {}",
+                        e
+                    ))
+                })?;
                 (Some(u), valid)
-            },
+            }
             Ok(None) | Err(_) => {
                 // User doesn't exist - verify with dummy hash to match timing
-                let _ = super::crypto::verify_password(current_password, DUMMY_PASSWORD_HASH);
+                let _ = super::crypto::verify_password(
+                    current_password,
+                    DUMMY_PASSWORD_HASH,
+                );
                 (None, false)
             }
         };
 
         // If user doesn't exist, return error now (after hash verification for timing)
         let mut user = user.ok_or_else(|| {
-            DatabaseError::PermissionDenied("Invalid username or password".to_string())
+            DatabaseError::PermissionDenied(
+                "Invalid username or password".to_string(),
+            )
         })?;
 
         // Password was already verified above for timing attack mitigation
@@ -911,7 +950,8 @@ impl AuthDatabase {
         // Prevent setting the same password
         if current_password == new_password {
             return Err(DatabaseError::ValidationError(
-                "New password must be different from current password".to_string(),
+                "New password must be different from current password"
+                    .to_string(),
             ));
         }
 
@@ -999,7 +1039,9 @@ impl AuthDatabase {
     /// Validate a username for CRLF injection and other attacks
     ///
     /// SECURITY FIX: Prevents CRLF injection, header manipulation, and log forgery
-    pub(crate) fn validate_username(username: &str) -> Result<(), DatabaseError> {
+    pub(crate) fn validate_username(
+        username: &str,
+    ) -> Result<(), DatabaseError> {
         // Check length (reasonable username limit)
         if username.len() > 64 {
             return Err(DatabaseError::ValidationError(
@@ -1048,7 +1090,9 @@ impl AuthDatabase {
     /// Validate a description field for CRLF injection
     ///
     /// SECURITY FIX: Prevents CRLF injection in description fields
-    pub(crate) fn validate_description(description: Option<&str>) -> Result<(), DatabaseError> {
+    pub(crate) fn validate_description(
+        description: Option<&str>,
+    ) -> Result<(), DatabaseError> {
         if let Some(desc) = description {
             // Check length
             if desc.len() > 500 {
@@ -1060,7 +1104,8 @@ impl AuthDatabase {
             // SECURITY: Check for CRLF injection
             if desc.contains('\r') || desc.contains('\n') {
                 return Err(DatabaseError::ValidationError(
-                    "Description contains invalid characters (CRLF)".to_string(),
+                    "Description contains invalid characters (CRLF)"
+                        .to_string(),
                 ));
             }
 
@@ -1074,7 +1119,8 @@ impl AuthDatabase {
             // Check for excessive control characters (allow tab)
             if desc.chars().any(|c| c.is_control() && c != '\t') {
                 return Err(DatabaseError::ValidationError(
-                    "Description contains invalid control characters".to_string(),
+                    "Description contains invalid control characters"
+                        .to_string(),
                 ));
             }
         }

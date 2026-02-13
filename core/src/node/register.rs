@@ -32,8 +32,6 @@ pub struct RegisterDataGov {
     pub description: Option<String>,
 }
 
-
-
 #[derive(
     Clone,
     Debug,

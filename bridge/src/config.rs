@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::{auth::AuthConfig, http::HttpConfig};
 
-#[derive(Deserialize,Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(default)]
 pub struct Config {
     /// Settings from Ave Base.

@@ -22,7 +22,9 @@ use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};
 
 /// Serializes an `EventRequestType` to its serde string representation.
-fn event_request_type_to_string(et: &EventRequestType) -> Result<String, DatabaseError> {
+fn event_request_type_to_string(
+    et: &EventRequestType,
+) -> Result<String, DatabaseError> {
     match serde_json::to_value(et) {
         Ok(Value::String(s)) => Ok(s),
         _ => Err(DatabaseError::JsonSerialize(
@@ -291,9 +293,17 @@ impl Querys for SqliteLocal {
     async fn get_events(
         &self,
         subject_id: &str,
-        query: EventsQuery
+        query: EventsQuery,
     ) -> Result<PaginatorEvents, DatabaseError> {
-        let EventsQuery { quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type } = query;
+        let EventsQuery {
+            quantity,
+            page,
+            reverse,
+            event_request_ts,
+            event_ledger_ts,
+            sink_ts,
+            event_type,
+        } = query;
 
         let quantity = quantity.unwrap_or(50).max(1);
         let mut page = page.unwrap_or(1).max(1);
@@ -467,16 +477,14 @@ impl Querys for SqliteLocal {
 
                 let event_type_str: String = row.get(6)?;
                 let event_type: EventRequestType =
-                    serde_json::from_value(Value::String(
-                        event_type_str,
-                    ))
-                    .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
+                    serde_json::from_value(Value::String(event_type_str))
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
 
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
@@ -566,16 +574,14 @@ impl Querys for SqliteLocal {
 
                 let event_type_str: String = row.get(6)?;
                 let event_type: EventRequestType =
-                    serde_json::from_value(Value::String(
-                        event_type_str,
-                    ))
-                    .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
+                    serde_json::from_value(Value::String(event_type_str))
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
 
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
@@ -605,7 +611,7 @@ impl Querys for SqliteLocal {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         let quantity = quantity.unwrap_or(50).max(1);
         let reverse = reverse.unwrap_or(false);
@@ -702,16 +708,14 @@ impl Querys for SqliteLocal {
 
                 let event_type_str: String = row.get(6)?;
                 let event_type: EventRequestType =
-                    serde_json::from_value(Value::String(
-                        event_type_str,
-                    ))
-                    .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
+                    serde_json::from_value(Value::String(event_type_str))
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
 
                 Ok(LedgerDB {
                     subject_id: row.get(0)?,
@@ -809,7 +813,8 @@ impl SqliteLocal {
         let event_json = serde_json::to_string(&event_db.event)
             .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
 
-        let event_type_str = event_request_type_to_string(&event_db.event_type)?;
+        let event_type_str =
+            event_request_type_to_string(&event_db.event_type)?;
 
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
@@ -924,17 +929,17 @@ impl SqliteLocal {
         sn: Option<u64>,
         error: String,
         who: String,
-        abort_type: String
+        abort_type: String,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::MutexLock)?;
 
         let sn_i64 = if let Some(sn) = sn {
             Some(i64::try_from(sn).map_err(|_| {
-            DatabaseError::IntegerConversion(format!(
-                "sn out of range for SQLite INTEGER (i64): {}",
-                sn
-            ))
-        })?)
+                DatabaseError::IntegerConversion(format!(
+                    "sn out of range for SQLite INTEGER (i64): {}",
+                    sn
+                ))
+            })?)
         } else {
             None
         };
@@ -958,10 +963,7 @@ impl SqliteLocal {
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteLocal {
     async fn notify(&self, event: SignedLedger) {
-        let subject_id = event
-            .content()
-            .get_subject_id()
-            .to_string();
+        let subject_id = event.content().get_subject_id().to_string();
         let sn = event.content().sn;
 
         if let Err(e) = self.save_signed_ledger(&event).await {

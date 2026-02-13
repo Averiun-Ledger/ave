@@ -10,7 +10,9 @@ use ave_identity::{DigestIdentifier, PublicKey, Signed};
 use crate::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::{
-       BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest, BridgeTransferRequest
+        BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
+        BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
+        BridgeSignedEventRequest, BridgeTransferRequest,
     },
     error::ConversionError,
     request::{
@@ -106,13 +108,13 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
     type Error = ConversionError;
 
     fn try_from(request: BridgeCreateRequest) -> Result<Self, Self::Error> {
-        let governance_id = if let Some(governance_id) = request
-            .governance_id {
-                DigestIdentifier::from_str(&governance_id)
-            .map_err(|e| ConversionError::InvalidGovernanceId(e.to_string()))?
-            } else {
-                DigestIdentifier::default()
-            };
+        let governance_id = if let Some(governance_id) = request.governance_id {
+            DigestIdentifier::from_str(&governance_id).map_err(|e| {
+                ConversionError::InvalidGovernanceId(e.to_string())
+            })?
+        } else {
+            DigestIdentifier::default()
+        };
 
         let schema_id = SchemaType::from_str(&request.schema_id)
             .map_err(ConversionError::InvalidSchemaId)?;
@@ -262,7 +264,6 @@ impl TryFrom<BridgeRejectRequest> for RejectRequest {
         Ok(RejectRequest { subject_id })
     }
 }
-
 
 #[cfg(test)]
 mod tests {

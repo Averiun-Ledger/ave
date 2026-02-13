@@ -1,6 +1,9 @@
 //! Response types from Ave API
 
-use crate::{SchemaType, bridge::request::{ApprovalState, EventRequestType}};
+use crate::{
+    SchemaType,
+    bridge::request::{ApprovalState, EventRequestType},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, fmt::Display};
@@ -85,7 +88,7 @@ pub struct LedgerDB {
     pub event_ledger_timestamp: u64,
     pub sink_timestamp: u64,
     pub event: RequestEventDB,
-    pub event_type: EventRequestType
+    pub event_type: EventRequestType,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,7 +156,9 @@ impl RequestEventDB {
             | RequestEventDB::GovernanceFact { .. } => EventRequestType::Fact,
             RequestEventDB::Transfer { .. } => EventRequestType::Transfer,
             RequestEventDB::TrackerConfirm
-            | RequestEventDB::GovernanceConfirm { .. } => EventRequestType::Confirm,
+            | RequestEventDB::GovernanceConfirm { .. } => {
+                EventRequestType::Confirm
+            }
             RequestEventDB::Reject => EventRequestType::Reject,
             RequestEventDB::EOL => EventRequestType::Eol,
         }

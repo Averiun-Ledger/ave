@@ -2,19 +2,19 @@
 //!
 //! These types are used for communication with the Ave HTTP API
 
-
 use std::fmt::Display;
 
-use crate::{request::EventRequest, response::TimeRange, signature::BridgeSignature};
+use crate::{
+    request::EventRequest, response::TimeRange, signature::BridgeSignature,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(feature = "openapi")]
-use utoipa::{ToSchema, IntoParams};
+use utoipa::{IntoParams, ToSchema};
 
-
-#[derive(Debug, Clone, Deserialize,Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 pub struct SubjectQuery {
@@ -49,7 +49,7 @@ pub struct EventsQuery {
     pub event_ledger_ts: Option<TimeRange>,
     #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
     pub sink_ts: Option<TimeRange>,
-    pub event_type: Option<EventRequestType>
+    pub event_type: Option<EventRequestType>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -69,7 +69,7 @@ pub struct AbortsQuery {
 pub struct FirstEndEvents {
     pub quantity: Option<u64>,
     pub reverse: Option<bool>,
-    pub event_type: Option<EventRequestType>
+    pub event_type: Option<EventRequestType>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -87,12 +87,12 @@ pub enum EventRequestType {
 impl From<&EventRequest> for EventRequestType {
     fn from(value: &EventRequest) -> Self {
         match value {
-            EventRequest::Create( .. ) => Self::Create,
-            EventRequest::Fact( .. ) => Self::Fact,
-            EventRequest::Transfer( .. ) => Self::Transfer,
-            EventRequest::Confirm( .. ) => Self::Confirm,
-            EventRequest::EOL( .. ) => Self::Eol,
-            EventRequest::Reject( .. ) => Self::Reject,
+            EventRequest::Create(..) => Self::Create,
+            EventRequest::Fact(..) => Self::Fact,
+            EventRequest::Transfer(..) => Self::Transfer,
+            EventRequest::Confirm(..) => Self::Confirm,
+            EventRequest::EOL(..) => Self::Eol,
+            EventRequest::Reject(..) => Self::Reject,
         }
     }
 }
@@ -107,10 +107,8 @@ impl Display for EventRequestType {
             EventRequestType::Reject => write!(f, "reject"),
             EventRequestType::Eol => write!(f, "eol"),
         }
-           
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -127,12 +125,8 @@ pub enum ApprovalStateRes {
 impl Display for ApprovalStateRes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let string = match self {
-            ApprovalStateRes::Accepted => {
-                "accepted".to_owned()
-            }
-            ApprovalStateRes::Rejected => {
-                "rejected".to_owned()
-            }
+            ApprovalStateRes::Accepted => "accepted".to_owned(),
+            ApprovalStateRes::Rejected => "rejected".to_owned(),
             ApprovalStateRes::Obsolete => "obsolete".to_owned(),
         };
         write!(f, "{}", string,)

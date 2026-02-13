@@ -85,7 +85,10 @@ impl MemoryManager {
         data: u8,
     ) -> Result<(), ContractError> {
         // Security check: validate pointer exists in allocation map
-        let len = self.map.get(&start_ptr).ok_or(ContractError::InvalidPointer { pointer: start_ptr })?;
+        let len = self
+            .map
+            .get(&start_ptr)
+            .ok_or(ContractError::InvalidPointer { pointer: start_ptr })?;
 
         // Security check: validate write is within bounds
         if offset >= *len {

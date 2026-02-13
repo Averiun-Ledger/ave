@@ -74,12 +74,7 @@ impl Runner {
                 payload,
             } => {
                 Self::execute_fact_not_gov(
-                    ctx,
-                    state,
-                    init_state,
-                    payload,
-                    contract,
-                    is_owner,
+                    ctx, state, init_state, payload, contract, is_owner,
                 )
                 .await
             }

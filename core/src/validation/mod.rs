@@ -438,7 +438,7 @@ impl Handler<Validation> for Validation {
                             self.validators_response.len() as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary 
+                            if let ResponseSummary::Reboot = summary
                                 && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -455,7 +455,6 @@ impl Handler<Validation> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                            
 
                             let validation_data = self.build_validation_data();
 
@@ -512,7 +511,7 @@ impl Handler<Validation> for Validation {
                                 new_validators = curren_vali.len(),
                                 "Created additional validators from pending pool"
                             );
-                        } else if self.current_validators.is_empty() 
+                        } else if self.current_validators.is_empty()
                             && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -529,7 +528,6 @@ impl Handler<Validation> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                        
                     } else {
                         warn!(
                             msg_type = "Response",

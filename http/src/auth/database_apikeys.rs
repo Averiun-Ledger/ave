@@ -153,13 +153,13 @@ impl AuthDatabase {
         let now = Self::now();
         let config_ttl = self.config.api_key.default_ttl_seconds;
         // SECURITY FIX: Validate TTL is not negative
-        if let Some(ttl) = expires_in_seconds &&
-             ttl < 0 {
-                return Err(DatabaseError::ValidationError(format!(
-                    "Invalid TTL: {} (must be positive or 0)",
-                    ttl
-                )));
-            
+        if let Some(ttl) = expires_in_seconds
+            && ttl < 0
+        {
+            return Err(DatabaseError::ValidationError(format!(
+                "Invalid TTL: {} (must be positive or 0)",
+                ttl
+            )));
         }
 
         let effective_ttl = match expires_in_seconds {
@@ -419,19 +419,24 @@ impl AuthDatabase {
 
         // SECURITY: Constant-time API key enumeration mitigation
         // If key doesn't exist, perform dummy user query to match timing
-        let (key_id, user_id, revoked, expires_at, is_management) = match key_result {
-            Some(k) => k,
-            None => {
-                // API key doesn't exist - perform dummy query to prevent timing attack
-                let _ = conn.query_row(
-                    "SELECT id FROM users WHERE id = ?1",
-                    params![999999], // Non-existent user
-                    |row| row.get::<_, i64>(0),
-                ).optional();
+        let (key_id, user_id, revoked, expires_at, is_management) =
+            match key_result {
+                Some(k) => k,
+                None => {
+                    // API key doesn't exist - perform dummy query to prevent timing attack
+                    let _ = conn
+                        .query_row(
+                            "SELECT id FROM users WHERE id = ?1",
+                            params![999999], // Non-existent user
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional();
 
-                return Err(DatabaseError::PermissionDenied("Invalid API key".to_string()));
-            }
-        };
+                    return Err(DatabaseError::PermissionDenied(
+                        "Invalid API key".to_string(),
+                    ));
+                }
+            };
 
         // Check if revoked
         if revoked {
@@ -593,7 +598,10 @@ impl AuthDatabase {
         }
 
         // Check for dangerous characters that could be used for attacks
-        let dangerous_chars = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '(', ')', '{', '}', '[', ']', '\\', '/', ':', '*', '?', '%'];
+        let dangerous_chars = [
+            '<', '>', '"', '\'', '`', '&', '|', ';', '$', '(', ')', '{', '}',
+            '[', ']', '\\', '/', ':', '*', '?', '%',
+        ];
         if name.chars().any(|c| dangerous_chars.contains(&c)) {
             return Err(DatabaseError::ValidationError(
                 "API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed".to_string()

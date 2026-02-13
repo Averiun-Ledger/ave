@@ -445,7 +445,6 @@ impl Subject for Governance {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
                         .await?;
                     self.up_owner(ctx, &hash, &network).await?;
-
                 }
 
                 // Seguimos sin ser owner ni new owner,
@@ -887,7 +886,7 @@ impl Governance {
             &schema_creators_vali,
             &new_schemas_eval,
             &new_schemas_vali,
-            (hash,network)
+            (hash, network),
         )
         .await
     }
@@ -1357,9 +1356,8 @@ impl Governance {
                 if witness == &ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
                 } else if let Some(w) = self.properties.members.get(witness) {
-                        witnesses.push(WitnessesType::User(w.clone()));
-                    }
-                
+                    witnesses.push(WitnessesType::User(w.clone()));
+                }
             }
 
             new_creator_data.insert(
@@ -1387,9 +1385,8 @@ impl Governance {
                 if witness == &ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
                 } else if let Some(w) = self.properties.members.get(witness) {
-                        witnesses.push(WitnessesType::User(w.clone()));
-                    }
-                
+                    witnesses.push(WitnessesType::User(w.clone()));
+                }
             }
 
             update_creator_witnesses_data.insert((
@@ -2150,7 +2147,9 @@ impl Handler<Governance> for Governance {
             }
             GovernanceMessage::GetLastLedger => {
                 let ledger_event = self.get_last_ledger(ctx).await?;
-                Ok(GovernanceResponse::LastLedger { ledger_event: Box::new(ledger_event) })
+                Ok(GovernanceResponse::LastLedger {
+                    ledger_event: Box::new(ledger_event),
+                })
             }
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),

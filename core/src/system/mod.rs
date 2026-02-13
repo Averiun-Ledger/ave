@@ -171,7 +171,7 @@ pub mod tests {
             contracts_path: contracts_path,
             always_accept: false,
             tracking_size: 100,
-            is_service: true
+            is_service: true,
         };
 
         let (sys, handlers) = system(

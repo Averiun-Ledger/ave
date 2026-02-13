@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::SchemaType;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataToSink {
     pub event: DataToSinkEvent,

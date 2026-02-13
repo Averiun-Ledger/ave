@@ -28,7 +28,7 @@ fn sanitize_log_field(input: &str, max_length: usize) -> String {
 /// Parameters for creating an audit log entry
 pub struct AuditLogParams<'a> {
     pub user_id: Option<i64>,
-    pub api_key_id: Option<&'a str>,  // UUID
+    pub api_key_id: Option<&'a str>, // UUID
     pub action_type: &'a str,
     pub endpoint: Option<&'a str>,
     pub http_method: Option<&'a str>,
@@ -65,11 +65,16 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         // SECURITY FIX: Sanitize user-controlled fields to prevent log injection
-        let sanitized_user_agent = params.user_agent.map(|ua| sanitize_log_field(ua, 500));
-        let sanitized_ip = params.ip_address.map(|ip| sanitize_log_field(ip, 100));
-        let sanitized_endpoint = params.endpoint.map(|ep| sanitize_log_field(ep, 500));
-        let sanitized_details = params.details.map(|d| sanitize_log_field(d, 2000));
-        let sanitized_error = params.error_message.map(|e| sanitize_log_field(e, 1000));
+        let sanitized_user_agent =
+            params.user_agent.map(|ua| sanitize_log_field(ua, 500));
+        let sanitized_ip =
+            params.ip_address.map(|ip| sanitize_log_field(ip, 100));
+        let sanitized_endpoint =
+            params.endpoint.map(|ep| sanitize_log_field(ep, 500));
+        let sanitized_details =
+            params.details.map(|d| sanitize_log_field(d, 2000));
+        let sanitized_error =
+            params.error_message.map(|e| sanitize_log_field(e, 1000));
 
         conn.execute(
             "INSERT INTO audit_logs (
@@ -211,14 +216,16 @@ impl AuthDatabase {
         let limit = match query.limit {
             Some(l) if l > 0 && l <= MAX_LIMIT => l,
             Some(l) if l <= 0 => {
-                return Err(DatabaseError::ValidationError(
-                    format!("Limit must be positive (got {})", l)
-                ));
+                return Err(DatabaseError::ValidationError(format!(
+                    "Limit must be positive (got {})",
+                    l
+                )));
             }
             Some(l) => {
-                return Err(DatabaseError::ValidationError(
-                    format!("Limit must not exceed {} (got {})", MAX_LIMIT, l)
-                ));
+                return Err(DatabaseError::ValidationError(format!(
+                    "Limit must not exceed {} (got {})",
+                    MAX_LIMIT, l
+                )));
             }
             None => DEFAULT_LIMIT,
         };
@@ -226,9 +233,10 @@ impl AuthDatabase {
         let offset = match query.offset {
             Some(o) if o >= 0 => o,
             Some(o) => {
-                return Err(DatabaseError::ValidationError(
-                    format!("Offset must be non-negative (got {})", o)
-                ));
+                return Err(DatabaseError::ValidationError(format!(
+                    "Offset must be non-negative (got {})",
+                    o
+                )));
             }
             None => 0,
         };
@@ -454,7 +462,7 @@ impl AuthDatabase {
     /// Check rate limit and record request
     pub fn check_rate_limit(
         &self,
-        api_key_id: Option<&str>,  // UUID
+        api_key_id: Option<&str>, // UUID
         ip_address: Option<&str>,
         endpoint: Option<&str>,
     ) -> Result<bool, DatabaseError> {
@@ -475,7 +483,8 @@ impl AuthDatabase {
         };
 
         // SECURITY: Check if this endpoint has a specific rate limit configuration
-        let (max_requests, window_seconds) = self.get_endpoint_rate_limit(endpoint);
+        let (max_requests, window_seconds) =
+            self.get_endpoint_rate_limit(endpoint);
 
         let conn = self.lock_conn()?;
 
@@ -504,7 +513,8 @@ impl AuthDatabase {
         };
 
         // Try to get existing rate limit entry
-        let select_query = format!("SELECT request_count FROM rate_limits {}", select_where);
+        let select_query =
+            format!("SELECT request_count FROM rate_limits {}", select_where);
         let current_count: Option<i64> = conn
             .query_row(
                 &select_query,
@@ -558,7 +568,8 @@ impl AuthDatabase {
         // Check if this endpoint has a specific configuration
         for endpoint_config in &self.config.rate_limit.sensitive_endpoints {
             if endpoint_config.endpoint == endpoint_path {
-                let window = endpoint_config.window_seconds
+                let window = endpoint_config
+                    .window_seconds
                     .unwrap_or(self.config.rate_limit.window_seconds);
                 return (endpoint_config.max_requests, window);
             }
@@ -592,7 +603,7 @@ impl AuthDatabase {
     #[allow(dead_code)]
     pub fn get_rate_limit_stats(
         &self,
-        api_key_id: Option<&str>,  // UUID
+        api_key_id: Option<&str>, // UUID
         hours: u32,
     ) -> Result<serde_json::Value, DatabaseError> {
         let conn = self.lock_conn()?;
@@ -606,14 +617,16 @@ impl AuthDatabase {
              WHERE api_key_id = ?1 AND window_start >= ?2
              GROUP BY window_start
              ORDER BY window_start DESC
-             LIMIT 100".to_string()
+             LIMIT 100"
+                .to_string()
         } else {
             "SELECT window_start, SUM(request_count) as total_requests
              FROM rate_limits
              WHERE api_key_id IS NULL AND window_start >= ?1
              GROUP BY window_start
              ORDER BY window_start DESC
-             LIMIT 100".to_string()
+             LIMIT 100"
+                .to_string()
         };
 
         let mut stmt = conn
@@ -675,7 +688,7 @@ impl AuthDatabase {
                  WHERE rl.window_start >= ?1 AND rl.api_key_id IS NOT NULL
                  GROUP BY rl.api_key_id
                  ORDER BY total_requests DESC
-                 LIMIT 50"
+                 LIMIT 50",
             )
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
@@ -706,7 +719,7 @@ impl AuthDatabase {
                  WHERE rl.window_start >= ?1 AND rl.ip_address IS NOT NULL
                  GROUP BY rl.ip_address
                  ORDER BY total_requests DESC
-                 LIMIT 50"
+                 LIMIT 50",
             )
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
@@ -734,7 +747,7 @@ impl AuthDatabase {
                  WHERE rl.window_start >= ?1 AND rl.endpoint IS NOT NULL
                  GROUP BY rl.endpoint
                  ORDER BY total_requests DESC
-                 LIMIT 50"
+                 LIMIT 50",
             )
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
@@ -765,7 +778,7 @@ impl AuthDatabase {
                    AND rl.endpoint IS NOT NULL
                  GROUP BY rl.ip_address, rl.endpoint
                  ORDER BY total_requests DESC
-                 LIMIT 100"
+                 LIMIT 100",
             )
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
@@ -884,7 +897,8 @@ impl AuthDatabase {
             "api_key_default_ttl_seconds" => {
                 let ttl_value: i64 = value.parse().map_err(|_| {
                     DatabaseError::ValidationError(
-                        "api_key_default_ttl_seconds must be a valid integer".to_string()
+                        "api_key_default_ttl_seconds must be a valid integer"
+                            .to_string(),
                     )
                 })?;
 
@@ -897,39 +911,42 @@ impl AuthDatabase {
             "max_login_attempts" => {
                 let attempts: u32 = value.parse().map_err(|_| {
                     DatabaseError::ValidationError(
-                        "max_login_attempts must be a valid positive integer".to_string()
+                        "max_login_attempts must be a valid positive integer"
+                            .to_string(),
                     )
                 })?;
 
                 if attempts == 0 {
                     return Err(DatabaseError::ValidationError(
-                        "max_login_attempts must be > 0".to_string()
+                        "max_login_attempts must be > 0".to_string(),
                     ));
                 }
             }
             "lockout_duration_seconds" => {
                 let duration: i64 = value.parse().map_err(|_| {
                     DatabaseError::ValidationError(
-                        "lockout_duration_seconds must be a valid integer".to_string()
+                        "lockout_duration_seconds must be a valid integer"
+                            .to_string(),
                     )
                 })?;
 
                 if duration <= 0 {
                     return Err(DatabaseError::ValidationError(
-                        "lockout_duration_seconds must be > 0".to_string()
+                        "lockout_duration_seconds must be > 0".to_string(),
                     ));
                 }
             }
             "rate_limit_window_seconds" => {
                 let window: i64 = value.parse().map_err(|_| {
                     DatabaseError::ValidationError(
-                        "rate_limit_window_seconds must be a valid integer".to_string()
+                        "rate_limit_window_seconds must be a valid integer"
+                            .to_string(),
                     )
                 })?;
 
                 if window <= 0 {
                     return Err(DatabaseError::ValidationError(
-                        "rate_limit_window_seconds must be > 0".to_string()
+                        "rate_limit_window_seconds must be > 0".to_string(),
                     ));
                 }
             }
@@ -942,7 +959,7 @@ impl AuthDatabase {
 
                 if max_requests == 0 {
                     return Err(DatabaseError::ValidationError(
-                        "rate_limit_max_requests must be > 0".to_string()
+                        "rate_limit_max_requests must be > 0".to_string(),
                     ));
                 }
             }

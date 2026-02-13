@@ -209,9 +209,9 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                         Ok(validation_actor) => {
                             if let Err(e) = validation_actor
                                 .tell(ValidationMessage::Response {
-                                    validation_res: Box::new(validation_res
-                                        .content()
-                                        .clone()),
+                                    validation_res: Box::new(
+                                        validation_res.content().clone(),
+                                    ),
                                     sender: self.node_key.clone(),
                                     signature: Some(
                                         validation_res.signature().clone(),
@@ -294,7 +294,9 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                     Ok(validation_actor) => {
                         if let Err(e) = validation_actor
                             .tell(ValidationMessage::Response {
-                                validation_res: Box::new(ValidationRes::TimeOut),
+                                validation_res: Box::new(
+                                    ValidationRes::TimeOut,
+                                ),
                                 signature: None,
                                 sender: self.node_key.clone(),
                             })

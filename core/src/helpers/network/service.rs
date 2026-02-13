@@ -31,7 +31,9 @@ impl NetworkSender {
                 error = %e,
                 "Failed to send command to network worker"
             );
-            ActorError::Functional { description: e.to_string() }
+            ActorError::Functional {
+                description: e.to_string(),
+            }
         })
     }
 

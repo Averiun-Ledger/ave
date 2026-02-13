@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorError, ActorPath, Handler, Message, NotPersistentActor,
+    Response,
 };
-use ave_common::{bridge::request::{EventRequestType, EventsQuery}, identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB}};
+use ave_common::{
+    bridge::request::{EventRequestType, EventsQuery},
+    identity::DigestIdentifier,
+    response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB},
+};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, info_span};
 
-use crate::helpers::db::{
-    ExternalDB, Querys
-};
+use crate::helpers::db::{ExternalDB, Querys};
 
 pub struct Query {
     db: Arc<ExternalDB>,
@@ -27,7 +29,7 @@ impl Query {
 pub enum QueryMessage {
     GetEvents {
         subject_id: DigestIdentifier,
-        query: EventsQuery
+        query: EventsQuery,
     },
     GetAborts {
         subject_id: DigestIdentifier,
@@ -45,7 +47,7 @@ pub enum QueryMessage {
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     },
     GetSubject {
         subject_id: DigestIdentifier,
@@ -81,7 +83,6 @@ impl Actor for Query {
             info_span!("Query")
         }
     }
-
 }
 
 #[async_trait]
@@ -96,33 +97,65 @@ impl Handler<Query> for Query {
             QueryMessage::GetEvents { subject_id, query } => {
                 match self.db.get_events(&subject_id.to_string(), query).await {
                     Ok(data) => Ok(QueryResponse::PagEvents(data)),
-                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                    Err(e) => Ok(QueryResponse::Error(e.to_string())),
                 }
-            },
-            QueryMessage::GetAborts { subject_id, request_id, sn, quantity, page, reverse } => {
-                match self.db.get_aborts(&subject_id.to_string(), request_id.map(|x| x.to_string()), sn, quantity, page, reverse).await {
+            }
+            QueryMessage::GetAborts {
+                subject_id,
+                request_id,
+                sn,
+                quantity,
+                page,
+                reverse,
+            } => {
+                match self
+                    .db
+                    .get_aborts(
+                        &subject_id.to_string(),
+                        request_id.map(|x| x.to_string()),
+                        sn,
+                        quantity,
+                        page,
+                        reverse,
+                    )
+                    .await
+                {
                     Ok(data) => Ok(QueryResponse::PagAborts(data)),
-                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                    Err(e) => Ok(QueryResponse::Error(e.to_string())),
                 }
-            },
+            }
             QueryMessage::GetEventSn { subject_id, sn } => {
                 match self.db.get_event_sn(&subject_id.to_string(), sn).await {
                     Ok(data) => Ok(QueryResponse::Event(data)),
-                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                    Err(e) => Ok(QueryResponse::Error(e.to_string())),
                 }
-            },
-            QueryMessage::GetFirstOrEndEvents { subject_id, quantity, reverse, event_type } => {
-                match self.db.get_first_or_end_events(&subject_id.to_string(), quantity, reverse, event_type).await {
+            }
+            QueryMessage::GetFirstOrEndEvents {
+                subject_id,
+                quantity,
+                reverse,
+                event_type,
+            } => {
+                match self
+                    .db
+                    .get_first_or_end_events(
+                        &subject_id.to_string(),
+                        quantity,
+                        reverse,
+                        event_type,
+                    )
+                    .await
+                {
                     Ok(data) => Ok(QueryResponse::Events(data)),
-                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                    Err(e) => Ok(QueryResponse::Error(e.to_string())),
                 }
-            },
+            }
             QueryMessage::GetSubject { subject_id } => {
                 match self.db.get_subject_state(&subject_id.to_string()).await {
                     Ok(data) => Ok(QueryResponse::Subject(data)),
-                    Err(e) => Ok(QueryResponse::Error(e.to_string()))
+                    Err(e) => Ok(QueryResponse::Error(e.to_string())),
                 }
-            },
+            }
         }
     }
 }

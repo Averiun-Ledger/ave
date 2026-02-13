@@ -26,7 +26,7 @@ pub fn bridge_to_event_request(
         .map_err(|e| BridgeError::InvalidEventRequest(e.to_string()))
 }
 
-pub fn core_approval_req_to_common(data: ApprovalReq ) -> ApprovalReqCommon {
+pub fn core_approval_req_to_common(data: ApprovalReq) -> ApprovalReqCommon {
     ApprovalReqCommon {
         subject_id: data.subject_id.to_string(),
         sn: data.sn,
@@ -36,7 +36,9 @@ pub fn core_approval_req_to_common(data: ApprovalReq ) -> ApprovalReqCommon {
     }
 }
 
-pub fn core_tranfer_subject_to_common(data: TransferSubject) -> TransferSubjectCommon {
+pub fn core_tranfer_subject_to_common(
+    data: TransferSubject,
+) -> TransferSubjectCommon {
     TransferSubjectCommon {
         name: data.name,
         subject_id: data.subject_id.to_string(),
@@ -45,11 +47,11 @@ pub fn core_tranfer_subject_to_common(data: TransferSubject) -> TransferSubjectC
     }
 }
 
-
-pub fn core_request_to_common(data: ave_core::request::RequestData) -> RequestData {
+pub fn core_request_to_common(
+    data: ave_core::request::RequestData,
+) -> RequestData {
     RequestData {
         request_id: data.request_id.to_string(),
         subject_id: data.subject_id.to_string(),
     }
 }
-

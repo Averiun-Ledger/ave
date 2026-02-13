@@ -172,12 +172,9 @@ impl Handler<ValidationSchema> for ValidationSchema {
                 }
 
                 if self.gov_version < validation_req.content().get_gov_version()
-                    && let Err(e) = try_to_update(
-                        ctx,
-                        self.governance_id.clone(),
-                        None,
-                    )
-                    .await
+                    && let Err(e) =
+                        try_to_update(ctx, self.governance_id.clone(), None)
+                            .await
                 {
                     error!(
                         msg_type = "NetworkRequest",
@@ -199,7 +196,7 @@ impl Handler<ValidationSchema> for ValidationSchema {
                             sn: self.sn,
                             hash: self.hash,
                             network: self.network.clone(),
-                            stop: true
+                            stop: true,
                         },
                     )
                     .await;

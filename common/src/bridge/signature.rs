@@ -43,15 +43,15 @@ impl TryFrom<BridgeSignature> for Signature {
 
     fn try_from(signature: BridgeSignature) -> Result<Self, Self::Error> {
         Ok(Self {
-            signer: PublicKey::from_str(&signature.signer).map_err(|e| {
-                SignatureError::InvalidPublicKey(e.to_string())
-            })?,
+            signer: PublicKey::from_str(&signature.signer)
+                .map_err(|e| SignatureError::InvalidPublicKey(e.to_string()))?,
             timestamp: TimeStamp::from_nanos(signature.timestamp),
-            value: SignatureIdentifier::from_str(&signature.value).map_err(
-                |e| SignatureError::InvalidSignature(e.to_string()),
-            )?,
+            value: SignatureIdentifier::from_str(&signature.value)
+                .map_err(|e| SignatureError::InvalidSignature(e.to_string()))?,
             content_hash: DigestIdentifier::from_str(&signature.content_hash)
-                .map_err(|e| SignatureError::InvalidContentHash(e.to_string()))?,
+                .map_err(|e| {
+                SignatureError::InvalidContentHash(e.to_string())
+            })?,
         })
     }
 }

@@ -2002,8 +2002,7 @@ async fn test_cannot_modify_system_permissions() {
 async fn test_all_system_roles_are_protected() {
     let (db, _dirs) = common::create_test_db();
 
-    let system_roles =
-        vec!["superadmin", "admin", "sender", "manager", "data"];
+    let system_roles = vec!["superadmin", "admin", "sender", "manager", "data"];
 
     for role_name in system_roles {
         let role = db.get_role_by_name(role_name).unwrap();

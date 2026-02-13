@@ -1,7 +1,9 @@
 mod error;
 
 use crate::{
-    external_db::DBManager, request::tracking::RequestTrackingEvent, subject::{SignedLedger, sinkdata::SinkDataEvent}
+    external_db::DBManager,
+    request::tracking::RequestTrackingEvent,
+    subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 
 use crate::config::ExternalDbConfig;
@@ -9,9 +11,10 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 
-use ave_common::{bridge::request::{EventRequestType, EventsQuery}, response::{
-    LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB
-}};
+use ave_common::{
+    bridge::request::{EventRequestType, EventsQuery},
+    response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB},
+};
 pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
@@ -27,7 +30,7 @@ pub trait Querys {
     async fn get_events(
         &self,
         subject_id: &str,
-        query: EventsQuery
+        query: EventsQuery,
     ) -> Result<PaginatorEvents, DatabaseError>;
 
     async fn get_aborts(
@@ -53,7 +56,7 @@ pub trait Querys {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, DatabaseError>;
 
     // subject
@@ -116,7 +119,9 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_request_tracking(&self) -> impl Subscriber<RequestTrackingEvent> {
+    pub fn get_request_tracking(
+        &self,
+    ) -> impl Subscriber<RequestTrackingEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
@@ -162,17 +167,12 @@ impl Querys for ExternalDB {
     async fn get_events(
         &self,
         subject_id: &str,
-        query: EventsQuery
+        query: EventsQuery,
     ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
-                sqlite_local
-                    .get_events(
-                        subject_id,
-                        query
-                    )
-                    .await
+                sqlite_local.get_events(subject_id, query).await
             }
         }
     }
@@ -195,13 +195,15 @@ impl Querys for ExternalDB {
         subject_id: &str,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             ExternalDB::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_first_or_end_events(subject_id, quantity, reverse, event_type)
+                    .get_first_or_end_events(
+                        subject_id, quantity, reverse, event_type,
+                    )
                     .await
             }
         }

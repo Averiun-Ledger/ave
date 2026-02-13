@@ -139,7 +139,9 @@ where
             .ask(GovernanceMessage::GetLastLedger)
             .await?;
         match response {
-            GovernanceResponse::LastLedger { ledger_event } => Ok(*ledger_event),
+            GovernanceResponse::LastLedger { ledger_event } => {
+                Ok(*ledger_event)
+            }
             _ => Err(ActorError::UnexpectedResponse {
                 path,
                 expected: "GovernanceResponse::LastLedger".to_owned(),

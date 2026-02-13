@@ -1312,9 +1312,7 @@ async fn test_manager_role_endpoints_access() {
 
     // Manager has node_request:all, node_subject:all, node_system:all
     // but NOT admin_system:get, so /config is blocked
-    let manager_overrides: &[(&str, &str, bool)] = &[
-        ("GET", "/config", false),
-    ];
+    let manager_overrides: &[(&str, &str, bool)] = &[("GET", "/config", false)];
 
     // Test with management key - full Node access except /config
     test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;

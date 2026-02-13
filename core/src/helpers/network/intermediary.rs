@@ -125,8 +125,7 @@ impl Intermediary {
                     );
                     return Err(IntermediaryError::NetworkSendFailed {
                         details: error.to_string(),
-                    }
-                    );
+                    });
                 };
 
                 debug!(
@@ -147,8 +146,7 @@ impl Intermediary {
                             );
                             return Err(IntermediaryError::InvalidPublicKey {
                                 details: e.to_string(),
-                            }
-                            );
+                            });
                         }
                     };
 
@@ -167,7 +165,7 @@ impl Intermediary {
                             return Err(
                                 IntermediaryError::DeserializationFailed {
                                     details: e.to_string(),
-                                }
+                                },
                             );
                         }
                     };

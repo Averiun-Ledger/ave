@@ -3,9 +3,11 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    HttpConfig, MemoryLimit, SelfSignedCertConfig, auth::{
-        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, RateLimitConfig, SessionConfig,
-    }
+    HttpConfig, MemoryLimit, SelfSignedCertConfig,
+    auth::{
+        ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
+        RateLimitConfig, SessionConfig,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -116,7 +118,8 @@ impl From<RateLimitConfig> for RateLimitConfigHttp {
             limit_by_key: value.limit_by_key,
             limit_by_ip: value.limit_by_ip,
             cleanup_interval_seconds: value.cleanup_interval_seconds,
-            sensitive_endpoints: value.sensitive_endpoints
+            sensitive_endpoints: value
+                .sensitive_endpoints
                 .into_iter()
                 .map(EndpointRateLimitHttp::from)
                 .collect(),
@@ -182,7 +185,9 @@ impl From<HttpConfig> for HttpConfigHttp {
                 .map(|x| x.to_string_lossy().to_string()),
             enable_doc: value.enable_doc,
             cors: CorsConfigHttp::from(value.cors),
-            self_signed_cert: SelfSignedCertConfigHttp::from(value.self_signed_cert),
+            self_signed_cert: SelfSignedCertConfigHttp::from(
+                value.self_signed_cert,
+            ),
         }
     }
 }
@@ -254,7 +259,7 @@ pub struct AveConfigHttp {
     /// Garbage collector interval in seconds
     pub tracking_size: usize,
     /// Is a service node
-    pub is_service: bool
+    pub is_service: bool,
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -268,7 +273,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
-            is_service: value.is_service
+            is_service: value.is_service,
         }
     }
 }

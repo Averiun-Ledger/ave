@@ -12,16 +12,20 @@ use crate::{
 };
 
 use ave_bridge::ave_common::{
-    bridge::request::{AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery, FirstEndEvents, GovQuery, SubjectQuery}, response::{ApprovalEntry, RequestData, RequestInfoExtend},
+    bridge::request::{
+        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
+        FirstEndEvents, GovQuery, SubjectQuery,
+    },
+    response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::{ApprovalStateRes},
+        bridge::request::ApprovalStateRes,
         response::{
-            GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
-            RequestInfo, RequestsInManager, RequestsInManagerSubject,
-            SubjectDB, SubjsData, TransferSubject,
+            GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
+            RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
+            TransferSubject,
         },
     },
 };
@@ -36,7 +40,6 @@ use axum::{
 };
 use serde_qs::axum::QsQuery;
 use tower::ServiceBuilder;
-
 
 use crate::doc::ApiDoc;
 use axum::http::Method;
@@ -127,11 +130,7 @@ pub(crate) async fn get_network_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<MonitorNetworkState>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_network_state()
-            .await?,
-    ))
+    Ok(Json(bridge.get_network_state().await?))
 }
 
 ///////// Request
@@ -155,11 +154,7 @@ pub(crate) async fn get_requests_in_manager(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<RequestsInManager>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_requests_in_manager()
-            .await?,
-    ))
+    Ok(Json(bridge.get_requests_in_manager().await?))
 }
 
 /// Get requests in manager by subject
@@ -216,11 +211,7 @@ pub(crate) async fn post_event_request(
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
 ) -> Result<Json<RequestData>, HttpError> {
-    Ok(Json(
-        bridge
-            .post_event_request(request)
-            .await?,
-    ))
+    Ok(Json(bridge.post_event_request(request).await?))
 }
 
 /// Get approval for a subject
@@ -249,9 +240,9 @@ pub(crate) async fn get_approval(
     Path(subject_id): Path<String>,
     Query(parameters): Query<ApprovalQuery>,
 ) -> Result<Json<Option<ApprovalEntry>>, HttpError> {
-    Ok(Json(bridge
-        .get_approval(subject_id, parameters.state)
-        .await?))
+    Ok(Json(
+        bridge.get_approval(subject_id, parameters.state).await?,
+    ))
 }
 
 /// List all approvals
@@ -274,9 +265,7 @@ pub(crate) async fn get_approvals(
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<ApprovalQuery>,
 ) -> Result<Json<Vec<ApprovalEntry>>, HttpError> {
-    Ok(Json(bridge
-        .get_approvals(parameters.state)
-        .await?))
+    Ok(Json(bridge.get_approvals(parameters.state).await?))
 }
 
 /// Update approval state
@@ -306,11 +295,7 @@ pub(crate) async fn patch_approve(
     Path(subject_id): Path<String>,
     Json(state): Json<ApprovalStateRes>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .patch_approve(subject_id, state)
-            .await?,
-    ))
+    Ok(Json(bridge.patch_approve(subject_id, state).await?))
 }
 
 /// Abort a pending request
@@ -337,11 +322,7 @@ pub(crate) async fn post_manual_request_abort(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .post_manual_request_abort(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.post_manual_request_abort(subject_id).await?))
 }
 
 ///////// Tracking
@@ -371,11 +352,7 @@ pub(crate) async fn get_request_state(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<RequestInfo>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_request_state(request_id)
-            .await?,
-    ))
+    Ok(Json(bridge.get_request_state(request_id).await?))
 }
 
 /// List all request states
@@ -396,11 +373,7 @@ pub(crate) async fn get_all_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<RequestInfoExtend>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_all_request_state()
-            .await?,
-    ))
+    Ok(Json(bridge.get_all_request_state().await?))
 }
 ///////// Node
 ////////////////////////////
@@ -424,11 +397,7 @@ pub(crate) async fn get_pending_transfers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<TransferSubject>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_pending_transfers()
-            .await?,
-    ))
+    Ok(Json(bridge.get_pending_transfers().await?))
 }
 
 ///////// Auth
@@ -459,11 +428,7 @@ pub(crate) async fn put_auth_subject(
     Path(subject_id): Path<String>,
     Json(witnesses): Json<Vec<String>>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .put_auth_subject(subject_id, witnesses)
-            .await?,
-    ))
+    Ok(Json(bridge.put_auth_subject(subject_id, witnesses).await?))
 }
 
 /// List all authorized subjects
@@ -484,11 +449,7 @@ pub(crate) async fn get_all_auth_subjects(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_all_auth_subjects()
-            .await?,
-    ))
+    Ok(Json(bridge.get_all_auth_subjects().await?))
 }
 
 /// Get witnesses for a subject
@@ -515,11 +476,7 @@ pub(crate) async fn get_witnesses_subject(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<HashSet<String>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_witnesses_subject(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.get_witnesses_subject(subject_id).await?))
 }
 
 /// Delete authorization for a subject
@@ -546,11 +503,7 @@ pub(crate) async fn delete_auth_subject(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .delete_auth_subject(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.delete_auth_subject(subject_id).await?))
 }
 
 /// Trigger subject update
@@ -577,11 +530,7 @@ pub(crate) async fn post_update_subject(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .post_update_subject(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.post_update_subject(subject_id).await?))
 }
 
 ///////// manual distribution
@@ -611,11 +560,7 @@ pub(crate) async fn post_manual_distribution(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(
-        bridge
-            .post_manual_distribution(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.post_manual_distribution(subject_id).await?))
 }
 
 ///////// Register
@@ -641,11 +586,7 @@ pub(crate) async fn get_all_govs(
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_all_govs(parameters.active)
-            .await?,
-    ))
+    Ok(Json(bridge.get_all_govs(parameters.active).await?))
 }
 
 /// List subjects under a governance
@@ -716,14 +657,7 @@ pub(crate) async fn get_events(
     Path(subject_id): Path<String>,
     QsQuery(parameters): QsQuery<EventsQuery>,
 ) -> Result<Json<PaginatorEvents>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_events(
-                subject_id,
-                parameters
-            )
-            .await?,
-    ))
+    Ok(Json(bridge.get_events(subject_id, parameters).await?))
 }
 
 /// Get aborts for a subject
@@ -791,11 +725,7 @@ pub(crate) async fn get_event_sn(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path((subject_id, sn)): Path<(String, u64)>,
 ) -> Result<Json<LedgerDB>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_event_sn(subject_id, sn)
-            .await?,
-    ))
+    Ok(Json(bridge.get_event_sn(subject_id, sn).await?))
 }
 
 /// Get first or last events
@@ -831,7 +761,7 @@ pub(crate) async fn get_first_or_end_events(
                 subject_id,
                 parameters.quantity,
                 parameters.reverse,
-                parameters.event_type
+                parameters.event_type,
             )
             .await?,
     ))
@@ -861,11 +791,7 @@ pub(crate) async fn get_subject_state(
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
 ) -> Result<Json<SubjectDB>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_subject_state(subject_id)
-            .await?,
-    ))
+    Ok(Json(bridge.get_subject_state(subject_id).await?))
 }
 
 pub fn build_routes(
@@ -1171,9 +1097,7 @@ pub(crate) fn permission_for(
         }
 
         // Requests in manager
-        (&Method::GET, "/requests-in-manager") => {
-            Some(("node_request", "get"))
-        }
+        (&Method::GET, "/requests-in-manager") => Some(("node_request", "get")),
         (&Method::GET, p) if p.starts_with("/requests-in-manager/") => {
             Some(("node_request", "get"))
         }
@@ -1351,13 +1275,11 @@ mod tests {
         let app = router();
 
         // data role has node_subject:get - should be allowed
-        let status =
-            call(&app, Method::GET, "/events/abc", ctx.clone()).await;
+        let status = call(&app, Method::GET, "/events/abc", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role has node_request:get - should be allowed
-        let status =
-            call(&app, Method::GET, "/request/123", ctx.clone()).await;
+        let status = call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         // data role does NOT have node_subject:post - should be forbidden
@@ -1392,12 +1314,10 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sender");
         let app = router();
 
-        let ok_status =
-            call(&app, Method::POST, "/request", ctx.clone()).await;
+        let ok_status = call(&app, Method::POST, "/request", ctx.clone()).await;
         assert_eq!(ok_status, StatusCode::OK);
 
-        let ok_get =
-            call(&app, Method::GET, "/request/123", ctx.clone()).await;
+        let ok_get = call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(ok_get, StatusCode::OK);
 
         let forbidden =

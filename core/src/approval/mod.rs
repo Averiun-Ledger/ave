@@ -83,11 +83,7 @@ impl Approval {
         ctx: &mut ActorContext<Approval>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
-        let subject_id = self
-            .request
-            .content()
-            .subject_id
-            .to_string();
+        let subject_id = self.request.content().subject_id.to_string();
 
         if signer == *self.our_key {
             let approver_path =

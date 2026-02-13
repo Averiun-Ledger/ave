@@ -1,3 +1,4 @@
+use crate::server::{self};
 use crate::{
     auth::{
         admin_handlers::{self, ListUsersQuery, ResetPasswordRequest},
@@ -46,7 +47,6 @@ use ave_bridge::ave_common::{
         TimeRange, TransferSubject,
     },
 };
-use crate::server::{self};
 
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi};

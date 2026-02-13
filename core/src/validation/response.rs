@@ -44,7 +44,7 @@ pub enum ValidatorError {
     #[error("The action could not be performed: {action}")]
     InvalidOperation { action: &'static str },
     #[error("The governance version is different from what was expected")]
-    OutOfVersion
+    OutOfVersion,
 }
 
 pub enum ResponseSummary {

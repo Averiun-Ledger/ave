@@ -2,11 +2,14 @@ use std::str::FromStr;
 
 mod common;
 
-use ave_common::{bridge::request::ApprovalStateRes, identity::{
-    PublicKey,
-    keys::{Ed25519Signer, KeyPair},
-}};
-use ave_core::{auth::AuthWitness};
+use ave_common::{
+    bridge::request::ApprovalStateRes,
+    identity::{
+        PublicKey,
+        keys::{Ed25519Signer, KeyPair},
+    },
+};
+use ave_core::auth::AuthWitness;
 
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
@@ -162,7 +165,7 @@ async fn test_governance_and_subject_copy_with_approve() {
             subject_id.clone(),
             Some(11),
             Some(false),
-            None
+            None,
         )
         .await
         .unwrap();
@@ -475,10 +478,7 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.namespace, "");
     assert_eq!(state.schema_id, "governance");
     assert_eq!(state.owner, owner_governance.public_key());
-    assert_eq!(
-        state.new_owner,
-        Some(future_owner.public_key().to_string())
-    );
+    assert_eq!(state.new_owner, Some(future_owner.public_key().to_string()));
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
@@ -546,7 +546,10 @@ async fn test_transfer_event_governance_2() {
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
     );
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
     assert_eq!(transfer_data[0].subject_id, governance_id);
 
     let transfer_data = future_owner.get_pending_transfers().await.unwrap();
@@ -554,7 +557,10 @@ async fn test_transfer_event_governance_2() {
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
     );
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
     assert_eq!(transfer_data[0].subject_id, governance_id);
 
     // Confirm transfer event
@@ -629,7 +635,6 @@ async fn test_transfer_event_governance_2() {
     );
 }
 
-
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
@@ -676,7 +681,9 @@ async fn test_governance_fail_approve() {
     .await
     .unwrap();
 
-    let state = get_subject(node1, governance_id.clone(), None).await.unwrap();
+    let state = get_subject(node1, governance_id.clone(), None)
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 0);
@@ -949,7 +956,6 @@ async fn test_governance_auto_many_approvers() {
     emit_fact(owner, governance_id.clone(), json, true)
         .await
         .unwrap();
-
 
     let state = get_subject(owner, governance_id.clone(), Some(2))
         .await
@@ -1227,7 +1233,6 @@ async fn test_change_roles_gov() {
     emit_fact(owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
-
 
     let state = get_subject(owner_governance, governance_id.clone(), Some(2))
         .await

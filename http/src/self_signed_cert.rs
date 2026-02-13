@@ -37,7 +37,8 @@ pub async fn generate_self_signed_cert(
     }
 
     // Generate key pair
-    let key_pair = KeyPair::generate().map_err(|e| CertError::Generation(e.to_string()))?;
+    let key_pair = KeyPair::generate()
+        .map_err(|e| CertError::Generation(e.to_string()))?;
 
     // Configure certificate parameters
     let mut params = CertificateParams::default();
@@ -47,17 +48,16 @@ pub async fn generate_self_signed_cert(
 
     // Set validity period
     let not_before = OffsetDateTime::now_utc();
-    let not_after = not_before + time::Duration::days(config.validity_days as i64);
+    let not_after =
+        not_before + time::Duration::days(config.validity_days as i64);
     params.not_before = not_before;
     params.not_after = not_after;
 
     // Add Subject Alternative Names
     let mut san_list = vec![SanType::DnsName(
-        config
-            .common_name
-            .clone()
-            .try_into()
-            .map_err(|e| CertError::Generation(format!("Invalid DNS name: {e}")))?,
+        config.common_name.clone().try_into().map_err(|e| {
+            CertError::Generation(format!("Invalid DNS name: {e}"))
+        })?,
     )];
 
     for san in &config.san {
@@ -104,8 +104,8 @@ pub async fn cert_needs_renewal(
         Ok(pem_data) => match parse_cert_expiry(&pem_data) {
             Some(expiry) => {
                 let now = OffsetDateTime::now_utc();
-                let renew_threshold =
-                    expiry - time::Duration::days(config.renew_before_days as i64);
+                let renew_threshold = expiry
+                    - time::Duration::days(config.renew_before_days as i64);
 
                 if now >= renew_threshold {
                     let days_until_expiry = (expiry - now).whole_days();
@@ -176,10 +176,20 @@ pub async fn cert_renewal_task(
     loop {
         interval.tick().await;
 
-        if cert_needs_renewal(&config, &paths.cert_path, &paths.key_path).await {
-            match generate_self_signed_cert(&config, &paths.cert_path, &paths.key_path).await {
+        if cert_needs_renewal(&config, &paths.cert_path, &paths.key_path).await
+        {
+            match generate_self_signed_cert(
+                &config,
+                &paths.cert_path,
+                &paths.key_path,
+            )
+            .await
+            {
                 Ok(()) => {
-                    match tls.reload_from_pem_file(&paths.cert_path, &paths.key_path).await {
+                    match tls
+                        .reload_from_pem_file(&paths.cert_path, &paths.key_path)
+                        .await
+                    {
                         Ok(()) => {
                             info!(target: TARGET, "Certificate renewed and reloaded successfully");
                         }

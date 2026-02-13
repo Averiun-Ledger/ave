@@ -93,25 +93,29 @@ impl AuthDatabase {
         }
 
         if name.len() > MAX_NAME_LENGTH {
-            return Err(DatabaseError::ValidationError(
-                format!("Role name must not exceed {} characters (got {})", MAX_NAME_LENGTH, name.len())
-            ));
+            return Err(DatabaseError::ValidationError(format!(
+                "Role name must not exceed {} characters (got {})",
+                MAX_NAME_LENGTH,
+                name.len()
+            )));
         }
 
         // Validate no dangerous control characters
         if name.chars().any(|c| c.is_control() && c != '\t') {
             return Err(DatabaseError::ValidationError(
-                "Role name contains invalid control characters".to_string()
+                "Role name contains invalid control characters".to_string(),
             ));
         }
 
         // Validate description length
-        if let Some(desc) = description &&
-             desc.len() > MAX_DESC_LENGTH {
-                return Err(DatabaseError::ValidationError(
-                    format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
-                ));
-            
+        if let Some(desc) = description
+            && desc.len() > MAX_DESC_LENGTH
+        {
+            return Err(DatabaseError::ValidationError(format!(
+                "Description must not exceed {} characters (got {})",
+                MAX_DESC_LENGTH,
+                desc.len()
+            )));
         }
         let exists: bool = conn
             .query_row(
@@ -192,12 +196,14 @@ impl AuthDatabase {
         // SECURITY FIX: Validate description length
         const MAX_DESC_LENGTH: usize = 500;
 
-        if let Some(desc) = description && 
-            desc.len() > MAX_DESC_LENGTH {
-                return Err(DatabaseError::ValidationError(
-                    format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
-                ));
-            
+        if let Some(desc) = description
+            && desc.len() > MAX_DESC_LENGTH
+        {
+            return Err(DatabaseError::ValidationError(format!(
+                "Description must not exceed {} characters (got {})",
+                MAX_DESC_LENGTH,
+                desc.len()
+            )));
         }
 
         // Check if role is system role
@@ -384,11 +390,13 @@ impl AuthDatabase {
                 params![role_id],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::NotFoundError(format!("Role not found: {}", e)))?;
+            .map_err(|e| {
+                DatabaseError::NotFoundError(format!("Role not found: {}", e))
+            })?;
 
         if is_system {
             return Err(DatabaseError::PermissionDenied(
-                "Cannot modify permissions of system roles".to_string()
+                "Cannot modify permissions of system roles".to_string(),
             ));
         }
 
@@ -423,11 +431,13 @@ impl AuthDatabase {
                 params![role_id],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::NotFoundError(format!("Role not found: {}", e)))?;
+            .map_err(|e| {
+                DatabaseError::NotFoundError(format!("Role not found: {}", e))
+            })?;
 
         if is_system {
             return Err(DatabaseError::PermissionDenied(
-                "Cannot remove permissions from system roles".to_string()
+                "Cannot remove permissions from system roles".to_string(),
             ));
         }
 
@@ -537,12 +547,10 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
             if has_all {
-                return Err(DatabaseError::ValidationError(
-                    format!(
-                        "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions",
-                        resource
-                    )
-                ));
+                return Err(DatabaseError::ValidationError(format!(
+                    "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions",
+                    resource
+                )));
             }
         }
 
@@ -621,14 +629,16 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         // Get direct permissions
-        let mut direct_perms_stmt = conn.prepare(
-            "SELECT res.name, act.name, up.allowed, res.is_system
+        let mut direct_perms_stmt = conn
+            .prepare(
+                "SELECT res.name, act.name, up.allowed, res.is_system
              FROM user_permissions up
              INNER JOIN resources res ON up.resource_id = res.id
              INNER JOIN actions act ON up.action_id = act.id
              WHERE up.user_id = ?1
-             ORDER BY res.name, act.name"
-        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+             ORDER BY res.name, act.name",
+            )
+            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
 
         let direct_perms: Vec<Permission> = direct_perms_stmt
             .query_map(params![user_id], |row| {

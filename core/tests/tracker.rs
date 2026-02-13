@@ -1,18 +1,18 @@
-use std::{str::FromStr};
+use std::str::FromStr;
 
 mod common;
 
 use ave_common::{
     ValueWrapper,
-    identity::{KeyPair, PublicKey, keys::Ed25519Signer}, request::{ConfirmRequest, EventRequest, FactRequest}, response::RequestState,
+    identity::{KeyPair, PublicKey, keys::Ed25519Signer},
+    request::{ConfirmRequest, EventRequest, FactRequest},
+    response::RequestState,
 };
-use ave_core::{
-    auth::AuthWitness,
-};
+use ave_core::auth::AuthWitness;
 use common::{
-    create_and_authorize_governance,
-    create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
-    emit_reject, emit_transfer, get_subject,
+    create_and_authorize_governance, create_nodes_and_connections,
+    create_subject, emit_confirm, emit_fact, emit_reject, emit_transfer,
+    get_subject,
 };
 use serde_json::json;
 use test_log::test;
@@ -116,7 +116,7 @@ async fn test_limits_in_subjects() {
         .await
         .unwrap();
 
-    let (subject_id_1, ..)=
+    let (subject_id_1, ..) =
         create_subject(emit_events, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -169,7 +169,7 @@ async fn test_limits_in_subjects() {
         .unwrap();
 
     // create other subject
-    let (subject_id_2, ..)=
+    let (subject_id_2, ..) =
         create_subject(emit_events, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -301,7 +301,6 @@ async fn test_limits_in_subjects() {
         })
     );
 }
-
 
 #[test(tokio::test)]
 // Testear los esppacios de nombre
@@ -821,7 +820,6 @@ async fn test_namespace_in_role_2() {
     );
 }
 
-
 #[test(tokio::test)]
 // Testear la transferencia de sujeto
 async fn test_subject_transfer_event_1() {
@@ -986,7 +984,10 @@ async fn test_subject_transfer_event_1() {
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
     );
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
     assert_eq!(transfer_data[0].subject_id, subject_id);
 
     let transfer_data = future_owner.get_pending_transfers().await.unwrap();
@@ -994,7 +995,10 @@ async fn test_subject_transfer_event_1() {
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
     );
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
     assert_eq!(transfer_data[0].subject_id, subject_id);
 
     emit_confirm(future_owner, subject_id.clone(), None, true)
@@ -1062,7 +1066,6 @@ async fn test_subject_transfer_event_1() {
         })
     );
 }
-
 
 #[test(tokio::test)]
 // Testear la transferencia de sujeto, entre dos nodos que no son el owner de la gobernanza
@@ -1182,7 +1185,7 @@ async fn test_subject_transfer_event_2() {
         .unwrap();
 
     // create subject
-    let (subject_id, ..)=
+    let (subject_id, ..) =
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1228,19 +1231,46 @@ async fn test_subject_transfer_event_2() {
         .unwrap();
 
     let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id.to_string()
+    );
 
     let transfer_data = old_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id.to_string()
+    );
 
     let transfer_data = future_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id.to_string()
+    );
 
     emit_confirm(future_owner, subject_id.clone(), None, true)
         .await
@@ -1260,9 +1290,18 @@ async fn test_subject_transfer_event_2() {
     assert!(transfer_data.is_empty());
 
     let transfer_data = old_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id.to_string()
+    );
 
     old_owner
         .auth_subject(
@@ -1276,7 +1315,7 @@ async fn test_subject_transfer_event_2() {
 
     old_owner.update_subject(subject_id.clone()).await.unwrap();
 
-    let (subject_id_2, ..)=
+    let (subject_id_2, ..) =
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1500,7 +1539,7 @@ async fn test_subject_transfer_event_3() {
         .unwrap();
 
     // create subject
-    let (subject_id_1, ..)=
+    let (subject_id_1, ..) =
         create_subject(old_owner, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -1556,19 +1595,46 @@ async fn test_subject_transfer_event_3() {
         .unwrap();
 
     let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     let transfer_data = old_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     let transfer_data = future_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     let request = EventRequest::Confirm(ConfirmRequest {
         subject_id: subject_id_1.clone(),
@@ -1584,19 +1650,46 @@ async fn test_subject_transfer_event_3() {
     );
 
     let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     let transfer_data = old_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     let transfer_data = future_owner.get_pending_transfers().await.unwrap();
-    assert_eq!(transfer_data[0].actual_owner.to_string(), old_owner.public_key());
-    assert_eq!(transfer_data[0].new_owner.to_string(), future_owner.public_key());
-    assert_eq!(transfer_data[0].subject_id.to_string(), subject_id_1.to_string());
+    assert_eq!(
+        transfer_data[0].actual_owner.to_string(),
+        old_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].new_owner.to_string(),
+        future_owner.public_key()
+    );
+    assert_eq!(
+        transfer_data[0].subject_id.to_string(),
+        subject_id_1.to_string()
+    );
 
     emit_reject(future_owner, subject_id_1.clone(), true)
         .await
@@ -1612,7 +1705,10 @@ async fn test_subject_transfer_event_3() {
         .await
         .unwrap();
 
-    old_owner.update_subject(subject_id_1.clone()).await.unwrap();
+    old_owner
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
 
     let _ = get_subject(old_owner, subject_id_1.clone(), Some(3))
         .await
@@ -1804,7 +1900,7 @@ async fn test_dynamic_witnesses_1() {
         .unwrap();
 
     // create subject
-    let (subject_id, ..)=
+    let (subject_id, ..) =
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -2052,7 +2148,7 @@ async fn test_dynamic_witnesses_2() {
         .unwrap();
 
     // create subject
-    let (subject_id, ..)=
+    let (subject_id, ..) =
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -2327,7 +2423,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         .unwrap();
 
     // create subject
-    let (subject_id, ..)=
+    let (subject_id, ..) =
         create_subject(creator, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
@@ -2353,7 +2449,10 @@ async fn test_dynamic_witnesses_explicit_1() {
         .await
         .unwrap();
 
-    owner_governance.update_subject(subject_id.clone()).await.unwrap();
+    owner_governance
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
 
     let state = get_subject(creator, subject_id.clone(), None)
         .await
@@ -2629,7 +2728,10 @@ async fn test_dynamic_witnesses_explicit_2() {
         })
     );
 
-    witness.get_subject_state(subject_id_2.clone()).await.unwrap_err();
+    witness
+        .get_subject_state(subject_id_2.clone())
+        .await
+        .unwrap_err();
 }
 
 #[test(tokio::test)]
@@ -2694,15 +2796,44 @@ async fn test_no_subject_validator() {
     .await
     .unwrap();
 
-    let _ = wait_request_state(owner_governance, request_id.clone(), Some(RequestState::RebootTimeOut { seconds: 0, count: 0 })).await.unwrap();
+    let _ = wait_request_state(
+        owner_governance,
+        request_id.clone(),
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
 
-    owner_governance.manual_request_abort(subject_id.clone()).await.unwrap();
+    owner_governance
+        .manual_request_abort(subject_id.clone())
+        .await
+        .unwrap();
 
-    wait_request_state(owner_governance, request_id.clone(), Some(RequestState::Abort { subject_id: String::default(), who:  String::default(), sn: None, error:  String::default() })).await.unwrap();
+    wait_request_state(
+        owner_governance,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
 
-    let aborts = get_abort_request(owner_governance, subject_id.clone(), request_id).await.unwrap();
+    let aborts =
+        get_abort_request(owner_governance, subject_id.clone(), request_id)
+            .await
+            .unwrap();
     assert_eq!(aborts.events.len(), 1);
-    assert_eq!(aborts.events[0].error, "The user manually aborted the request");
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
 }
 
 #[test(tokio::test)]
@@ -2785,19 +2916,49 @@ async fn test_no_subject_evaluator() {
         }
     });
 
-    let request_id = emit_fact(owner_governance, subject_id.clone(), json.clone(), false)
+    let request_id =
+        emit_fact(owner_governance, subject_id.clone(), json.clone(), false)
+            .await
+            .unwrap();
+
+    let _ = wait_request_state(
+        owner_governance,
+        request_id.clone(),
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    owner_governance
+        .manual_request_abort(subject_id.clone())
         .await
         .unwrap();
 
-        let _ = wait_request_state(owner_governance, request_id.clone(), Some(RequestState::RebootTimeOut { seconds: 0, count: 0 })).await.unwrap();
+    wait_request_state(
+        owner_governance,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
 
-    owner_governance.manual_request_abort(subject_id.clone()).await.unwrap();
-
-    wait_request_state(owner_governance, request_id.clone(), Some(RequestState::Abort { subject_id: String::default(), who:  String::default(), sn: None, error:  String::default() })).await.unwrap();
-
-    let aborts = get_abort_request(owner_governance, subject_id.clone(), request_id).await.unwrap();
+    let aborts =
+        get_abort_request(owner_governance, subject_id.clone(), request_id)
+            .await
+            .unwrap();
     assert_eq!(aborts.events.len(), 1);
-    assert_eq!(aborts.events[0].error, "The user manually aborted the request");
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
 
     let state = get_subject(owner_governance, subject_id.clone(), None)
         .await

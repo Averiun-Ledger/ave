@@ -391,9 +391,8 @@ impl RequestHandler {
                         return Err(RequestHandlerError::NamespaceMustBeEmpty);
                     }
                 } else if create_request.governance_id.is_empty() {
-                        return Err(RequestHandlerError::GovernanceIdRequired);
-                    }
-                
+                    return Err(RequestHandlerError::GovernanceIdRequired);
+                }
             }
             EventRequest::Transfer(transfer_request) => {
                 if transfer_request.new_owner.is_empty() {
@@ -404,18 +403,17 @@ impl RequestHandler {
                 if is_gov {
                     if let Some(name_old_owner) =
                         &confirm_request.name_old_owner
-                    && name_old_owner.is_empty() {
-                            return Err(
-                                RequestHandlerError::ConfirmNameOldOwnerEmpty,
-                            );
-                        }
-                    
-                } else if confirm_request.name_old_owner.is_some() {
+                        && name_old_owner.is_empty()
+                    {
                         return Err(
-                            RequestHandlerError::ConfirmTrackerNameOldOwner,
+                            RequestHandlerError::ConfirmNameOldOwnerEmpty,
                         );
                     }
-                
+                } else if confirm_request.name_old_owner.is_some() {
+                    return Err(
+                        RequestHandlerError::ConfirmTrackerNameOldOwner,
+                    );
+                }
             }
             EventRequest::Fact(fact_request) => {
                 if is_gov
@@ -1080,20 +1078,22 @@ impl Handler<RequestHandler> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                let subject_data =
-                    match Self::build_subject_data(ctx, request.content())
-                        .await
-                    {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!(
-                                msg_type = "NewRequest",
-                                error = %e,
-                                "Failed to build subject data"
-                            );
-                            return Err(ActorError::from(e));
-                        }
-                    };
+                let subject_data = match Self::build_subject_data(
+                    ctx,
+                    request.content(),
+                )
+                .await
+                {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!(
+                            msg_type = "NewRequest",
+                            error = %e,
+                            "Failed to build subject data"
+                        );
+                        return Err(ActorError::from(e));
+                    }
+                };
                 let event_request_type =
                     EventRequestType::from(request.content());
                 let signer = request.signature().signer.clone();

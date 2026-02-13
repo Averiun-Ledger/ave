@@ -11,7 +11,9 @@ pub enum DistributorError {
     #[error("we are not witness for this subject")]
     NotWitness,
 
-    #[error("subject not found: we do not have the subject that we have been asked for")]
+    #[error(
+        "subject not found: we do not have the subject that we have been asked for"
+    )]
     SubjectNotFound,
 
     #[error("sender '{sender}' is not a member of governance")]
@@ -23,7 +25,9 @@ pub enum DistributorError {
     #[error("missing governance_id for tracker subject {subject_id}")]
     MissingGovernanceId { subject_id: DigestIdentifier },
 
-    #[error("missing governance_id in create event for tracker subject {subject_id}")]
+    #[error(
+        "missing governance_id in create event for tracker subject {subject_id}"
+    )]
     MissingGovernanceIdInCreate { subject_id: DigestIdentifier },
 
     #[error("updating subject, need to fetch first event")]
@@ -38,8 +42,13 @@ pub enum DistributorError {
     #[error("events list is empty")]
     EmptyEvents,
 
-    #[error("our governance version ({our_version}) is less than theirs ({their_version})")]
-    GovernanceVersionMismatch { our_version: u64, their_version: u64 },
+    #[error(
+        "our governance version ({our_version}) is less than theirs ({their_version})"
+    )]
+    GovernanceVersionMismatch {
+        our_version: u64,
+        their_version: u64,
+    },
 
     #[error("failed to get governance data: {details}")]
     GetGovernanceFailed { details: String },

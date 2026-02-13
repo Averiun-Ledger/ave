@@ -54,8 +54,9 @@ fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
         | BridgeError::KeyWrite(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
         // ── Configuration → 500 ────────────────────────────────
-        BridgeError::ConfigBuild(_)
-        | BridgeError::ConfigDeserialize(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        BridgeError::ConfigBuild(_) | BridgeError::ConfigDeserialize(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
 
         // ── Sink authentication → 500 ──────────────────────────
         BridgeError::SinkAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -103,8 +104,9 @@ fn status_for_core_error(err: &CoreError) -> StatusCode {
         CoreError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
 
         // ── 502 Bad Gateway ────────────────────────────────────
-        CoreError::Network(_)
-        | CoreError::NetworkState(_) => StatusCode::BAD_GATEWAY,
+        CoreError::Network(_) | CoreError::NetworkState(_) => {
+            StatusCode::BAD_GATEWAY
+        }
 
         // ── 504 Gateway Timeout ────────────────────────────────
         CoreError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,

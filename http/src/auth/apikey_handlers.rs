@@ -73,7 +73,8 @@ pub async fn create_api_key_for_user(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can create API keys for other users".to_string(),
+                error: "Only superadmin can create API keys for other users"
+                    .to_string(),
             }),
         ));
     }
@@ -250,7 +251,8 @@ pub async fn revoke_api_key(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can revoke API keys of other users".to_string(),
+                error: "Only superadmin can revoke API keys of other users"
+                    .to_string(),
             }),
         ));
     }
@@ -319,7 +321,8 @@ pub async fn rotate_api_key(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Only superadmin can rotate API keys of other users".to_string(),
+                error: "Only superadmin can rotate API keys of other users"
+                    .to_string(),
             }),
         ));
     }
@@ -328,13 +331,20 @@ pub async fn rotate_api_key(
     let req = req.as_ref().map(|r| &r.0);
 
     // Revoke old key first
-    db.revoke_api_key(&existing.id, Some(auth_ctx.user_id), req.and_then(|r| r.reason.as_deref()))
-        .map_err(db_error_to_response)?;
+    db.revoke_api_key(
+        &existing.id,
+        Some(auth_ctx.user_id),
+        req.and_then(|r| r.reason.as_deref()),
+    )
+    .map_err(db_error_to_response)?;
 
     // Create replacement key
     // Use provided values or fall back to existing values
-    let new_name = req.and_then(|r| r.name.as_deref()).unwrap_or(existing.name.as_str());
-    let new_description = req.and_then(|r| r.description.as_deref())
+    let new_name = req
+        .and_then(|r| r.name.as_deref())
+        .unwrap_or(existing.name.as_str());
+    let new_description = req
+        .and_then(|r| r.description.as_deref())
         .or(existing.description.as_deref());
 
     // Handle expires_in_seconds: if provided in request, use it; otherwise keep existing TTL

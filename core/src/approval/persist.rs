@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     ActorMessage, NetworkMessage,
-    approval::types::{VotationType},
+    approval::types::VotationType,
     db::Storable,
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
@@ -20,9 +20,11 @@ use ave_actors::{
 };
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::{
-    Namespace, SchemaType, bridge::request::{ApprovalState, ApprovalStateRes}, identity::{
+    Namespace, SchemaType,
+    bridge::request::{ApprovalState, ApprovalStateRes},
+    identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    }
+    },
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
@@ -187,14 +189,8 @@ impl ApprPersist {
         let req_subject_data_hash = hash_borsh(
             &*hash.hasher(),
             &RequestSubjectData {
-                subject_id: request
-                    .content()
-                    .subject_id
-                    .clone(),
-                governance_id: request
-                    .content()
-                    .subject_id
-                    .clone(),
+                subject_id: request.content().subject_id.clone(),
+                governance_id: request.content().subject_id.clone(),
                 sn: request.content().sn,
                 namespace: Namespace::new(),
                 schema_id: SchemaType::Governance,
@@ -214,20 +210,25 @@ impl ApprPersist {
         let sign_type = SignTypesNode::ApprovalRes(Box::new(res.clone()));
         let signature = get_sign(ctx, sign_type).await?;
 
-        let subject_id =
-            request.content().subject_id.clone();
+        let subject_id = request.content().subject_id.clone();
         if self.node_key == *self.our_key {
             // Approval actor.
             let subject_id = ctx.path().parent().key();
-            let approval_actor = ctx.system().get_actor::<Approval>(&ActorPath::from(&format!("/user/request/{}/approval", subject_id))).await;
+            let approval_actor = ctx
+                .system()
+                .get_actor::<Approval>(&ActorPath::from(&format!(
+                    "/user/request/{}/approval",
+                    subject_id
+                )))
+                .await;
             if let Ok(approval_actor) = approval_actor {
                 approval_actor
-                .tell(ApprovalMessage::Response {
-                    approval_res: res,
-                    sender: (*self.our_key).clone(),
-                    signature: Some(signature),
-                })
-                .await?;
+                    .tell(ApprovalMessage::Response {
+                        approval_res: res,
+                        sender: (*self.our_key).clone(),
+                        signature: Some(signature),
+                    })
+                    .await?;
             }
         } else {
             let signed_response: Signed<ApprovalRes> =
@@ -542,42 +543,39 @@ impl Handler<ApprPersist> for ApprPersist {
                     )
                     .await;
                 } else if let Some(state) = self.state.clone() {
-                        let response = if state
-                            == ApprovalState::Accepted
-                        {
-                            true
-                        } else if state == ApprovalState::Rejected {
-                            false
-                        } else {
-                            return Ok(ApprPersistResponse::Ok);
-                        };
+                    let response = if state == ApprovalState::Accepted {
+                        true
+                    } else if state == ApprovalState::Rejected {
+                        false
+                    } else {
+                        return Ok(ApprPersistResponse::Ok);
+                    };
 
-                        if let Err(e) = self
-                            .send_response(
-                                ctx,
-                                approval_req.clone(),
-                                response,
-                                &request_id.to_string(),
-                                version,
-                            )
-                            .await
-                        {
-                            error!(
-                                msg_type = "LocalApproval",
-                                error = %e,
-                                "Failed to resend approval response"
-                            );
-                            return Err(emit_fail(ctx, e).await);
-                        }
-
-                        debug!(
+                    if let Err(e) = self
+                        .send_response(
+                            ctx,
+                            approval_req.clone(),
+                            response,
+                            &request_id.to_string(),
+                            version,
+                        )
+                        .await
+                    {
+                        error!(
                             msg_type = "LocalApproval",
-                            request_id = %request_id,
-                            version = version,
-                            "Response resent successfully"
+                            error = %e,
+                            "Failed to resend approval response"
                         );
+                        return Err(emit_fail(ctx, e).await);
                     }
-                
+
+                    debug!(
+                        msg_type = "LocalApproval",
+                        request_id = %request_id,
+                        version = version,
+                        "Response resent successfully"
+                    );
+                }
             }
             ApprPersistMessage::NetworkRequest {
                 approval_req,
@@ -616,9 +614,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     if let Err(e) = self
                         .check_governance(
                             ctx,
-                            &approval_req
-                                .content()
-                                .subject_id,
+                            &approval_req.content().subject_id,
                             approval_req.content().gov_version,
                         )
                         .await
@@ -690,8 +686,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         return Err(emit_fail(ctx, e).await);
                     };
 
-                    let response = if ApprovalState::Accepted == state
-                    {
+                    let response = if ApprovalState::Accepted == state {
                         true
                     } else if ApprovalState::Rejected == state {
                         false

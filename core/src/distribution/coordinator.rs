@@ -70,8 +70,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
                 request_id,
                 ledger,
             } => {
-                let subject_id =
-                    ledger.content().get_subject_id();
+                let subject_id = ledger.content().get_subject_id();
                 let sn = ledger.content().sn;
 
                 let receiver_actor =
@@ -84,9 +83,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
                         receiver: self.node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::DistributionLastEventReq {
-                        ledger,
-                    },
+                    message: ActorMessage::DistributionLastEventReq { ledger },
                 };
 
                 let target = RetryNetwork::new(self.network.clone());

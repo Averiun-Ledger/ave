@@ -31,7 +31,7 @@ use ave_common::{
     },
 };
 
-use json_patch::{diff};
+use json_patch::diff;
 use network::ComunicateInfo;
 
 use ave_actors::{
@@ -61,7 +61,7 @@ pub struct EvalWorker {
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
-    pub stop: bool
+    pub stop: bool,
 }
 
 impl EvalWorker {
@@ -239,7 +239,10 @@ impl EvalWorker {
     ) -> Result<Value, EvaluatorError> {
         let patch = diff(prev_state, new_state);
         serde_json::to_value(patch).map_err(|e| {
-            EvaluatorError::InternalError(format!("Can not generate json patch {}", e))
+            EvaluatorError::InternalError(format!(
+                "Can not generate json patch {}",
+                e
+            ))
         })
     }
 
@@ -308,12 +311,12 @@ impl EvalWorker {
                 (ValueWrapper(patch), properties_hash)
             }
             EvaluateData::GovTransfer { state } => {
-                let state = state.to_value_wrapper();   
+                let state = state.to_value_wrapper();
                 let properties_hash = hash_borsh(&*self.hash.hasher(), &state)
                     .map_err(|e| {
                         EvaluatorError::InternalError(e.to_string())
                     })?;
-                    
+
                 (evaluation.final_state, properties_hash)
             }
             EvaluateData::GovConfirm { state } => {
@@ -331,14 +334,11 @@ impl EvalWorker {
 
                 (ValueWrapper(patch), properties_hash)
             }
-            EvaluateData::AllSchemasTransfer {
-                state, ..
-            } => {
-                let properties_hash =
-                    hash_borsh(&*self.hash.hasher(), &state)
-                        .map_err(|e| {
-                            EvaluatorError::InternalError(e.to_string())
-                        })?;
+            EvaluateData::AllSchemasTransfer { state, .. } => {
+                let properties_hash = hash_borsh(&*self.hash.hasher(), &state)
+                    .map_err(|e| {
+                        EvaluatorError::InternalError(e.to_string())
+                    })?;
 
                 (evaluation.final_state, properties_hash)
             }
@@ -366,10 +366,7 @@ impl EvalWorker {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
             EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..)) => {
-                    return Ok(EvaluationRes::Abort(
-                        evaluator_error.to_string(),
-                    ));
-                               
+                return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
             _ => {}
         };
@@ -479,7 +476,7 @@ impl EvalWorker {
 #[derive(Debug, Clone)]
 pub enum EvalWorkerMessage {
     UpdateGovVersion {
-        gov_version: u64   
+        gov_version: u64,
     },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,

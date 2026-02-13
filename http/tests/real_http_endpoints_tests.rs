@@ -114,8 +114,14 @@ async fn test_create_user() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["username"], username);
     // Verify user has no superadmin role
-    assert!(body["roles"].as_array().unwrap().is_empty() ||
-            !body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
+    assert!(
+        body["roles"].as_array().unwrap().is_empty()
+            || !body["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "superadmin")
+    );
 }
 
 #[test(tokio::test)]
@@ -203,7 +209,13 @@ async fn test_get_user_by_id() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
     // Verify admin has superadmin role
-    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
+    assert!(
+        body["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "superadmin")
+    );
 }
 
 #[test(tokio::test)]
@@ -803,7 +815,13 @@ async fn test_get_me() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
     // Verify admin has superadmin role
-    assert!(body["roles"].as_array().unwrap().iter().any(|r| r == "superadmin"));
+    assert!(
+        body["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "superadmin")
+    );
 }
 
 #[test(tokio::test)]

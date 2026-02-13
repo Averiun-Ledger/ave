@@ -21,17 +21,21 @@ pub mod tracker;
 pub mod update;
 pub mod validation;
 
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor};
-use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery};
+use ave_common::bridge::request::{
+    ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery,
+};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use ave_common::request::EventRequest;
 use ave_common::response::{
-    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData
+    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents,
+    RequestInfo, RequestInfoExtend, RequestsInManager,
+    RequestsInManagerSubject, SubjectDB, SubjsData,
 };
 use config::Config as AveBaseConfig;
 use error::Error;
@@ -40,9 +44,7 @@ use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 
-use node::register::{
-    Register, RegisterMessage, RegisterResponse,
-};
+use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
 use query::{Query, QueryMessage, QueryResponse};
@@ -302,7 +304,7 @@ impl Api {
 
     pub async fn get_requests_in_manager(
         &self,
-    ) -> Result<RequestsInManager,Error> {
+    ) -> Result<RequestsInManager, Error> {
         let response = self
             .request
             .ask(RequestHandlerMessage::RequestInManager)
@@ -315,9 +317,7 @@ impl Api {
             })?;
 
         match response {
-            RequestHandlerResponse::RequestInManager(request) => {
-                Ok(request)
-            }
+            RequestHandlerResponse::RequestInManager(request) => Ok(request),
             _ => {
                 warn!("Unexpected response from request handler");
                 Err(Error::UnexpectedResponse {
@@ -332,8 +332,7 @@ impl Api {
     pub async fn get_requests_in_manager_subject_id(
         &self,
         subject_id: DigestIdentifier,
-    ) -> Result<RequestsInManagerSubject, Error>
-    {
+    ) -> Result<RequestsInManagerSubject, Error> {
         let response = self
             .request
             .ask(RequestHandlerMessage::RequestInManagerSubjectId {
@@ -348,7 +347,9 @@ impl Api {
             })?;
 
         match response {
-            RequestHandlerResponse::RequestInManagerSubjectId(request) => Ok(request),
+            RequestHandlerResponse::RequestInManagerSubjectId(request) => {
+                Ok(request)
+            }
             _ => {
                 warn!("Unexpected response from request handler");
                 Err(Error::UnexpectedResponse {
@@ -585,7 +586,9 @@ impl Api {
         }
     }
 
-    pub async fn all_request_state(&self) -> Result<Vec<RequestInfoExtend>, Error> {
+    pub async fn all_request_state(
+        &self,
+    ) -> Result<Vec<RequestInfoExtend>, Error> {
         let response = self
             .tracking
             .ask(RequestTrackingMessage::AllRequests)
@@ -845,14 +848,11 @@ impl Api {
     pub async fn get_events(
         &self,
         subject_id: DigestIdentifier,
-        query: EventsQuery
+        query: EventsQuery,
     ) -> Result<PaginatorEvents, Error> {
         let response = self
             .query
-            .ask(QueryMessage::GetEvents {
-                subject_id,
-                query
-            })
+            .ask(QueryMessage::GetEvents { subject_id, query })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get events");
@@ -863,9 +863,7 @@ impl Api {
 
         match response {
             QueryResponse::PagEvents(data) => Ok(data),
-            QueryResponse::Error(e) => {
-                Err(Error::QueryFailed(e))
-            }
+            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
             _ => {
                 warn!("Unexpected response from query");
                 Err(Error::UnexpectedResponse {
@@ -906,9 +904,7 @@ impl Api {
 
         match response {
             QueryResponse::PagAborts(data) => Ok(data),
-            QueryResponse::Error(e) => {
-                Err(Error::QueryFailed(e))
-            }
+            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
             _ => {
                 warn!("Unexpected response from query");
                 Err(Error::UnexpectedResponse {
@@ -941,12 +937,10 @@ impl Api {
 
         match response {
             QueryResponse::Event(data) => Ok(data),
-            QueryResponse::Error(_e) => {
-                Err(Error::EventNotFound {
-                    subject: subject_id.to_string(),
-                    sn,
-                })
-            }
+            QueryResponse::Error(_e) => Err(Error::EventNotFound {
+                subject: subject_id.to_string(),
+                sn,
+            }),
             _ => {
                 warn!("Unexpected response from query");
                 Err(Error::UnexpectedResponse {
@@ -963,7 +957,7 @@ impl Api {
         subject_id: DigestIdentifier,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, Error> {
         let response = self
             .query
@@ -971,7 +965,7 @@ impl Api {
                 subject_id,
                 quantity,
                 reverse,
-                event_type
+                event_type,
             })
             .await
             .map_err(|e| {
@@ -983,9 +977,7 @@ impl Api {
 
         match response {
             QueryResponse::Events(data) => Ok(data),
-            QueryResponse::Error(e) => {
-                Err(Error::QueryFailed(e))
-            }
+            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
             _ => {
                 warn!("Unexpected response from query");
                 Err(Error::UnexpectedResponse {

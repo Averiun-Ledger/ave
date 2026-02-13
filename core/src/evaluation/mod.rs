@@ -153,7 +153,7 @@ impl Evaluation {
                         sn: self.request.content().sn,
                         hash: self.hash,
                         network: self.network.clone(),
-                        stop: true
+                        stop: true,
                     },
                 )
                 .await?;
@@ -471,7 +471,8 @@ impl Handler<Evaluation> for Evaluation {
                                 as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary && let Err(e) = send_reboot_to_req(
+                            if let ResponseSummary::Reboot = summary
+                                && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
@@ -481,15 +482,14 @@ impl Handler<Evaluation> for Evaluation {
                                     RebootType::Diff,
                                 )
                                 .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        "Failed to send reboot to request actor"
-                                    );
-                                    return Err(emit_fail(ctx, e).await);
-                                }
-                            
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    error = %e,
+                                    "Failed to send reboot to request actor"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
 
                             let response = match self
                                 .build_evaluation_data(summary.is_ok())
@@ -559,22 +559,22 @@ impl Handler<Evaluation> for Evaluation {
                                 new_evaluators = current_eval.len(),
                                 "Created additional evaluators from pending pool"
                             );
-                        } else if self.current_evaluators.is_empty() && let Err(e) = send_reboot_to_req(
+                        } else if self.current_evaluators.is_empty()
+                            && let Err(e) = send_reboot_to_req(
                                 ctx,
                                 self.request_id.clone(),
                                 self.request.content().governance_id.clone(),
                                 RebootType::TimeOut,
                             )
                             .await
-                            {
-                                error!(
-                                    msg_type = "Response",
-                                    error = %e,
-                                    "Failed to send reboot to request actor"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        
+                        {
+                            error!(
+                                msg_type = "Response",
+                                error = %e,
+                                "Failed to send reboot to request actor"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     } else {
                         warn!(
                             msg_type = "Response",
@@ -611,7 +611,11 @@ mod tests {
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use ave_common::{
-        Namespace, SchemaType, ValueWrapper, bridge::request::{ApprovalState, ApprovalStateRes}, identity::{DigestIdentifier, PublicKey, Signed}, request::{CreateRequest, FactRequest, TransferRequest}, response::{EvalResDB, RequestEventDB, RequestState}
+        Namespace, SchemaType, ValueWrapper,
+        bridge::request::{ApprovalState, ApprovalStateRes},
+        identity::{DigestIdentifier, PublicKey, Signed},
+        request::{CreateRequest, FactRequest, TransferRequest},
+        response::{EvalResDB, RequestEventDB, RequestState},
     };
     use serde_json::json;
     use tempfile::TempDir;

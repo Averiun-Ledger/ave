@@ -196,7 +196,7 @@ impl BorshDeserialize for Node {
             known_subjects,
             transfer_subjects,
             reject_subjects,
-            is_service: false
+            is_service: false,
         })
     }
 }
@@ -234,11 +234,11 @@ impl Node {
                 if let Some(data) = self.owned_subjects.remove(&subject_id) {
                     self.known_subjects.insert(subject_id, data);
                 }
-            } else if data.new_owner == *self.our_key 
-                && let Some(data) = self.known_subjects.remove(&subject_id) {
-                    self.owned_subjects.insert(subject_id, data);
-                };
-            
+            } else if data.new_owner == *self.our_key
+                && let Some(data) = self.known_subjects.remove(&subject_id)
+            {
+                self.owned_subjects.insert(subject_id, data);
+            };
         };
     }
 
@@ -248,9 +248,8 @@ impl Node {
                 data.eol();
             }
         } else if let Some(data) = self.known_subjects.get_mut(&subject_id) {
-                data.eol();
-            }
-        
+            data.eol();
+        }
     }
 
     pub fn register_subject(
@@ -266,9 +265,15 @@ impl Node {
         }
     }
 
-    fn sign<T: BorshSerialize>(&self, content: &T) -> Result<Signature, ActorError> {
-        Signature::new(content, &self.owner)
-            .map_err(|e| ActorError::Functional { description: format!("{}", e) })
+    fn sign<T: BorshSerialize>(
+        &self,
+        content: &T,
+    ) -> Result<Signature, ActorError> {
+        Signature::new(content, &self.owner).map_err(|e| {
+            ActorError::Functional {
+                description: format!("{}", e),
+            }
+        })
     }
 
     async fn build_compilation_dir(
@@ -357,7 +362,7 @@ impl Node {
                             data: None,
                             hash,
                             is_service: self.is_service,
-                            public_key: self.our_key.clone()
+                            public_key: self.our_key.clone(),
                         }),
                     )
                     .await?;
@@ -417,7 +422,7 @@ impl Node {
                             data: None,
                             hash,
                             is_service: self.is_service,
-                            public_key: self.our_key.clone()
+                            public_key: self.our_key.clone(),
                         }),
                     )
                     .await?;
@@ -587,10 +592,7 @@ impl Actor for Node {
         }
 
         if let Err(e) = ctx
-            .create_child(
-                "auth",
-                Auth::initial(network.clone()),
-            )
+            .create_child("auth", Auth::initial(network.clone()))
             .await
         {
             error!(
@@ -670,17 +672,13 @@ impl Handler<Node> for Node {
                 let mut gov_know = self
                     .known_subjects
                     .iter()
-                    .filter(|x| {
-                        matches!(x.1, SubjectData::Governance { .. })
-                    })
+                    .filter(|x| matches!(x.1, SubjectData::Governance { .. }))
                     .map(|x| x.0.clone())
                     .collect::<Vec<DigestIdentifier>>();
                 let mut gov_owned = self
                     .owned_subjects
                     .iter()
-                    .filter(|x| {
-                        matches!(x.1, SubjectData::Governance { .. })
-                    })
+                    .filter(|x| matches!(x.1, SubjectData::Governance { .. }))
                     .map(|x| x.0.clone())
                     .collect::<Vec<DigestIdentifier>>();
                 gov_know.append(&mut gov_owned);
@@ -730,7 +728,7 @@ impl Handler<Node> for Node {
                             data: None,
                             hash,
                             is_service: self.is_service,
-                            public_key: self.our_key.clone()
+                            public_key: self.our_key.clone(),
                         }),
                     )
                     .await?;
@@ -958,13 +956,12 @@ impl Handler<Node> for Node {
                 } else {
                     let tracker_init = TrackerInit::from(&*metadata);
 
-                    let tracker = Tracker::initial(
-                        InitParamsTracker {
-                            data: Some(tracker_init),
-                            hash,
-                            is_service: self.is_service,
-                            public_key: self.our_key.clone()
-                        });
+                    let tracker = Tracker::initial(InitParamsTracker {
+                        data: Some(tracker_init),
+                        hash,
+                        is_service: self.is_service,
+                        public_key: self.our_key.clone(),
+                    });
 
                     let tracker_actor =
                         ctx.create_child(&subject_id, tracker).await?;
@@ -1216,7 +1213,7 @@ pub struct InitParamsNode {
     pub key_pair: KeyPair,
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
-    pub is_service: bool
+    pub is_service: bool,
 }
 
 #[async_trait]

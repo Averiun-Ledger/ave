@@ -60,10 +60,8 @@ pub struct RoleRegister {
     evaluators: HashMap<SchemaType, HashSet<(PublicKey, Namespace)>>,
 
     vali_quorum: HashMap<SchemaType, CeilingMap<Quorum>>,
-    validators: HashMap<
-        SchemaType,
-        HashMap<(PublicKey, Namespace), IntervalData>,
-    >,
+    validators:
+        HashMap<SchemaType, HashMap<(PublicKey, Namespace), IntervalData>>,
 }
 
 type IntervalData = (IntervalSet, Option<u64>);

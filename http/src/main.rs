@@ -7,7 +7,8 @@ use ave_bridge::{
     settings::{
         build_config,
         command::{
-            Args, build_config_path, build_key_password, build_sink_password, build_sink_api_key,
+            Args, build_config_path, build_key_password, build_sink_api_key,
+            build_sink_password,
         },
     },
 };
@@ -116,9 +117,16 @@ async fn main() {
                 .allowed_origins
                 .iter()
                 .filter_map(|origin| {
-                    origin.parse::<HeaderValue>().inspect_err(|e| {
-                        tracing::error!("Invalid CORS origin '{}': {}", origin, e);
-                    }).ok()
+                    origin
+                        .parse::<HeaderValue>()
+                        .inspect_err(|e| {
+                            tracing::error!(
+                                "Invalid CORS origin '{}': {}",
+                                origin,
+                                e
+                            );
+                        })
+                        .ok()
                 })
                 .collect();
 
@@ -184,13 +192,18 @@ async fn main() {
         sink_api_key = build_sink_api_key();
     }
 
-    let (bridge, runners) =
-        Bridge::build(&config, &key_password, &sink_password, &sink_api_key, None)
-            .await
-            .map_err(|e| {
-                error!("Can not build Bridge: {}", e);
-            })
-            .expect("Can not build Bridge");
+    let (bridge, runners) = Bridge::build(
+        &config,
+        &key_password,
+        &sink_password,
+        &sink_api_key,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        error!("Can not build Bridge: {}", e);
+    })
+    .expect("Can not build Bridge");
 
     if let Some(https_address) = config.http.https_address {
         let https_address = https_address
@@ -206,10 +219,9 @@ async fn main() {
             .expect("Can not install ring for RustTLS");
 
         // Certificate paths are validated in build_config, unwrap is safe here
-        let cert_path = config
-            .http
-            .https_cert_path
-            .expect("https_cert_path required for HTTPS (validated in build_config)");
+        let cert_path = config.http.https_cert_path.expect(
+            "https_cert_path required for HTTPS (validated in build_config)",
+        );
         let key_path = config
             .http
             .https_private_key_path
@@ -224,8 +236,16 @@ async fn main() {
                 "Self-signed certificate mode enabled"
             );
 
-            if cert_needs_renewal(&self_signed_config, &cert_path, &key_path).await {
-                match generate_self_signed_cert(&self_signed_config, &cert_path, &key_path).await {
+            if cert_needs_renewal(&self_signed_config, &cert_path, &key_path)
+                .await
+            {
+                match generate_self_signed_cert(
+                    &self_signed_config,
+                    &cert_path,
+                    &key_path,
+                )
+                .await
+                {
                     Ok(()) => {
                         info!(
                             target: TARGET_HTTP,
@@ -256,7 +276,11 @@ async fn main() {
                 cert_path,
                 key_path,
             };
-            tokio::spawn(cert_renewal_task(self_signed_config, paths, tls_clone));
+            tokio::spawn(cert_renewal_task(
+                self_signed_config,
+                paths,
+                tls_clone,
+            ));
         }
 
         let handle = Handle::new();

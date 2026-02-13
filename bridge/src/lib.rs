@@ -4,15 +4,18 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
-        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest, EventRequestType, EventsQuery,
+        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
+        EventRequestType, EventsQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
     response::{
-        ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestData as RequestDataRes, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TransferSubject
+        ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
+        RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
+        RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
+        TransferSubject,
     },
 };
-use config::Config;
 pub use ave_core::{
     Api as AveApi,
     auth::AuthWitness,
@@ -23,6 +26,7 @@ pub use ave_core::{
     error::Error,
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
+use config::Config;
 pub use network::MemoryLimit;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
@@ -86,8 +90,7 @@ impl Bridge {
 
         // Skip bearer token acquisition when using api_key mode
         let auth_token =
-            if sink_api_key.is_empty() && !settings.sink.auth.is_empty()
-            {
+            if sink_api_key.is_empty() && !settings.sink.auth.is_empty() {
                 Some(
                     obtain_token(
                         &settings.sink.auth,
@@ -234,11 +237,12 @@ impl Bridge {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self
-            .api
-            .get_approval(subject_id, state)
-            .await?
-            .map(|x| ApprovalEntry {request: core_approval_req_to_common(x.0), state: x.1}))
+        Ok(self.api.get_approval(subject_id, state).await?.map(|x| {
+            ApprovalEntry {
+                request: core_approval_req_to_common(x.0),
+                state: x.1,
+            }
+        }))
     }
 
     pub async fn get_approvals(
@@ -249,7 +253,10 @@ impl Bridge {
 
         Ok(res
             .iter()
-            .map(|x| ApprovalEntry {request: core_approval_req_to_common(x.0.clone()), state: x.1.clone()})
+            .map(|x| ApprovalEntry {
+                request: core_approval_req_to_common(x.0.clone()),
+                state: x.1.clone(),
+            })
             .collect())
     }
 
@@ -317,9 +324,11 @@ impl Bridge {
         let mut witnesses_key = vec![];
 
         for witness in witnesses {
-            witnesses_key.push(PublicKey::from_str(&witness).map_err(|e| {
-                BridgeError::InvalidPublicKey(e.to_string())
-            })?);
+            witnesses_key.push(
+                PublicKey::from_str(&witness).map_err(|e| {
+                    BridgeError::InvalidPublicKey(e.to_string())
+                })?,
+            );
         }
 
         let auh_witness = if witnesses_key.is_empty() {
@@ -403,10 +412,7 @@ impl Bridge {
         let governance_id = DigestIdentifier::from_str(&governance_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self
-            .api
-            .all_subjs(governance_id, active, schema_id)
-            .await?)
+        Ok(self.api.all_subjs(governance_id, active, schema_id).await?)
     }
 
     ///////// Query
@@ -414,18 +420,12 @@ impl Bridge {
     pub async fn get_events(
         &self,
         subject_id: String,
-        query: EventsQuery
+        query: EventsQuery,
     ) -> Result<PaginatorEvents, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(self
-            .api
-            .get_events(
-                subject_id,
-                query
-            )
-            .await?)
+        Ok(self.api.get_events(subject_id, query).await?)
     }
 
     pub async fn get_aborts(
@@ -440,13 +440,14 @@ impl Bridge {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        let request_id = if let Some(request_id) = request_id {
-            Some(DigestIdentifier::from_str(&request_id).map_err(|e| {
-                BridgeError::InvalidRequestId(e.to_string())
-            })?)
-        } else {
-            None
-        };
+        let request_id =
+            if let Some(request_id) = request_id {
+                Some(DigestIdentifier::from_str(&request_id).map_err(|e| {
+                    BridgeError::InvalidRequestId(e.to_string())
+                })?)
+            } else {
+                None
+            };
 
         Ok(self
             .api
@@ -470,7 +471,7 @@ impl Bridge {
         subject_id: String,
         quantity: Option<u64>,
         reverse: Option<bool>,
-        event_type: Option<EventRequestType>
+        event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;

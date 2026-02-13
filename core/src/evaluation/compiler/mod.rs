@@ -23,10 +23,8 @@ use tokio::{fs, sync::RwLock};
 use tracing::{Span, debug, error, info_span};
 use wasmtime::{Engine, ExternType, Module, Store};
 
-use crate::{
-    model::common::contract::{
-        MAX_FUEL_COMPILATION, MemoryManager, generate_linker,
-    },
+use crate::model::common::contract::{
+    MAX_FUEL_COMPILATION, MemoryManager, generate_linker,
 };
 
 pub mod error;
@@ -43,12 +41,15 @@ pub struct ContractResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Compiler {
     contract: DigestIdentifier,
-    hash: HashAlgorithm
+    hash: HashAlgorithm,
 }
 
 impl Compiler {
     pub fn new(hash: HashAlgorithm) -> Self {
-        Self { contract: DigestIdentifier::default(), hash }
+        Self {
+            contract: DigestIdentifier::default(),
+            hash,
+        }
     }
 
     fn compilation_toml() -> String {
@@ -71,8 +72,8 @@ impl Compiler {
     crate-type = ["cdylib"]
 
     [workspace]
-      "#.into()
-        
+      "#
+        .into()
     }
 
     async fn compile_contract(
@@ -197,8 +198,7 @@ impl Compiler {
                             kind: InvalidModuleKind::UnknownImportFunction {
                                 name: import.name().to_string(),
                             },
-                        }
-                        );
+                        });
                     }
                 }
                 extern_type => {
@@ -206,8 +206,7 @@ impl Compiler {
                         kind: InvalidModuleKind::NonFunctionImport {
                             import_type: format!("{:?}", extern_type),
                         },
-                    }
-                    );
+                    });
                 }
             }
         }
@@ -219,8 +218,7 @@ impl Compiler {
                         .map(|s| s.to_string())
                         .collect(),
                 },
-            }
-            );
+            });
         }
 
         // We create a context from the state and the event.
@@ -295,8 +293,7 @@ impl Compiler {
         } else {
             Err(CompilerError::ContractCheckFailed {
                 error: contract_result.error,
-            }
-            )
+            })
         }
     }
 
@@ -364,24 +361,23 @@ impl Handler<Compiler> for Compiler {
                 contract_path,
                 initial_value,
             } => {
-                
-                let contract_hash = match hash_borsh(&*self.hash.hasher(), &contract)
-                {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        error!(
-                            msg_type = "Compile",
-                            error = %e,
-                            "Failed to hash contract"
-                        );
-                        return Err(ActorError::FunctionalCritical {
-                            description: format!(
-                                "Can not hash contract: {}",
-                                e
-                            ),
-                        });
-                    }
-                };
+                let contract_hash =
+                    match hash_borsh(&*self.hash.hasher(), &contract) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            error!(
+                                msg_type = "Compile",
+                                error = %e,
+                                "Failed to hash contract"
+                            );
+                            return Err(ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not hash contract: {}",
+                                    e
+                                ),
+                            });
+                        }
+                    };
 
                 if contract_hash != self.contract {
                     if let Err(e) =

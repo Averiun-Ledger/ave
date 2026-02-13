@@ -116,7 +116,8 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
                 if deleted > 0 {
                     info!(
                         TARGET,
-                        "Cleaned up {} old audit log entries (by time)", deleted
+                        "Cleaned up {} old audit log entries (by time)",
+                        deleted
                     );
                 }
             }
@@ -135,7 +136,8 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
                     info!(
                         TARGET,
                         "Cleaned up {} excess audit log entries (LRU, limit: {})",
-                        deleted, db.config.session.audit_max_entries
+                        deleted,
+                        db.config.session.audit_max_entries
                     );
                 }
             }

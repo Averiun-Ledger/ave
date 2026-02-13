@@ -35,7 +35,7 @@ pub struct Config {
     /// Tracking lru cache size
     pub tracking_size: usize,
     /// Is a service node
-    pub is_service: bool
+    pub is_service: bool,
 }
 
 impl Default for Config {
@@ -49,7 +49,7 @@ impl Default for Config {
             contracts_path: PathBuf::new(),
             always_accept: Default::default(),
             tracking_size: 100,
-            is_service: false
+            is_service: false,
         }
     }
 }

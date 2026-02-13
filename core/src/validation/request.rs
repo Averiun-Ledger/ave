@@ -1,12 +1,13 @@
 use crate::{
-    model::{
-        event::{ApprovalData, EvaluationData, ValidationData},
-    },
+    model::event::{ApprovalData, EvaluationData, ValidationData},
     subject::Metadata,
 };
 
 use ave_common::{
-    Namespace, SchemaType, bridge::request::EventRequestType, identity::{DigestIdentifier, Signed}, request::EventRequest
+    Namespace, SchemaType,
+    bridge::request::EventRequestType,
+    identity::{DigestIdentifier, Signed},
+    request::EventRequest,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,9 @@ impl ValidationReq {
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
             ValidationReq::Create { subject_id, .. } => subject_id.clone(),
-            ValidationReq::Event {  metadata, ..} => metadata.subject_id.clone(),
+            ValidationReq::Event { metadata, .. } => {
+                metadata.subject_id.clone()
+            }
         }
     }
 

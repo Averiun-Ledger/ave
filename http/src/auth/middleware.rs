@@ -89,8 +89,8 @@ where
         auth_ctx.ip_address = ip_address.clone();
 
         // Update API key last used
-        let _ =
-            db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
+        let _ = db
+            .update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
 
         // Post-authentication rate limit (per API key)
         db.check_rate_limit(
@@ -235,23 +235,25 @@ pub async fn audit_log_middleware(
             );
         } else {
             // No auth context - log as unauthenticated request
-            let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-                user_id: None,
-                api_key_id: None,
-                action_type: if success {
-                    "unauthenticated_request_success"
-                } else {
-                    "unauthenticated_request_failed"
+            let _ = db.create_audit_log(
+                crate::auth::database_audit::AuditLogParams {
+                    user_id: None,
+                    api_key_id: None,
+                    action_type: if success {
+                        "unauthenticated_request_success"
+                    } else {
+                        "unauthenticated_request_failed"
+                    },
+                    endpoint: Some(&path),
+                    http_method: Some(&method),
+                    ip_address: ip_address.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    request_id: Some(&request_id),
+                    details: Some(&format!("{} {}", method, path)),
+                    success,
+                    error_message: error_message.as_deref(),
                 },
-                endpoint: Some(&path),
-                http_method: Some(&method),
-                ip_address: ip_address.as_deref(),
-                user_agent: user_agent.as_deref(),
-                request_id: Some(&request_id),
-                details: Some(&format!("{} {}", method, path)),
-                success,
-                error_message: error_message.as_deref(),
-            });
+            );
         }
     }
 

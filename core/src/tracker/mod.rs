@@ -148,12 +148,12 @@ impl Subject for Tracker {
 
     async fn eol(
         &self,
-    ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let node = ctx.get_parent::<Node>().await?;
         node.tell(NodeMessage::EOLSubject {
-            subject_id:self.subject_metadata.subject_id.clone(),
-            i_owner: *self.our_key == self.subject_metadata.owner
+            subject_id: self.subject_metadata.subject_id.clone(),
+            i_owner: *self.our_key == self.subject_metadata.owner,
         })
         .await
     }
@@ -197,8 +197,7 @@ impl Subject for Tracker {
         ))
         .await?;
 
-        if self.service || *self.our_key == self.subject_metadata.owner
-        {
+        if self.service || *self.our_key == self.subject_metadata.owner {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -390,8 +389,7 @@ impl Tracker {
             })
             .await?;
 
-        if self.service || *self.our_key == self.subject_metadata.owner
-        {
+        if self.service || *self.our_key == self.subject_metadata.owner {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -538,8 +536,16 @@ impl Tracker {
                         .signature()
                         .signer
                         .to_string(),
-                    event_ledger_timestamp: first.signature().timestamp.as_nanos(),
-                    event_request_timestamp: first.content().event_request.signature().timestamp.as_nanos()
+                    event_ledger_timestamp: first
+                        .signature()
+                        .timestamp
+                        .as_nanos(),
+                    event_request_timestamp: first
+                        .content()
+                        .event_request
+                        .signature()
+                        .timestamp
+                        .as_nanos(),
                 },
                 first.content().event_request.content(),
             )
@@ -655,8 +661,16 @@ impl Tracker {
                             .signature()
                             .signer
                             .to_string(),
-                        event_ledger_timestamp: event.signature().timestamp.as_nanos(),
-                        event_request_timestamp: event.content().event_request.signature().timestamp.as_nanos()
+                        event_ledger_timestamp: event
+                            .signature()
+                            .timestamp
+                            .as_nanos(),
+                        event_request_timestamp: event
+                            .content()
+                            .event_request
+                            .signature()
+                            .timestamp
+                            .as_nanos(),
                     },
                     event.content().event_request.content(),
                 )
@@ -677,7 +691,7 @@ impl Tracker {
 #[derive(Debug, Clone)]
 pub enum TrackerMessage {
     GetMetadata,
-    GetLedger { lo_sn: Option<u64>, hi_sn: u64},
+    GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
@@ -692,7 +706,7 @@ pub enum TrackerResponse {
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
         ledger: Vec<SignedLedger>,
-        is_all: bool
+        is_all: bool,
     },
     LastLedger {
         ledger_event: Box<Option<SignedLedger>>,
@@ -805,13 +819,16 @@ impl Handler<Tracker> for Tracker {
         ctx: &mut ActorContext<Tracker>,
     ) -> Result<TrackerResponse, ActorError> {
         match msg {
-            TrackerMessage::GetLedger {lo_sn, hi_sn} => {
-                let (ledger, is_all) = self.get_ledger(ctx, lo_sn, hi_sn).await?;
+            TrackerMessage::GetLedger { lo_sn, hi_sn } => {
+                let (ledger, is_all) =
+                    self.get_ledger(ctx, lo_sn, hi_sn).await?;
                 Ok(TrackerResponse::Ledger { ledger, is_all })
             }
             TrackerMessage::GetLastLedger => {
                 let ledger_event = self.get_last_ledger(ctx).await?;
-                Ok(TrackerResponse::LastLedger { ledger_event: Box::new(ledger_event) })
+                Ok(TrackerResponse::LastLedger {
+                    ledger_event: Box::new(ledger_event),
+                })
             }
             TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),
@@ -905,7 +922,7 @@ pub struct InitParamsTracker {
     pub data: Option<TrackerInit>,
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
-    pub is_service: bool
+    pub is_service: bool,
 }
 
 #[async_trait]

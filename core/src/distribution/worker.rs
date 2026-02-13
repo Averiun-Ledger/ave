@@ -485,24 +485,22 @@ impl Handler<DistriWorker> for DistriWorker {
                     }
                 };
 
-                if let Some(actual_sn) = actual_sn 
-                    && actual_sn >= hi_sn {
-                        warn!(
-                            msg_type = "SendDistribution",
-                            subject_id = %subject_id,
-                            actual_sn = actual_sn,
-                            witness_sn = hi_sn,
-                            "Requester SN is >= witness SN, nothing to send"
-                        );
-                        return Err(
-                            DistributorError::ActualSnBiggerThanWitness {
-                                actual_sn,
-                                witness_sn: hi_sn,
-                            }
-                            .into(),
-                        );
+                if let Some(actual_sn) = actual_sn
+                    && actual_sn >= hi_sn
+                {
+                    warn!(
+                        msg_type = "SendDistribution",
+                        subject_id = %subject_id,
+                        actual_sn = actual_sn,
+                        witness_sn = hi_sn,
+                        "Requester SN is >= witness SN, nothing to send"
+                    );
+                    return Err(DistributorError::ActualSnBiggerThanWitness {
+                        actual_sn,
+                        witness_sn: hi_sn,
                     }
-                ;
+                    .into());
+                };
 
                 let (ledger, is_all) = match self
                     .get_ledger(ctx, &subject_id, hi_sn, actual_sn, is_gov)

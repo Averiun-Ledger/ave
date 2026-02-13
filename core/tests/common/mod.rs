@@ -1,11 +1,19 @@
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper, bridge::request::ApprovalStateRes, identity::{
+    Namespace, SchemaType, ValueWrapper,
+    bridge::request::ApprovalStateRes,
+    identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
-    }, request::{ConfirmRequest, CreateRequest, EventRequest, FactRequest, RejectRequest, TransferRequest}, response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB}
+    },
+    request::{
+        ConfirmRequest, CreateRequest, EventRequest, FactRequest,
+        RejectRequest, TransferRequest,
+    },
+    response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB},
 };
 use ave_core::{
-    Api, config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth}
+    Api,
+    config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth},
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
@@ -210,12 +218,7 @@ pub async fn create_and_authorize_governance(
     });
     let data = owner_node.own_request(request).await.unwrap();
     let governance_id = data.subject_id;
-    wait_request(
-        owner_node,
-        data.request_id,
-    )
-    .await
-    .unwrap();
+    wait_request(owner_node, data.request_id).await.unwrap();
 
     for node in other_nodes {
         node.auth_subject(
@@ -305,10 +308,20 @@ pub async fn get_subject(
 pub async fn get_abort_request(
     node: &Api,
     subject_id: DigestIdentifier,
-    request_id: DigestIdentifier
+    request_id: DigestIdentifier,
 ) -> Result<PaginatorAborts, Box<dyn std::error::Error>> {
     loop {
-        if let Ok(state) = node.get_aborts(subject_id.clone(), Some(request_id.clone()), None, None, None,None).await {
+        if let Ok(state) = node
+            .get_aborts(
+                subject_id.clone(),
+                Some(request_id.clone()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        {
             return Ok(state);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -319,22 +332,39 @@ pub async fn get_abort_request(
 pub async fn wait_request_state(
     node: &Api,
     request_id: DigestIdentifier,
-    request_state: Option<RequestState>
+    request_state: Option<RequestState>,
 ) -> Result<RequestState, Box<dyn std::error::Error>> {
     loop {
-        if let Ok(state) = node.get_request_state(request_id.clone()).await{
+        if let Ok(state) = node.get_request_state(request_id.clone()).await {
             if let Some(request_state) = request_state.clone() {
                 match (request_state, state.state.clone()) {
                     (RequestState::InQueue, RequestState::InQueue)
                     | (RequestState::Handling, RequestState::Handling)
-                    | (RequestState::Invalid { .. }, RequestState::Invalid { .. })
-                    | (RequestState::Abort { .. }, RequestState::Abort { .. })
+                    | (
+                        RequestState::Invalid { .. },
+                        RequestState::Invalid { .. },
+                    )
+                    | (
+                        RequestState::Abort { .. },
+                        RequestState::Abort { .. },
+                    )
                     | (RequestState::Reboot, RequestState::Reboot)
-                    | (RequestState::RebootDiff { .. }, RequestState::RebootDiff { .. })
-                    | (RequestState::RebootTimeOut {.. }, RequestState::RebootTimeOut { .. })
+                    | (
+                        RequestState::RebootDiff { .. },
+                        RequestState::RebootDiff { .. },
+                    )
+                    | (
+                        RequestState::RebootTimeOut { .. },
+                        RequestState::RebootTimeOut { .. },
+                    )
                     | (RequestState::Validation, RequestState::Validation)
-                    | (RequestState::Distribution, RequestState::Distribution)
-                    | (RequestState::Finish, RequestState::Finish) => return Ok(state.state),
+                    | (
+                        RequestState::Distribution,
+                        RequestState::Distribution,
+                    )
+                    | (RequestState::Finish, RequestState::Finish) => {
+                        return Ok(state.state);
+                    }
                     _ => {}
                 }
             } else {
@@ -342,8 +372,7 @@ pub async fn wait_request_state(
             }
         }
     }
-        
-    }
+}
 
 /*
     Abort,
@@ -364,8 +393,8 @@ pub async fn wait_request(
         if let Ok(state) = node.get_request_state(request_id.clone()).await {
             match state.state {
                 RequestState::Approval
-                | RequestState::Abort {..}
-                | RequestState::Invalid {..}
+                | RequestState::Abort { .. }
+                | RequestState::Invalid { .. }
                 | RequestState::Finish => break,
                 _ => {}
             }
@@ -391,7 +420,6 @@ pub async fn node_running(
     }
     Ok(())
 }
-
 
 pub async fn emit_transfer(
     node: &Api,
@@ -435,8 +463,8 @@ pub async fn emit_approve(
         if let Ok(state) = node.get_request_state(request_id.clone()).await {
             match state.state {
                 RequestState::Approval
-                | RequestState::Abort {..}
-                | RequestState::Invalid {..}
+                | RequestState::Abort { .. }
+                | RequestState::Invalid { .. }
                 | RequestState::Finish => break,
                 _ => {}
             }

@@ -30,9 +30,12 @@ use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
-    ValueWrapper, bridge::request::EventRequestType, identity::{
+    ValueWrapper,
+    bridge::request::EventRequestType,
+    identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    }, request::EventRequest
+    },
+    request::EventRequest,
 };
 
 use json_patch::{Patch, patch};
@@ -61,7 +64,7 @@ pub struct ValiWorker {
     pub sn: u64,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
-    pub stop: bool
+    pub stop: bool,
 }
 
 impl ValiWorker {
@@ -168,14 +171,17 @@ impl ValiWorker {
             });
         }
 
-        if is_gov && metadata.governance_id != metadata.subject_id || !is_gov && metadata.governance_id == metadata.subject_id{
+        if is_gov && metadata.governance_id != metadata.subject_id
+            || !is_gov && metadata.governance_id == metadata.subject_id
+        {
             return Err(ValidatorError::InvalidData {
                 value: "metadata governance_id",
             });
         }
-        
 
-        if is_gov && metadata.genesis_gov_version != 0 || !is_gov && metadata.genesis_gov_version == 0 {
+        if is_gov && metadata.genesis_gov_version != 0
+            || !is_gov && metadata.genesis_gov_version == 0
+        {
             return Err(ValidatorError::InvalidData {
                 value: "metadata genesis_gov_version",
             });
@@ -187,7 +193,9 @@ impl ValiWorker {
             });
         }
 
-        if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty() || metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty() {
+        if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty()
+            || metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty()
+        {
             return Err(ValidatorError::InvalidData {
                 value: "metadata prev_ledger_event_hash",
             });
@@ -217,13 +225,13 @@ impl ValiWorker {
             });
         }
 
-        if let Some(new_owner) = &metadata.new_owner 
-            && (new_owner.is_empty() || new_owner == &metadata.owner) {
-                return Err(ValidatorError::InvalidData {
-                    value: "metadata new owner",
-                });
-            }
-        ;
+        if let Some(new_owner) = &metadata.new_owner
+            && (new_owner.is_empty() || new_owner == &metadata.owner)
+        {
+            return Err(ValidatorError::InvalidData {
+                value: "metadata new owner",
+            });
+        };
 
         if !metadata.active {
             return Err(ValidatorError::InvalidData {
@@ -340,7 +348,6 @@ impl ValiWorker {
         } else {
             !quorum.check_quorum(workers.len() as u32, agrees + timeout)
         }
-        
     }
 
     fn check_approval(
@@ -387,7 +394,6 @@ impl ValiWorker {
         if !Self::check_approval_quorum(
             agrees.len() as u32,
             timeout.len() as u32,
-
             &appr_data.quorum,
             &appr_data.workers,
             approval.approved,
@@ -756,7 +762,7 @@ impl ValiWorker {
                     .map_err(|_| ValidatorError::InvalidData {
                         value: "metadata properties",
                     })?;
-                    
+
             gov_data.version += 1;
             metadata.properties = gov_data.to_value_wrapper();
         }
@@ -777,7 +783,7 @@ impl ValiWorker {
                 ValidationReq::Create {
                     event_request,
                     gov_version,
-                    subject_id
+                    subject_id,
                 } => {
                     // todo Check is valid en check_data
                     if let EventRequest::Create(create) =
@@ -819,11 +825,10 @@ impl ValiWorker {
                                 });
                             }
                         } else if create.governance_id.is_empty() {
-                                return Err(ValidatorError::InvalidData {
-                                    value: "create event governance_id",
-                                });
-                            }
-                        
+                            return Err(ValidatorError::InvalidData {
+                                value: "create event governance_id",
+                            });
+                        }
 
                         let subject_id_worker =
                             hash_borsh(&*self.hash.hasher(), &event_request)
@@ -833,8 +838,8 @@ impl ValiWorker {
 
                         if subject_id != &subject_id_worker {
                             return Err(ValidatorError::InvalidData {
-                                    value: "subject_id",
-                                });
+                                value: "subject_id",
+                            });
                         }
 
                         let init_state =
@@ -953,7 +958,7 @@ impl ValiWorker {
 #[derive(Debug, Clone)]
 pub enum ValiWorkerMessage {
     UpdateGovVersion {
-        gov_version: u64   
+        gov_version: u64,
     },
     LocalValidation {
         validation_req: Box<Signed<ValidationReq>>,
@@ -1005,14 +1010,13 @@ impl Handler<ValiWorker> for ValiWorker {
                                 ValidationRes::Reboot
                             } else {
                                 return Err(emit_fail(
-                                ctx,
-                                ActorError::FunctionalCritical {
-                                    description: e.to_string(),
-                                },
-                            )
-                            .await);
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: e.to_string(),
+                                    },
+                                )
+                                .await);
                             }
-                            
                         }
                     };
 
@@ -1161,9 +1165,7 @@ impl Handler<ValiWorker> for ValiWorker {
                     version: info.version,
                     receiver_actor: format!(
                         "/user/request/{}/validation/{}",
-                        validation_req
-                            .content()
-                            .get_subject_id(),
+                        validation_req.content().get_subject_id(),
                         self.our_key.clone()
                     ),
                 };

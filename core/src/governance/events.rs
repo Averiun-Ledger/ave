@@ -87,29 +87,21 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        && let Some(user) =
+                                            && let Some(user) =
                                                 members.get(&creator.name)
-                                            {
-                                                new_creator.insert(
-                                                    (
-                                                        schema
-                                                            .schema_id
-                                                            .clone(),
-                                                        new_namespace
-                                                            .to_string(),
-                                                        user.clone(),
-                                                    ),
-                                                    (
-                                                        creator
-                                                            .quantity
-                                                            .clone(),
-                                                        creator
-                                                            .witnesses
-                                                            .clone(),
-                                                    ),
-                                                );
-                                            }
-                                        
+                                        {
+                                            new_creator.insert(
+                                                (
+                                                    schema.schema_id.clone(),
+                                                    new_namespace.to_string(),
+                                                    user.clone(),
+                                                ),
+                                                (
+                                                    creator.quantity.clone(),
+                                                    creator.witnesses.clone(),
+                                                ),
+                                            );
+                                        }
                                     }
                                     (None, Some(q)) => {
                                         if let Some(creator) =
@@ -122,27 +114,21 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        && let Some(user) =
+                                            && let Some(user) =
                                                 members.get(&creator.name)
-                                            {
-                                                new_creator.insert(
-                                                    (
-                                                        schema
-                                                            .schema_id
-                                                            .clone(),
-                                                        new_namespace
-                                                            .to_string(),
-                                                        user.clone(),
-                                                    ),
-                                                    (
-                                                        q.clone(),
-                                                        creator
-                                                            .witnesses
-                                                            .clone(),
-                                                    ),
-                                                );
-                                            }
-                                        
+                                        {
+                                            new_creator.insert(
+                                                (
+                                                    schema.schema_id.clone(),
+                                                    new_namespace.to_string(),
+                                                    user.clone(),
+                                                ),
+                                                (
+                                                    q.clone(),
+                                                    creator.witnesses.clone(),
+                                                ),
+                                            );
+                                        }
                                     }
                                     (Some(w), None) => {
                                         if let Some(creator) =
@@ -155,26 +141,20 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        && let Some(user) =
+                                            && let Some(user) =
                                                 members.get(&creator.name)
-                                            {
-                                                new_creator.insert(
-                                                    (
-                                                        schema
-                                                            .schema_id
-                                                            .clone(),
-                                                        new_namespace
-                                                            .to_string(),
-                                                        user.clone(),
-                                                    ),
-                                                    (
-                                                        creator
-                                                            .quantity
-                                                            .clone(),
-                                                        w.clone(),
-                                                    ),
-                                                );
-                                            
+                                        {
+                                            new_creator.insert(
+                                                (
+                                                    schema.schema_id.clone(),
+                                                    new_namespace.to_string(),
+                                                    user.clone(),
+                                                ),
+                                                (
+                                                    creator.quantity.clone(),
+                                                    w.clone(),
+                                                ),
+                                            );
                                         }
                                     }
                                     (Some(w), Some(q)) => {
@@ -558,15 +538,12 @@ impl GovernanceEvent {
                                             witnesses
                                                 .push(WitnessesType::Witnesses);
                                         } else if let Some(w) =
-                                                members.get(witness)
-                                            {
-                                                witnesses.push(
-                                                    WitnessesType::User(
-                                                        w.clone(),
-                                                    ),
-                                                );
-                                            }
-                                        
+                                            members.get(witness)
+                                        {
+                                            witnesses.push(
+                                                WitnessesType::User(w.clone()),
+                                            );
+                                        }
                                     }
 
                                     new_creator.insert(

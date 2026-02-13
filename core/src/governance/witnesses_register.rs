@@ -30,10 +30,8 @@ use crate::db::Storable;
 pub struct WitnessesRegister {
     gov_sn: u64,
     subjects: HashMap<DigestIdentifier, TransferData>,
-    witnesses: HashMap<
-        (PublicKey, SchemaType),
-        HashMap<Namespace, IntervalData>,
-    >,
+    witnesses:
+        HashMap<(PublicKey, SchemaType), HashMap<Namespace, IntervalData>>,
     witnesses_creator: HashMap<
         (PublicKey, String, SchemaType),
         HashMap<WitnessesType, IntervalData>,
@@ -256,13 +254,13 @@ impl WitnessesRegister {
             for (namespace, (interval, actual_lo)) in witness_data.iter() {
                 if namespace.is_ancestor_or_equal_of(parse_namespace) {
                     for range in data.interval_gov_version.iter().rev() {
-                        if let Some(actual_lo) = actual_lo 
-                             && range.contains(*actual_lo) {
-                                better_sn = better_sn.max(Some(data.sn));
+                        if let Some(actual_lo) = actual_lo
+                            && range.contains(*actual_lo)
+                        {
+                            better_sn = better_sn.max(Some(data.sn));
 
-                                break 'witness;
-                            }
-                        
+                            break 'witness;
+                        }
 
                         if let Some(gov_version) =
                             interval.max_covered_in(range.lo, range.hi)
@@ -294,13 +292,13 @@ impl WitnessesRegister {
                     return ActualSearch::End(SnLimit::Sn(sn));
                 }
 
-                if let Some(range) = interval.iter().last() 
-                     && range.contains(gov_version) {
-                        // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                        better_gov_version =
-                            better_gov_version.max(Some(gov_version));
-                    }
-                
+                if let Some(range) = interval.iter().last()
+                    && range.contains(gov_version)
+                {
+                    // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
+                    better_gov_version =
+                        better_gov_version.max(Some(gov_version));
+                }
             }
         }
 
@@ -333,7 +331,7 @@ impl WitnessesRegister {
             .await
             {
                 ActualSearch::End(sn_limit) => {
-                    return ActualSearch::End(sn_limit)
+                    return ActualSearch::End(sn_limit);
                 }
                 ActualSearch::Continue { gov_version } => gov_version,
             }
@@ -411,7 +409,8 @@ impl WitnessesRegister {
         sn: u64,
         owner_better_gov_version: (u64, Option<u64>),
     ) -> ActualSearch {
-        let (owner_gov_version, mut better_gov_version) = owner_better_gov_version;
+        let (owner_gov_version, mut better_gov_version) =
+            owner_better_gov_version;
 
         // Si el nodo es testigo explicito
         if let Some((interval, actual_lo)) =
@@ -423,13 +422,13 @@ impl WitnessesRegister {
             }
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
-            if let Some(range) = interval.iter().last() 
-                && range.contains(owner_gov_version) {
-                    // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                    better_gov_version =
-                        better_gov_version.max(Some(owner_gov_version));
-                }
-            
+            if let Some(range) = interval.iter().last()
+                && range.contains(owner_gov_version)
+            {
+                // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
+                better_gov_version =
+                    better_gov_version.max(Some(owner_gov_version));
+            }
         }
 
         if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
@@ -526,14 +525,13 @@ impl WitnessesRegister {
                     // Si es testigo explicito
                     for range in old_data.interval_gov_version.iter().rev() {
                         // Sigue siendo testigo.
-                        if let Some(actual_lo) = actual_lo 
-                             && range.contains(*actual_lo) {
-                                better_sn =
-                                    better_sn.max(Some(old_data.sn));
+                        if let Some(actual_lo) = actual_lo
+                            && range.contains(*actual_lo)
+                        {
+                            better_sn = better_sn.max(Some(old_data.sn));
 
-                                break;
-                            }
-                        
+                            break;
+                        }
 
                         if let Some(gov_version) =
                             interval.max_covered_in(range.lo, range.hi)
@@ -642,7 +640,10 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
-                let data = self.subjects.get(&subject_id).map(|data| (data.actual_owner.clone(), data.sn));
+                let data = self
+                    .subjects
+                    .get(&subject_id)
+                    .map(|data| (data.actual_owner.clone(), data.sn));
 
                 debug!(
                     msg_type = "GetTrackerSnCreator",
@@ -986,13 +987,13 @@ impl PersistentActor for WitnessesRegister {
                         for ns in namespace.iter() {
                             if let Some((interval, last)) =
                                 witness_namespace.get_mut(ns)
-                            && let Some(last) = last.take() {
-                                    interval.insert(Interval {
-                                        lo: last,
-                                        hi: *version - 1,
-                                    });
-                                }
-                            
+                                && let Some(last) = last.take()
+                            {
+                                interval.insert(Interval {
+                                    lo: last,
+                                    hi: *version - 1,
+                                });
+                            }
                         }
                     }
                 }
@@ -1092,13 +1093,13 @@ impl PersistentActor for WitnessesRegister {
                         for ns in namespace.iter() {
                             if let Some((interval, last)) =
                                 witness_namespace.get_mut(ns)
-                             && let Some(last) = last.take() {
-                                    interval.insert(Interval {
-                                        lo: last,
-                                        hi: *version - 1,
-                                    });
-                                }
-                            
+                                && let Some(last) = last.take()
+                            {
+                                interval.insert(Interval {
+                                    lo: last,
+                                    hi: *version - 1,
+                                });
+                            }
                         }
                     }
                 }

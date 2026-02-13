@@ -30,9 +30,12 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, PersistentActor,
 };
 use ave_common::{
-    DataToSinkEvent, Namespace, SchemaType, ValueWrapper, bridge::request::EventRequestType, identity::{
+    DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
+    bridge::request::EventRequestType,
+    identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
-    }, request::EventRequest
+    },
+    request::EventRequest,
 };
 
 use async_trait::async_trait;
@@ -340,34 +343,34 @@ where
                     return Err(SubjectError::UnexpectedFactEvent);
                 }
 
-                let actual_protocols = if let Some(eval) =
-                    evaluation.evaluator_res()
-                {
-                    if let Some(appr) = approval {
-                        if appr.approved {
-                            Self::apply_patch_verify(
-                                &mut modified_subject_metadata.properties,
-                                eval.patch,
-                            )?;
-                        }
+                let actual_protocols =
+                    if let Some(eval) = evaluation.evaluator_res() {
+                        if let Some(appr) = approval {
+                            if appr.approved {
+                                Self::apply_patch_verify(
+                                    &mut modified_subject_metadata.properties,
+                                    eval.patch,
+                                )?;
+                            }
 
-                        ActualProtocols::EvalApprove {
-                            eval_data: evaluation.clone(),
-                            approval_data: appr.clone(),
+                            ActualProtocols::EvalApprove {
+                                eval_data: evaluation.clone(),
+                                approval_data: appr.clone(),
+                            }
+                        } else {
+                            return Err(
+                                SubjectError::MissingApprovalAfterEvaluation,
+                            );
                         }
-                    } else {
+                    } else if approval.is_some() {
                         return Err(
-                            SubjectError::MissingApprovalAfterEvaluation,
-                        );
-                    }
-                } else if approval.is_some() {
-                        return Err(SubjectError::UnexpectedApprovalAfterFailedEvaluation);
+                        SubjectError::UnexpectedApprovalAfterFailedEvaluation,
+                    );
                     } else {
                         ActualProtocols::Eval {
                             eval_data: evaluation.clone(),
                         }
-                    
-                };
+                    };
 
                 (validation, actual_protocols)
             }
@@ -626,7 +629,7 @@ where
         let validation_req = ValidationReq::Create {
             event_request: ledger_event.content().event_request.clone(),
             gov_version: ledger_event.content().gov_version,
-            subject_id: subject_metadata.subject_id.clone()
+            subject_id: subject_metadata.subject_id.clone(),
         };
 
         let signed_validation_req = Signed::from_parts(
@@ -837,11 +840,10 @@ where
                 Ok((get_n_events(ctx, actual_sn, hi_sn).await?, true))
             }
         } else if hi_sn > 99 {
-                Ok((get_n_events(ctx, 0, 99).await?, false))
-            } else {
-                Ok((get_n_events(ctx, 0, hi_sn).await?, true))
-            }
-        
+            Ok((get_n_events(ctx, 0, 99).await?, false))
+        } else {
+            Ok((get_n_events(ctx, 0, hi_sn).await?, true))
+        }
     }
 
     async fn update_sn(

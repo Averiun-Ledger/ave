@@ -26,12 +26,15 @@ use crate::distribution::{
 use crate::evaluation::request::EvaluateData;
 use crate::evaluation::response::EvaluatorResponse;
 use crate::governance::data::GovernanceData;
-use crate::governance::model::{HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData};
+use crate::governance::model::{
+    HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData,
+};
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
-    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata, make_obsolete, update_ledger
+    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata,
+    make_obsolete, update_ledger,
 };
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -295,7 +298,7 @@ impl RequestManager {
                         governance_data: governance_data.clone(),
                         namespace: metadata.namespace.clone(),
                         schema_id: metadata.schema_id.clone(),
-                        state: metadata.properties.clone()
+                        state: metadata.properties.clone(),
                     },
                     governance_data,
                     None,
@@ -412,11 +415,8 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         let request = self.build_request_appro(ctx, eval_req, eval_res).await?;
 
-        let governance_data = get_gov(
-            ctx,
-            &request.content().subject_id,
-        )
-        .await?;
+        let governance_data =
+            get_gov(ctx, &request.content().subject_id).await?;
 
         let (signers, quorum) = governance_data.get_quorum_and_signers(
             ProtocolTypes::Approval,
@@ -576,7 +576,7 @@ impl RequestManager {
                     ValidationReq::Create {
                         event_request: request.clone(),
                         gov_version: 0,
-                        subject_id: self.subject_id.clone()
+                        subject_id: self.subject_id.clone(),
                     },
                     quorum,
                     signers,
@@ -584,7 +584,8 @@ impl RequestManager {
                     SchemaType::Governance,
                 ))
             } else {
-                let governance_data = get_gov(ctx, &create.governance_id).await?;
+                let governance_data =
+                    get_gov(ctx, &create.governance_id).await?;
 
                 let (signers, quorum) = governance_data
                     .get_quorum_and_signers(
@@ -600,7 +601,7 @@ impl RequestManager {
                     ValidationReq::Create {
                         event_request: request.clone(),
                         gov_version: governance_data.version,
-                        subject_id: self.subject_id.clone()
+                        subject_id: self.subject_id.clone(),
                     },
                     quorum,
                     signers,
@@ -1233,7 +1234,10 @@ impl RequestManager {
                     _ => 60,
                 };
 
-                info!("Launching Diff reboot {}, try: {}, seconds: {}", self.id, self.retry_diff, seconds);
+                info!(
+                    "Launching Diff reboot {}, try: {}, seconds: {}",
+                    self.id, self.retry_diff, seconds
+                );
 
                 send_to_tracking(
                     ctx,
@@ -1267,7 +1271,10 @@ impl RequestManager {
                     _ => 300,
                 };
 
-                info!("Launching TimeOut reboot {}, try: {}, seconds: {}", self.id, self.retry_timeout, seconds);
+                info!(
+                    "Launching TimeOut reboot {}, try: {}, seconds: {}",
+                    self.id, self.retry_timeout, seconds
+                );
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
@@ -1320,38 +1327,37 @@ impl RequestManager {
         };
 
         if let EventRequest::Fact { .. } = request.content() {
-                            let subject_data = get_subject_data(ctx, &self.subject_id).await?;
-                let Some(subject_data) = subject_data else {
-                    return Err(RequestManagerError::SubjecData);
-                };
+            let subject_data = get_subject_data(ctx, &self.subject_id).await?;
+            let Some(subject_data) = subject_data else {
+                return Err(RequestManagerError::SubjecData);
+            };
 
-                let gov = get_gov(ctx, &self.subject_id).await?;
-                match subject_data {
-                    SubjectData::Tracker {
+            let gov = get_gov(ctx, &self.subject_id).await?;
+            match subject_data {
+                SubjectData::Tracker {
+                    schema_id,
+                    namespace,
+                    ..
+                } => {
+                    if !gov.has_this_role(HashThisRole::Schema {
+                        who: request.signature().signer.clone(),
+                        role: RoleTypes::Issuer,
                         schema_id,
-                        namespace,
-                        ..
-                    } => {
-                        if !gov.has_this_role(HashThisRole::Schema {
-                            who: request.signature().signer.clone(),
-                            role: RoleTypes::Issuer,
-                            schema_id,
-                            namespace: Namespace::from(namespace),
-                        }) {
-                            return Err(RequestManagerError::NotIssuer);
-                        }
-                    }
-                    SubjectData::Governance { .. } => {
-                        if !gov.has_this_role(HashThisRole::Gov {
-                            who: request.signature().signer.clone(),
-                            role: RoleTypes::Issuer,
-                        }) {
-                            return Err(RequestManagerError::NotIssuer);
-                        }
+                        namespace: Namespace::from(namespace),
+                    }) {
+                        return Err(RequestManagerError::NotIssuer);
                     }
                 }
+                SubjectData::Governance { .. } => {
+                    if !gov.has_this_role(HashThisRole::Gov {
+                        who: request.signature().signer.clone(),
+                        role: RoleTypes::Issuer,
+                    }) {
+                        return Err(RequestManagerError::NotIssuer);
+                    }
+                }
+            }
         }
-
 
         Ok(())
     }
@@ -1932,7 +1938,7 @@ impl Handler<RequestManager> for RequestManager {
 
                         match self.build_distribution(ctx, ledger).await {
                             Ok(in_distribution) => {
-                                if !in_distribution 
+                                if !in_distribution
                                     && let Err(e) =
                                         self.finish_request(ctx).await
                                     {
@@ -1945,7 +1951,6 @@ impl Handler<RequestManager> for RequestManager {
                                         );
                                         self.match_error(ctx, e).await;
                         return Ok(())
-                                    
                                 }
                             }
                             Err(e) => {
@@ -1964,7 +1969,7 @@ impl Handler<RequestManager> for RequestManager {
                     RequestManagerState::Distribution { ledger } => {
                         match self.build_distribution(ctx, ledger).await {
                             Ok(in_distribution) => {
-                                if !in_distribution 
+                                if !in_distribution
                                     && let Err(e) =
                                         self.finish_request(ctx).await
                                     {
@@ -1978,7 +1983,6 @@ impl Handler<RequestManager> for RequestManager {
                                         self.match_error(ctx, e).await;
                         return Ok(())
                                     }
-                                
                             }
                             Err(e) => {
                                 error!(
@@ -2237,20 +2241,20 @@ impl Handler<RequestManager> for RequestManager {
                     };
 
                     match self.build_distribution(ctx, signed_ledger).await {
-                        Ok(in_distribution) => 
-                            if !in_distribution 
-                                && let Err(e) = self.finish_request(ctx).await {
-                                    error!(
-                                        msg_type = "ValidationRes",
-                                        request_id = %self.id,
-                                        error = %e,
-                                        "Failed to finish request after build distribution"
-                                    );
-                                    self.match_error(ctx, e).await;
-                                    return Ok(());
-                                }
-                            ,
-                        
+                        Ok(in_distribution) => {
+                            if !in_distribution
+                                && let Err(e) = self.finish_request(ctx).await
+                            {
+                                error!(
+                                    msg_type = "ValidationRes",
+                                    request_id = %self.id,
+                                    error = %e,
+                                    "Failed to finish request after build distribution"
+                                );
+                                self.match_error(ctx, e).await;
+                                return Ok(());
+                            }
+                        }
                         Err(e) => {
                             error!(
                                 msg_type = "ValidationRes",

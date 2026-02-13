@@ -135,12 +135,9 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                 }
 
                 if self.gov_version < evaluation_req.content().gov_version
-                    && let Err(e) = try_to_update(
-                        ctx,
-                        self.governance_id.clone(),
-                        None
-                    )
-                    .await
+                    && let Err(e) =
+                        try_to_update(ctx, self.governance_id.clone(), None)
+                            .await
                 {
                     error!(
                         msg_type = "NetworkRequest",
@@ -162,7 +159,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                             sn: self.sn,
                             hash: self.hash,
                             network: self.network.clone(),
-                            stop: true
+                            stop: true,
                         },
                     )
                     .await;

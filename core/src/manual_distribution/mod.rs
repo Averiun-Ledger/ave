@@ -189,8 +189,11 @@ impl Handler<ManualDistribution> for ManualDistribution {
                     });
                 };
 
-                let distribution =
-                    Distribution::new(network, DistributionType::Manual, DigestIdentifier::default());
+                let distribution = Distribution::new(
+                    network,
+                    DistributionType::Manual,
+                    DigestIdentifier::default(),
+                );
 
                 let distribution_actor = ctx.create_child(&subject_id.to_string(), distribution).await.map_err(|e| {
                     warn!(

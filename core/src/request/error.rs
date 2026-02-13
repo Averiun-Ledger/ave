@@ -18,7 +18,9 @@ pub enum RequestHandlerError {
     ObsoleteApproval,
 
     /// Approval actor not found for a subject.
-    #[error("no approval found for subject '{0}', node likely no longer has approver role")]
+    #[error(
+        "no approval found for subject '{0}', node likely no longer has approver role"
+    )]
     ApprovalNotFound(String),
 
     /// Failed to change approval state.
@@ -78,7 +80,9 @@ pub enum RequestHandlerError {
     TransferNewOwnerEmpty,
 
     /// Confirm event name_old_owner is empty.
-    #[error("governance confirm event name_old_owner cannot be empty if present")]
+    #[error(
+        "governance confirm event name_old_owner cannot be empty if present"
+    )]
     ConfirmNameOldOwnerEmpty,
 
     /// Confirm event for tracker should not have name_old_owner.
@@ -154,13 +158,22 @@ pub enum RequestManagerError {
 
     // Protocol participant errors
     #[error("no evaluators available for schema '{schema_id}'")]
-    NoEvaluatorsAvailable { schema_id: String, governance_id: DigestIdentifier },
+    NoEvaluatorsAvailable {
+        schema_id: String,
+        governance_id: DigestIdentifier,
+    },
 
     #[error("no approvers available for schema '{schema_id}'")]
-    NoApproversAvailable { schema_id: String, governance_id: DigestIdentifier },
+    NoApproversAvailable {
+        schema_id: String,
+        governance_id: DigestIdentifier,
+    },
 
     #[error("no validators available for schema '{schema_id}'")]
-    NoValidatorsAvailable { schema_id: String, governance_id: DigestIdentifier },
+    NoValidatorsAvailable {
+        schema_id: String,
+        governance_id: DigestIdentifier,
+    },
 
     // Governance errors
     #[error("governance error: {0}")]
@@ -188,7 +201,7 @@ pub enum RequestManagerError {
     SubjecData,
 
     #[error("In fact events, the signer has to be an issuer")]
-    NotIssuer
+    NotIssuer,
 }
 
 /*
