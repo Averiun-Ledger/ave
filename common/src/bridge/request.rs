@@ -5,13 +5,72 @@
 
 use std::fmt::Display;
 
-use crate::{request::EventRequest, signature::BridgeSignature};
+use crate::{request::EventRequest, response::TimeRange, signature::BridgeSignature};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(feature = "openapi")]
-use utoipa::ToSchema;
+use utoipa::{ToSchema, IntoParams};
+
+
+#[derive(Debug, Clone, Deserialize,Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct SubjectQuery {
+    pub active: Option<bool>,
+    pub schema_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct GovQuery {
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct ApprovalQuery {
+    pub state: Option<ApprovalState>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct EventsQuery {
+    pub quantity: Option<u64>,
+    pub page: Option<u64>,
+    pub reverse: Option<bool>,
+    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
+    pub event_request_ts: Option<TimeRange>,
+    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
+    pub event_ledger_ts: Option<TimeRange>,
+    #[cfg_attr(feature = "openapi", param(style = DeepObject, explode))]
+    pub sink_ts: Option<TimeRange>,
+    pub event_type: Option<EventRequestType>
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct AbortsQuery {
+    pub request_id: Option<String>,
+    pub sn: Option<u64>,
+    pub quantity: Option<u64>,
+    pub page: Option<u64>,
+    pub reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+pub struct FirstEndEvents {
+    pub quantity: Option<u64>,
+    pub reverse: Option<bool>,
+    pub event_type: Option<EventRequestType>
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

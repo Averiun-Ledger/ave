@@ -365,15 +365,11 @@ impl EvalWorker {
             | EvaluatorError::InvalidEventRequest(..) => {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
-            EvaluatorError::Runner(eval_runner_error) => {
-                match eval_runner_error {
-                    EvalRunnerError::ContractNotFound(..) => {
-                        return Ok(EvaluationRes::Abort(
-                            evaluator_error.to_string(),
-                        ));
-                    }
-                    _ => {}
-                }
+            EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..)) => {
+                    return Ok(EvaluationRes::Abort(
+                        evaluator_error.to_string(),
+                    ));
+                               
             }
             _ => {}
         };

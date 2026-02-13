@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
-use ave_common::bridge::request::EventRequestType;
+use ave_common::bridge::request::{EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, TimeRange,
@@ -122,7 +122,7 @@ impl Querys for SqliteLocal {
             });
         }
 
-        let mut pages = (total + quantity - 1) / quantity;
+        let mut pages = total.div_ceil(quantity);
         if pages == 0 {
             pages = 1;
         }
@@ -291,14 +291,10 @@ impl Querys for SqliteLocal {
     async fn get_events(
         &self,
         subject_id: &str,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     ) -> Result<PaginatorEvents, DatabaseError> {
+        let EventsQuery { quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type } = query;
+
         let quantity = quantity.unwrap_or(50).max(1);
         let mut page = page.unwrap_or(1).max(1);
 
@@ -370,7 +366,7 @@ impl Querys for SqliteLocal {
             return Err(DatabaseError::NoEvents(subject_id.to_owned()));
         }
 
-        let mut pages = (total + quantity - 1) / quantity;
+        let mut pages = total.div_ceil(quantity);
         if pages == 0 {
             pages = 1;
         }

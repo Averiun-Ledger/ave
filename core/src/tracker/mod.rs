@@ -71,10 +71,10 @@ pub struct TrackerInit {
 impl From<&Metadata> for TrackerInit {
     fn from(value: &Metadata) -> Self {
         Self {
-            subject_metadata: SubjectMetadata::new(&value),
+            subject_metadata: SubjectMetadata::new(value),
             governance_id: value.governance_id.clone(),
             namespace: value.namespace.clone(),
-            genesis_gov_version: value.genesis_gov_version.clone(),
+            genesis_gov_version: value.genesis_gov_version,
             properties: value.properties.clone(),
         }
     }
@@ -197,8 +197,7 @@ impl Subject for Tracker {
         ))
         .await?;
 
-        if !self.service && *self.our_key == self.subject_metadata.owner
-            || self.service
+        if self.service || *self.our_key == self.subject_metadata.owner
         {
             let subject_register = ctx
                 .system()
@@ -391,8 +390,7 @@ impl Tracker {
             })
             .await?;
 
-        if !self.service && *self.our_key == self.subject_metadata.owner
-            || self.service
+        if self.service || *self.our_key == self.subject_metadata.owner
         {
             let subject_register = ctx
                 .system()
@@ -543,7 +541,7 @@ impl Tracker {
                     event_ledger_timestamp: first.signature().timestamp.as_nanos(),
                     event_request_timestamp: first.content().event_request.signature().timestamp.as_nanos()
                 },
-                &first.content().event_request.content(),
+                first.content().event_request.content(),
             )
             .await?;
 
@@ -660,7 +658,7 @@ impl Tracker {
                         event_ledger_timestamp: event.signature().timestamp.as_nanos(),
                         event_request_timestamp: event.content().event_request.signature().timestamp.as_nanos()
                     },
-                    &event.content().event_request.content(),
+                    event.content().event_request.content(),
                 )
                 .await?;
             }
@@ -697,7 +695,7 @@ pub enum TrackerResponse {
         is_all: bool
     },
     LastLedger {
-        ledger_event: Option<SignedLedger>,
+        ledger_event: Box<Option<SignedLedger>>,
     },
     Governance(Box<GovernanceData>),
     Sn(u64),
@@ -813,7 +811,7 @@ impl Handler<Tracker> for Tracker {
             }
             TrackerMessage::GetLastLedger => {
                 let ledger_event = self.get_last_ledger(ctx).await?;
-                Ok(TrackerResponse::LastLedger { ledger_event })
+                Ok(TrackerResponse::LastLedger { ledger_event: Box::new(ledger_event) })
             }
             TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),

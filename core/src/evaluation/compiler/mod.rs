@@ -71,8 +71,8 @@ impl Compiler {
     crate-type = ["cdylib"]
 
     [workspace]
-      "#
-        .into()
+      "#.into()
+        
     }
 
     async fn compile_contract(
@@ -134,7 +134,7 @@ impl Compiler {
 
         // Is success
         if !status.success() {
-            return Err(CompilerError::CompilationFailed.into());
+            return Err(CompilerError::CompilationFailed);
         }
 
         Ok(())
@@ -149,7 +149,7 @@ impl Compiler {
         let Some(engine) =
             ctx.system().get_helper::<Arc<Engine>>("engine").await
         else {
-            return Err(CompilerError::MissingHelper { name: "engine" }.into());
+            return Err(CompilerError::MissingHelper { name: "engine" });
         };
         // Read compile contract
         let wasm_path = contract_path
@@ -198,7 +198,7 @@ impl Compiler {
                                 name: import.name().to_string(),
                             },
                         }
-                        .into());
+                        );
                     }
                 }
                 extern_type => {
@@ -207,7 +207,7 @@ impl Compiler {
                             import_type: format!("{:?}", extern_type),
                         },
                     }
-                    .into());
+                    );
                 }
             }
         }
@@ -220,7 +220,7 @@ impl Compiler {
                         .collect(),
                 },
             }
-            .into());
+            );
         }
 
         // We create a context from the state and the event.
@@ -296,7 +296,7 @@ impl Compiler {
             Err(CompilerError::ContractCheckFailed {
                 error: contract_result.error,
             }
-            .into())
+            )
         }
     }
 

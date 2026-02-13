@@ -160,7 +160,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
                             sn: self.sn,
-                            hash: self.hash.clone(),
+                            hash: self.hash,
                             network: self.network.clone(),
                             stop: true
                         },

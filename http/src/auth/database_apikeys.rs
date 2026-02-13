@@ -153,13 +153,13 @@ impl AuthDatabase {
         let now = Self::now();
         let config_ttl = self.config.api_key.default_ttl_seconds;
         // SECURITY FIX: Validate TTL is not negative
-        if let Some(ttl) = expires_in_seconds {
-            if ttl < 0 {
+        if let Some(ttl) = expires_in_seconds &&
+             ttl < 0 {
                 return Err(DatabaseError::ValidationError(format!(
                     "Invalid TTL: {} (must be positive or 0)",
                     ttl
                 )));
-            }
+            
         }
 
         let effective_ttl = match expires_in_seconds {
@@ -596,7 +596,7 @@ impl AuthDatabase {
         let dangerous_chars = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '(', ')', '{', '}', '[', ']', '\\', '/', ':', '*', '?', '%'];
         if name.chars().any(|c| dangerous_chars.contains(&c)) {
             return Err(DatabaseError::ValidationError(
-                format!("API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed")
+                "API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed".to_string()
             ));
         }
 

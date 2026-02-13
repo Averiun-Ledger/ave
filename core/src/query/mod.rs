@@ -5,7 +5,7 @@ use ave_actors::{
     Actor, ActorError, ActorPath, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::{bridge::request::EventRequestType, identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange}};
+use ave_common::{bridge::request::{EventRequestType, EventsQuery}, identity::DigestIdentifier, response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB}};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, info_span};
 
@@ -27,13 +27,7 @@ impl Query {
 pub enum QueryMessage {
     GetEvents {
         subject_id: DigestIdentifier,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     },
     GetAborts {
         subject_id: DigestIdentifier,
@@ -99,8 +93,8 @@ impl Handler<Query> for Query {
         _ctx: &mut ave_actors::ActorContext<Query>,
     ) -> Result<QueryResponse, ActorError> {
         match msg {
-            QueryMessage::GetEvents { subject_id, quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type } => {
-                match self.db.get_events(&subject_id.to_string(), quantity, page, reverse, event_request_ts, event_ledger_ts, sink_ts, event_type).await {
+            QueryMessage::GetEvents { subject_id, query } => {
+                match self.db.get_events(&subject_id.to_string(), query).await {
                     Ok(data) => Ok(QueryResponse::PagEvents(data)),
                     Err(e) => Ok(QueryResponse::Error(e.to_string()))
                 }

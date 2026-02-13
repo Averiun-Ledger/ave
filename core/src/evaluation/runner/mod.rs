@@ -56,7 +56,7 @@ impl Runner {
                 Self::execute_fact_gov(state.clone(), payload).await
             }
             EvaluateInfo::GovTransfer { new_owner, state } => {
-                Self::execute_transfer_gov(state, &new_owner)
+                Self::execute_transfer_gov(state, new_owner)
             }
             EvaluateInfo::GovConfirm {
                 new_owner,
@@ -65,7 +65,7 @@ impl Runner {
             } => Self::execute_confirm_gov(
                 state.clone(),
                 old_owner_name.clone(),
-                &new_owner,
+                new_owner,
             ),
             EvaluateInfo::AllSchemasFact {
                 contract,
@@ -75,10 +75,10 @@ impl Runner {
             } => {
                 Self::execute_fact_not_gov(
                     ctx,
-                    &state,
-                    &init_state,
-                    &payload,
-                    &contract,
+                    state,
+                    init_state,
+                    payload,
+                    contract,
                     is_owner,
                 )
                 .await
@@ -91,10 +91,10 @@ impl Runner {
                 schema_id,
             } => Self::execute_transfer_not_gov(
                 governance_data,
-                &new_owner,
-                &old_owner,
+                new_owner,
+                old_owner,
                 namespace.clone(),
-                &schema_id,
+                schema_id,
             ),
         }
     }

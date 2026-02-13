@@ -158,10 +158,8 @@ impl AveSink {
         let header: Option<(String, String)> = if server_requires_auth {
             if let Some(ref key) = self.api_key {
                 Some(("X-API-Key".to_owned(), key.clone()))
-            } else if let Some(bearer) = self.current_auth_header().await {
-                Some(("Authorization".to_owned(), bearer))
             } else {
-                None
+                self.current_auth_header().await.map(|bearer| ("Authorization".to_owned(), bearer))
             }
         } else {
             None

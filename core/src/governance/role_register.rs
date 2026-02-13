@@ -62,9 +62,11 @@ pub struct RoleRegister {
     vali_quorum: HashMap<SchemaType, CeilingMap<Quorum>>,
     validators: HashMap<
         SchemaType,
-        HashMap<(PublicKey, Namespace), (IntervalSet, Option<u64>)>,
+        HashMap<(PublicKey, Namespace), IntervalData>,
     >,
 }
+
+type IntervalData = (IntervalSet, Option<u64>);
 
 impl RoleRegister {
     pub fn new() -> Self {

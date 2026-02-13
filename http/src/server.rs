@@ -12,16 +12,16 @@ use crate::{
 };
 
 use ave_bridge::ave_common::{
-    bridge::request::{BridgeSignedEventRequest, EventRequestType}, response::{ApprovalEntry, RequestData, RequestInfoExtend},
+    bridge::request::{AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery, FirstEndEvents, GovQuery, SubjectQuery}, response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::{ApprovalState, ApprovalStateRes},
+        bridge::request::{ApprovalStateRes},
         response::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
             RequestInfo, RequestsInManager, RequestsInManagerSubject,
-            SubjectDB, SubjsData, TimeRange, TransferSubject,
+            SubjectDB, SubjsData, TransferSubject,
         },
     },
 };
@@ -35,61 +35,8 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use serde_qs::axum::QsQuery;
-use serde::{Deserialize};
 use tower::ServiceBuilder;
-use utoipa::{IntoParams, ToSchema};
 
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct SubjectQuery {
-    pub active: Option<bool>,
-    pub schema_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct GovQuery {
-    pub active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct ApprovalQuery {
-    pub state: Option<ApprovalState>,
-}
-
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct EventsQuery {
-    pub quantity: Option<u64>,
-    pub page: Option<u64>,
-    pub reverse: Option<bool>,
-    #[param(style = DeepObject, explode)]
-    pub event_request_ts: Option<TimeRange>,
-    #[param(style = DeepObject, explode)]
-    pub event_ledger_ts: Option<TimeRange>,
-    #[param(style = DeepObject, explode)]
-    pub sink_ts: Option<TimeRange>,
-    pub event_type: Option<EventRequestType>
-}
-
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct AbortsQuery {
-    pub request_id: Option<String>,
-    pub sn: Option<u64>,
-    pub quantity: Option<u64>,
-    pub page: Option<u64>,
-    pub reverse: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct FirstEndEvents {
-    pub quantity: Option<u64>,
-    pub reverse: Option<bool>,
-    pub event_type: Option<EventRequestType>
-}
 
 use crate::doc::ApiDoc;
 use axum::http::Method;
@@ -773,13 +720,7 @@ pub(crate) async fn get_events(
         bridge
             .get_events(
                 subject_id,
-                parameters.quantity,
-                parameters.page,
-                parameters.reverse,
-                parameters.event_request_ts,
-                parameters.event_ledger_ts,
-                parameters.sink_ts,
-                parameters.event_type
+                parameters
             )
             .await?,
     ))

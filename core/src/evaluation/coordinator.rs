@@ -53,11 +53,11 @@ impl EvalCoordinator {
 #[derive(Debug, Clone)]
 pub enum EvalCoordinatorMessage {
     NetworkEvaluation {
-        evaluation_req: Signed<EvaluationReq>,
+        evaluation_req: Box<Signed<EvaluationReq>>,
         node_key: PublicKey,
     },
     NetworkResponse {
-        evaluation_res: Signed<EvaluationRes>,
+        evaluation_res: Box<Signed<EvaluationRes>>,
         request_id: String,
         version: u64,
         sender: PublicKey,

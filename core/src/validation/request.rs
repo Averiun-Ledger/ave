@@ -22,11 +22,11 @@ pub enum ValidationReq {
         gov_version: u64,
     },
     Event {
-        actual_protocols: ActualProtocols,
+        actual_protocols: Box<ActualProtocols>,
         event_request: Signed<EventRequest>,
         ledger_hash: DigestIdentifier,
-        metadata: Metadata,
-        last_data: LastData,
+        metadata: Box<Metadata>,
+        last_data: Box<LastData>,
         gov_version: u64,
         sn: u64,
     },
@@ -43,18 +43,10 @@ impl ValidationReq {
     pub fn is_valid(&self) -> bool {
         match self {
             ValidationReq::Create { event_request, .. } => {
-                if let EventRequest::Create(..) = event_request.content() {
-                    true
-                } else {
-                    false
-                }
+                matches!(event_request.content(), EventRequest::Create(..))
             }
             ValidationReq::Event { event_request, .. } => {
-                if let EventRequest::Create(..) = event_request.content() {
-                    false
-                } else {
-                    true
-                }
+                !matches!(event_request.content(), EventRequest::Create(..))
             }
         }
     }

@@ -234,11 +234,11 @@ impl Node {
                 if let Some(data) = self.owned_subjects.remove(&subject_id) {
                     self.known_subjects.insert(subject_id, data);
                 }
-            } else if data.new_owner == *self.our_key {
-                if let Some(data) = self.known_subjects.remove(&subject_id) {
+            } else if data.new_owner == *self.our_key 
+                && let Some(data) = self.known_subjects.remove(&subject_id) {
                     self.owned_subjects.insert(subject_id, data);
                 };
-            }
+            
         };
     }
 
@@ -247,11 +247,10 @@ impl Node {
             if let Some(data) = self.owned_subjects.get_mut(&subject_id) {
                 data.eol();
             }
-        } else {
-            if let Some(data) = self.known_subjects.get_mut(&subject_id) {
+        } else if let Some(data) = self.known_subjects.get_mut(&subject_id) {
                 data.eol();
             }
-        }
+        
     }
 
     pub fn register_subject(
@@ -672,11 +671,7 @@ impl Handler<Node> for Node {
                     .known_subjects
                     .iter()
                     .filter(|x| {
-                        if let SubjectData::Governance { .. } = x.1 {
-                            true
-                        } else {
-                            false
-                        }
+                        matches!(x.1, SubjectData::Governance { .. })
                     })
                     .map(|x| x.0.clone())
                     .collect::<Vec<DigestIdentifier>>();
@@ -684,11 +679,7 @@ impl Handler<Node> for Node {
                     .owned_subjects
                     .iter()
                     .filter(|x| {
-                        if let SubjectData::Governance { .. } = x.1 {
-                            true
-                        } else {
-                            false
-                        }
+                        matches!(x.1, SubjectData::Governance { .. })
                     })
                     .map(|x| x.0.clone())
                     .collect::<Vec<DigestIdentifier>>();
@@ -965,7 +956,7 @@ impl Handler<Node> for Node {
 
                     SubjectData::Governance { active: true }
                 } else {
-                    let tracker_init = TrackerInit::from(&metadata);
+                    let tracker_init = TrackerInit::from(&*metadata);
 
                     let tracker = Tracker::initial(
                         InitParamsTracker {

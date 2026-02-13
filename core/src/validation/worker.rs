@@ -168,21 +168,14 @@ impl ValiWorker {
             });
         }
 
-        if is_gov && metadata.governance_id != metadata.subject_id {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata governance_id",
-            });
-        } else if !is_gov && metadata.governance_id == metadata.subject_id {
+        if is_gov && metadata.governance_id != metadata.subject_id || !is_gov && metadata.governance_id == metadata.subject_id{
             return Err(ValidatorError::InvalidData {
                 value: "metadata governance_id",
             });
         }
+        
 
-        if is_gov && metadata.genesis_gov_version != 0 {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata genesis_gov_version",
-            });
-        } else if !is_gov && metadata.genesis_gov_version == 0 {
+        if is_gov && metadata.genesis_gov_version != 0 || !is_gov && metadata.genesis_gov_version == 0 {
             return Err(ValidatorError::InvalidData {
                 value: "metadata genesis_gov_version",
             });
@@ -194,16 +187,11 @@ impl ValiWorker {
             });
         }
 
-        if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty() {
+        if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty() || metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty() {
             return Err(ValidatorError::InvalidData {
                 value: "metadata prev_ledger_event_hash",
             });
-        } else if metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty()
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata prev_ledger_event_hash",
-            });
-        }
+        };
 
         if !metadata.schema_id.is_valid_in_request() {
             return Err(ValidatorError::InvalidData {
@@ -229,13 +217,13 @@ impl ValiWorker {
             });
         }
 
-        if let Some(new_owner) = &metadata.new_owner {
-            if new_owner.is_empty() || new_owner == &metadata.owner {
+        if let Some(new_owner) = &metadata.new_owner 
+            && (new_owner.is_empty() || new_owner == &metadata.owner) {
                 return Err(ValidatorError::InvalidData {
                     value: "metadata new owner",
                 });
             }
-        };
+        ;
 
         if !metadata.active {
             return Err(ValidatorError::InvalidData {
@@ -571,7 +559,7 @@ impl ValiWorker {
                     sn: metadata.sn + 1,
                     namespace: metadata.namespace.clone(),
                     schema_id: metadata.schema_id.clone(),
-                    gov_version: gov_version,
+                    gov_version,
                     signer: signer.clone(),
                 },
             )
@@ -685,7 +673,7 @@ impl ValiWorker {
         let vali_res = if metadata.sn == 0 {
             ValidationRes::Create {
                 vali_req_hash,
-                subject_metadata: metadata.clone(),
+                subject_metadata: Box::new(metadata.clone()),
             }
         } else {
             let hash_metadata =
@@ -830,13 +818,12 @@ impl ValiWorker {
                                     value: "create event namespace",
                                 });
                             }
-                        } else {
-                            if create.governance_id.is_empty() {
+                        } else if create.governance_id.is_empty() {
                                 return Err(ValidatorError::InvalidData {
                                     value: "create event governance_id",
                                 });
                             }
-                        }
+                        
 
                         let subject_id_worker =
                             hash_borsh(&*self.hash.hasher(), &event_request)
@@ -871,7 +858,7 @@ impl ValiWorker {
                             name: create.name.clone(),
                             description: create.description.clone(),
                             subject_id: subject_id_worker,
-                            governance_id: governance_id,
+                            governance_id,
                             genesis_gov_version: *gov_version,
                             prev_ledger_event_hash: DigestIdentifier::default(),
                             schema_id: create.schema_id.clone(),
@@ -892,7 +879,7 @@ impl ValiWorker {
 
                         Ok(ValidationRes::Create {
                             vali_req_hash,
-                            subject_metadata,
+                            subject_metadata: Box::new(subject_metadata),
                         })
                     } else {
                         Err(ValidatorError::InvalidData {
@@ -935,10 +922,10 @@ impl ValiWorker {
 
                     let modified_metadata = Self::create_modified_metadata(
                         is_success,
-                        &event_request.content(),
+                        event_request.content(),
                         properties,
                         ledger_hash.clone(),
-                        metadata.clone(),
+                        *metadata.clone(),
                     )?;
 
                     let vali_req_hash =
@@ -969,10 +956,10 @@ pub enum ValiWorkerMessage {
         gov_version: u64   
     },
     LocalValidation {
-        validation_req: Signed<ValidationReq>,
+        validation_req: Box<Signed<ValidationReq>>,
     },
     NetworkRequest {
-        validation_req: Signed<ValidationReq>,
+        validation_req: Box<Signed<ValidationReq>>,
         sender: PublicKey,
         info: ComunicateInfo,
     },
@@ -1050,7 +1037,7 @@ impl Handler<ValiWorker> for ValiWorker {
                     Ok(validation_actor) => {
                         validation_actor
                             .tell(ValidationMessage::Response {
-                                validation_res: validation,
+                                validation_res: Box::new(validation),
                                 sender: (*self.our_key).clone(),
                                 signature: Some(signature),
                             })

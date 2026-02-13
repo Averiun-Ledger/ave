@@ -24,7 +24,7 @@ pub enum ValidationRes {
     },
     Create {
         vali_req_hash: DigestIdentifier,
-        subject_metadata: Metadata,
+        subject_metadata: Box<Metadata>,
     },
     Abort(String),
     TimeOut,

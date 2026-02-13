@@ -40,7 +40,7 @@ pub struct ValidationSchema {
 #[derive(Debug, Clone)]
 pub enum ValidationSchemaMessage {
     NetworkRequest {
-        validation_req: Signed<ValidationReq>,
+        validation_req: Box<Signed<ValidationReq>>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
@@ -197,7 +197,7 @@ impl Handler<ValidationSchema> for ValidationSchema {
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
                             sn: self.sn,
-                            hash: self.hash.clone(),
+                            hash: self.hash,
                             network: self.network.clone(),
                             stop: true
                         },

@@ -103,7 +103,7 @@ impl Handler<RequestTracking> for RequestTracking {
                     "Retrieving all tracked requests"
                 );
                 Ok(RequestTrackingResponse::AllInfo(
-                    self.cache.iter().map(|x| RequestInfoExtend { request_id: x.0.to_string(), state: x.1.state.clone(), version: x.1.version.clone() }).collect(),
+                    self.cache.iter().map(|x| RequestInfoExtend { request_id: x.0.to_string(), state: x.1.state.clone(), version: x.1.version }).collect(),
                 ))
             }
             RequestTrackingMessage::UpdateState { request_id, state } => {

@@ -120,7 +120,7 @@ pub struct ValidationData {
 )]
 pub enum ValidationMetadata {
     ModifiedHash(DigestIdentifier),
-    Metadata(Metadata),
+    Metadata(Box<Metadata>),
 }
 
 #[derive(
@@ -514,7 +514,7 @@ impl Ledger {
             && let ValidationMetadata::Metadata(metadata) =
                 &validation.validation_metadata
         {
-            Ok(metadata.clone())
+            Ok(*metadata.clone())
         } else {
             Err(ProtocolsError::NotCreateWithMetadata)
         }

@@ -132,7 +132,7 @@ impl Evaluation {
 
             child
                 .tell(EvalCoordinatorMessage::NetworkEvaluation {
-                    evaluation_req: self.request.clone(),
+                    evaluation_req: Box::new(self.request.clone()),
                     node_key: signer,
                 })
                 .await?
@@ -216,7 +216,7 @@ impl Evaluation {
         req_actor
             .tell(RequestManagerMessage::EvaluationRes {
                 request_id: self.request_id.clone(),
-                eval_req: self.request.content().clone(),
+                eval_req: Box::new(self.request.content().clone()),
                 eval_res: response,
             })
             .await
@@ -471,8 +471,7 @@ impl Handler<Evaluation> for Evaluation {
                                 as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary {
-                                if let Err(e) = send_reboot_to_req(
+                            if let ResponseSummary::Reboot = summary && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
@@ -490,7 +489,7 @@ impl Handler<Evaluation> for Evaluation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                            }
+                            
 
                             let response = match self
                                 .build_evaluation_data(summary.is_ok())
@@ -560,8 +559,7 @@ impl Handler<Evaluation> for Evaluation {
                                 new_evaluators = current_eval.len(),
                                 "Created additional evaluators from pending pool"
                             );
-                        } else if self.current_evaluators.is_empty() {
-                            if let Err(e) = send_reboot_to_req(
+                        } else if self.current_evaluators.is_empty() && let Err(e) = send_reboot_to_req(
                                 ctx,
                                 self.request_id.clone(),
                                 self.request.content().governance_id.clone(),
@@ -576,7 +574,7 @@ impl Handler<Evaluation> for Evaluation {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             }
-                        }
+                        
                     } else {
                         warn!(
                             msg_type = "Response",

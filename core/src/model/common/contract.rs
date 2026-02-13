@@ -64,7 +64,7 @@ impl MemoryManager {
         // Security check: prevent total memory exhaustion
         let new_len = current_len
             .checked_add(len)
-            .ok_or_else(|| ContractError::AllocationOverflow)?;
+            .ok_or(ContractError::AllocationOverflow)?;
 
         if new_len > MAX_TOTAL_MEMORY {
             return Err(ContractError::TotalMemoryExceeded {
@@ -85,9 +85,7 @@ impl MemoryManager {
         data: u8,
     ) -> Result<(), ContractError> {
         // Security check: validate pointer exists in allocation map
-        let len = self.map.get(&start_ptr).ok_or_else(|| {
-            ContractError::InvalidPointer { pointer: start_ptr }
-        })?;
+        let len = self.map.get(&start_ptr).ok_or(ContractError::InvalidPointer { pointer: start_ptr })?;
 
         // Security check: validate write is within bounds
         if offset >= *len {
@@ -106,7 +104,7 @@ impl MemoryManager {
         let len = self
             .map
             .get(&ptr)
-            .ok_or_else(|| ContractError::InvalidPointer { pointer: ptr })?;
+            .ok_or(ContractError::InvalidPointer { pointer: ptr })?;
         Ok(&self.memory[ptr..ptr + len])
     }
 

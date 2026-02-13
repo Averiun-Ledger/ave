@@ -582,8 +582,7 @@ impl Governance {
         >,
         up_eval: &BTreeMap<SchemaType, ValueWrapper>,
         up_vali: &BTreeMap<SchemaType, ValueWrapper>,
-        hash: &HashAlgorithm,
-        network: &Arc<NetworkSender>,
+        hash_network: (&HashAlgorithm, &Arc<NetworkSender>),
     ) -> Result<(), ActorError> {
         for (schema_id, init_state) in up_eval.iter() {
             let eval_actor = EvaluationSchema {
@@ -597,8 +596,8 @@ impl Governance {
                     .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
-                hash: hash.clone(),
-                network: network.clone(),
+                hash: *hash_network.0,
+                network: hash_network.1.clone(),
             };
 
             ctx.create_child(&format!("{}_evaluation", schema_id), eval_actor)
@@ -617,8 +616,8 @@ impl Governance {
                     .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
-                hash: hash.clone(),
-                network: network.clone(),
+                hash: *hash_network.0,
+                network: hash_network.1.clone(),
             };
 
             ctx.create_child(&format!("{}_validation", schema_id), vali_actor)
@@ -664,7 +663,7 @@ impl Governance {
                 .clone()
                 .iter()
                 .filter(|x| !new_schemas_eval.contains_key(x))
-                .map(|x| x.clone())
+                .cloned()
                 .collect();
             Self::down_compilers_schemas(ctx, &down).await?;
 
@@ -719,14 +718,14 @@ impl Governance {
             .clone()
             .iter()
             .filter(|x| !new_schemas_eval.contains_key(x))
-            .map(|x| x.clone())
+            .cloned()
             .collect();
 
         let down_vali = old_schemas_vali
             .clone()
             .iter()
             .filter(|x| !new_schemas_vali.contains_key(x))
-            .map(|x| x.clone())
+            .cloned()
             .collect();
 
         Self::down_schemas(ctx, &down_eval, &down_vali).await?;
@@ -768,8 +767,7 @@ impl Governance {
             &schema_creators_vali,
             &up_eval,
             &up_vali,
-            &hash,
-            &network,
+            (&hash, &network),
         )
         .await?;
 
@@ -889,8 +887,7 @@ impl Governance {
             &schema_creators_vali,
             &new_schemas_eval,
             &new_schemas_vali,
-            hash,
-            network,
+            (hash,network)
         )
         .await
     }
@@ -972,7 +969,7 @@ impl Governance {
                 node_key: node_key.clone(),
                 subject_id: self.subject_metadata.subject_id.clone(),
                 pass_votation,
-                helpers: (hash.clone(), network.clone()),
+                helpers: (*hash, network.clone()),
             };
 
             ctx.create_child("approver", ApprPersist::initial(init_approver))
@@ -1101,7 +1098,7 @@ impl Governance {
                     node_key: node_key.clone(),
                     subject_id: self.subject_metadata.subject_id.clone(),
                     pass_votation,
-                    helpers: (hash.clone(), network.clone()),
+                    helpers: (*hash, network.clone()),
                 };
 
                 ctx.create_child(
@@ -1178,7 +1175,7 @@ impl Governance {
             node_key: (*self.our_key).clone(),
             subject_id: self.subject_metadata.subject_id.clone(),
             pass_votation,
-            helpers: (hash.clone(), network.clone()),
+            helpers: (*hash, network.clone()),
         };
 
         ctx.create_child("approver", ApprPersist::initial(init_approver))
@@ -1359,11 +1356,10 @@ impl Governance {
             for witness in creator_witnesses.iter() {
                 if witness == &ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else {
-                    if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) = self.properties.members.get(witness) {
                         witnesses.push(WitnessesType::User(w.clone()));
                     }
-                }
+                
             }
 
             new_creator_data.insert(
@@ -1390,11 +1386,10 @@ impl Governance {
             for witness in creator_witnesses.iter() {
                 if witness == &ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else {
-                    if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) = self.properties.members.get(witness) {
                         witnesses.push(WitnessesType::User(w.clone()));
                     }
-                }
+                
             }
 
             update_creator_witnesses_data.insert((
@@ -1682,7 +1677,7 @@ impl Governance {
                         .timestamp
                         .as_nanos(),
                 },
-                &first.content().event_request.content(),
+                first.content().event_request.content(),
             )
             .await?;
 
@@ -1795,7 +1790,7 @@ impl Governance {
                             .timestamp
                             .as_nanos(),
                     },
-                    &event.content().event_request.content(),
+                    event.content().event_request.content(),
                 )
                 .await?;
 
@@ -1943,7 +1938,7 @@ pub enum GovernanceResponse {
         is_all: bool,
     },
     LastLedger {
-        ledger_event: Option<SignedLedger>,
+        ledger_event: Box<Option<SignedLedger>>,
     },
     Governance(Box<GovernanceData>),
     NewCompilers(Vec<SchemaType>),
@@ -2155,7 +2150,7 @@ impl Handler<Governance> for Governance {
             }
             GovernanceMessage::GetLastLedger => {
                 let ledger_event = self.get_last_ledger(ctx).await?;
-                Ok(GovernanceResponse::LastLedger { ledger_event })
+                Ok(GovernanceResponse::LastLedger { ledger_event: Box::new(ledger_event) })
             }
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),

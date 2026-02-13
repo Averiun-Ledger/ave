@@ -367,8 +367,8 @@ impl AuthDatabase {
                 |row| row.get(0),
             ).ok();
 
-            if let Some(sa_role_id) = superadmin_role_id {
-                if roles.contains(&sa_role_id) {
+            if let Some(sa_role_id) = superadmin_role_id 
+                && roles.contains(&sa_role_id) {
                     // Use the already-acquired connection to avoid deadlock
                     let existing_count: i64 = conn.query_row(
                         "SELECT COUNT(DISTINCT u.id)
@@ -386,7 +386,7 @@ impl AuthDatabase {
                         ));
                     }
                 }
-            }
+            
         }
 
         // Hash password

@@ -26,12 +26,12 @@ use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorPath, ActorRef, PersistentActor};
-use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType};
+use ave_common::bridge::request::{ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery};
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
 use ave_common::request::EventRequest;
 use ave_common::response::{
-    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange
+    GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData
 };
 use config::Config as AveBaseConfig;
 use error::Error;
@@ -845,25 +845,13 @@ impl Api {
     pub async fn get_events(
         &self,
         subject_id: DigestIdentifier,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     ) -> Result<PaginatorEvents, Error> {
         let response = self
             .query
             .ask(QueryMessage::GetEvents {
-                subject_id: subject_id,
-                event_ledger_ts,
-                event_request_ts,
-                page,
-                quantity,
-                reverse,
-                sink_ts,
-                event_type
+                subject_id,
+                query
             })
             .await
             .map_err(|e| {
@@ -901,7 +889,7 @@ impl Api {
         let response = self
             .query
             .ask(QueryMessage::GetAborts {
-                subject_id: subject_id,
+                subject_id,
                 request_id,
                 sn,
                 quantity,

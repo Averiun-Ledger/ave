@@ -212,8 +212,8 @@ impl SubjectMetadata {
             new_owner: data.new_owner.clone(),
             prev_ledger_event_hash: data.prev_ledger_event_hash.clone(),
             creator: data.creator.clone(),
-            active: data.active.clone(),
-            sn: data.sn.clone(),
+            active: data.active,
+            sn: data.sn,
         }
     }
 }
@@ -360,14 +360,13 @@ where
                             SubjectError::MissingApprovalAfterEvaluation,
                         );
                     }
-                } else {
-                    if approval.is_some() {
+                } else if approval.is_some() {
                         return Err(SubjectError::UnexpectedApprovalAfterFailedEvaluation);
                     } else {
                         ActualProtocols::Eval {
                             eval_data: evaluation.clone(),
                         }
-                    }
+                    
                 };
 
                 (validation, actual_protocols)
@@ -486,11 +485,11 @@ where
         }
 
         let validation_req = ValidationReq::Event {
-            actual_protocols: new_actual_protocols,
+            actual_protocols: Box::new(new_actual_protocols),
             event_request: new_ledger_event.content().event_request.clone(),
             ledger_hash: actual_ledger_event_hash.clone(),
-            metadata: subject_metadata.clone(),
-            last_data,
+            metadata: Box::new(subject_metadata.clone()),
+            last_data: Box::new(last_data),
             gov_version: new_ledger_event.content().gov_version,
             sn: new_ledger_event.content().sn,
         };
@@ -650,7 +649,7 @@ where
             return Err(SubjectError::ValidationRequestHashMismatch);
         }
 
-        if metadata != &subject_metadata {
+        if metadata.deref() != &subject_metadata {
             return Err(SubjectError::MetadataMismatch);
         }
 
@@ -667,7 +666,7 @@ where
 
         let validation_res = ValidationRes::Create {
             vali_req_hash: hash_signed_val_req,
-            subject_metadata,
+            subject_metadata: Box::new(subject_metadata),
         };
 
         let role_data = match metadata.schema_id {
@@ -837,13 +836,12 @@ where
             } else {
                 Ok((get_n_events(ctx, actual_sn, hi_sn).await?, true))
             }
-        } else {
-            if hi_sn > 99 {
+        } else if hi_sn > 99 {
                 Ok((get_n_events(ctx, 0, 99).await?, false))
             } else {
                 Ok((get_n_events(ctx, 0, hi_sn).await?, true))
             }
-        }
+        
     }
 
     async fn update_sn(

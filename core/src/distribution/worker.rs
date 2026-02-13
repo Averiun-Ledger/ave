@@ -277,7 +277,7 @@ impl DistriWorker {
                 Ok((sn, false))
             }
             SubjectData::Governance { .. } => {
-                let gov = get_gov(ctx, &subject_id).await.map_err(|e| {
+                let gov = get_gov(ctx, subject_id).await.map_err(|e| {
                     DistributorError::GetGovernanceFailed {
                         details: e.to_string(),
                     }
@@ -355,7 +355,7 @@ pub enum DistriWorkerMessage {
     },
     // Nos llega una replica, guardarla en informar que la hemos recivido
     LastEventDistribution {
-        ledger: SignedLedger,
+        ledger: Box<SignedLedger>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
@@ -428,7 +428,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .send_command(network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
-                            message: ActorMessage::AuthLastSn { sn: sn },
+                            message: ActorMessage::AuthLastSn { sn },
                         },
                     })
                     .await
@@ -485,8 +485,8 @@ impl Handler<DistriWorker> for DistriWorker {
                     }
                 };
 
-                if let Some(actual_sn) = actual_sn {
-                    if actual_sn >= hi_sn {
+                if let Some(actual_sn) = actual_sn 
+                    && actual_sn >= hi_sn {
                         warn!(
                             msg_type = "SendDistribution",
                             subject_id = %subject_id,
@@ -502,7 +502,7 @@ impl Handler<DistriWorker> for DistriWorker {
                             .into(),
                         );
                     }
-                };
+                ;
 
                 let (ledger, is_all) = match self
                     .get_ledger(ctx, &subject_id, hi_sn, actual_sn, is_gov)
@@ -612,7 +612,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     .content()
                     .is_create_event()
                 {
-                    if let Err(e) = create_subject(ctx, ledger.clone()).await {
+                    if let Err(e) = create_subject(ctx, *ledger.clone()).await {
                         if let ActorError::Functional { .. } = e {
                             warn!(
                                 msg_type = "LastEventDistribution",
@@ -668,7 +668,7 @@ impl Handler<DistriWorker> for DistriWorker {
                         return Err(emit_fail(ctx, error.into()).await);
                     }
 
-                    match update_ledger(ctx, &subject_id, vec![ledger.clone()])
+                    match update_ledger(ctx, &subject_id, vec![*ledger.clone()])
                         .await
                     {
                         Ok((last_sn, owner, new_owner))

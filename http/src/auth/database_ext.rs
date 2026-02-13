@@ -106,12 +106,12 @@ impl AuthDatabase {
         }
 
         // Validate description length
-        if let Some(desc) = description {
-            if desc.len() > MAX_DESC_LENGTH {
+        if let Some(desc) = description &&
+             desc.len() > MAX_DESC_LENGTH {
                 return Err(DatabaseError::ValidationError(
                     format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
                 ));
-            }
+            
         }
         let exists: bool = conn
             .query_row(
@@ -192,12 +192,12 @@ impl AuthDatabase {
         // SECURITY FIX: Validate description length
         const MAX_DESC_LENGTH: usize = 500;
 
-        if let Some(desc) = description {
-            if desc.len() > MAX_DESC_LENGTH {
+        if let Some(desc) = description && 
+            desc.len() > MAX_DESC_LENGTH {
                 return Err(DatabaseError::ValidationError(
                     format!("Description must not exceed {} characters (got {})", MAX_DESC_LENGTH, desc.len())
                 ));
-            }
+            
         }
 
         // Check if role is system role

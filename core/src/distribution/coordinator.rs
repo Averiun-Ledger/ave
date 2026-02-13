@@ -45,7 +45,7 @@ pub enum DistriCoordinatorMessage {
     // Enviar a un nodo la replicación.
     NetworkDistribution {
         request_id: String,
-        ledger: SignedLedger,
+        ledger: Box<SignedLedger>,
     },
     // El nodo al que le enviamos la replica la recivió, parar los reintentos.
     NetworkResponse {
@@ -85,7 +85,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
                         receiver_actor,
                     },
                     message: ActorMessage::DistributionLastEventReq {
-                        ledger: Box::new(ledger),
+                        ledger,
                     },
                 };
 

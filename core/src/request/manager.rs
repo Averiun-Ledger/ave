@@ -312,15 +312,17 @@ impl RequestManager {
             metadata.namespace.clone(),
         )?;
 
-        let eval_req = self.create_req_eval(
-            request,
-            evaluate_data,
-            metadata.sn,
-            metadata.namespace.clone(),
-            metadata.schema_id.clone(),
-            governance_data.version,
-            metadata.governance_id.clone(),
-        );
+        let eval_req = EvaluationReq {
+            event_request: request.clone(),
+            data: evaluate_data,
+            sn: metadata.sn + 1,
+            gov_version: governance_data.version,
+            namespace: metadata.namespace.clone(),
+            schema_id: metadata.schema_id.clone(),
+            signer: (*self.our_key).clone(),
+            signer_is_owner: *self.our_key == request.signature().signer,
+            governance_id: metadata.governance_id.clone(),
+        };
 
         let signature =
             get_sign(ctx, SignTypesNode::EvaluationReq(eval_req.clone()))
@@ -329,29 +331,6 @@ impl RequestManager {
         let signed_evaluation_req: Signed<EvaluationReq> =
             Signed::from_parts(eval_req, signature);
         Ok((signed_evaluation_req, quorum, signers, init_state))
-    }
-
-    fn create_req_eval(
-        &self,
-        event_request: &Signed<EventRequest>,
-        data: EvaluateData,
-        sn: u64,
-        namespace: Namespace,
-        schema_id: SchemaType,
-        gov_version: u64,
-        governance_id: DigestIdentifier,
-    ) -> EvaluationReq {
-        EvaluationReq {
-            event_request: event_request.clone(),
-            data,
-            sn: sn + 1,
-            gov_version,
-            namespace,
-            schema_id,
-            signer: (*self.our_key).clone(),
-            signer_is_owner: *self.our_key == event_request.signature().signer,
-            governance_id,
-        }
     }
 
     async fn run_evaluation(
@@ -550,7 +529,7 @@ impl RequestManager {
         self.on_event(
             RequestManagerEvent::UpdateState {
                 state: Box::new(RequestManagerState::Validation {
-                    request: signed_validation_req.clone(),
+                    request: Box::new(signed_validation_req.clone()),
                     quorum: quorum.clone(),
                     init_state: init_state.clone(),
                     signers: signers.clone(),
@@ -687,16 +666,16 @@ impl RequestManager {
 
             Ok((
                 ValidationReq::Event {
-                    actual_protocols,
+                    actual_protocols: Box::new(actual_protocols),
                     event_request: request.clone(),
-                    metadata,
-                    last_data: LastData {
+                    metadata: Box::new(metadata),
+                    last_data: Box::new(LastData {
                         vali_data: last_ledger_event
                             .content()
                             .protocols
                             .get_validation_data(),
                         gov_version: last_ledger_event.content().gov_version,
-                    },
+                    }),
                     gov_version,
                     ledger_hash,
                     sn,
@@ -792,7 +771,7 @@ impl RequestManager {
                 protocols: Protocols::build(
                     metadata.schema_id.is_gov(),
                     EventRequestType::from(event_request.content()),
-                    actual_protocols,
+                    *actual_protocols,
                     val_res,
                 )?,
                 event_request,
@@ -1104,7 +1083,7 @@ impl RequestManager {
             AuthResponse::Witnesses(witnesses) => Ok(witnesses),
             _ => Err(RequestManagerError::ActorError(
                 ActorError::UnexpectedResponse {
-                    path: path,
+                    path,
                     expected: "AuthResponse::Witnesses".to_owned(),
                 },
             )),
@@ -1340,9 +1319,8 @@ impl RequestManager {
             return Err(RequestManagerError::RequestNotSet);
         };
 
-        match request.content() {
-            EventRequest::Fact { .. } => {
-                let subject_data = get_subject_data(ctx, &self.subject_id).await?;
+        if let EventRequest::Fact { .. } = request.content() {
+                            let subject_data = get_subject_data(ctx, &self.subject_id).await?;
                 let Some(subject_data) = subject_data else {
                     return Err(RequestManagerError::SubjecData);
                 };
@@ -1372,9 +1350,8 @@ impl RequestManager {
                         }
                     }
                 }
-            },
-            _ => {}
         }
+
 
         Ok(())
     }
@@ -1506,7 +1483,7 @@ pub enum RequestManagerMessage {
     },
     EvaluationRes {
         request_id: DigestIdentifier,
-        eval_req: EvaluationReq,
+        eval_req: Box<EvaluationReq>,
         eval_res: EvaluationData,
     },
     ApprovalRes {
@@ -1515,7 +1492,7 @@ pub enum RequestManagerMessage {
     },
     ValidationRes {
         request_id: DigestIdentifier,
-        val_req: ValidationReq,
+        val_req: Box<ValidationReq>,
         val_res: ValidationData,
     },
     FinishRequest {
@@ -1923,7 +1900,7 @@ impl Handler<RequestManager> for RequestManager {
                     } => {
                         if let Err(e) = self
                             .run_validation(
-                                ctx, request, quorum, signers, init_state,
+                                ctx, *request, quorum, signers, init_state,
                             )
                             .await
                         {
@@ -1955,8 +1932,8 @@ impl Handler<RequestManager> for RequestManager {
 
                         match self.build_distribution(ctx, ledger).await {
                             Ok(in_distribution) => {
-                                if !in_distribution {
-                                    if let Err(e) =
+                                if !in_distribution 
+                                    && let Err(e) =
                                         self.finish_request(ctx).await
                                     {
                                         error!(
@@ -1968,7 +1945,7 @@ impl Handler<RequestManager> for RequestManager {
                                         );
                                         self.match_error(ctx, e).await;
                         return Ok(())
-                                    }
+                                    
                                 }
                             }
                             Err(e) => {
@@ -1987,8 +1964,8 @@ impl Handler<RequestManager> for RequestManager {
                     RequestManagerState::Distribution { ledger } => {
                         match self.build_distribution(ctx, ledger).await {
                             Ok(in_distribution) => {
-                                if !in_distribution {
-                                    if let Err(e) =
+                                if !in_distribution 
+                                    && let Err(e) =
                                         self.finish_request(ctx).await
                                     {
                                         error!(
@@ -2001,7 +1978,7 @@ impl Handler<RequestManager> for RequestManager {
                                         self.match_error(ctx, e).await;
                         return Ok(())
                                     }
-                                }
+                                
                             }
                             Err(e) => {
                                 error!(
@@ -2066,7 +2043,7 @@ impl Handler<RequestManager> for RequestManager {
                             RequestManagerEvent::UpdateState {
                                 state: Box::new(
                                     RequestManagerState::Approval {
-                                        eval_req: eval_req.clone(),
+                                        eval_req: *eval_req.clone(),
                                         eval_res: eval_res.clone(),
                                     },
                                 ),
@@ -2076,7 +2053,7 @@ impl Handler<RequestManager> for RequestManager {
                         .await;
 
                         if let Err(e) = self
-                            .build_approval(ctx, eval_req, evaluator_res)
+                            .build_approval(ctx, *eval_req, evaluator_res)
                             .await
                         {
                             error!(
@@ -2097,7 +2074,7 @@ impl Handler<RequestManager> for RequestManager {
                         let (request, quorum, signers, init_state) = match self
                             .build_validation_req(
                                 ctx,
-                                Some((eval_req, eval_res)),
+                                Some((*eval_req, eval_res)),
                                 None,
                             )
                             .await
@@ -2232,7 +2209,7 @@ impl Handler<RequestManager> for RequestManager {
                     };
 
                     let signed_ledger =
-                        match self.build_ledger(ctx, val_req, val_res).await {
+                        match self.build_ledger(ctx, *val_req, val_res).await {
                             Ok(signed_ledger) => signed_ledger,
                             Err(e) => {
                                 error!(
@@ -2260,9 +2237,9 @@ impl Handler<RequestManager> for RequestManager {
                     };
 
                     match self.build_distribution(ctx, signed_ledger).await {
-                        Ok(in_distribution) => {
-                            if !in_distribution {
-                                if let Err(e) = self.finish_request(ctx).await {
+                        Ok(in_distribution) => 
+                            if !in_distribution 
+                                && let Err(e) = self.finish_request(ctx).await {
                                     error!(
                                         msg_type = "ValidationRes",
                                         request_id = %self.id,
@@ -2272,8 +2249,8 @@ impl Handler<RequestManager> for RequestManager {
                                     self.match_error(ctx, e).await;
                                     return Ok(());
                                 }
-                            }
-                        }
+                            ,
+                        
                         Err(e) => {
                             error!(
                                 msg_type = "ValidationRes",

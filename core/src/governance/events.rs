@@ -87,8 +87,7 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        {
-                                            if let Some(user) =
+                                        && let Some(user) =
                                                 members.get(&creator.name)
                                             {
                                                 new_creator.insert(
@@ -110,7 +109,7 @@ impl GovernanceEvent {
                                                     ),
                                                 );
                                             }
-                                        }
+                                        
                                     }
                                     (None, Some(q)) => {
                                         if let Some(creator) =
@@ -123,8 +122,7 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        {
-                                            if let Some(user) =
+                                        && let Some(user) =
                                                 members.get(&creator.name)
                                             {
                                                 new_creator.insert(
@@ -144,7 +142,7 @@ impl GovernanceEvent {
                                                     ),
                                                 );
                                             }
-                                        }
+                                        
                                     }
                                     (Some(w), None) => {
                                         if let Some(creator) =
@@ -157,8 +155,7 @@ impl GovernanceEvent {
                                                 quantity:
                                                     CreatorQuantity::Infinity,
                                             })
-                                        {
-                                            if let Some(user) =
+                                        && let Some(user) =
                                                 members.get(&creator.name)
                                             {
                                                 new_creator.insert(
@@ -177,7 +174,7 @@ impl GovernanceEvent {
                                                         w.clone(),
                                                     ),
                                                 );
-                                            }
+                                            
                                         }
                                     }
                                     (Some(w), Some(q)) => {
@@ -560,8 +557,7 @@ impl GovernanceEvent {
                                         {
                                             witnesses
                                                 .push(WitnessesType::Witnesses);
-                                        } else {
-                                            if let Some(w) =
+                                        } else if let Some(w) =
                                                 members.get(witness)
                                             {
                                                 witnesses.push(
@@ -570,7 +566,7 @@ impl GovernanceEvent {
                                                     ),
                                                 );
                                             }
-                                        }
+                                        
                                     }
 
                                     new_creator.insert(

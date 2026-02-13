@@ -127,7 +127,7 @@ impl Validation {
 
             child
                 .tell(ValiCoordinatorMessage::NetworkValidation {
-                    validation_req: self.request.clone(),
+                    validation_req: Box::new(self.request.clone()),
                     node_key: signer,
                 })
                 .await?
@@ -154,7 +154,7 @@ impl Validation {
 
             child
                 .tell(ValiWorkerMessage::LocalValidation {
-                    validation_req: self.request.clone(),
+                    validation_req: Box::new(self.request.clone()),
                 })
                 .await?
         }
@@ -172,7 +172,7 @@ impl Validation {
         req_actor
             .tell(RequestManagerMessage::ValidationRes {
                 request_id: self.request_id.clone(),
-                val_req: self.request.content().clone(),
+                val_req: Box::new(self.request.content().clone()),
                 val_res: response,
             })
             .await?;
@@ -213,7 +213,7 @@ pub enum ValidationMessage {
         signers: HashSet<PublicKey>,
     },
     Response {
-        validation_res: ValidationRes,
+        validation_res: Box<ValidationRes>,
         sender: PublicKey,
         signature: Option<Signature>,
     },
@@ -316,7 +316,7 @@ impl Handler<Validation> for Validation {
             } => {
                 if !self.reboot {
                     if self.check_validator(sender.clone()) {
-                        match validation_res {
+                        match *validation_res {
                             ValidationRes::Create {
                                 vali_req_hash,
                                 subject_metadata,
@@ -438,8 +438,8 @@ impl Handler<Validation> for Validation {
                             self.validators_response.len() as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary {
-                                if let Err(e) = send_reboot_to_req(
+                            if let ResponseSummary::Reboot = summary 
+                                && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
@@ -455,7 +455,7 @@ impl Handler<Validation> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                            }
+                            
 
                             let validation_data = self.build_validation_data();
 
@@ -512,8 +512,8 @@ impl Handler<Validation> for Validation {
                                 new_validators = curren_vali.len(),
                                 "Created additional validators from pending pool"
                             );
-                        } else if self.current_validators.is_empty() {
-                            if let Err(e) = send_reboot_to_req(
+                        } else if self.current_validators.is_empty() 
+                            && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
@@ -529,7 +529,7 @@ impl Handler<Validation> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
-                        }
+                        
                     } else {
                         warn!(
                             msg_type = "Response",

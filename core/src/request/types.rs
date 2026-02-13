@@ -25,7 +25,7 @@ pub enum RequestManagerState {
         eval_res: EvaluationData,
     },
     Validation {
-        request: Signed<ValidationReq>,
+        request: Box<Signed<ValidationReq>>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
         signers: HashSet<PublicKey>,

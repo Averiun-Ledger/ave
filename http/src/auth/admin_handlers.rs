@@ -211,8 +211,8 @@ pub async fn create_user(
                 ).ok()
             });
 
-        if let Some(sa_role_id) = superadmin_role_id {
-            if role_ids.contains(&sa_role_id) {
+        if let Some(sa_role_id) = superadmin_role_id 
+            && role_ids.contains(&sa_role_id) {
                 // Only one superadmin is allowed in the system
                 // Only the current superadmin can attempt this operation
                 if !auth_ctx.is_superadmin() {
@@ -237,7 +237,7 @@ pub async fn create_user(
                     ));
                 }
             }
-        }
+        
     }
 
     // Create user
@@ -321,8 +321,7 @@ pub async fn list_users(
 
     let limit = params.limit
         .unwrap_or(DEFAULT_LIMIT)
-        .min(MAX_LIMIT)
-        .max(1);
+        .clamp(1, MAX_LIMIT);
     let offset = params.offset.unwrap_or(0).max(0);
 
     let users = db
@@ -710,10 +709,9 @@ pub async fn assign_role(
     // SECURITY FIX: Protect superadmin role assignment
     let superadmin_role_id = get_superadmin_role_id(&db)?;
 
-    if let Some(sa_role_id) = superadmin_role_id {
-        if role_id == sa_role_id {
-            validate_superadmin_assignment(&db, &auth_ctx, user_id)?;
-        }
+    if let Some(sa_role_id) = superadmin_role_id &&
+        role_id == sa_role_id {
+            validate_superadmin_assignment(&db, &auth_ctx, user_id)?;  
     }
 
     db.assign_role_to_user(user_id, role_id, Some(auth_ctx.user_id))
@@ -778,11 +776,11 @@ pub async fn remove_role(
     // SECURITY FIX: Protect superadmin role removal
     let superadmin_role_id = get_superadmin_role_id(&db)?;
 
-    if let Some(sa_role_id) = superadmin_role_id {
-        if role_id == sa_role_id {
+    if let Some(sa_role_id) = superadmin_role_id && 
+        role_id == sa_role_id {
             validate_superadmin_removal(&db, &auth_ctx, user_id)?;
         }
-    }
+    
 
     db.remove_role_from_user(user_id, role_id)
         .map_err(db_error_to_response)?;

@@ -93,7 +93,7 @@ impl Distribution {
         distributor_actor
             .tell(DistriCoordinatorMessage::NetworkDistribution {
                 request_id,
-                ledger,
+                ledger: Box::new(ledger),
             })
             .await
     }

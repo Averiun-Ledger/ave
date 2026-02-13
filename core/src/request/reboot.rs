@@ -231,8 +231,7 @@ impl Handler<Reboot> for Reboot {
                         );
                         return Err(emit_fail(ctx, e).await);
                     }
-                } else {
-                    if let Err(e) = self.sleep(ctx).await {
+                } else if let Err(e) = self.sleep(ctx).await {
                         error!(
                             msg_type = "Update",
                             request_id = %self.request_id,
@@ -243,7 +242,7 @@ impl Handler<Reboot> for Reboot {
                         );
                         return Err(emit_fail(ctx, e).await);
                     };
-                }
+                
             }
         };
 

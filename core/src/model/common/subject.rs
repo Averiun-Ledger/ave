@@ -126,7 +126,7 @@ where
     if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
         match response {
-            TrackerResponse::LastLedger { ledger_event } => Ok(ledger_event),
+            TrackerResponse::LastLedger { ledger_event } => Ok(*ledger_event),
             _ => Err(ActorError::UnexpectedResponse {
                 path,
                 expected: "TrackerResponse::LastLedger".to_owned(),
@@ -139,7 +139,7 @@ where
             .ask(GovernanceMessage::GetLastLedger)
             .await?;
         match response {
-            GovernanceResponse::LastLedger { ledger_event } => Ok(ledger_event),
+            GovernanceResponse::LastLedger { ledger_event } => Ok(*ledger_event),
             _ => Err(ActorError::UnexpectedResponse {
                 path,
                 expected: "GovernanceResponse::LastLedger".to_owned(),

@@ -232,7 +232,7 @@ pub async fn revoke_api_key(
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
 
     // SECURITY FIX: Prevent revoking the currently used API key
-    if &id == &auth_ctx.api_key_id {
+    if id == auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -539,7 +539,7 @@ pub async fn revoke_my_api_key(
         .map_err(db_error_to_response)?;
 
     // Cannot revoke the current key
-    if &key_info.id == &auth_ctx.api_key_id {
+    if key_info.id == auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {

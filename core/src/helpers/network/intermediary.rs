@@ -126,7 +126,7 @@ impl Intermediary {
                     return Err(IntermediaryError::NetworkSendFailed {
                         details: error.to_string(),
                     }
-                    .into());
+                    );
                 };
 
                 debug!(
@@ -148,7 +148,7 @@ impl Intermediary {
                             return Err(IntermediaryError::InvalidPublicKey {
                                 details: e.to_string(),
                             }
-                            .into());
+                            );
                         }
                     };
 
@@ -168,7 +168,6 @@ impl Intermediary {
                                 IntermediaryError::DeserializationFailed {
                                     details: e.to_string(),
                                 }
-                                .into(),
                             );
                         }
                     };
@@ -242,7 +241,7 @@ impl Intermediary {
 
                             actor
                                 .tell(ValiWorkerMessage::NetworkRequest {
-                                    validation_req: req,
+                                    validation_req: Box::new(req),
                                     info: message.info,
                                     sender: sender.clone(),
                                 })
@@ -265,7 +264,7 @@ impl Intermediary {
 
                             actor
                                 .tell(ValidationSchemaMessage::NetworkRequest {
-                                    validation_req: req,
+                                    validation_req: Box::new(req),
                                     info: message.info,
                                     sender: sender.clone(),
                                 })
@@ -290,7 +289,7 @@ impl Intermediary {
                                 })?;
                             actor
                                 .tell(EvalWorkerMessage::NetworkRequest {
-                                    evaluation_req: req,
+                                    evaluation_req: *req,
                                     info: message.info,
                                     sender: sender.clone(),
                                 })
@@ -313,7 +312,7 @@ impl Intermediary {
 
                             actor
                                 .tell(EvaluationSchemaMessage::NetworkRequest {
-                                    evaluation_req: Box::new(req),
+                                    evaluation_req: req,
                                     info: message.info,
                                     sender: sender.clone(),
                                 })
@@ -375,7 +374,7 @@ impl Intermediary {
 
                         actor
                             .tell(DistriWorkerMessage::LastEventDistribution {
-                                ledger: *ledger,
+                                ledger,
                                 info: message.info,
                                 sender: sender.clone(),
                             })
@@ -423,7 +422,7 @@ impl Intermediary {
 
                         actor
                             .tell(ValiCoordinatorMessage::NetworkResponse {
-                                validation_res: res,
+                                validation_res: Box::new(res),
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),
@@ -446,7 +445,7 @@ impl Intermediary {
 
                         actor
                             .tell(EvalCoordinatorMessage::NetworkResponse {
-                                evaluation_res: res,
+                                evaluation_res: Box::new(res),
                                 request_id: message.info.request_id,
                                 version: message.info.version,
                                 sender: sender.clone(),

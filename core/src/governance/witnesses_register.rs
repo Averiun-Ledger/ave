@@ -32,13 +32,15 @@ pub struct WitnessesRegister {
     subjects: HashMap<DigestIdentifier, TransferData>,
     witnesses: HashMap<
         (PublicKey, SchemaType),
-        HashMap<Namespace, (IntervalSet, Option<u64>)>,
+        HashMap<Namespace, IntervalData>,
     >,
     witnesses_creator: HashMap<
         (PublicKey, String, SchemaType),
-        HashMap<WitnessesType, (IntervalSet, Option<u64>)>,
+        HashMap<WitnessesType, IntervalData>,
     >,
 }
+
+type IntervalData = (IntervalSet, Option<u64>);
 
 pub enum ActualSearch {
     End(SnLimit),
@@ -252,15 +254,15 @@ impl WitnessesRegister {
     ) -> (Option<u64>, Option<u64>) {
         'witness: {
             for (namespace, (interval, actual_lo)) in witness_data.iter() {
-                if namespace.is_ancestor_or_equal_of(&parse_namespace) {
+                if namespace.is_ancestor_or_equal_of(parse_namespace) {
                     for range in data.interval_gov_version.iter().rev() {
-                        if let Some(actual_lo) = actual_lo {
-                            if range.contains(*actual_lo) {
+                        if let Some(actual_lo) = actual_lo 
+                             && range.contains(*actual_lo) {
                                 better_sn = better_sn.max(Some(data.sn));
 
                                 break 'witness;
                             }
-                        }
+                        
 
                         if let Some(gov_version) =
                             interval.max_covered_in(range.lo, range.hi)
@@ -286,19 +288,19 @@ impl WitnessesRegister {
         mut better_gov_version: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
-            if namespace.is_ancestor_or_equal_of(&parse_namespace) {
+            if namespace.is_ancestor_or_equal_of(parse_namespace) {
                 // Actualmente soy testigo del owner
                 if actual_lo.is_some() {
                     return ActualSearch::End(SnLimit::Sn(sn));
                 }
 
-                if let Some(range) = interval.iter().last() {
-                    if range.contains(gov_version) {
+                if let Some(range) = interval.iter().last() 
+                     && range.contains(gov_version) {
                         // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
                         better_gov_version =
                             better_gov_version.max(Some(gov_version));
                     }
-                }
+                
             }
         }
 
@@ -406,11 +408,10 @@ impl WitnessesRegister {
         node: &PublicKey,
         schema_id: &SchemaType,
         parse_namespace: &Namespace,
-        owner_gov_version: u64,
         sn: u64,
-        better_gov_version: Option<u64>,
+        owner_better_gov_version: (u64, Option<u64>),
     ) -> ActualSearch {
-        let mut better_gov_version = better_gov_version;
+        let (owner_gov_version, mut better_gov_version) = owner_better_gov_version;
 
         // Si el nodo es testigo explicito
         if let Some((interval, actual_lo)) =
@@ -422,13 +423,13 @@ impl WitnessesRegister {
             }
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
-            if let Some(range) = interval.iter().last() {
-                if range.contains(owner_gov_version) {
+            if let Some(range) = interval.iter().last() 
+                && range.contains(owner_gov_version) {
                     // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
                     better_gov_version =
                         better_gov_version.max(Some(owner_gov_version));
                 }
-            }
+            
         }
 
         if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
@@ -474,9 +475,8 @@ impl WitnessesRegister {
                     node,
                     &schema_id,
                     &parse_namespace,
-                    data.gov_version,
                     data.sn,
-                    better_gov_version,
+                    (data.gov_version, better_gov_version),
                 )
                 .await
             {
@@ -501,9 +501,8 @@ impl WitnessesRegister {
                     node,
                     &schema_id,
                     &parse_namespace,
-                    *new_owner_gov_version,
                     data.sn,
-                    better_gov_version,
+                    (*new_owner_gov_version, better_gov_version),
                 )
                 .await
             {
@@ -527,14 +526,14 @@ impl WitnessesRegister {
                     // Si es testigo explicito
                     for range in old_data.interval_gov_version.iter().rev() {
                         // Sigue siendo testigo.
-                        if let Some(actual_lo) = actual_lo {
-                            if range.contains(*actual_lo) {
+                        if let Some(actual_lo) = actual_lo 
+                             && range.contains(*actual_lo) {
                                 better_sn =
                                     better_sn.max(Some(old_data.sn));
 
                                 break;
                             }
-                        }
+                        
 
                         if let Some(gov_version) =
                             interval.max_covered_in(range.lo, range.hi)
@@ -643,11 +642,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
-                let data = if let Some(data) = self.subjects.get(&subject_id) {
-                    Some((data.actual_owner.clone(), data.sn))
-                } else {
-                    None
-                };
+                let data = self.subjects.get(&subject_id).map(|data| (data.actual_owner.clone(), data.sn));
 
                 debug!(
                     msg_type = "GetTrackerSnCreator",
@@ -867,7 +862,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
                             .search_witnesses(
                                 ctx,
                                 &node,
-                                &data,
+                                data,
                                 namespace.clone(),
                                 schema_id.clone(),
                                 subject_id.clone(),
@@ -889,7 +884,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
                             .search_witnesses(
                                 ctx,
                                 &node,
-                                &data,
+                                data,
                                 namespace.clone(),
                                 schema_id.clone(),
                                 subject_id.clone(),
@@ -991,14 +986,13 @@ impl PersistentActor for WitnessesRegister {
                         for ns in namespace.iter() {
                             if let Some((interval, last)) =
                                 witness_namespace.get_mut(ns)
-                            {
-                                if let Some(last) = last.take() {
+                            && let Some(last) = last.take() {
                                     interval.insert(Interval {
                                         lo: last,
                                         hi: *version - 1,
                                     });
                                 }
-                            }
+                            
                         }
                     }
                 }
@@ -1098,14 +1092,13 @@ impl PersistentActor for WitnessesRegister {
                         for ns in namespace.iter() {
                             if let Some((interval, last)) =
                                 witness_namespace.get_mut(ns)
-                            {
-                                if let Some(last) = last.take() {
+                             && let Some(last) = last.take() {
                                     interval.insert(Interval {
                                         lo: last,
                                         hi: *version - 1,
                                     });
                                 }
-                            }
+                            
                         }
                     }
                 }

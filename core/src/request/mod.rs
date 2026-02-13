@@ -390,11 +390,10 @@ impl RequestHandler {
                     if !create_request.namespace.is_empty() {
                         return Err(RequestHandlerError::NamespaceMustBeEmpty);
                     }
-                } else {
-                    if create_request.governance_id.is_empty() {
+                } else if create_request.governance_id.is_empty() {
                         return Err(RequestHandlerError::GovernanceIdRequired);
                     }
-                }
+                
             }
             EventRequest::Transfer(transfer_request) => {
                 if transfer_request.new_owner.is_empty() {
@@ -405,20 +404,18 @@ impl RequestHandler {
                 if is_gov {
                     if let Some(name_old_owner) =
                         &confirm_request.name_old_owner
-                    {
-                        if name_old_owner.is_empty() {
+                    && name_old_owner.is_empty() {
                             return Err(
                                 RequestHandlerError::ConfirmNameOldOwnerEmpty,
                             );
                         }
-                    }
-                } else {
-                    if confirm_request.name_old_owner.is_some() {
+                    
+                } else if confirm_request.name_old_owner.is_some() {
                         return Err(
                             RequestHandlerError::ConfirmTrackerNameOldOwner,
                         );
                     }
-                }
+                
             }
             EventRequest::Fact(fact_request) => {
                 if is_gov
@@ -560,8 +557,8 @@ impl RequestHandler {
             return Err(ActorError::FunctionalCritical { description: e });
         };
 
-        let in_handling = self.handling.contains_key(&subject_id);
-        let in_queue = self.in_queue.contains_key(&subject_id);
+        let in_handling = self.handling.contains_key(subject_id);
+        let in_queue = self.in_queue.contains_key(subject_id);
 
         if !in_handling && !in_queue {
             let command = Self::build_req_manager_init_msg(
@@ -658,10 +655,10 @@ impl RequestHandler {
             return Err(RequestHandlerError::CreationNotQueued);
         }
 
-        Self::check_owner_new_owner(ctx, &request.content()).await?;
+        Self::check_owner_new_owner(ctx, request.content()).await?;
 
         let subject_data =
-            Self::build_subject_data(ctx, &request.content()).await?;
+            Self::build_subject_data(ctx, request.content()).await?;
         let event_request_type = EventRequestType::from(request.content());
         let signer = request.signature().signer.clone();
         let governance_id =
@@ -914,7 +911,7 @@ impl Actor for RequestHandler {
             let request_manager_init = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
-                helpers: (hash.clone(), network.clone()),
+                helpers: (hash, network.clone()),
             };
 
             let request_manager_actor = match ctx
@@ -1036,7 +1033,7 @@ impl Handler<RequestHandler> for RequestHandler {
             RequestHandlerMessage::GetApproval { subject_id, state } => {
                 let res = Self::get_approval(ctx, &subject_id, state.clone())
                     .await
-                    .map_err(|e| ActorError::from(e))?;
+                    .map_err(ActorError::from)?;
 
                 Ok(RequestHandlerResponse::Approval(res))
             }
@@ -1073,7 +1070,7 @@ impl Handler<RequestHandler> for RequestHandler {
                 };
 
                 if let Err(e) =
-                    Self::check_owner_new_owner(ctx, &request.content()).await
+                    Self::check_owner_new_owner(ctx, request.content()).await
                 {
                     error!(
                         msg_type = "NewRequest",
@@ -1084,7 +1081,7 @@ impl Handler<RequestHandler> for RequestHandler {
                 }
 
                 let subject_data =
-                    match Self::build_subject_data(ctx, &request.content())
+                    match Self::build_subject_data(ctx, request.content())
                         .await
                     {
                         Ok(data) => data,
@@ -1124,7 +1121,7 @@ impl Handler<RequestHandler> for RequestHandler {
                 }
 
                 if let Err(e) =
-                    Self::check_event_request(&request.content(), is_gov)
+                    Self::check_event_request(request.content(), is_gov)
                 {
                     error!(
                         msg_type = "NewRequest",
@@ -1166,7 +1163,7 @@ impl Handler<RequestHandler> for RequestHandler {
                         error = %e,
                         "Creation check failed"
                     );
-                    return Err(ActorError::from(e));
+                    return Err(e);
                 }
 
                 let (request_id, subject_id) =

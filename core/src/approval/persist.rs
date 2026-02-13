@@ -117,7 +117,7 @@ impl ApprPersist {
             });
         };
 
-        let metadata = get_metadata(ctx, &governance_id).await?;
+        let metadata = get_metadata(ctx, governance_id).await?;
         let governance =
             match GovernanceData::try_from(metadata.properties.clone()) {
                 Ok(gov) => gov,
@@ -236,7 +236,7 @@ impl ApprPersist {
             let new_info = ComunicateInfo {
                 receiver: self.node_key.clone(),
                 request_id: request_id.to_string(),
-                version: version,
+                version,
                 receiver_actor: format!(
                     "/user/request/{}/approval/{}",
                     subject_id, self.our_key
@@ -541,8 +541,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         ctx,
                     )
                     .await;
-                } else {
-                    if let Some(state) = self.state.clone() {
+                } else if let Some(state) = self.state.clone() {
                         let response = if state
                             == ApprovalState::Accepted
                         {
@@ -578,7 +577,7 @@ impl Handler<ApprPersist> for ApprPersist {
                             "Response resent successfully"
                         );
                     }
-                }
+                
             }
             ApprPersistMessage::NetworkRequest {
                 approval_req,
@@ -597,7 +596,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     return Ok(ApprPersistResponse::Ok);
                 }
 
-                if info.request_id != self.request_id.to_string()
+                if info.request_id != self.request_id
                     || info.version != self.version
                 {
                     if let Err(e) = approval_req.verify() {

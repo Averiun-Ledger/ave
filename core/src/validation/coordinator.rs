@@ -53,11 +53,11 @@ impl ValiCoordinator {
 #[derive(Debug, Clone)]
 pub enum ValiCoordinatorMessage {
     NetworkValidation {
-        validation_req: Signed<ValidationReq>,
+        validation_req: Box<Signed<ValidationReq>>,
         node_key: PublicKey,
     },
     NetworkResponse {
-        validation_res: Signed<ValidationRes>,
+        validation_res: Box<Signed<ValidationRes>>,
         request_id: String,
         version: u64,
         sender: PublicKey,
@@ -117,7 +117,7 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                         receiver_actor,
                     },
                     message: ActorMessage::ValidationReq {
-                        req: validation_req,
+                        req: *validation_req,
                     },
                 };
 
@@ -209,9 +209,9 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                         Ok(validation_actor) => {
                             if let Err(e) = validation_actor
                                 .tell(ValidationMessage::Response {
-                                    validation_res: validation_res
+                                    validation_res: Box::new(validation_res
                                         .content()
-                                        .clone(),
+                                        .clone()),
                                     sender: self.node_key.clone(),
                                     signature: Some(
                                         validation_res.signature().clone(),
@@ -294,7 +294,7 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
                     Ok(validation_actor) => {
                         if let Err(e) = validation_actor
                             .tell(ValidationMessage::Response {
-                                validation_res: ValidationRes::TimeOut,
+                                validation_res: Box::new(ValidationRes::TimeOut),
                                 signature: None,
                                 sender: self.node_key.clone(),
                             })

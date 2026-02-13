@@ -47,23 +47,27 @@ pub struct OwnerSchema {
 )]
 pub struct SubjectRegister {
     register: HashMap<
-        (PublicKey, SchemaType, String),
-        (CeilingMap<CreatorQuantity>, HashSet<DigestIdentifier>),
+        RegisterData,
+        (RegisterCreations, RegisterSubjects),
     >,
 }
+
+type RegisterData = (PublicKey, SchemaType, String);
+type RegisterCreations = CeilingMap<CreatorQuantity>;
+type RegisterSubjects = HashSet<DigestIdentifier>;
 
 impl SubjectRegister {
     fn check(
         &self,
         creator: &PublicKey,
-        namespace: &String,
+        namespace: &str,
         schema_id: &SchemaType,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         if let Some((creator_quantity, subjects)) = self.register.get(&(
             creator.clone(),
             schema_id.clone(),
-            namespace.clone(),
+            namespace.to_owned(),
         )) {
             if let Some(quantity) =
                 creator_quantity.get_prev_or_equal(gov_version)

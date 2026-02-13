@@ -9,8 +9,8 @@ use crate::config::ExternalDbConfig;
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 
-use ave_common::{bridge::request::EventRequestType, response::{
-    LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB, TimeRange,
+use ave_common::{bridge::request::{EventRequestType, EventsQuery}, response::{
+    LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB
 }};
 pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
@@ -27,13 +27,7 @@ pub trait Querys {
     async fn get_events(
         &self,
         subject_id: &str,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     ) -> Result<PaginatorEvents, DatabaseError>;
 
     async fn get_aborts(
@@ -168,13 +162,7 @@ impl Querys for ExternalDB {
     async fn get_events(
         &self,
         subject_id: &str,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -182,13 +170,7 @@ impl Querys for ExternalDB {
                 sqlite_local
                     .get_events(
                         subject_id,
-                        quantity,
-                        page,
-                        reverse,
-                        event_request_ts,
-                        event_ledger_ts,
-                        sink_ts,
-                        event_type
+                        query
                     )
                     .await
             }

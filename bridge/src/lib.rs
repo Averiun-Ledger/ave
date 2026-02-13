@@ -4,12 +4,12 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
-        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
+        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest, EventRequestType, EventsQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
     response::{
-        ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestData as RequestDataRes, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TimeRange, TransferSubject
+        ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestData as RequestDataRes, RequestInfo, RequestInfoExtend, RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData, TransferSubject
     },
 };
 use config::Config;
@@ -414,13 +414,7 @@ impl Bridge {
     pub async fn get_events(
         &self,
         subject_id: String,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
-        event_request_ts: Option<TimeRange>,
-        event_ledger_ts: Option<TimeRange>,
-        sink_ts: Option<TimeRange>,
-        event_type: Option<EventRequestType>
+        query: EventsQuery
     ) -> Result<PaginatorEvents, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
@@ -429,13 +423,7 @@ impl Bridge {
             .api
             .get_events(
                 subject_id,
-                quantity,
-                page,
-                reverse,
-                event_request_ts,
-                event_ledger_ts,
-                sink_ts,
-                event_type
+                query
             )
             .await?)
     }
