@@ -157,6 +157,7 @@ impl BorshSerialize for Node {
         BorshSerialize::serialize(&self.owned_subjects, writer)?;
         BorshSerialize::serialize(&self.known_subjects, writer)?;
         BorshSerialize::serialize(&self.transfer_subjects, writer)?;
+        BorshSerialize::serialize(&self.reject_subjects, writer)?;
         Ok(())
     }
 }
