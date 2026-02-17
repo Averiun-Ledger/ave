@@ -12,6 +12,18 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (subject_id, sn)
 );
 
+CREATE INDEX IF NOT EXISTS idx_events_subject_event_type_sn
+ON events(subject_id, event_type, sn);
+
+CREATE INDEX IF NOT EXISTS idx_events_subject_request_ts_sn
+ON events(subject_id, event_request_timestamp, sn);
+
+CREATE INDEX IF NOT EXISTS idx_events_subject_ledger_ts_sn
+ON events(subject_id, event_ledger_timestamp, sn);
+
+CREATE INDEX IF NOT EXISTS idx_events_subject_sink_ts_sn
+ON events(subject_id, sink_timestamp, sn);
+
 -- =============================================================================
 -- SUBJECTS TABLE
 -- =============================================================================
@@ -45,6 +57,9 @@ CREATE TABLE IF NOT EXISTS aborts (
     abort_type TEXT NOT NULL,
     PRIMARY KEY (request_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_aborts_subject_sn
+ON aborts(subject_id, sn);
 -- =============================================================================
 -- END OF MIGRATION
 -- =============================================================================
