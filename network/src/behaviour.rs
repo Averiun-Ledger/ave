@@ -32,6 +32,7 @@ use tell::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use std::{convert::Infallible, iter, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -129,11 +130,20 @@ impl Behaviour {
 
         let mem_limits = if let Some(memory_limit) = memory_limit {
             match memory_limit {
-                MemoryLimit::Percentage(percentage) => Toggle::from(Some(
-                    memory_connection_limits::Behaviour::with_max_percentage(
-                        percentage,
-                    ),
-                )),
+                MemoryLimit::Percentage(percentage) => {
+                    let clamped = percentage.clamp(0.01, 1.0);
+                    if clamped != percentage {
+                        warn!(
+                            "MemoryLimit::Percentage value {} is out of range (0.01, 1.0], clamped to {}",
+                            percentage, clamped
+                        );
+                    }
+                    Toggle::from(Some(
+                        memory_connection_limits::Behaviour::with_max_percentage(
+                            clamped,
+                        ),
+                    ))
+                }
                 MemoryLimit::Bytes(bytes) => Toggle::from(Some(
                     memory_connection_limits::Behaviour::with_max_bytes(bytes),
                 )),
@@ -154,7 +164,6 @@ impl Behaviour {
                     public_key.clone(),
                 )
                 .with_agent_version(USER_AGENT.to_string())
-                .with_interval(Duration::from_secs(limits.identify_interval))
                 .with_cache_size(limits.identify_cache),
             ),
             routing: routing::Behaviour::new(
@@ -738,7 +747,7 @@ mod tests {
         random_walk: bool,
         node_type: NodeType,
     ) -> Config {
-        let config = crate::routing::Config::new()
+        let config = crate::routing::Config::default()
             .with_discovery_limit(50)
             .with_dht_random_walk(random_walk);
 

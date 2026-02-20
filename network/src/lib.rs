@@ -92,7 +92,7 @@ impl Config {
             listen_addresses,
             external_addresses,
             memory_limit,
-            routing: routing::Config::new(),
+            routing: routing::Config::default(),
             control_list: control_list::Config::default(),
         }
     }

@@ -14,7 +14,6 @@ rust-version.workspace = true
 [dependencies]
 borsh = { workspace = true }
 reqwest = { workspace = true }
-test-log = { workspace = true } 
 bs58 = { workspace = true }
 futures = { workspace = true }
 futures-timer = { workspace = true }
@@ -47,6 +46,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]
+test-log = { workspace = true } 
 libp2p = { workspace = true, default_features = false, features = [
 	"plaintext"
 ] }

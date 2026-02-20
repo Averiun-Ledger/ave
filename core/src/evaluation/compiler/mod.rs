@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Stdio},
     sync::Arc,
 };
 
@@ -18,7 +18,7 @@ use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{fs, sync::RwLock};
+use tokio::{fs, process::Command, sync::RwLock};
 
 use tracing::{Span, debug, error, info_span};
 use wasmtime::{Engine, ExternType, Module, Store};
@@ -129,6 +129,7 @@ impl Compiler {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
+            .await
             .map_err(|e| CompilerError::CargoBuildFailed {
                 details: e.to_string(),
             })?;
@@ -226,6 +227,9 @@ impl Compiler {
 
         // Container to store and manage the global state of a WebAssembly instance during its execution.
         let mut store = Store::new(&engine, context);
+
+        // Limit WASM linear memory and table growth to prevent resource exhaustion.
+        store.limiter(|data| &mut data.store_limits);
 
         // Set fuel limit for compilation/validation (more generous than production)
         store.set_fuel(MAX_FUEL_COMPILATION).map_err(|e| {

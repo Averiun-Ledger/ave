@@ -355,6 +355,9 @@ impl Runner {
 
         let mut store = Store::new(&engine, context);
 
+        // Limit WASM linear memory and table growth to prevent resource exhaustion.
+        store.limiter(|data| &mut data.store_limits);
+
         store
             .set_fuel(MAX_FUEL)
             .map_err(|e| RunnerError::WasmError {

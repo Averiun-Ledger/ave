@@ -72,7 +72,6 @@ pub struct LimitsConfig {
     pub reqres_request_timeout: u64,
     pub tell_max_concurrent_streams: usize,
     pub tell_request_timeout: u64,
-    pub identify_interval: u64,
     // TODO mirar en un futuro.
     pub identify_cache: usize,
     pub kademlia_query_timeout: u64,
@@ -88,14 +87,14 @@ impl LimitsConfig {
     pub fn build(node_type: &NodeType) -> Self {
         match node_type {
             NodeType::Bootstrap | NodeType::Addressable => Self {
-                yamux_max_num_streams: 512,
+                // reqres(2048) + tell(2048) + kad/identify overhead(~32) = 4128
+                yamux_max_num_streams: 4128,
                 tcp_listen_backlog: 8192,
                 tcp_nodelay: true,
                 reqres_max_concurrent_streams: 2048,
                 reqres_request_timeout: 15,
                 tell_max_concurrent_streams: 2048,
                 tell_request_timeout: 15,
-                identify_interval: 60 * 15,
                 identify_cache: 1024,
                 kademlia_query_timeout: 25,
                 conn_limmits_max_pending_incoming: Some(512),
@@ -106,14 +105,14 @@ impl LimitsConfig {
                 conn_limmits_max_established_total: Some(9000),
             },
             NodeType::Ephemeral => Self {
-                yamux_max_num_streams: 128,
+                // reqres(128) + tell(128) + identify overhead(~8) = 264 → 256
+                yamux_max_num_streams: 256,
                 tcp_listen_backlog: 512,
                 tcp_nodelay: true,
                 reqres_max_concurrent_streams: 128,
                 reqres_request_timeout: 10,
                 tell_max_concurrent_streams: 128,
                 tell_request_timeout: 10,
-                identify_interval: 60 * 60,
                 identify_cache: 0,
                 kademlia_query_timeout: 15,
                 conn_limmits_max_pending_incoming: Some(50),

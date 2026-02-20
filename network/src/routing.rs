@@ -168,7 +168,7 @@ impl Behaviour {
             .peer_to_remove
             .entry(*peer_id)
             .and_modify(|x| *x += 1)
-            .or_default();
+            .or_insert(1);
 
         if *count >= 3 {
             self.remove_node(peer_id);
@@ -609,18 +609,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Creates a new configuration for the discovery behaviour.
-    pub fn new() -> Self {
-        Self {
-            dht_random_walk: false,
-            discovery_only_if_under_num: u64::MAX,
-            allow_private_address_in_dht: false,
-            allow_dns_address_in_dht: false,
-            allow_loop_back_address_in_dht: false,
-            kademlia_disjoint_query_paths: true,
-        }
-    }
-
     /// Get DHT random walk.
     pub fn get_dht_random_walk(&self) -> bool {
         self.dht_random_walk

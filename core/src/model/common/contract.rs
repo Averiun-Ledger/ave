@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use wasmtime::{Caller, Config, Engine, Linker};
-
-use tracing::error;
+use wasmtime::{
+    Caller, Config, Engine, Error as WasmError, Linker, StoreLimits,
+    StoreLimitsBuilder,
+};
 
 use thiserror::Error;
 
@@ -33,20 +34,45 @@ pub enum ContractError {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MemoryManager {
     memory: Vec<u8>,
     map: HashMap<usize, usize>,
+    pub store_limits: StoreLimits,
 }
 
-// Security limits to prevent memory exhaustion attacks
-const MAX_TOTAL_MEMORY: usize = 5_000_000; // 5MB total memory limit (for production execution)
-const MAX_SINGLE_ALLOC: usize = 2_000_000; // 2MB single allocation limit (for production execution)
+impl Default for MemoryManager {
+    fn default() -> Self {
+        Self {
+            memory: Vec::new(),
+            map: HashMap::new(),
+            // Limits applied to the WASM module's own linear memory and tables,
+            // independent of the host-side MemoryManager buffer limits above.
+            store_limits: StoreLimitsBuilder::new()
+                .memory_size(8 * 1024 * 1024) // 8MB max WASM linear memory (2× estimated digital-twin peak of ~4MB)
+                .table_elements(512)           // max function table entries (Rust contracts without dyn Trait use <50 real entries)
+                .instances(1)
+                .tables(1)
+                .memories(1)
+                .trap_on_grow_failure(true)
+                .build(),
+        }
+    }
+}
 
-// Fuel limits for contract execution
-// Production limit: 10M operations (~100ms execution, suitable for 1000s of concurrent evaluations)
+// Host-side MemoryManager limits (the buffer shared between host and WASM for I/O).
+// These bound what can be passed in (state, event) and out (result) of a contract.
+//
+// Realistic sizes (e.g. digital-twin with many unit processes and sensor readings):
+//   state_in   ~3-5 KB | event_in  ~10-100 KB
+//   result_out ~100-500 KB | init_state ~1 KB
+// 2MB per alloc and 6MB total gives >4x headroom over expected peaks.
+const MAX_SINGLE_ALLOC: usize = 2 * 1024 * 1024; // 2MB per allocation
+const MAX_TOTAL_MEMORY: usize = 6 * 1024 * 1024; // 6MB total I/O (state_in + event_in + init + result_out)
+
+// Fuel limits for contract execution (~1 fuel unit per WASM instruction)
 pub const MAX_FUEL: u64 = 10_000_000;
-// Compilation/validation limit: 50M operations (contracts need more fuel during init)
+// Compilation/validation limit (one-time cost when new schemas are compiled)
 pub const MAX_FUEL_COMPILATION: u64 = 50_000_000;
 
 impl MemoryManager {
@@ -99,8 +125,11 @@ impl MemoryManager {
         Ok(())
     }
 
-    pub fn read_byte(&self, ptr: usize) -> u8 {
-        self.memory[ptr]
+    pub fn read_byte(&self, ptr: usize) -> Result<u8, ContractError> {
+        if ptr >= self.memory.len() {
+            return Err(ContractError::InvalidPointer { pointer: ptr });
+        }
+        Ok(self.memory[ptr])
     }
 
     pub fn read_data(&self, ptr: usize) -> Result<&[u8], ContractError> {
@@ -171,15 +200,14 @@ pub fn generate_linker(
         .func_wrap(
             "env",
             "alloc",
-            |mut caller: Caller<'_, MemoryManager>, len: u32| -> u32 {
+            |mut caller: Caller<'_, MemoryManager>,
+             len: u32|
+             -> Result<u32, WasmError> {
                 caller
                     .data_mut()
                     .alloc(len as usize)
                     .map(|ptr| ptr as u32)
-                    .unwrap_or_else(|e| {
-                        error!(error = %e, "Allocation failed");
-                        0 // Return 0 to indicate allocation failure
-                    })
+                    .map_err(WasmError::from)
             },
         )
         .map_err(|e| ContractError::LinkerError {
@@ -194,13 +222,12 @@ pub fn generate_linker(
             |mut caller: Caller<'_, MemoryManager>,
              ptr: u32,
              offset: u32,
-             data: u32| {
+             data: u32|
+             -> Result<(), WasmError> {
                 caller
                     .data_mut()
                     .write_byte(ptr as usize, offset as usize, data as u8)
-                    .unwrap_or_else(|e| {
-                        error!(error = %e, "Write byte failed");
-                    });
+                    .map_err(WasmError::from)
             },
         )
         .map_err(|e| ContractError::LinkerError {
@@ -212,8 +239,12 @@ pub fn generate_linker(
         .func_wrap(
             "env",
             "read_byte",
-            |caller: Caller<'_, MemoryManager>, index: i32| {
-                caller.data().read_byte(index as usize) as u32
+            |caller: Caller<'_, MemoryManager>,
+             index: i32|
+             -> Result<u32, WasmError> {
+                let ptr = usize::try_from(index)
+                    .map_err(|_| ContractError::InvalidPointer { pointer: 0 })?;
+                caller.data().read_byte(ptr).map(|b| b as u32).map_err(WasmError::from)
             },
         )
         .map_err(|e| ContractError::LinkerError {

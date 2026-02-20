@@ -1050,10 +1050,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             self.peer_identify.insert(peer_id);
 
                             if let Some(messages) =
-                                self.pending_inbound_messages.get(&peer_id)
+                                self.pending_inbound_messages.remove(&peer_id)
                             {
                                 self.message_to_helper(
-                                    MessagesHelper::Vec(messages.clone()),
+                                    MessagesHelper::Vec(messages),
                                     &peer_id,
                                 )
                                 .await;
@@ -1253,6 +1253,21 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             ScheduleType::Dial(vec![]),
                         );
                     }
+                } else if let Some(Action::Dial | Action::Discover) =
+                    self.peer_action.get(&peer_id)
+                {
+                    self.peer_action.remove(&peer_id);
+                    self.retry_by_peer.remove(&peer_id);
+                    self.pending_inbound_messages.remove(&peer_id);
+                    self.ephemeral_responses.remove(&peer_id);
+                    self.peer_identify.remove(&peer_id);
+
+                    if self.pending_outbound_messages.contains_key(&peer_id) {
+                        self.schedule_retry(
+                            peer_id,
+                            ScheduleType::Discover,
+                        );
+                    }
                 }
             }
             SwarmEvent::IncomingConnectionError { .. } => {
@@ -1330,7 +1345,7 @@ mod tests {
         node_type: NodeType,
         listen_addresses: Vec<String>,
     ) -> Config {
-        let config = crate::routing::Config::new()
+        let config = crate::routing::Config::default()
             .with_discovery_limit(50)
             .with_dht_random_walk(random_walk);
 

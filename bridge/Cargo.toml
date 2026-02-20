@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 ave_core = { package = "ave-core", path = "../core", default-features = false}
 network = { package = "ave-network", path = "../network" }
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal", "process"] }
 tokio-util = { workspace = true }
 ave-common = { workspace = true }
 pkcs8 = { workspace = true, features = ["encryption"] }
