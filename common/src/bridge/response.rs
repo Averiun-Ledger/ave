@@ -11,9 +11,14 @@ use std::{collections::HashMap, fmt::Display};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 /// Approval entry combining the request details and its current state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ApprovalEntry {
     /// The approval request details
     pub request: ApprovalReq,
@@ -25,6 +30,8 @@ pub struct ApprovalEntry {
     Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SubjsData {
     pub subject_id: String,
     pub schema_id: SchemaType,
@@ -35,6 +42,8 @@ pub struct SubjsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct GovsData {
     pub governance_id: String,
     pub active: bool,
@@ -44,6 +53,8 @@ pub struct GovsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct TransferSubject {
     pub name: Option<String>,
     pub subject_id: String,
@@ -53,6 +64,8 @@ pub struct TransferSubject {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ApprovalReq {
     /// The signed event request.
     pub subject_id: String,
@@ -69,6 +82,8 @@ pub struct ApprovalReq {
 /// Monitor network states
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum MonitorNetworkState {
     /// Connecting to others network nodes
     #[default]
@@ -81,6 +96,8 @@ pub enum MonitorNetworkState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct LedgerDB {
     pub subject_id: String,
     pub sn: u64,
@@ -93,6 +110,8 @@ pub struct LedgerDB {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequestsInManager {
     pub handling: HashMap<String, String>,
     pub in_queue: HashMap<String, Vec<String>>,
@@ -100,6 +119,8 @@ pub struct RequestsInManager {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequestsInManagerSubject {
     pub handling: Option<String>,
     pub in_queue: Option<Vec<String>>,
@@ -107,6 +128,8 @@ pub struct RequestsInManagerSubject {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct AbortDB {
     pub request_id: String,
     pub subject_id: String,
@@ -118,6 +141,8 @@ pub struct AbortDB {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum RequestEventDB {
     Create {
@@ -167,6 +192,8 @@ impl RequestEventDB {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum EvalResDB {
     Patch(Value),
     Error(String),
@@ -174,6 +201,8 @@ pub enum EvalResDB {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SubjectDB {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -193,6 +222,8 @@ pub struct SubjectDB {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PaginatorEvents {
     pub paginator: Paginator,
     pub events: Vec<LedgerDB>,
@@ -200,6 +231,8 @@ pub struct PaginatorEvents {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PaginatorAborts {
     pub paginator: Paginator,
     pub events: Vec<AbortDB>,
@@ -207,6 +240,8 @@ pub struct PaginatorAborts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct Paginator {
     pub pages: u64,
     pub next: Option<u64>,
@@ -215,6 +250,8 @@ pub struct Paginator {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequestInfo {
     pub state: RequestState,
     pub version: u64,
@@ -222,6 +259,8 @@ pub struct RequestInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequestInfoExtend {
     pub request_id: String,
     pub state: RequestState,
@@ -230,6 +269,8 @@ pub struct RequestInfoExtend {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum RequestState {
     // Handler
     InQueue,
@@ -324,6 +365,8 @@ impl Display for RequestState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequestData {
     pub request_id: String,
     pub subject_id: String,
@@ -333,6 +376,8 @@ pub struct RequestData {
 /// Both `from` and `to` are optional and should be ISO 8601 strings (e.g., "2024-01-15T14:30:00Z").
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct TimeRange {
     /// Start of the range (inclusive). ISO 8601 format.
     pub from: Option<String>,

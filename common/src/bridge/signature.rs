@@ -13,9 +13,14 @@ use std::{fmt::Debug, str::FromStr};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 /// Signature model for API communication
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeSignature {
     /// Public key of the issuer
     pub signer: String,

@@ -13,10 +13,14 @@ use serde_json::Value;
 
 #[cfg(feature = "openapi")]
 use utoipa::{IntoParams, ToSchema};
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SubjectQuery {
     pub active: Option<bool>,
     pub schema_id: Option<String>,
@@ -25,6 +29,8 @@ pub struct SubjectQuery {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct GovQuery {
     pub active: Option<bool>,
 }
@@ -32,6 +38,8 @@ pub struct GovQuery {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ApprovalQuery {
     pub state: Option<ApprovalState>,
 }
@@ -39,6 +47,8 @@ pub struct ApprovalQuery {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct EventsQuery {
     pub quantity: Option<u64>,
     pub page: Option<u64>,
@@ -55,6 +65,8 @@ pub struct EventsQuery {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct AbortsQuery {
     pub request_id: Option<String>,
     pub sn: Option<u64>,
@@ -66,6 +78,8 @@ pub struct AbortsQuery {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct FirstEndEvents {
     pub quantity: Option<u64>,
     pub reverse: Option<bool>,
@@ -74,6 +88,8 @@ pub struct FirstEndEvents {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum EventRequestType {
     Create,
@@ -112,6 +128,8 @@ impl Display for EventRequestType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStateRes {
     /// Request for approval which is in responded status and accepted
@@ -145,6 +163,8 @@ impl Display for ApprovalStateRes {
     BorshSerialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
     /// The approval entity is pending a response.
@@ -173,6 +193,8 @@ impl Display for ApprovalState {
 /// Signed event request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeSignedEventRequest {
     /// Event request
     pub request: BridgeEventRequest,
@@ -183,6 +205,8 @@ pub struct BridgeSignedEventRequest {
 /// Event request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum BridgeEventRequest {
     Create(BridgeCreateRequest),
@@ -195,6 +219,8 @@ pub enum BridgeEventRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeRejectRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -202,6 +228,8 @@ pub struct BridgeRejectRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeCreateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -215,6 +243,8 @@ pub struct BridgeCreateRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeFactRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -224,6 +254,8 @@ pub struct BridgeFactRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeTransferRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -234,6 +266,8 @@ pub struct BridgeTransferRequest {
 /// EOL request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeEOLRequest {
     /// Subject identifier
     pub subject_id: String,
@@ -241,6 +275,8 @@ pub struct BridgeEOLRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct BridgeConfirmRequest {
     /// Subject identifier
     pub subject_id: String,

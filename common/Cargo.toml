@@ -18,9 +18,14 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }
 utoipa = { workspace = true, optional = true }
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl"], optional = true}
+
+[dev-dependencies]
+ave-common = { package = "ave-common", path = ".", features = ["typescript"]}
 
 [features]
 default = ["common"]
 common = ["ave-identity", "value-wrapper"]
 value-wrapper = []
 openapi = ["utoipa"]
+typescript = ["ts-rs"]

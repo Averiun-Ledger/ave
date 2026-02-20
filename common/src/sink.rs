@@ -3,7 +3,12 @@ use serde_json::Value;
 
 use crate::SchemaType;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DataToSink {
     pub event: DataToSinkEvent,
     pub public_key: String,
@@ -13,6 +18,8 @@ pub struct DataToSink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum DataToSinkEvent {
     Create {

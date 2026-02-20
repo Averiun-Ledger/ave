@@ -1,0 +1,35 @@
+{
+  "name": "ave-types",
+  "version": "0.3.3",
+  "description": "TypeScript types for the Averiun Ledger API",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src/**/*.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "generate": "bash generate.sh",
+    "release:patch": "bash generate.sh && npm version patch && npm publish --access public",
+    "release:minor": "bash generate.sh && npm version minor && npm publish --access public",
+    "release:major": "bash generate.sh && npm version major && npm publish --access public"
+  },
+  "keywords": [
+    "averiun",
+    "ledger",
+    "types",
+    "typescript"
+  ],
+  "author": "Averiun Ledger, SL <info@averiun.com>",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://averiun.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Averiun-Ledger/ave.git",
+    "directory": "common/ts"
+  }
+}

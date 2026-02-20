@@ -5,6 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 #[derive(
     Default,
     Debug,
@@ -18,6 +21,8 @@ use utoipa::ToSchema;
     BorshDeserialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum SchemaType {
     #[default]
     Governance,

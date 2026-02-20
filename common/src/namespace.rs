@@ -11,6 +11,9 @@ use std::fmt::{Error, Formatter};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+#[cfg(feature = "typescript")]
+use ts_rs::TS;
+
 /// This is the name space for a `Subject`.
 ///
 #[derive(
@@ -26,6 +29,8 @@ use utoipa::ToSchema;
     BorshSerialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct Namespace(Vec<String>);
 
 /// `Namespace` implementation.

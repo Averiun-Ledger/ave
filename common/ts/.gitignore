@@ -1,0 +1,4 @@
+# Generated TypeScript bindings (re-generate with: bash generate.sh)
+src/**/*.ts
+dist/
+node_modules/
