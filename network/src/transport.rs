@@ -15,7 +15,6 @@ use libp2p::{
         transport::{Boxed, upgrade::Version},
     },
     identity::Keypair,
-    metrics::{BandwidthTransport, Registry},
     noise, yamux,
 };
 
@@ -34,7 +33,6 @@ pub type AveTransport = Boxed<(PeerId, StreamMuxerBox)>;
 ///
 /// # Arguments
 ///
-/// * `registry` - The Prometheus registry.
 /// * `peer_id` - The peer ID.
 /// * `keys` - The keypair.
 ///
@@ -47,7 +45,6 @@ pub type AveTransport = Boxed<(PeerId, StreamMuxerBox)>;
 /// If the transport cannot be built.
 ///
 pub fn build_transport(
-    registry: &mut Registry,
     keys: &Keypair,
     limits: LimitsConfig,
 ) -> Result<AveTransport, Error> {
@@ -83,9 +80,6 @@ pub fn build_transport(
         .timeout(Duration::from_secs(10))
         .boxed();
 
-    let transport = BandwidthTransport::new(transport, registry)
-        .map(|(peer_id, conn), _| (peer_id, StreamMuxerBox::new(conn)));
-
     Ok(transport.boxed())
 }
 
@@ -97,10 +91,9 @@ mod tests {
 
     #[test]
     fn test_build_transport() {
-        let mut registry = Registry::default();
         let keypair = Keypair::generate_ed25519();
         let limit = LimitsConfig::build(&NodeType::Bootstrap);
-        let result = build_transport(&mut registry, &keypair, limit);
+        let result = build_transport(&keypair, limit);
 
         assert!(result.is_ok());
     }

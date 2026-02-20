@@ -15,7 +15,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 borsh = { workspace = true, optional = true }
-cbor4ii = { version = "1.0.0", features = ["serde1", "use_std"], optional = true }
+cbor4ii = { version = "1.2.2", features = ["serde1", "use_std"], optional = true }
 futures = { workspace = true }
 futures-bounded = { version = "0.3.0", features = ["futures-timer"]}
 libp2p = { workspace = true, default_features = false, features = [
@@ -32,7 +32,7 @@ lru = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-anyhow = "1.0.79"
+anyhow = "1.0.102"
 serial_test = { workspace = true }
 futures_ringbuf = "0.4.0"
 libp2p-swarm-test = { workspace = true }

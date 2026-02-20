@@ -8,7 +8,6 @@ use libp2p::{
     multihash::Multihash,
     swarm::ConnectionId,
 };
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
 use tracing::error;
@@ -16,7 +15,6 @@ use tracing::error;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
-    hash::Hash,
     str::FromStr,
     time::Duration,
 };
@@ -195,24 +193,6 @@ pub enum NetworkState {
     Running,
     /// Disconnected.
     Disconnected,
-}
-
-/// Metric labels for the messages.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct MetricLabels {
-    /// Fact.
-    pub fact: Fact,
-    /// Peer ID.
-    pub peer_id: String,
-}
-
-/// Fact related to the message (sent or received).
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Fact {
-    /// Message sent.
-    Sent,
-    /// Message received.
-    Received,
 }
 
 pub enum MessagesHelper {

@@ -21,9 +21,10 @@ pub use ave_core::{
     auth::AuthWitness,
     config::Config as AveConfig,
     config::{
-        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer,
+        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer, AveStoreConfig
     },
     error::Error,
+
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
@@ -32,7 +33,6 @@ pub use network::{
     Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
     RoutingNode, TellConfig,
 };
-use prometheus_client::registry::Registry;
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinHandle,
@@ -49,10 +49,6 @@ pub mod settings;
 pub mod utils;
 pub use clap;
 pub mod auth;
-#[cfg(feature = "prometheus")]
-pub mod prometheus;
-#[cfg(feature = "prometheus")]
-use prometheus::run_prometheus;
 
 pub use error::BridgeError;
 
@@ -103,15 +99,13 @@ impl Bridge {
                 None
             };
 
-        let mut registry = <Registry>::default();
-
         let token = if let Some(token) = token {
             token
         } else {
             CancellationToken::new()
         };
 
-        let (api, mut runners) = AveApi::build(
+        let (api, runners) = AveApi::build(
             keys,
             settings.node.clone(),
             SinkAuth {
@@ -120,22 +114,12 @@ impl Bridge {
                 password: password_sink.to_owned(),
                 api_key: sink_api_key.to_owned(),
             },
-            &mut registry,
             password,
             &token.clone(),
         )
         .await?;
 
         Self::bind_with_shutdown(token.clone());
-
-        #[cfg(feature = "prometheus")]
-        {
-            runners.push(run_prometheus(
-                registry,
-                &settings.prometheus,
-                token.clone(),
-            ));
-        }
 
         Ok((
             Self {

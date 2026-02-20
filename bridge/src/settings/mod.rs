@@ -78,17 +78,24 @@ mod tests {
 
     const FULL_TOML: &str = r#"
 keys_path = "/custom/keys"
-prometheus = "1.2.3.4:3333"
 
 [node]
 keypair_algorithm = "Ed25519"
 hash_algorithm = "Blake3"
-ave_db = "/data/ave.db"
 external_db = "/data/ext.db"
 contracts_path = "/contracts"
 always_accept = true
 tracking_size = 200
 is_service = true
+
+[node.ave_db]
+db = "/data/ave.db"
+
+[node.ave_db.tunning]
+ram_mb = 2048
+cpu_cores = 4
+profile = "medium"
+durability = true
 
 [node.network]
 node_type = "Addressable"
@@ -180,11 +187,16 @@ check_interval_secs = 3600
 
     const FULL_YAML: &str = r#"
 keys_path: /custom/keys
-prometheus: 1.2.3.4:3333
 node:
   keypair_algorithm: Ed25519
   hash_algorithm: Blake3
-  ave_db: /data/ave.db
+  ave_db:
+    db: /data/ave.db
+    tunning:
+      ram_mb: 2048
+      cpu_cores: 4
+      profile: medium
+      durability: true
   external_db: /data/ext.db
   contracts_path: /contracts
   always_accept: true
@@ -284,11 +296,18 @@ http:
     const FULL_JSON: &str = r#"
 {
   "keys_path": "/custom/keys",
-  "prometheus": "1.2.3.4:3333",
   "node": {
     "keypair_algorithm": "Ed25519",
     "hash_algorithm": "Blake3",
-    "ave_db": "/data/ave.db",
+    "ave_db": {
+      "db": "/data/ave.db",
+      "tunning": {
+        "ram_mb": 2048,
+        "cpu_cores": 4,
+        "profile": "medium",
+        "durability": true
+      }
+    },
     "external_db": "/data/ext.db",
     "contracts_path": "/contracts",
     "always_accept": true,
@@ -499,7 +518,6 @@ http:
 
     fn assert_full_config(config: BridgeConfig) {
         assert_eq!(config.keys_path, PathBuf::from("/custom/keys"));
-        assert_eq!(config.prometheus, "1.2.3.4:3333");
 
         let node = &config.node;
         assert_eq!(node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
@@ -509,9 +527,12 @@ http:
         assert_eq!(node.tracking_size, 200);
         assert!(node.is_service);
         assert_eq!(
-            node.ave_db,
+            node.ave_db.db,
             AveDbConfig::build(&PathBuf::from("/data/ave.db"))
         );
+        assert_eq!(node.ave_db.tunning.ram_mb, Some(2048));
+        assert_eq!(node.ave_db.tunning.cpu_cores, Some(4));
+        assert!(node.ave_db.tunning.durability);
         assert_eq!(
             node.external_db,
             ExternalDbConfig::build(&PathBuf::from("/data/ext.db"))
@@ -659,7 +680,6 @@ http:
 
     fn assert_partial_defaults(config: BridgeConfig) {
         assert_eq!(config.keys_path, PathBuf::from("/partial/keys"));
-        assert_eq!(config.prometheus, "0.0.0.0:3050");
         assert!(config.auth.enable);
         assert_eq!(config.http.http_address, "127.0.0.1:8888");
         assert!(config.http.enable_doc);
@@ -675,7 +695,7 @@ http:
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
         assert_eq!(config.node.contracts_path, PathBuf::new());
-        assert_eq!(config.node.ave_db, AveDbConfig::default());
+        assert_eq!(config.node.ave_db.db, AveDbConfig::default());
         assert_eq!(config.node.external_db, ExternalDbConfig::default());
         assert_eq!(config.node.tracking_size, 100);
         assert!(!config.node.is_service);

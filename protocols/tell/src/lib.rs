@@ -715,6 +715,7 @@ where
                 ));
             }
             handler::TellEvent::InboundStreamFailed { tell_id, error } => {
+                println!("InboundStreamFailed");
                 self.pending_events.push_back(ToSwarm::GenerateEvent(
                     Event::InboundFailure {
                         peer_id,
@@ -821,18 +822,18 @@ mod tests {
     #[tokio::test]
     async fn test_ping_protocol() {
         use crate::codec::binary::Behaviour;
-        use rand::Rng;
+        use rand::RngExt;
 
         let ping = Ping(Bytes::from("ping"));
 
         let protocols =
             iter::once((StreamProtocol::new("/ping/1"), ProtocolSupport::Full));
         let cfg = Config::default();
-        let mut swarm1 = Swarm::new_ephemeral(|_| {
+        let mut swarm1 = Swarm::new_ephemeral_tokio(|_| {
             Behaviour::new(protocols.clone(), cfg.clone())
         });
         let peer1_id = *swarm1.local_peer_id();
-        let mut swarm2 = Swarm::new_ephemeral(|_| {
+        let mut swarm2 = Swarm::new_ephemeral_tokio(|_| {
             Behaviour::new(protocols.clone(), cfg.clone())
         });
         let peer2_id = *swarm2.local_peer_id();
@@ -916,7 +917,7 @@ mod tests {
             .try_init();
         let ping = Ping(Bytes::from("ping"));
         let offline_peer = PeerId::random();
-        let mut swarm1 = Swarm::new_ephemeral(|_| {
+        let mut swarm1 = Swarm::new_ephemeral_tokio(|_| {
             Behaviour::new(
                 vec![(StreamProtocol::new("/ping/1"), ProtocolSupport::Full)],
                 Config::default(),

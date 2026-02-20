@@ -16,11 +16,9 @@ borsh = { workspace = true }
 reqwest = { workspace = true }
 test-log = { workspace = true } 
 bs58 = { workspace = true }
-either = { workspace = true }
-fnv = { workspace = true } 
 futures = { workspace = true }
 futures-timer = { workspace = true }
-ave-common = { path = "../common" }
+ave-common = { workspace = true }
 ip_network = { workspace = true }
 libp2p = { workspace = true, default_features = false, features = [
 	"identify",
@@ -31,14 +29,11 @@ libp2p = { workspace = true, default_features = false, features = [
 	"tcp",
 	"tokio",
 	"dns",
-	"metrics",
 	"request-response",
 	"cbor",
 	"memory-connection-limits"
 ] }
 metrics = { workspace = true }
-prometheus-client = { workspace = true }
-smallvec = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tell = { package = "ave-tell", path = "../protocols/tell", default-features = false, features = [
 	"binary",
@@ -57,8 +52,6 @@ libp2p = { workspace = true, default_features = false, features = [
 ] }
 libp2p-swarm-test = { workspace = true }
 network = { package = "ave-network", path = ".", features = ["test"]}
-rand = { workspace = true }
-tracing-subscriber = { workspace = true }
 serial_test = { workspace = true }
 
 [features]

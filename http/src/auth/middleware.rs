@@ -13,6 +13,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use rand::RngExt;
 use std::fmt::Display;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -274,7 +275,6 @@ mod uuid {
 
 impl Display for Uuid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         write!(

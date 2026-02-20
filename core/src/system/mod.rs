@@ -1,11 +1,12 @@
 pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ave_actors::{ActorSystem, EncryptedKey, SystemRef};
+use ave_actors::{ActorSystem, DbManager, EncryptedKey, SystemRef};
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tracing::error;
 use wasmtime::Engine;
 
 use crate::{
@@ -42,7 +43,7 @@ pub async fn system(
     token: CancellationToken,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
-    let (system, mut runner) = ActorSystem::create(token);
+    let (system, mut runner) = ActorSystem::create(token.clone());
 
     system
         .add_helper("config", ConfigHelper::from(config.clone()))
@@ -62,7 +63,7 @@ pub async fn system(
     // Build database manager.
     let db = Database::open(&config.ave_db)
         .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
-    system.add_helper("store", db).await;
+    system.add_helper("store", db.clone()).await;
 
     // Build sink manager.
     let api_key = if sink_auth.api_key.is_empty() {
@@ -107,6 +108,9 @@ pub async fn system(
 
     let runner = tokio::spawn(async move {
         runner.run().await;
+        if let Err(e) = db.stop() {
+            error!(error = %e, "Failed to stop db");
+        };
     });
 
     Ok((system, runner))
@@ -115,7 +119,7 @@ pub async fn system(
 #[cfg(test)]
 pub mod tests {
 
-    use crate::config::{AveDbConfig, ExternalDbConfig};
+    use crate::config::{AveDbConfig, AveStoreConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
     use tempfile::TempDir;
@@ -165,7 +169,10 @@ pub mod tests {
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
-            ave_db: AveDbConfig::build(&ave_path),
+            ave_db: AveStoreConfig {
+                db: AveDbConfig::build(&ave_path),
+                ..Default::default()
+            },
             external_db: ExternalDbConfig::build(&ext_path),
             network: newtork_config,
             contracts_path: contracts_path,

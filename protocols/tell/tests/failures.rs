@@ -24,13 +24,21 @@ async fn test_outbound_failure() {
     swarm2.listen().with_memory_addr_external().await;
     swarm1.connect(&mut swarm2).await;
 
-    // Expects no events because `Event::Request` is produced after `read_request`.
-    // Keep the connection alive, otherwise swarm2 may receive `ConnectionClosed` instead.
-    let server_task = wait_no_events(&mut swarm1);
+    // Keep the connection alive. InboundFailure is expected on swarm1 because swarm2
+    // closes the stream without writing any data when FailOnWriteMessage is used.
+    let server_task = async move {
+        loop {
+            match swarm1.select_next_some().await.try_into_behaviour_event() {
+                Ok(ave_tell::Event::InboundFailure { .. }) => {}
+                Ok(ev) => panic!("Unexpected event: {ev:?}"),
+                Err(..) => {}
+            }
+        }
+    };
 
     // Expects OutboundFailure::Io failure with `FailOnWriteRequest` error.
     let client_task = async move {
-        println!("ENVIANDO DESDE CILENTE",);
+        println!("ENVIANDO DESDE CILENTE");
 
         let req_id = swarm2
             .behaviour_mut()
@@ -98,17 +106,6 @@ async fn test_inbound_failure() {
     futures::future::select(server_task, client_task).await;
 }
 
-async fn wait_no_events(swarm: &mut Swarm<ave_tell::Behaviour<TestCodec>>) {
-    loop {
-        if let Ok(ev) =
-            swarm.select_next_some().await.try_into_behaviour_event()
-        {
-            println!("evento",);
-            panic!("Unexpected event: {ev:?}")
-        }
-    }
-}
-
 async fn wait_outbound_failure(
     swarm: &mut Swarm<ave_tell::Behaviour<TestCodec>>,
 ) -> Result<(PeerId, OutboundTellId, OutboundFailure)> {
@@ -152,7 +149,7 @@ fn new_swarm_with_timeout(
         iter::once((StreamProtocol::new("/test/1"), ProtocolSupport::Full));
     let cfg = ave_tell::Config::default().with_request_timeout(timeout);
 
-    let swarm = Swarm::new_ephemeral(|_| {
+    let swarm = Swarm::new_ephemeral_tokio(|_| {
         ave_tell::Behaviour::<TestCodec>::new(protocols, cfg)
     });
     let peed_id = *swarm.local_peer_id();

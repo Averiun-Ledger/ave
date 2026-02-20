@@ -23,31 +23,27 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 file-rotate = {  workspace = true }
 
-getrandom = { workspace = true }
-async-trait = "0.1.89"
+futures = { version = "0.3.32", default-features = false }
 
-futures = { version = "0.3.31", default-features = false }
-
-reqwest = { version = "0.12.24"}
-rustls = { version = "0.23.35", features = ["ring"] }
+reqwest = {  workspace = true }
+rustls = { version = "0.23.36", features = ["ring"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-axum = { version = "0.8.7" }
-axum-extra = "0.12.1"
+axum = { workspace = true }
+axum-extra = "0.12.5"
 serde_qs = { version = "1.0", features = ["axum"] }
-tower = "0.5.2"
-tower-http = {version = "0.6.7", features = ["trace", "metrics", "cors", "set-header"]}
-utoipa = { version = "5.4.0", features = ["axum_extras"]}
+tower = "0.5.3"
+tower-http = {version = "0.6.8", features = ["trace", "metrics", "cors", "set-header"]}
+utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"]}
-bytes = "1.11.0"
 
 # Auth system dependencies
-rusqlite = { version = "0.38.0", features = ["bundled", "time"] }
+rusqlite = { workspace = true, features = ["time"] }
 argon2 = { version = "0.5.3", features = ["std"] }
-sha2 = "0.10.8"
+sha2 = { workspace = true }
 hex = "0.4.3"
-rand = "0.9.2"
-time = "0.3.36"
-thiserror = "2.0.9"
+rand = { workspace = true } 
+time = { workspace = true }
+thiserror = { workspace = true } 
 
 # Self-signed certificate generation
 rcgen = "0.14"
@@ -55,14 +51,12 @@ x509-parser = "0.18"
 
 [dev-dependencies]
 test-log = { workspace = true } 
-tempfile = "3.10.1"
+tempfile = { workspace = true }
 chrono = "0.4"
-pkcs8 = "0.10.2"
 ave-bridge = { path = "../bridge", default-features = false, features = ["openapi", "test"] }
 
 [features]
-default = ["prometheus", "sqlite", "ext-sqlite"]
+default = ["sqlite", "ext-sqlite"]
 rocksdb = ["ave-bridge/rocksdb"]
 sqlite = ["ave-bridge/sqlite"]
 ext-sqlite = ["ave-bridge/ext-sqlite"]
-prometheus = ["ave-bridge/prometheus"]

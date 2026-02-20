@@ -16,12 +16,11 @@ use axum::{
     BoxError,
     handler::HandlerWithoutStateExt,
     http::{
-        HeaderName, HeaderValue, Method, StatusCode, Uri, header,
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header,
         uri::{Authority, Scheme},
     },
     response::Redirect,
 };
-use axum_extra::extract::Host;
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use futures::future::join_all;
 use middleware::tower_trace;
@@ -368,7 +367,12 @@ async fn redirect_http_to_https(https: u16, listener_http: TcpListener) {
             .to_string(),
     };
 
-    let redirect = move |Host(host): Host, uri: Uri| async move {
+    let redirect = move |headers: HeaderMap, uri: Uri| async move {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         match make_https(host, uri, ports) {
             Ok(uri) => Ok(Redirect::permanent(&uri.to_string())),
             Err(error) => {

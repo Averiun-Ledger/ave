@@ -90,7 +90,7 @@ impl Handler<Updater> for Updater {
                 let target = RetryNetwork::new(self.network.clone());
 
                 let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(5)),
+                    FixedIntervalStrategy::new(1, Duration::from_secs(10)),
                 );
 
                 let retry_actor = RetryActor::new(target, message, strategy);

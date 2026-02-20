@@ -9,6 +9,7 @@ use argon2::{
         rand_core::OsRng,
     },
 };
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 
 /// Result type for crypto operations
@@ -88,7 +89,6 @@ pub fn verify_password(password: &str, hash: &str) -> CryptoResult<bool> {
 /// # Returns
 /// * `String` - The generated API key
 pub fn generate_api_key() -> String {
-    use rand::Rng;
     let mut rng = rand::rng();
     let random_bytes: [u8; 20] = rng.random();
     let random_hex = hex::encode(random_bytes);

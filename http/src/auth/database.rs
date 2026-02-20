@@ -7,6 +7,7 @@ use crate::auth::validate_password;
 use super::crypto::hash_password;
 use super::models::*;
 use ave_bridge::auth::AuthConfig;
+use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, params};
 use std::{
     fs,
@@ -307,7 +308,6 @@ impl AuthDatabase {
 
     /// Generate a UUID v4 string (for API key public IDs)
     pub(crate) fn generate_uuid() -> String {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         format!(

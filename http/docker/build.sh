@@ -11,7 +11,7 @@ DOCKER_USERNAME="averiun"
 DOCKER_REPO="ave-http"
 PROD_TAG_ARRAY=("0.8.0-sqlite" "0.8.0-rocksdb")
 PROD_DOCKERFILE_ARRAY=("./ave/http/docker/Dockerfile.sqlite" "./ave/http/docker/Dockerfile.rocksdb")
-PROD_FEATURES_ARRAY=("ext-sqlite sqlite prometheus" "ext-sqlite rocksdb prometheus")
+PROD_FEATURES_ARRAY=("ext-sqlite sqlite" "ext-sqlite rocksdb")
 
 # Arrays that will be used for the current build
 TAG_ARRAY=("${PROD_TAG_ARRAY[@]}")

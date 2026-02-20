@@ -21,8 +21,7 @@ pub struct Config {
     /// Digest derivator.
     pub hash_algorithm: HashAlgorithm,
     /// Database configuration.
-    #[serde(deserialize_with = "AveDbConfig::deserialize_db")]
-    pub ave_db: AveDbConfig,
+    pub ave_db: AveStoreConfig,
     /// External database configuration.
     #[serde(deserialize_with = "ExternalDbConfig::deserialize_db")]
     pub external_db: ExternalDbConfig,
@@ -52,6 +51,14 @@ impl Default for Config {
             is_service: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct AveStoreConfig {
+    #[serde(deserialize_with = "AveDbConfig::deserialize_db")]
+    pub db: AveDbConfig,
+    pub tunning: ave_actors::Config
 }
 
 /// Database configuration.

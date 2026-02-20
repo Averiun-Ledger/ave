@@ -1,7 +1,7 @@
 //! # Store module.
 //!
 
-use crate::config::AveDbConfig;
+use crate::config::{AveDbConfig, AveStoreConfig};
 
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
@@ -22,16 +22,16 @@ pub enum Database {
 }
 
 impl Database {
-    pub fn open(config: &AveDbConfig) -> Result<Self, StoreError> {
-        match config {
+    pub fn open(config: &AveStoreConfig) -> Result<Self, StoreError> {
+        match &config.db {
             #[cfg(feature = "rocksdb")]
             AveDbConfig::Rocksdb { path } => {
-                let manager = RocksDbManager::new(path)?;
+                let manager = RocksDbManager::new(path, config.tunning.clone())?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
             AveDbConfig::Sqlite { path } => {
-                let manager = SqliteManager::new(path)?;
+                let manager = SqliteManager::new(path, config.tunning.clone())?;
                 Ok(Database::SQLite(manager))
             }
         }
@@ -73,6 +73,19 @@ impl DbManager<DbCollection, DbCollection> for Database {
             Database::SQLite(manager) => {
                 let store = manager.create_state(name, prefix)?;
                 Ok(DbCollection::SQLite(store))
+            }
+        }
+    }
+    
+    fn stop(self) -> Result<(), StoreError> {
+                match self {
+            #[cfg(feature = "rocksdb")]
+            Database::RocksDb(manager) => {
+                manager.stop()
+            }
+            #[cfg(feature = "sqlite")]
+            Database::SQLite(manager) => {
+                manager.stop()
             }
         }
     }
@@ -140,6 +153,15 @@ impl Collection for DbCollection {
             DbCollection::RocksDb(store) => Collection::purge(store),
             #[cfg(feature = "sqlite")]
             DbCollection::SQLite(store) => Collection::purge(store),
+        }
+    }
+    
+    fn last(&self) -> Option<(String, Vec<u8>)> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            DbCollection::RocksDb(store) => Collection::last(store),
+            #[cfg(feature = "sqlite")]
+            DbCollection::SQLite(store) => Collection::last(store),
         }
     }
 }

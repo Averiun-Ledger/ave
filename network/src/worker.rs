@@ -8,8 +8,8 @@ use crate::{
     service::NetworkService,
     transport::build_transport,
     utils::{
-        Action, Due, Fact, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
-        MetricLabels, NetworkState, REQRES_PROTOCOL, RetryKind, RetryState,
+        Action, Due, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
+        NetworkState, REQRES_PROTOCOL, RetryKind, RetryState,
         ScheduleType, TELL_PROTOCOL, convert_addresses, convert_boot_nodes,
         peer_id_to_ed25519_pubkey_bytes,
     },
@@ -34,10 +34,6 @@ use libp2p::{
 };
 
 use futures::StreamExt;
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family},
-    registry::Registry,
-};
 use serde::Serialize;
 use tokio::{
     sync::mpsc,
@@ -103,9 +99,6 @@ where
     ephemeral_responses:
         HashMap<PeerId, VecDeque<ResponseChannel<ReqResMessage>>>,
 
-    /// Messages metric.
-    messages_metric: Family<MetricLabels, Counter>,
-
     /// Successful dials
     successful_dials: u64,
 
@@ -123,7 +116,6 @@ where
 impl<T: Debug + Serialize> NetworkWorker<T> {
     /// Create a new `NetworkWorker`.
     pub fn new(
-        registry: &mut Registry,
         keys: &KeyPair,
         config: Config,
         monitor: Option<ActorRef<Monitor>>,
@@ -173,7 +165,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let limits = LimitsConfig::build(&node_type);
 
         // Build transport.
-        let transport = build_transport(registry, &key, limits.clone())?;
+        let transport = build_transport(&key, limits.clone())?;
 
         let behaviour = Behaviour::new(
             &key.public(),
@@ -198,14 +190,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 .with_dial_concurrency_factor(
                     NonZeroU8::new(2).expect("2 > 0"),
                 ),
-        );
-
-        // Register metrics
-        let messages_metric = Family::default();
-        registry.register(
-            "Messages",
-            "Counts messages sent or received from other peers",
-            messages_metric.clone(),
         );
 
         let service = NetworkService::new(command_sender);
@@ -258,7 +242,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             pending_outbound_messages: HashMap::default(),
             pending_inbound_messages: HashMap::default(),
             ephemeral_responses: HashMap::default(),
-            messages_metric,
             successful_dials: 0,
             peer_identify: HashSet::new(),
             retry_by_peer: HashMap::new(),
@@ -390,15 +373,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         TARGET_WORKER,
                         "Can not send response to {}: {}", peer, e
                     )
-                } else {
-                    self.messages_metric
-                        .get_or_create(&MetricLabels {
-                            fact: Fact::Sent,
-                            peer_id: peer.to_string(),
-                        })
-                        .inc();
-
-                    break;
                 }
             }
 
@@ -456,13 +430,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
 
         self.retry_by_peer.remove(&peer);
-
-        self.messages_metric
-            .get_or_create(&MetricLabels {
-                fact: Fact::Sent,
-                peer_id: peer.to_string(),
-            })
-            .inc();
     }
 
     /// Get the network service.
@@ -1157,13 +1124,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 .or_default()
                                 .push_back(message_data);
                         }
-
-                        self.messages_metric
-                            .get_or_create(&MetricLabels {
-                                fact: Fact::Received,
-                                peer_id: peer_id.to_string(),
-                            })
-                            .inc();
                     }
                     BehaviourEvent::TellMessage { peer_id, message } => {
                         info!(
@@ -1182,13 +1142,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 .or_default()
                                 .push_back(message.message);
                         }
-
-                        self.messages_metric
-                            .get_or_create(&MetricLabels {
-                                fact: Fact::Received,
-                                peer_id: peer_id.to_string(),
-                            })
-                            .inc();
                     }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
                         if let Some(Action::Discover) =
@@ -1366,9 +1319,8 @@ mod tests {
             vec![memory_addr],
         );
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-        let mut registry = Registry::default();
 
-        NetworkWorker::new(&mut registry, &keys, config, None, token).unwrap()
+        NetworkWorker::new(&keys, config, None, token).unwrap()
     }
 
     // Create a config

@@ -46,7 +46,6 @@ use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 
 use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
-use prometheus_client::registry::Registry;
 use query::{Query, QueryMessage, QueryResponse};
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
@@ -100,7 +99,6 @@ impl Api {
         keys: KeyPair,
         config: AveBaseConfig,
         sink_auth: SinkAuth,
-        registry: &mut Registry,
         password: &str,
         token: &CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
@@ -127,7 +125,6 @@ impl Api {
             })?;
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
-            registry,
             &keys,
             config.network.clone(),
             Some(newtork_monitor_actor.clone()),

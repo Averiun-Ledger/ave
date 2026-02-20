@@ -18,12 +18,13 @@ use crate::{
         },
     },
     config_types::{
-        ApiKeyConfigHttp, AuthConfigHttp, AveConfigHttp, ConfigHttp,
-        ControlListConfigHttp, CorsConfigHttp, EndpointRateLimitHttp,
-        HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
-        MemoryLimitHttp, NetworkConfigHttp, RateLimitConfigHttp,
-        RoutingConfigHttp, RoutingNodeHttp, SelfSignedCertConfigHttp,
-        SessionConfigHttp, SinkConfigHttp, SinkServerHttp,
+        ApiKeyConfigHttp, AuthConfigHttp, AveActorsStoreConfigHttp,
+        AveConfigHttp, AveStoreConfigHttp, ConfigHttp, ControlListConfigHttp,
+        CorsConfigHttp, EndpointRateLimitHttp, HttpConfigHttp,
+        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, MemoryLimitHttp,
+        NetworkConfigHttp, RateLimitConfigHttp, RoutingConfigHttp,
+        RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
+        SinkConfigHttp, SinkServerHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -297,6 +298,8 @@ impl Modify for SecurityAddon {
             LoggingOutputHttp,
             SinkConfigHttp,
             SinkServerHttp,
+            AveActorsStoreConfigHttp,
+            AveStoreConfigHttp
         )
     ),
     modifiers(&SecurityAddon),

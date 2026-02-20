@@ -3,11 +3,10 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    HttpConfig, MemoryLimit, SelfSignedCertConfig,
-    auth::{
+    AveStoreConfig, HttpConfig, MemoryLimit, SelfSignedCertConfig, auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
-    },
+    }
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,8 +18,6 @@ pub struct ConfigHttp {
     pub node: AveConfigHttp,
     /// Path to cryptographic keys
     pub keys_path: String,
-    /// Prometheus metrics endpoint
-    pub prometheus: String,
     /// Logging configuration
     pub logging: LoggingHttp,
     /// Event sink configuration
@@ -34,7 +31,6 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
         Self {
             node: AveConfigHttp::from(value.node),
             keys_path: value.keys_path.to_string_lossy().to_string(),
-            prometheus: value.prometheus,
             logging: LoggingHttp::from(value.logging),
             sink: SinkConfigHttp::from(value.sink),
             auth: AuthConfigHttp::from(value.auth),
@@ -247,7 +243,7 @@ pub struct AveConfigHttp {
     /// Hash algorithm
     pub hash_algorithm: String,
     /// AVE database path
-    pub ave_db: String,
+    pub ave_db: AveStoreConfigHttp,
     /// External database path
     pub external_db: String,
     /// Network configuration
@@ -267,7 +263,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
         Self {
             keypair_algorithm: format!("{:?}", value.keypair_algorithm),
             hash_algorithm: format!("{:?}", value.hash_algorithm),
-            ave_db: value.ave_db.to_string(),
+            ave_db: AveStoreConfigHttp::from(value.ave_db),
             external_db: value.external_db.to_string(),
             network: NetworkConfigHttp::from(value.network),
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
@@ -277,6 +273,33 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
         }
     }
 }
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct AveStoreConfigHttp {
+    pub db: String,
+    pub tunning: AveActorsStoreConfigHttp
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct AveActorsStoreConfigHttp {
+    pub ram_mb: Option<u64>,
+    pub cpu_cores: Option<usize>,
+    pub profile: Option<String>,
+    pub durability: bool
+}
+
+impl From<AveStoreConfig> for AveStoreConfigHttp {
+    fn from(value: AveStoreConfig) -> Self {
+        Self { db: value.db.to_string(), tunning: AveActorsStoreConfigHttp {
+            ram_mb: value.tunning.ram_mb,
+            cpu_cores: value.tunning.cpu_cores,
+            profile: value.tunning.profile.map(|x| x.to_string()),
+            durability: value.tunning.durability,
+        } }
+    }
+}
+
+
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct NetworkConfigHttp {

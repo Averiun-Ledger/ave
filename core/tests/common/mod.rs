@@ -13,10 +13,9 @@ use ave_common::{
 };
 use ave_core::{
     Api,
-    config::{AveDbConfig, Config, ExternalDbConfig, SinkAuth},
+    config::{AveDbConfig, AveStoreConfig, Config, ExternalDbConfig, SinkAuth},
 };
 use network::{Config as NetworkConfig, RoutingNode};
-use prometheus_client::registry::Registry;
 use std::{
     path::PathBuf,
     str::FromStr,
@@ -79,7 +78,7 @@ pub async fn create_node(
         is_service: true,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
-        ave_db: AveDbConfig::build(&local_db),
+        ave_db: AveStoreConfig {db: AveDbConfig::build(&local_db), ..Default::default()},
         external_db: ExternalDbConfig::build(&ext_db),
         network: network_config,
         contracts_path,
@@ -87,14 +86,12 @@ pub async fn create_node(
         tracking_size: 100,
     };
 
-    let mut registry = Registry::default();
     let token = CancellationToken::new();
 
     let (api, runners) = Api::build(
         keys,
         config,
         SinkAuth::default(),
-        &mut registry,
         "ave",
         &token,
     )

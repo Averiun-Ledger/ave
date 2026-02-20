@@ -431,7 +431,7 @@ pub fn take_random_signers(
 
     let random_signers: HashSet<PublicKey> = signers
         .iter()
-        .choose_multiple(&mut rng, quantity)
+        .sample(&mut rng, quantity)
         .into_iter()
         .cloned()
         .collect();

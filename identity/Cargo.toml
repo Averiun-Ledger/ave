@@ -18,7 +18,7 @@ borsh = { workspace = true }
 ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
 memsecurity = { workspace = true, features = ["encryption"] }
-pkcs8 = { version = "0.10.2" }
+pkcs8 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 subtle = { workspace = true }
 thiserror = { workspace = true }

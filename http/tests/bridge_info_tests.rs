@@ -1757,11 +1757,11 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.keypair_algorithm, "Ed25519");
     #[cfg(feature = "sqlite")]
     {
-        assert_eq!(config.node.ave_db, "Sqlite");
+        assert_eq!(config.node.ave_db.db, "Sqlite");
     }
     #[cfg(feature = "rocksdb")]
     {
-        assert_eq!(config.node.ave_db, "Rocksdb");
+        assert_eq!(config.node.ave_db.db, "Rocksdb");
     }
     assert_eq!(config.node.external_db, "Sqlite");
     assert_eq!(config.node.hash_algorithm, "Blake3");
@@ -1810,8 +1810,6 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.network.control_list.interval_request_secs, 60);
 
     assert_eq!(config.keys_path, expected_keys_path);
-    assert_eq!(config.prometheus, "127.0.0.1:0");
-
     assert!(config.logging.output.stdout);
     assert!(!config.logging.output.file);
     assert!(!config.logging.output.api);

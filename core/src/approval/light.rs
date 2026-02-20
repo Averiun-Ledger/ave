@@ -122,9 +122,9 @@ impl Handler<ApprLight> for ApprLight {
 
                 let strategy = Strategy::CustomIntervalStrategy(
                     CustomIntervalStrategy::new(VecDeque::from([
-                        Duration::from_secs(14400),
-                        Duration::from_secs(28800),
-                        Duration::from_secs(57600),
+                        Duration::from_hours(4),
+                        Duration::from_hours(8),
+                        Duration::from_hours(16),
                     ])),
                 );
 

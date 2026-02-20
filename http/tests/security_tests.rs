@@ -7,7 +7,6 @@ mod common;
 use ave_http::auth::database::DatabaseError;
 use test_log::test;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ave_http::auth::{
@@ -3531,9 +3530,10 @@ async fn test_system_config_ttl_validation() {
         ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
     };
 
+    let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config = AuthConfig {
         enable: true,
-        database_path: PathBuf::from(":memory:"),
+        database_path: tmp_dir.path().join("auth.db"),
         superadmin: "admin".to_string(),
         api_key: ApiKeyConfig::default(),
         lockout: LockoutConfig::default(),
