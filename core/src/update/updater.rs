@@ -80,10 +80,11 @@ impl Handler<Updater> for Updater {
                         request_id: String::default(),
                         version: 0,
                         receiver: node_key.clone(),
-                        receiver_actor: "/user/node/distributor".to_string(),
+                        receiver_actor: format!("/user/node/distributor_{}", subject_id),
                     },
                     message: ActorMessage::DistributionGetLastSn {
                         subject_id: subject_id.clone(),
+                        receiver_actor: ctx.path().to_string()
                     },
                 };
 

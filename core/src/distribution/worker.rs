@@ -345,6 +345,7 @@ pub enum DistriWorkerMessage {
         subject_id: DigestIdentifier,
         info: ComunicateInfo,
         sender: PublicKey,
+        receiver_actor: String
     },
     // Un nodo nos solicitó la copia del ledger.
     SendDistribution {
@@ -384,6 +385,7 @@ impl Handler<DistriWorker> for DistriWorker {
                 subject_id,
                 info,
                 sender,
+                receiver_actor
             } => {
                 let (sn, ..) = match self
                     .check_witness(ctx, &subject_id, sender.clone())
@@ -417,10 +419,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     receiver: sender.clone(),
                     request_id: info.request_id,
                     version: info.version,
-                    receiver_actor: format!(
-                        "/user/node/auth/{}/{}",
-                        subject_id, info.receiver
-                    ),
+                    receiver_actor: receiver_actor,
                 };
 
                 if let Err(e) = self

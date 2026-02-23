@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Stdio},
+    process::Stdio,
     sync::Arc,
 };
 
@@ -323,6 +323,12 @@ impl Compiler {
 
 #[derive(Debug, Clone)]
 pub enum CompilerMessage {
+    TemporalCompile {
+        contract: String,
+        contract_name: String,
+        initial_value: Value,
+        contract_path: PathBuf,
+    },
     Compile {
         contract: String,
         contract_name: String,
@@ -359,6 +365,58 @@ impl Handler<Compiler> for Compiler {
         ctx: &mut ActorContext<Compiler>,
     ) -> Result<(), ActorError> {
         match msg {
+            CompilerMessage::TemporalCompile {
+                contract,
+                contract_name,
+                contract_path,
+                initial_value,
+            } => {
+                if let Err(e) =
+                    Self::compile_contract(&contract, &contract_path).await
+                {
+                    error!(
+                        msg_type = "TemporalCompile",
+                        error = %e,
+                        contract_name = %contract_name,
+                        path = %contract_path.display(),
+                        "Contract compilation failed"
+                    );
+                    let _ = fs::remove_dir_all(&contract_path).await;
+                    return Err(ActorError::FunctionalCritical {
+                        description: e.to_string(),
+                    });
+                };
+
+                if let Err(e) = Self::check_wasm(
+                    ctx,
+                    &contract_path,
+                    ValueWrapper(initial_value),
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "TemporalCompile",
+                        error = %e,
+                        contract_name = %contract_name,
+                        "WASM validation failed"
+                    );
+                    let _ = fs::remove_dir_all(&contract_path).await;
+                    return Err(ActorError::FunctionalCritical {
+                        description: e.to_string(),
+                    });
+                }
+
+                if let Err(e) = fs::remove_dir_all(&contract_path).await {
+                    error!(
+                        msg_type = "TemporalCompile",
+                        error = %e,
+                        path = %contract_path.display(),
+                        "Failed to remove temporal contract directory"
+                    );
+                }
+
+                Ok(())
+            }
             CompilerMessage::Compile {
                 contract,
                 contract_name,

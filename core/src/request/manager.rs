@@ -1041,6 +1041,7 @@ impl RequestManager {
                 our_sn: Some(gov_sn),
                 witnesses,
                 update_type: UpdateType::Request {
+                    subject_id: self.subject_id.clone(),
                     id: self.id.clone(),
                 },
             };

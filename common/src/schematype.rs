@@ -30,6 +30,8 @@ pub enum SchemaType {
     AllSchemas,
 }
 
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum ReservedWords {
     AllSchemas,
     Governance,

@@ -1212,12 +1212,7 @@ impl Governance {
         for (id, schema) in schemas {
             let actor_name = format!("{}_compiler", id);
 
-            let compiler =
-                if let Ok(compiler) = ctx.get_child(&actor_name).await {
-                    compiler
-                } else {
-                    ctx.create_child(&actor_name, Compiler::new(*hash)).await?
-                };
+            let compiler = ctx.create_child(&actor_name, Compiler::new(*hash)).await?;
 
             let Schema {
                 contract,
@@ -1877,44 +1872,11 @@ impl Governance {
 
         Ok(())
     }
-
-    async fn create_compilers(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        compilers: &[SchemaType],
-    ) -> Result<Vec<SchemaType>, ActorError> {
-        let Some(hash) = self.hash else {
-            return Err(ActorError::FunctionalCritical {
-                description: "Hash algorithm is None".to_string(),
-            });
-        };
-
-        let mut new_compilers = vec![];
-
-        for compiler in compilers {
-            if ctx
-                .get_child::<Compiler>(&format!("{}_compiler", compiler))
-                .await
-                .is_err()
-            {
-                new_compilers.push(compiler.clone());
-
-                ctx.create_child(
-                    &format!("{}_compiler", compiler),
-                    Compiler::new(hash),
-                )
-                .await?;
-            }
-        }
-
-        Ok(new_compilers)
-    }
 }
 
 /// Governance command.
 #[derive(Debug, Clone)]
 pub enum GovernanceMessage {
-    CreateCompilers(Vec<SchemaType>),
     GetMetadata,
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
@@ -2118,27 +2080,6 @@ impl Handler<Governance> for Governance {
         match msg {
             GovernanceMessage::GetVersion => {
                 Ok(GovernanceResponse::Version(self.properties.version))
-            }
-            GovernanceMessage::CreateCompilers(compilers) => {
-                let new_compilers =
-                    match self.create_compilers(ctx, &compilers).await {
-                        Ok(new_compilers) => new_compilers,
-                        Err(e) => {
-                            warn!(
-                                msg_type = "CreateCompilers",
-                                error = %e,
-                                "Failed to create compilers"
-                            );
-                            return Err(e);
-                        }
-                    };
-
-                debug!(
-                    msg_type = "CreateCompilers",
-                    new_compilers_count = new_compilers.len(),
-                    "Compilers created successfully"
-                );
-                Ok(GovernanceResponse::NewCompilers(new_compilers))
             }
             GovernanceMessage::GetLedger { lo_sn, hi_sn } => {
                 let (ledger, is_all) =

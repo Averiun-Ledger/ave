@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::slice;
+use tracing::error;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
@@ -413,6 +414,7 @@ pub async fn emit_fail<A>(
 where
     A: Actor + Handler<A>,
 {
+    error!("Falling, error: {}, actor: {}", error, ctx.path());
     if let Err(_e) = ctx.emit_fail(error.clone()).await {
         ctx.system().stop_system();
     };

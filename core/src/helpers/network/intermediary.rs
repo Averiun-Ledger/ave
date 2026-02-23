@@ -173,7 +173,7 @@ impl Intermediary {
                 let path = ActorPath::from(message.info.receiver_actor.clone());
                 let request_id = message.info.request_id.clone();
                 match message.message {
-                    ActorMessage::DistributionGetLastSn { subject_id } => {
+                    ActorMessage::DistributionGetLastSn { subject_id, receiver_actor } => {
                         let actor = system
                             .get_actor::<DistriWorker>(&path)
                             .await
@@ -186,6 +186,7 @@ impl Intermediary {
                                 subject_id,
                                 info: message.info,
                                 sender: sender.clone(),
+                                receiver_actor
                             })
                             .await
                             .map_err(|e| {

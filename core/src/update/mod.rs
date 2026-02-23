@@ -24,7 +24,7 @@ pub mod updater;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateType {
     Auth,
-    Request { id: DigestIdentifier },
+    Request { subject_id: DigestIdentifier, id: DigestIdentifier },
 }
 
 pub struct UpdateNew {
@@ -196,10 +196,10 @@ impl Handler<Update> for Update {
                                 }
                         }
 
-                        if let UpdateType::Request { id } = &self.update_type {
+                        if let UpdateType::Request { id, subject_id } = &self.update_type {
                             let request_path = ActorPath::from(format!(
                                 "/user/request/{}",
-                                self.subject_id
+                                subject_id
                             ));
                             match ctx
                                 .system()

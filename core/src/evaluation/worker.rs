@@ -8,10 +8,7 @@ use crate::{
         },
         runner::types::EvaluateInfo,
     },
-    governance::{
-        Governance, GovernanceMessage, GovernanceResponse,
-        data::GovernanceData, model::Schema,
-    },
+    governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
         emit_fail,
@@ -79,6 +76,7 @@ impl EvalWorker {
                 is_owner,
             })
             .await;
+
         runner_actor.ask_stop().await?;
 
         response
@@ -101,30 +99,28 @@ impl EvalWorker {
             });
         };
 
+        let compiler = ctx
+            .create_child(&format!("compiler",), Compiler::new(self.hash))
+            .await?;
+
         for id in ids {
             let Some(schema) = schemas.get(id) else {
                 return Err(ActorError::Functional { description: "There is a contract that requires compilation but its scheme could not be found".to_owned()});
             };
 
-            let compiler_path = ActorPath::from(format!(
-                "/user/node/{}/{}_compiler",
-                self.governance_id, id
-            ));
-            let compiler_actor =
-                ctx.system().get_actor::<Compiler>(&compiler_path).await?;
-
-            compiler_actor
-                .ask(CompilerMessage::Compile {
+            compiler
+                .ask(CompilerMessage::TemporalCompile {
                     contract_name: format!("{}_{}", self.governance_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),
                     contract_path: contracts_path
                         .join("contracts")
-                        .join(format!("{}_{}", self.governance_id, id)),
+                        .join(format!("{}_temp_{}", self.governance_id, id)),
                 })
                 .await?
         }
-        Ok(())
+
+        compiler.ask_stop().await
     }
 
     async fn check_governance(
@@ -194,43 +190,12 @@ impl EvalWorker {
                 EvaluatorError::InternalError(e.to_string())
             })?;
 
-            // TODO SI falla eliminar los new_compilers y borrar de CONTRACTS.
-            let _new_compilers = self
-                .create_compilers(ctx, &compilations)
-                .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
-
             self.compile_contracts(ctx, &compilations, governance_data.schemas)
                 .await
                 .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
         }
 
         Ok(result)
-    }
-
-    async fn create_compilers(
-        &self,
-        ctx: &mut ActorContext<EvalWorker>,
-        ids: &[SchemaType],
-    ) -> Result<Vec<SchemaType>, ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/{}", self.governance_id));
-        let subject =
-            ctx.system().get_actor::<Governance>(&subject_path).await?;
-
-        let response = subject
-            .ask(GovernanceMessage::CreateCompilers(ids.to_vec()))
-            .await?;
-
-        match response {
-            GovernanceResponse::NewCompilers(new_compilers) => {
-                Ok(new_compilers)
-            }
-            _ => Err(ActorError::UnexpectedResponse {
-                path: subject_path,
-                expected: "GovernanceResponse::NewCompilers".to_owned(),
-            }),
-        }
     }
 
     fn generate_json_patch(
@@ -366,7 +331,7 @@ impl EvalWorker {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
             EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..)) => {
-                return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
+                return Ok(EvaluationRes::Reboot);
             }
             _ => {}
         };
