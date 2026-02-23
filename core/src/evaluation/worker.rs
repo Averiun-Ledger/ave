@@ -261,7 +261,7 @@ impl EvalWorker {
 
                 (ValueWrapper(patch), properties_hash)
             }
-            EvaluateData::AllSchemasFact { state, .. } => {
+            EvaluateData::TrackerSchemasFact { state, .. } => {
                 let properties_hash =
                     hash_borsh(&*self.hash.hasher(), &evaluation.final_state)
                         .map_err(|e| {
@@ -299,7 +299,7 @@ impl EvalWorker {
 
                 (ValueWrapper(patch), properties_hash)
             }
-            EvaluateData::AllSchemasTransfer { state, .. } => {
+            EvaluateData::TrackerSchemasTransfer { state, .. } => {
                 let properties_hash = hash_borsh(&*self.hash.hasher(), &state)
                     .map_err(|e| {
                         EvaluatorError::InternalError(e.to_string())

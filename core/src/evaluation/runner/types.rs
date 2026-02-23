@@ -36,13 +36,13 @@ pub enum EvaluateInfo {
         old_owner_name: Option<String>,
         state: GovernanceData,
     },
-    AllSchemasFact {
+    TrackerSchemasFact {
         contract: String,
         init_state: ValueWrapper,
         state: ValueWrapper,
         payload: ValueWrapper,
     },
-    AllSchemasTransfer {
+    TrackerSchemasTransfer {
         governance_data: GovernanceData,
         new_owner: PublicKey,
         old_owner: PublicKey,

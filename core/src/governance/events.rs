@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::model::{
-    CreatorQuantity, RoleCreator, RolesAllSchemas, RolesGov, RolesSchema,
+    CreatorQuantity, RoleCreator, RolesTrackerSchemas, RolesGov, RolesSchema,
 };
 
 pub type MemberName = String;
@@ -340,14 +340,14 @@ impl GovernanceEvent {
             }
 
             // all schemas
-            if let Some(all_schemas) = &roles.all_schemas {
-                if let Some(add) = &all_schemas.add {
+            if let Some(tracker_schemas) = &roles.tracker_schemas {
+                if let Some(add) = &tracker_schemas.add {
                     if let Some(evaluators) = &add.evaluator {
                         evaluators.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.name) {
                                 new_evaluators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -361,7 +361,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.name) {
                                 new_validators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -375,7 +375,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.name) {
                                 new_witnesses
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -384,13 +384,13 @@ impl GovernanceEvent {
                         });
                     }
                 }
-                if let Some(remove) = &all_schemas.remove {
+                if let Some(remove) = &tracker_schemas.remove {
                     if let Some(evaluators) = &remove.evaluator {
                         evaluators.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.name) {
                                 remove_evaluators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -404,7 +404,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.name) {
                                 remove_validators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -418,7 +418,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.name) {
                                 remove_witnesses
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -427,13 +427,13 @@ impl GovernanceEvent {
                         });
                     }
                 }
-                if let Some(change) = &all_schemas.change {
+                if let Some(change) = &tracker_schemas.change {
                     if let Some(evaluators) = &change.evaluator {
                         evaluators.iter().for_each(|x| {
                             if let Some(user) = members.get(&x.actual_name) {
                                 remove_evaluators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -441,7 +441,7 @@ impl GovernanceEvent {
 
                                 new_evaluators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -455,7 +455,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.actual_name) {
                                 remove_validators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -463,7 +463,7 @@ impl GovernanceEvent {
 
                                 new_validators
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -477,7 +477,7 @@ impl GovernanceEvent {
                             if let Some(user) = members.get(&x.actual_name) {
                                 remove_witnesses
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -485,7 +485,7 @@ impl GovernanceEvent {
 
                                 new_witnesses
                                     .entry((
-                                        SchemaType::AllSchemas,
+                                        SchemaType::TrackerSchemas,
                                         user.clone(),
                                     ))
                                     .or_default()
@@ -783,7 +783,7 @@ pub struct NewMember {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolesEvent {
     pub governance: Option<GovRoleEvent>,
-    pub all_schemas: Option<AllSchemasRoleEvent>,
+    pub tracker_schemas: Option<TrackerSchemasRoleEvent>,
     pub schema: Option<HashSet<SchemaIdRole>>,
 }
 
@@ -791,7 +791,7 @@ impl RolesEvent {
     pub fn is_empty(&self) -> bool {
         self.governance.is_none()
             && self.schema.is_none()
-            && self.all_schemas.is_none()
+            && self.tracker_schemas.is_none()
     }
 }
 
@@ -1340,32 +1340,32 @@ pub struct SchemaIdRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
-pub struct AllSchemasRoleEvent {
-    pub add: Option<AllSchemasRolesAddEvent>,
-    pub remove: Option<AllSchemasRolesRemoveEvent>,
-    pub change: Option<AllSchemasRolesChangeEvent>,
+pub struct TrackerSchemasRoleEvent {
+    pub add: Option<TrackerSchemasRolesAddEvent>,
+    pub remove: Option<TrackerSchemasRolesRemoveEvent>,
+    pub change: Option<TrackerSchemasRolesChangeEvent>,
 }
 
-impl AllSchemasRoleEvent {
+impl TrackerSchemasRoleEvent {
     pub fn check_data(
         &self,
         governance: &GovernanceData,
-        roles_not_gov: RolesAllSchemas,
+        roles_not_gov: RolesTrackerSchemas,
         schema_id: &SchemaType,
-    ) -> Result<RolesAllSchemas, RunnerError> {
+    ) -> Result<RolesTrackerSchemas, RunnerError> {
         let schema_role = SchemaIdRole::from(self.clone());
 
         let mut roles_schema = RolesSchema::from(roles_not_gov);
         schema_role.check_data(governance, &mut roles_schema, schema_id)?;
-        let roles_not_gov = RolesAllSchemas::from(roles_schema.clone());
+        let roles_not_gov = RolesTrackerSchemas::from(roles_schema.clone());
         Ok(roles_not_gov)
     }
 }
 
-impl From<AllSchemasRoleEvent> for SchemaIdRole {
-    fn from(value: AllSchemasRoleEvent) -> Self {
+impl From<TrackerSchemasRoleEvent> for SchemaIdRole {
+    fn from(value: TrackerSchemasRoleEvent) -> Self {
         Self {
-            schema_id: SchemaType::AllSchemas,
+            schema_id: SchemaType::TrackerSchemas,
             add: value.add.map(SchemaRolesAddEvent::from),
             remove: value.remove.map(SchemaRolesRemoveEvent::from),
             change: value.change.map(SchemaRolesChangeEvent::from),
@@ -2558,14 +2558,14 @@ impl GovRolesEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct AllSchemasRolesAddEvent {
+pub struct TrackerSchemasRolesAddEvent {
     pub evaluator: Option<BTreeSet<Role>>,
     pub validator: Option<BTreeSet<Role>>,
     pub witness: Option<BTreeSet<Role>>,
     pub issuer: Option<BTreeSet<Role>>,
 }
 
-impl AllSchemasRolesAddEvent {
+impl TrackerSchemasRolesAddEvent {
     pub fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
@@ -2574,8 +2574,8 @@ impl AllSchemasRolesAddEvent {
     }
 }
 
-impl From<AllSchemasRolesAddEvent> for SchemaRolesAddEvent {
-    fn from(value: AllSchemasRolesAddEvent) -> Self {
+impl From<TrackerSchemasRolesAddEvent> for SchemaRolesAddEvent {
+    fn from(value: TrackerSchemasRolesAddEvent) -> Self {
         Self {
             evaluator: value.evaluator,
             validator: value.validator,
@@ -2606,14 +2606,14 @@ impl SchemaRolesAddEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct AllSchemasRolesRemoveEvent {
+pub struct TrackerSchemasRolesRemoveEvent {
     pub evaluator: Option<BTreeSet<Role>>,
     pub validator: Option<BTreeSet<Role>>,
     pub witness: Option<BTreeSet<Role>>,
     pub issuer: Option<BTreeSet<Role>>,
 }
 
-impl AllSchemasRolesRemoveEvent {
+impl TrackerSchemasRolesRemoveEvent {
     pub fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
@@ -2622,8 +2622,8 @@ impl AllSchemasRolesRemoveEvent {
     }
 }
 
-impl From<AllSchemasRolesRemoveEvent> for SchemaRolesRemoveEvent {
-    fn from(value: AllSchemasRolesRemoveEvent) -> Self {
+impl From<TrackerSchemasRolesRemoveEvent> for SchemaRolesRemoveEvent {
+    fn from(value: TrackerSchemasRolesRemoveEvent) -> Self {
         Self {
             evaluator: value.evaluator,
             validator: value.validator,
@@ -2656,14 +2656,14 @@ impl SchemaRolesRemoveEvent {
 #[derive(
     Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord,
 )]
-pub struct AllSchemasRolesChangeEvent {
+pub struct TrackerSchemasRolesChangeEvent {
     pub evaluator: Option<BTreeSet<RoleChange>>,
     pub validator: Option<BTreeSet<RoleChange>>,
     pub witness: Option<BTreeSet<RoleChange>>,
     pub issuer: Option<BTreeSet<RoleChange>>,
 }
 
-impl AllSchemasRolesChangeEvent {
+impl TrackerSchemasRolesChangeEvent {
     pub fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
@@ -2672,8 +2672,8 @@ impl AllSchemasRolesChangeEvent {
     }
 }
 
-impl From<AllSchemasRolesChangeEvent> for SchemaRolesChangeEvent {
-    fn from(value: AllSchemasRolesChangeEvent) -> Self {
+impl From<TrackerSchemasRolesChangeEvent> for SchemaRolesChangeEvent {
+    fn from(value: TrackerSchemasRolesChangeEvent) -> Self {
         Self {
             evaluator: value.evaluator,
             validator: value.validator,

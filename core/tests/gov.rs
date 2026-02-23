@@ -275,7 +275,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 
     let state = get_subject(bootstrap, governance_id.clone(), Some(1))
@@ -294,7 +294,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 
     let state = get_subject(ephimeral, governance_id.clone(), Some(1))
@@ -312,7 +312,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 }
 
@@ -378,7 +378,7 @@ async fn test_many_schema_in_one_governance() {
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"Owner": owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{"Example1":{"evaluate":"majority","validate":"majority"},"Example2":{"evaluate":"majority","validate":"majority"},"Example3":{"evaluate":"majority","validate":"majority"}},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{"Example1":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example2":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example3":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]}},"schemas":{"Example1":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example2":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example3":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}}},"version":1})
+        json!({"members":{"Owner": owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{"Example1":{"evaluate":"majority","validate":"majority"},"Example2":{"evaluate":"majority","validate":"majority"},"Example3":{"evaluate":"majority","validate":"majority"}},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{"Example1":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example2":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example3":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]}},"schemas":{"Example1":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example2":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example3":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}}},"version":1})
     );
 }
 
@@ -466,7 +466,7 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":fake_node, "Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
+        json!({"members":{"AveNode2":fake_node, "Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
     );
 
     let state = get_subject(owner_governance, governance_id.clone(), None)
@@ -484,7 +484,7 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":future_owner.public_key(),"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"AveNode1":future_owner.public_key(),"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
     );
 }
 
@@ -613,7 +613,7 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
+        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
     );
 
     let state = get_subject(owner_governance, governance_id.clone(), None)
@@ -631,7 +631,7 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
+        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
     );
 }
 
@@ -696,7 +696,7 @@ async fn test_governance_fail_approve() {
     assert_eq!(state.sn, 1);
     assert_eq!(
         state.properties,
-        json!({"members":{"Owner":node1.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":0})
+        json!({"members":{"Owner":node1.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":0})
     );
 }
 
@@ -832,7 +832,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
@@ -849,7 +849,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
@@ -866,7 +866,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
 }
 
@@ -972,7 +972,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
@@ -989,7 +989,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
@@ -1006,7 +1006,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
     );
 }
 
@@ -1142,7 +1142,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
     );
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
@@ -1159,7 +1159,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
     );
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
@@ -1176,7 +1176,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
+        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
     );
 }
 
@@ -1249,7 +1249,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
     );
     let state = get_subject(eval_node, governance_id.clone(), Some(2))
         .await
@@ -1266,7 +1266,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
     );
 
     let json = json!({
@@ -1298,7 +1298,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 3);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
     );
     let state = get_subject(eval_node, governance_id.clone(), Some(3))
         .await
@@ -1315,7 +1315,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 3);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
     );
 
     let fake_node_2 = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
@@ -1351,7 +1351,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
     );
     let state = get_subject(eval_node, governance_id.clone(), Some(4))
         .await
@@ -1368,7 +1368,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.sn, 4);
     assert_eq!(
         state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
+        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
     );
 }
 
@@ -1759,7 +1759,7 @@ async fn test_gov_no_all_validators() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner","offline"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner","offline"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
     );
 }
 
@@ -1854,7 +1854,7 @@ async fn test_gov_no_all_evaluators() {
     assert_eq!(state.sn, 2);
     assert_eq!(
         state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
     );
 }
 
@@ -1961,6 +1961,6 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.sn, 3);
     assert_eq!(
         state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user1":keys[0]},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_all_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
+        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user1":keys[0]},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
     );
 }

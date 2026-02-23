@@ -99,7 +99,7 @@ const signedRequest: BridgeSignedEventRequest = {
 - `DataToSink` - Event sink data (tagged union)
 - `DataToSinkEvent` - Sink event types (create, fact, transfer, etc.)
 - `Namespace` - Subject namespace (`Array<string>`)
-- `SchemaType` - Schema type: `"Governance" | { Type: string } | "AllSchemas"`
+- `SchemaType` - Schema type: `"Governance" | { Type: string } | "TrackerSchemas"`
 - `JsonValue` - Recursive JSON value type
 
 ## Type Notes

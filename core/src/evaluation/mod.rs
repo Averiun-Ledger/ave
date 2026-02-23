@@ -1381,7 +1381,7 @@ pub mod tests {
                     ]
                 },
                 "roles": {
-                    "all_schemas": {
+                    "tracker_schemas": {
                         "add": {
                             "evaluator": [
                                 {

@@ -279,7 +279,7 @@ impl RequestManager {
                     governance_data.get_init_state(&metadata.schema_id)?;
 
                 (
-                    EvaluateData::AllSchemasFact {
+                    EvaluateData::TrackerSchemasFact {
                         contract: format!(
                             "{}_{}",
                             metadata.governance_id, metadata.schema_id
@@ -294,7 +294,7 @@ impl RequestManager {
                 let governance_data =
                     get_gov(ctx, &metadata.governance_id).await?;
                 (
-                    EvaluateData::AllSchemasTransfer {
+                    EvaluateData::TrackerSchemasTransfer {
                         governance_data: governance_data.clone(),
                         namespace: metadata.namespace.clone(),
                         schema_id: metadata.schema_id.clone(),

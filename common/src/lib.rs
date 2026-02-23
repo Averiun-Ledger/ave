@@ -5,6 +5,8 @@
 //! This crate re-exports essential types needed for working with Ave,
 //! such as identity and cryptography, without pulling in heavy dependencies
 //! like wasmtime that don't compile on all architectures.
+#[cfg(feature = "common")]
+pub mod governance;
 
 #[cfg(feature = "common")]
 pub mod error;

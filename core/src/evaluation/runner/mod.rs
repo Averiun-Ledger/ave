@@ -67,7 +67,7 @@ impl Runner {
                 old_owner_name.clone(),
                 new_owner,
             ),
-            EvaluateInfo::AllSchemasFact {
+            EvaluateInfo::TrackerSchemasFact {
                 contract,
                 init_state,
                 state,
@@ -78,7 +78,7 @@ impl Runner {
                 )
                 .await
             }
-            EvaluateInfo::AllSchemasTransfer {
+            EvaluateInfo::TrackerSchemasTransfer {
                 governance_data,
                 new_owner,
                 old_owner,
@@ -704,16 +704,16 @@ impl Runner {
             governance.roles_schema = new_roles;
         }
 
-        if let Some(all_schemas) = roles_event.all_schemas {
-            let new_roles = governance.roles_all_schemas.clone();
+        if let Some(tracker_schemas) = roles_event.tracker_schemas {
+            let new_roles = governance.roles_tracker_schemas.clone();
 
-            let new_roles = all_schemas.check_data(
+            let new_roles = tracker_schemas.check_data(
                 governance,
                 new_roles,
-                &SchemaType::AllSchemas,
+                &SchemaType::TrackerSchemas,
             )?;
 
-            governance.roles_all_schemas = new_roles;
+            governance.roles_tracker_schemas = new_roles;
         }
 
         Ok(())
@@ -769,12 +769,12 @@ impl Runner {
                     });
                 }
 
-                if new_schema.id == SchemaType::AllSchemas {
+                if new_schema.id == SchemaType::TrackerSchemas {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::ReservedWord {
                             field: "schema id".to_owned(),
-                            value: ReservedWords::AllSchemas.to_string(),
+                            value: ReservedWords::TrackerSchemas.to_string(),
                         },
                     });
                 }

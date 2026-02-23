@@ -6,7 +6,7 @@ use crate::governance::{
     error::GovernanceError,
     model::{
         HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
-        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesAllSchemas, RolesGov,
+        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesTrackerSchemas, RolesGov,
         RolesSchema, Schema, WitnessesData,
     },
 };
@@ -39,7 +39,7 @@ pub struct GovernanceData {
     pub policies_gov: PolicyGov,
     pub schemas: BTreeMap<SchemaType, Schema>,
     pub roles_schema: BTreeMap<SchemaType, RolesSchema>,
-    pub roles_all_schemas: RolesAllSchemas,
+    pub roles_tracker_schemas: RolesTrackerSchemas,
     pub policies_schema: BTreeMap<SchemaType, PolicySchema>,
 }
 
@@ -65,7 +65,7 @@ impl GovernanceData {
             },
         };
 
-        let not_gov_role = RolesAllSchemas {
+        let not_gov_role = RolesTrackerSchemas {
             evaluator: BTreeSet::new(),
             validator: BTreeSet::new(),
             witness: BTreeSet::new(),
@@ -85,7 +85,7 @@ impl GovernanceData {
             policies_gov,
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
-            roles_all_schemas: not_gov_role,
+            roles_tracker_schemas: not_gov_role,
             policies_schema: BTreeMap::new(),
         }
     }
@@ -206,41 +206,41 @@ impl GovernanceData {
                 }
             }
 
-            for evaluators in self.roles_all_schemas.evaluator.iter() {
+            for evaluators in self.roles_tracker_schemas.evaluator.iter() {
                 if evaluators.name == ReservedWords::Owner.to_string() {
                     remove_evaluators
-                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
                         .or_default()
                         .push(evaluators.namespace.clone());
                 } else if evaluators.name == old_name {
                     remove_evaluators
-                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
                         .or_default()
                         .push(evaluators.namespace.clone());
                 }
             }
-            for validators in self.roles_all_schemas.validator.iter() {
+            for validators in self.roles_tracker_schemas.validator.iter() {
                 if validators.name == ReservedWords::Owner.to_string() {
                     remove_validators
-                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
                         .or_default()
                         .push(validators.namespace.clone());
                 } else if validators.name == old_name {
                     remove_validators
-                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
                         .or_default()
                         .push(validators.namespace.clone());
                 }
             }
-            for witness in self.roles_all_schemas.witness.iter() {
+            for witness in self.roles_tracker_schemas.witness.iter() {
                 if witness.name == ReservedWords::Owner.to_string() {
                     remove_witnesses
-                        .entry((SchemaType::AllSchemas, old_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
                         .or_default()
                         .push(witness.namespace.clone());
                 } else if witness.name == old_name {
                     remove_witnesses
-                        .entry((SchemaType::AllSchemas, new_owner_key.clone()))
+                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
                         .or_default()
                         .push(witness.namespace.clone());
                 }
@@ -397,33 +397,33 @@ impl GovernanceData {
                 }
             }
 
-            // all_schemas
-            for evaluators in self.roles_all_schemas.evaluator.iter() {
+            // tracker_schemas
+            for evaluators in self.roles_tracker_schemas.evaluator.iter() {
                 if remove_members.contains(&evaluators.name)
                     && let Some(user) = self.members.get(&evaluators.name)
                 {
                     remove_evaluators
-                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .entry((SchemaType::TrackerSchemas, user.clone()))
                         .or_default()
                         .push(evaluators.namespace.clone());
                 }
             }
-            for validators in self.roles_all_schemas.validator.iter() {
+            for validators in self.roles_tracker_schemas.validator.iter() {
                 if remove_members.contains(&validators.name)
                     && let Some(user) = self.members.get(&validators.name)
                 {
                     remove_validators
-                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .entry((SchemaType::TrackerSchemas, user.clone()))
                         .or_default()
                         .push(validators.namespace.clone());
                 }
             }
-            for witness in self.roles_all_schemas.witness.iter() {
+            for witness in self.roles_tracker_schemas.witness.iter() {
                 if remove_members.contains(&witness.name)
                     && let Some(user) = self.members.get(&witness.name)
                 {
                     remove_witnesses
-                        .entry((SchemaType::AllSchemas, user.clone()))
+                        .entry((SchemaType::TrackerSchemas, user.clone()))
                         .or_default()
                         .push(witness.namespace.clone());
                 }
@@ -457,7 +457,7 @@ impl GovernanceData {
 
     pub fn remove_member_role(&mut self, remove_members: &Vec<MemberName>) {
         self.roles_gov.remove_member_role(remove_members);
-        self.roles_all_schemas.remove_member_role(remove_members);
+        self.roles_tracker_schemas.remove_member_role(remove_members);
 
         for (_, roles) in self.roles_schema.iter_mut() {
             roles.remove_member_role(remove_members);
@@ -469,8 +469,8 @@ impl GovernanceData {
         let owner_name = vec![ReservedWords::Owner.to_string()];
         self.roles_gov.remove_member_role(&old_name);
 
-        self.roles_all_schemas.remove_member_role(&old_name);
-        self.roles_all_schemas.remove_member_role(&owner_name);
+        self.roles_tracker_schemas.remove_member_role(&old_name);
+        self.roles_tracker_schemas.remove_member_role(&owner_name);
 
         for (_, roles) in self.roles_schema.iter_mut() {
             roles.remove_member_role(&old_name);
@@ -539,7 +539,7 @@ impl GovernanceData {
                 namespace,
                 ..
             } => {
-                if self.roles_all_schemas.hash_this_rol(
+                if self.roles_tracker_schemas.hash_this_rol(
                     role.clone(),
                     namespace.clone(),
                     &name,
@@ -585,7 +585,7 @@ impl GovernanceData {
                     .contains(&ReservedWords::Witnesses.to_string())
                 {
                     let not_gov_witnesses = self
-                        .roles_all_schemas
+                        .roles_tracker_schemas
                         .get_signers(RoleTypes::Witness, namespace.clone())
                         .0;
 
@@ -624,7 +624,7 @@ impl GovernanceData {
             self.roles_gov.get_signers(role)
         } else {
             let (mut not_gov_signers, not_gov_any) = self
-                .roles_all_schemas
+                .roles_tracker_schemas
                 .get_signers(role.clone(), namespace.clone());
             let (mut schema_signers, schema_any) =
                 if let Some(roles) = self.roles_schema.get(schema_id) {
@@ -682,7 +682,7 @@ impl GovernanceData {
                 for witness in witnesses_creator {
                     if witness == ReservedWords::Witnesses.to_string() {
                         let mut not_gov_witnesses = self
-                            .roles_all_schemas
+                            .roles_tracker_schemas
                             .get_signers(RoleTypes::Witness, namespace.clone())
                             .0;
                         let mut schema_witnesses = roles_schema
@@ -775,7 +775,7 @@ impl GovernanceData {
         };
 
         if self
-            .roles_all_schemas
+            .roles_tracker_schemas
             .hash_this_rol_not_namespace(role.clone(), &name)
         {
             return self.schemas.keys().cloned().collect();
@@ -809,10 +809,10 @@ impl GovernanceData {
             return map;
         };
 
-        let vec = self.roles_all_schemas.role_namespace(role.clone(), &name);
+        let vec = self.roles_tracker_schemas.role_namespace(role.clone(), &name);
 
         if !vec.is_empty() {
-            map.insert(SchemaType::AllSchemas, vec);
+            map.insert(SchemaType::TrackerSchemas, vec);
         }
 
         for (schema_id, roles) in self.roles_schema.iter() {
@@ -834,7 +834,7 @@ impl GovernanceData {
         > = BTreeMap::new();
 
         for (schema_id, namespace) in schema_namespaces {
-            if schema_id == SchemaType::AllSchemas {
+            if schema_id == SchemaType::TrackerSchemas {
                 for (schema_id, roles) in self.roles_schema.iter() {
                     let schema_entry =
                         map.entry(schema_id.clone()).or_default();
@@ -888,7 +888,7 @@ impl GovernanceData {
         };
 
         if self
-            .roles_all_schemas
+            .roles_tracker_schemas
             .hash_this_rol_not_namespace(role.clone(), &name)
         {
             return self.schemas.clone();
@@ -926,7 +926,7 @@ impl GovernanceData {
         };
 
         if self
-            .roles_all_schemas
+            .roles_tracker_schemas
             .hash_this_rol_not_namespace(role.clone(), &name)
         {
             return self

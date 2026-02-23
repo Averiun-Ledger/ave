@@ -335,7 +335,7 @@ async fn test_namespace_in_role_1() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -593,7 +593,7 @@ async fn test_namespace_in_role_2() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -867,7 +867,7 @@ async fn test_subject_transfer_event_1() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "issuer": [
                         {
@@ -1124,7 +1124,7 @@ async fn test_subject_transfer_event_2() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -1478,7 +1478,7 @@ async fn test_subject_transfer_event_3() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -1849,7 +1849,7 @@ async fn test_dynamic_witnesses_1() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -2092,7 +2092,7 @@ async fn test_dynamic_witnesses_2() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -2371,7 +2371,7 @@ async fn test_dynamic_witnesses_explicit_1() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {
@@ -2558,7 +2558,7 @@ async fn test_dynamic_witnesses_explicit_2() {
                     ]
                 }
             },
-            "all_schemas": {
+            "tracker_schemas": {
                 "add": {
                     "evaluator": [
                         {

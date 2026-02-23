@@ -164,15 +164,15 @@ impl RolesGov {
     BorshDeserialize,
     BorshSerialize,
 )]
-pub struct RolesAllSchemas {
+pub struct RolesTrackerSchemas {
     pub evaluator: BTreeSet<Role>,
     pub validator: BTreeSet<Role>,
     pub witness: BTreeSet<Role>,
     pub issuer: RoleSchemaIssuer,
 }
 
-impl From<RolesAllSchemas> for RolesSchema {
-    fn from(value: RolesAllSchemas) -> Self {
+impl From<RolesTrackerSchemas> for RolesSchema {
+    fn from(value: RolesTrackerSchemas) -> Self {
         Self {
             evaluator: value.evaluator,
             validator: value.validator,
@@ -183,7 +183,7 @@ impl From<RolesAllSchemas> for RolesSchema {
     }
 }
 
-impl From<RolesSchema> for RolesAllSchemas {
+impl From<RolesSchema> for RolesTrackerSchemas {
     fn from(value: RolesSchema) -> Self {
         Self {
             evaluator: value.evaluator,
@@ -194,7 +194,7 @@ impl From<RolesSchema> for RolesAllSchemas {
     }
 }
 
-impl RolesAllSchemas {
+impl RolesTrackerSchemas {
     pub fn role_namespace(
         &self,
         role: ProtocolTypes,

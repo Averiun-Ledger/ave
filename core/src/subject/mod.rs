@@ -692,7 +692,7 @@ where
                     details: e.to_string(),
                 }
             })?,
-            SchemaType::AllSchemas => {
+            SchemaType::TrackerSchemas => {
                 return Err(SubjectError::InvalidSchemaId);
             }
         };

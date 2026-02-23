@@ -27,13 +27,13 @@ pub enum SchemaType {
     #[default]
     Governance,
     Type(String),
-    AllSchemas,
+    TrackerSchemas,
 }
 
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 pub enum ReservedWords {
-    AllSchemas,
+    TrackerSchemas,
     Governance,
     Any,
     Witnesses,
@@ -43,7 +43,7 @@ pub enum ReservedWords {
 impl Display for ReservedWords {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReservedWords::AllSchemas => write!(f, "all_schemas"),
+            ReservedWords::TrackerSchemas => write!(f, "tracker_schemas"),
             ReservedWords::Governance => write!(f, "governance"),
             ReservedWords::Any => write!(f, "Any"),
             ReservedWords::Witnesses => write!(f, "Witnesses"),
@@ -63,7 +63,7 @@ impl std::str::FromStr for SchemaType {
 
         match s {
             "governance" => Ok(SchemaType::Governance),
-            "all_schemas" => Ok(SchemaType::AllSchemas),
+            "tracker_schemas" => Ok(SchemaType::TrackerSchemas),
             _ => Ok(SchemaType::Type(s.to_string())),
         }
     }
@@ -74,7 +74,7 @@ impl SchemaType {
         match self {
             SchemaType::Governance => "governance".len(),
             SchemaType::Type(schema_id) => schema_id.len(),
-            SchemaType::AllSchemas => "all_schemas".len(),
+            SchemaType::TrackerSchemas => "tracker_schemas".len(),
         }
     }
 
@@ -82,18 +82,18 @@ impl SchemaType {
         match self {
             SchemaType::Governance => false,
             SchemaType::Type(schschema_id) => schschema_id.is_empty(),
-            SchemaType::AllSchemas => false,
+            SchemaType::TrackerSchemas => false,
         }
     }
 
     pub fn is_valid(&self) -> bool {
         match self {
             SchemaType::Governance => true,
-            SchemaType::AllSchemas => true,
+            SchemaType::TrackerSchemas => true,
             SchemaType::Type(schema_id) => {
                 !schema_id.is_empty()
                     && schema_id != &ReservedWords::Governance.to_string()
-                    && schema_id != &ReservedWords::AllSchemas.to_string()
+                    && schema_id != &ReservedWords::TrackerSchemas.to_string()
                     && schema_id.trim().len() == schema_id.len()
             }
         }
@@ -102,11 +102,11 @@ impl SchemaType {
     pub fn is_valid_in_request(&self) -> bool {
         match self {
             SchemaType::Governance => true,
-            SchemaType::AllSchemas => false,
+            SchemaType::TrackerSchemas => false,
             SchemaType::Type(schema_id) => {
                 !schema_id.is_empty()
                     && schema_id != &ReservedWords::Governance.to_string()
-                    && schema_id != &ReservedWords::AllSchemas.to_string()
+                    && schema_id != &ReservedWords::TrackerSchemas.to_string()
                     && schema_id.trim().len() == schema_id.len()
             }
         }
@@ -116,7 +116,7 @@ impl SchemaType {
 impl Display for SchemaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchemaType::AllSchemas => write!(f, "all_schemas"),
+            SchemaType::TrackerSchemas => write!(f, "tracker_schemas"),
             SchemaType::Governance => write!(f, "governance"),
             SchemaType::Type(schema_id) => write!(f, "{}", schema_id),
         }
@@ -143,7 +143,7 @@ impl<'de> Deserialize<'de> for SchemaType {
 
         Ok(match s.as_str() {
             "governance" => SchemaType::Governance,
-            "all_schemas" => SchemaType::AllSchemas,
+            "tracker_schemas" => SchemaType::TrackerSchemas,
             _ => SchemaType::Type(s),
         })
     }
@@ -155,7 +155,7 @@ impl Serialize for SchemaType {
         S: Serializer,
     {
         match self {
-            SchemaType::AllSchemas => serializer.serialize_str("all_schemas"),
+            SchemaType::TrackerSchemas => serializer.serialize_str("tracker_schemas"),
             SchemaType::Governance => serializer.serialize_str("governance"),
             SchemaType::Type(schema) => serializer.serialize_str(schema),
         }

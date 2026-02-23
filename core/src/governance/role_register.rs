@@ -289,7 +289,7 @@ impl Handler<RoleRegister> for RoleRegister {
 
                     let mut all_eval = if !evaluation.schema_id.is_gov()
                         && let Some(evaluators) =
-                            self.evaluators.get(&SchemaType::AllSchemas)
+                            self.evaluators.get(&SchemaType::TrackerSchemas)
                     {
                         let mut schema_eval = vec![];
                         for (key, namespace) in evaluators {
@@ -381,7 +381,7 @@ impl Handler<RoleRegister> for RoleRegister {
 
                 let mut all_val = if !search.schema_id.is_gov()
                     && let Some(validators) =
-                        self.validators.get(&SchemaType::AllSchemas)
+                        self.validators.get(&SchemaType::TrackerSchemas)
                 {
                     // PublicKey, Namespace), (IntervalSet, Option<u64>
                     let mut schema_val = vec![];

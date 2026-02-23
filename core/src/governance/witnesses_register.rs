@@ -307,7 +307,7 @@ impl WitnessesRegister {
         }
     }
 
-    /// Busca en los testigos de schema para ambos tipos (específico y AllSchemas) usando search_in_schema_actual
+    /// Busca en los testigos de schema para ambos tipos (específico y TrackerSchemas) usando search_in_schema_actual
     async fn search_schemas_actual(
         &self,
         node: &PublicKey,
@@ -341,7 +341,7 @@ impl WitnessesRegister {
 
         // todos los esquemas
         if let Some(witness_data) =
-            self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
+            self.witnesses.get(&(node.clone(), SchemaType::TrackerSchemas))
         {
             return Self::search_in_schema_actual(
                 witness_data,
@@ -358,7 +358,7 @@ impl WitnessesRegister {
         }
     }
 
-    /// Busca en los testigos de schema para ambos tipos (específico y AllSchemas) usando search_in_schema para old owners
+    /// Busca en los testigos de schema para ambos tipos (específico y TrackerSchemas) usando search_in_schema para old owners
     fn search_schemas_old(
         &self,
         node: &PublicKey,
@@ -385,7 +385,7 @@ impl WitnessesRegister {
 
         // todos los esquemas
         if let Some(witness_data) =
-            self.witnesses.get(&(node.clone(), SchemaType::AllSchemas))
+            self.witnesses.get(&(node.clone(), SchemaType::TrackerSchemas))
         {
             return Self::search_in_schema(
                 witness_data,

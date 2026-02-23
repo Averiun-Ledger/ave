@@ -51,10 +51,10 @@ impl EvaluationReq {
             }),
             (
                 EventRequest::Fact(fact_request),
-                EvaluateData::AllSchemasFact { contract, state },
+                EvaluateData::TrackerSchemasFact { contract, state },
             ) => {
                 if let Some(init_state) = init_state {
-                    Ok(EvaluateInfo::AllSchemasFact {
+                    Ok(EvaluateInfo::TrackerSchemasFact {
                         contract: contract.clone(),
                         init_state: init_state.clone(),
                         state: state.clone(),
@@ -75,13 +75,13 @@ impl EvaluationReq {
             }),
             (
                 EventRequest::Transfer(transfer_request),
-                EvaluateData::AllSchemasTransfer {
+                EvaluateData::TrackerSchemasTransfer {
                     governance_data,
                     namespace,
                     schema_id,
                     ..
                 },
-            ) => Ok(EvaluateInfo::AllSchemasTransfer {
+            ) => Ok(EvaluateInfo::TrackerSchemasTransfer {
                 governance_data: governance_data.clone(),
                 new_owner: transfer_request.new_owner.clone(),
                 old_owner: self.event_request.signature().signer.clone(),
@@ -117,11 +117,11 @@ pub enum EvaluateData {
     GovConfirm {
         state: GovernanceData,
     },
-    AllSchemasFact {
+    TrackerSchemasFact {
         contract: String,
         state: ValueWrapper,
     },
-    AllSchemasTransfer {
+    TrackerSchemasTransfer {
         state: ValueWrapper,
         governance_data: GovernanceData,
         namespace: Namespace,
@@ -135,8 +135,8 @@ impl EvaluateData {
             EvaluateData::GovFact { .. }
             | EvaluateData::GovTransfer { .. }
             | EvaluateData::GovConfirm { .. } => true,
-            EvaluateData::AllSchemasFact { .. }
-            | EvaluateData::AllSchemasTransfer { .. } => false,
+            EvaluateData::TrackerSchemasFact { .. }
+            | EvaluateData::TrackerSchemasTransfer { .. } => false,
         }
     }
 }
