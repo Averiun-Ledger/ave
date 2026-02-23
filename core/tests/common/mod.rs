@@ -362,11 +362,15 @@ pub async fn wait_request_state(
                     | (RequestState::Finish, RequestState::Finish) => {
                         return Ok(state.state);
                     }
-                    _ => {}
+                    _ => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                 }
             } else {
                 return Ok(state.state);
             }
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 }

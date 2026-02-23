@@ -560,7 +560,7 @@ impl Handler<Validation> for Validation {
 #[cfg(test)]
 pub mod tests {
     use core::panic;
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use test_log::test;
 
@@ -577,6 +577,7 @@ pub mod tests {
 
     use crate::{
         EventRequest, Node, NodeMessage, NodeResponse, Signed,
+        evaluation::tests::wait_request,
         governance::{
             Governance, GovernanceMessage, GovernanceResponse,
             data::GovernanceData,
@@ -677,7 +678,14 @@ pub mod tests {
 
         let owned_subj = response.subject_id;
 
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let tracking = system
+            .get_actor::<RequestTracking>(&ActorPath::from(
+                "/user/request/tracking",
+            ))
+            .await
+            .unwrap();
+
+        wait_request(&tracking, response.request_id).await;
 
         let subject_actor: ActorRef<Governance> = system
             .get_actor(&ActorPath::from(format!("/user/node/{}", owned_subj)))
@@ -779,13 +787,6 @@ pub mod tests {
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
-        let tracking = system
-            .get_actor::<RequestTracking>(&ActorPath::from(
-                "/user/request/tracking",
-            ))
-            .await
-            .unwrap();
-
         (
             system,
             node_actor,
@@ -811,7 +812,7 @@ pub mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             _dirs,
         ) = create_gov().await;
@@ -832,7 +833,7 @@ pub mod tests {
 
         let signed_event_req = Signed::from_parts(eol_reques, signature);
 
-        let RequestHandlerResponse::Ok(_response) = request_actor
+        let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
             })
@@ -842,7 +843,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        wait_request(&tracking, response.request_id).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)

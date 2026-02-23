@@ -606,7 +606,7 @@ impl Handler<Evaluation> for Evaluation {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::{str::FromStr, time::Duration};
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
@@ -631,15 +631,72 @@ mod tests {
         node::Node,
         query::{Query, QueryMessage, QueryResponse},
         request::{
-            RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
-            tracking::{
+            RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse, tracking::{
                 RequestTracking, RequestTrackingMessage,
                 RequestTrackingResponse,
-            },
+            }
         },
         tracker::{Tracker, TrackerMessage, TrackerResponse},
         validation::tests::create_gov,
     };
+
+    pub async fn emit_request(
+        request: EventRequest,
+        node_actor: &ActorRef<Node>,
+        request_actor: &ActorRef<RequestHandler>,
+        tracking_actor: &ActorRef<RequestTracking>,
+        wait_request_state: bool,
+    ) -> RequestData {
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(request, signature);
+
+        let RequestHandlerResponse::Ok(request_data) = request_actor
+            .ask(RequestHandlerMessage::NewRequest {
+                request: signed_event_req.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        if wait_request_state {
+            wait_request(tracking_actor, request_data.request_id.clone()).await;
+        }
+
+        request_data
+    }
+
+    pub async fn wait_request(
+        tracking_actor: &ActorRef<RequestTracking>,
+        request_id: DigestIdentifier,
+    ) {
+        loop {
+            if let Ok(RequestTrackingResponse::Info(state)) = tracking_actor
+                .ask(RequestTrackingMessage::SearchRequest(request_id.clone()))
+                .await
+            {
+                match state.state {
+                    RequestState::Approval
+                    | RequestState::Abort { .. }
+                    | RequestState::Invalid { .. }
+                    | RequestState::Finish => break,
+                    _ => {}
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            };
+        }
+    }
 
     #[test(tokio::test)]
     async fn test_fact_gov() {
@@ -669,41 +726,8 @@ mod tests {
             payload: payload.clone(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
+        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let RequestTrackingResponse::Info(state) = tracking
-            .ask(RequestTrackingMessage::SearchRequest(
-                request_id.request_id.clone(),
-            ))
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(RequestState::Approval, state.state);
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {
                 subject_id: subject_id.clone(),
@@ -736,7 +760,8 @@ mod tests {
             )
         );
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        wait_request(&tracking, request_data.request_id).await;
+
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -864,43 +889,8 @@ mod tests {
             payload: payload.clone(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let RequestTrackingResponse::Info(state) = tracking
-            .ask(RequestTrackingMessage::SearchRequest(
-                request_id.request_id.clone(),
-            ))
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(RequestState::Finish, state.state);
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -1012,7 +1002,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             _dir,
         ) = create_gov().await;
@@ -1031,29 +1021,7 @@ mod tests {
             })),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(_request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(9)).await;
+        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
@@ -1074,7 +1042,7 @@ mod tests {
             )
         );
 
-        let transfer_reques = EventRequest::Transfer(TransferRequest {
+        let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
             new_owner: PublicKey::from_str(
                 "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
@@ -1082,29 +1050,7 @@ mod tests {
             .unwrap(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_reques.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(transfer_reques, signature);
-
-        let RequestHandlerResponse::Ok(_response) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -1208,6 +1154,18 @@ mod tests {
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                transfer_request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(transfer_request, signature);
+
         if !request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
@@ -1227,7 +1185,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             _dir,
         ) = create_gov().await;
@@ -1246,29 +1204,7 @@ mod tests {
             })),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(_request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(9)).await;
+        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
@@ -1289,7 +1225,7 @@ mod tests {
             )
         );
 
-        let transfer_reques = EventRequest::Transfer(TransferRequest {
+        let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
             new_owner: PublicKey::from_str(
                 "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA",
@@ -1297,29 +1233,7 @@ mod tests {
             .unwrap(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_reques.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(transfer_reques, signature);
-
-        let RequestHandlerResponse::Ok(_response) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _request_data = emit_request(transfer_request, &node_actor, &request_actor, &tracking, true).await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -1519,41 +1433,7 @@ mod tests {
             })),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(9)).await;
-
-        let RequestTrackingResponse::Info(_state) = tracking
-            .ask(RequestTrackingMessage::SearchRequest(
-                request_id.request_id.clone(),
-            ))
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {
@@ -1587,7 +1467,8 @@ mod tests {
             )
         );
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        wait_request(&tracking, request_data.request_id).await;
+
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -1703,51 +1584,17 @@ mod tests {
             namespace: Namespace::new(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                create_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(create_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let RequestTrackingResponse::Info(state) = tracking
-            .ask(RequestTrackingMessage::SearchRequest(
-                request_id.request_id.clone(),
-            ))
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(RequestState::Finish, state.state);
+        let request_data = emit_request(create_request, &node_actor, &request_actor, &tracking, true).await;
 
         let subject_actor: ActorRef<Tracker> = system
             .get_actor(&ActorPath::from(format!(
                 "/user/node/{}",
-                request_id.subject_id
+                request_data.subject_id
             )))
             .await
             .unwrap();
 
-        let subject_id = request_id.subject_id.clone();
+        let subject_id = request_data.subject_id.clone();
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
@@ -1848,7 +1695,7 @@ mod tests {
             query_actor,
             subject_actor,
             tracking,
-            request_id.subject_id,
+            request_data.subject_id,
             gov_id,
             _dir,
         )
@@ -1867,7 +1714,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             gov_id,
             _dir,
@@ -1884,29 +1731,8 @@ mod tests {
             payload: ValueWrapper(payload.clone()),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
+        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
             .await
@@ -1917,7 +1743,7 @@ mod tests {
 
         let QueryResponse::Subject(subject_data) = query_actor
             .ask(QueryMessage::GetSubject {
-                subject_id: request_id.subject_id.clone(),
+                subject_id: request_data.subject_id.clone(),
             })
             .await
             .unwrap()
@@ -2007,7 +1833,7 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             gov_id,
             _dir,
@@ -2024,29 +1850,8 @@ mod tests {
             payload: ValueWrapper(payload.clone()),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                fact_request.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
+        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
 
-        let signed_event_req = Signed::from_parts(fact_request, signature);
-
-        let RequestHandlerResponse::Ok(request_id) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
             .await
@@ -2057,7 +1862,7 @@ mod tests {
 
         let QueryResponse::Subject(subject_data) = query_actor
             .ask(QueryMessage::GetSubject {
-                subject_id: request_id.subject_id.clone(),
+                subject_id: request_data.subject_id.clone(),
             })
             .await
             .unwrap()
@@ -2151,13 +1956,13 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             gov_id,
             _dir,
         ) = create_tracker().await;
 
-        let transfer_reques = EventRequest::Transfer(TransferRequest {
+        let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
             new_owner: PublicKey::from_str(
                 "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
@@ -2165,29 +1970,7 @@ mod tests {
             .unwrap(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_reques.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(transfer_reques, signature);
-
-        let RequestHandlerResponse::Ok(_response) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
@@ -2287,6 +2070,18 @@ mod tests {
         assert!(metadata.properties.0["two"].as_u64().unwrap() == 0);
         assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
 
+        let response = node_actor
+            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
+                transfer_request.clone(),
+            )))
+            .await
+            .unwrap();
+        let NodeResponse::SignRequest(signature) = response else {
+            panic!("Invalid Response")
+        };
+
+        let signed_event_req = Signed::from_parts(transfer_request, signature);
+
         if !request_actor
             .ask(RequestHandlerMessage::NewRequest {
                 request: signed_event_req.clone(),
@@ -2306,13 +2101,13 @@ mod tests {
             request_actor,
             query_actor,
             subject_actor,
-            _tracking,
+            tracking,
             subject_id,
             gov_id,
             _dir,
         ) = create_tracker().await;
 
-        let transfer_reques = EventRequest::Transfer(TransferRequest {
+        let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
             new_owner: PublicKey::from_str(
                 "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbA",
@@ -2320,29 +2115,7 @@ mod tests {
             .unwrap(),
         });
 
-        let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_reques.clone(),
-            )))
-            .await
-            .unwrap();
-        let NodeResponse::SignRequest(signature) = response else {
-            panic!("Invalid Response")
-        };
-
-        let signed_event_req = Signed::from_parts(transfer_reques, signature);
-
-        let RequestHandlerResponse::Ok(_response) = request_actor
-            .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)

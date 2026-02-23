@@ -493,7 +493,7 @@ async fn test_namespace_in_role_1() {
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, subject_id.clone(), None)
+    let state = get_subject(owner_governance, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -513,7 +513,7 @@ async fn test_namespace_in_role_1() {
         })
     );
 
-    let state = get_subject(emit_events, subject_id.clone(), None)
+    let state = get_subject(emit_events, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -533,7 +533,7 @@ async fn test_namespace_in_role_1() {
         })
     );
 
-    let state = get_subject(witness_schema, subject_id.clone(), None)
+    let state = get_subject(witness_schema, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -752,7 +752,7 @@ async fn test_namespace_in_role_2() {
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, subject_id.clone(), None)
+    let state = get_subject(owner_governance, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -772,7 +772,7 @@ async fn test_namespace_in_role_2() {
         })
     );
 
-    let state = get_subject(emit_events, subject_id.clone(), None)
+    let state = get_subject(emit_events, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
@@ -792,7 +792,7 @@ async fn test_namespace_in_role_2() {
         })
     );
 
-    let state = get_subject(witness_schema, subject_id.clone(), None)
+    let state = get_subject(witness_schema, subject_id.clone(), Some(1))
         .await
         .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
