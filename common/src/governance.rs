@@ -264,7 +264,7 @@ pub enum Quorum {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "typescript", derive(TS))]
-#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "typescript", ts(export, type = "number | \"infinity\""))]
 pub enum CreatorQuantity {
     Quantity(u32),
     Infinity,
