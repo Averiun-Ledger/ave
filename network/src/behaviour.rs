@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    Config, Error, MemoryLimit, NodeType,
+    Config, Error, NodeType,
     control_list::{self, build_control_lists_updaters},
     routing::{self},
     utils::{
@@ -31,7 +31,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, iter, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 /// The network composed behaviour.
 #[derive(NetworkBehaviour)]
@@ -61,7 +60,6 @@ impl Behaviour {
         config: Config,
         token: CancellationToken,
         limits: LimitsConfig,
-        memory_limit: Option<MemoryLimit>,
     ) -> Self {
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
         let stream_routing = StreamProtocol::new(ROUTING_PROTOCOL);
@@ -96,29 +94,18 @@ impl Behaviour {
                 limits.conn_limmits_max_established_per_peer,
             );
 
-        let mem_limits = if let Some(memory_limit) = memory_limit {
-            match memory_limit {
-                MemoryLimit::Percentage(percentage) => {
-                    let clamped = percentage.clamp(0.01, 1.0);
-                    if clamped != percentage {
-                        warn!(
-                            "MemoryLimit::Percentage value {} is out of range (0.01, 1.0], clamped to {}",
-                            percentage, clamped
-                        );
-                    }
-                    Toggle::from(Some(
+        
+            #[cfg(feature = "test")]
+            let mem_limits = Toggle::from(None);
+
+            #[cfg(not(feature = "test"))]
+            let mem_limits = Toggle::from(Some(
                         memory_connection_limits::Behaviour::with_max_percentage(
-                            clamped,
+                            0.9,
                         ),
-                    ))
-                }
-                MemoryLimit::Bytes(bytes) => Toggle::from(Some(
-                    memory_connection_limits::Behaviour::with_max_bytes(bytes),
-                )),
-            }
-        } else {
-            Toggle::from(None)
-        };
+                    ));
+        
+
 
         let identify_config = identify::Config::new(
             IDENTIFY_PROTOCOL.to_owned(),
@@ -578,14 +565,15 @@ mod tests {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        let limits = LimitsConfig::build(&config.node_type);
+        let crate::ResolvedSpec { ram_mb, cpu_cores } =
+            crate::resolve_spec(None);
+        let limits = LimitsConfig::build(ram_mb, cpu_cores);
 
         let behaviour = Behaviour::new(
             &local_key.public(),
             config,
             CancellationToken::new(),
             limits,
-            None,
         );
         Swarm::new(
             transport,

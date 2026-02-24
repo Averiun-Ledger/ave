@@ -1,3 +1,4 @@
+use crate::config_types::MachineSpecHttp;
 use crate::server::{self};
 use crate::{
     auth::{
@@ -21,7 +22,7 @@ use crate::{
         ApiKeyConfigHttp, AuthConfigHttp, AveActorsStoreConfigHttp,
         AveConfigHttp, AveStoreConfigHttp, ConfigHttp, ControlListConfigHttp,
         CorsConfigHttp, EndpointRateLimitHttp, HttpConfigHttp,
-        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, MemoryLimitHttp,
+        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
         NetworkConfigHttp, RateLimitConfigHttp, RoutingConfigHttp,
         RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
         SinkConfigHttp, SinkServerHttp,
@@ -284,7 +285,6 @@ impl Modify for SecurityAddon {
             RoutingConfigHttp,
             RoutingNodeHttp,
             ControlListConfigHttp,
-            MemoryLimitHttp,
             HttpConfigHttp,
             CorsConfigHttp,
             SelfSignedCertConfigHttp,
@@ -299,7 +299,8 @@ impl Modify for SecurityAddon {
             SinkConfigHttp,
             SinkServerHttp,
             AveActorsStoreConfigHttp,
-            AveStoreConfigHttp
+            AveStoreConfigHttp,
+            MachineSpecHttp
         )
     ),
     modifiers(&SecurityAddon),

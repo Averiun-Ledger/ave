@@ -3,7 +3,7 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    AveStoreConfig, HttpConfig, MemoryLimit, SelfSignedCertConfig, auth::{
+    AveStoreConfig, HttpConfig, SelfSignedCertConfig, auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
     }
@@ -24,6 +24,28 @@ pub struct ConfigHttp {
     pub sink: SinkConfigHttp,
     pub auth: AuthConfigHttp,
     pub http: HttpConfigHttp,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub enum MachineSpecHttp {
+    /// Use a predefined profile.
+    Profile(String),
+    /// Supply exact machine dimensions.
+    Custom {
+        /// Total RAM in megabytes.
+        ram_mb: u64,
+        /// Available CPU cores.
+        cpu_cores: usize,
+    },
+}
+
+impl From<ave_bridge::MachineSpec> for MachineSpecHttp {
+    fn from(value: ave_bridge::MachineSpec) -> Self {
+        match value {
+            ave_bridge::MachineSpec::Profile(machine_profile) => Self::Profile(machine_profile.to_string()),
+            ave_bridge::MachineSpec::Custom { ram_mb, cpu_cores } => Self::Custom { ram_mb, cpu_cores },
+        }
+    }
 }
 
 impl From<ave_bridge::config::Config> for ConfigHttp {
@@ -256,6 +278,8 @@ pub struct AveConfigHttp {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+
+    pub spec: Option<MachineSpecHttp>
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -270,6 +294,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
+            spec: value.spec.map(MachineSpecHttp::from)
         }
     }
 }
@@ -277,7 +302,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AveStoreConfigHttp {
     pub db: String,
-    pub tunning: AveActorsStoreConfigHttp
+    pub durability: bool
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -290,12 +315,7 @@ pub struct AveActorsStoreConfigHttp {
 
 impl From<AveStoreConfig> for AveStoreConfigHttp {
     fn from(value: AveStoreConfig) -> Self {
-        Self { db: value.db.to_string(), tunning: AveActorsStoreConfigHttp {
-            ram_mb: value.tunning.ram_mb,
-            cpu_cores: value.tunning.cpu_cores,
-            profile: value.tunning.profile.map(|x| x.to_string()),
-            durability: value.tunning.durability,
-        } }
+        Self { db: value.db.to_string(), durability: value.durability}
     }
 }
 
@@ -315,8 +335,6 @@ pub struct NetworkConfigHttp {
     pub routing: RoutingConfigHttp,
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
-
-    pub memory_limit: Option<MemoryLimitHttp>,
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -332,26 +350,6 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .collect(),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
-            memory_limit: value.memory_limit.map(MemoryLimitHttp::from),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
-pub enum MemoryLimitHttp {
-    /// Ram in percentage.
-    Percentage(f64),
-    /// Ram in bytes.
-    Bytes(usize),
-}
-
-impl From<MemoryLimit> for MemoryLimitHttp {
-    fn from(value: MemoryLimit) -> Self {
-        match value {
-            MemoryLimit::Percentage(percentage) => {
-                MemoryLimitHttp::Percentage(percentage)
-            }
-            MemoryLimit::Bytes(bytes) => MemoryLimitHttp::Bytes(bytes),
         }
     }
 }

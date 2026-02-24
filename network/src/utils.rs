@@ -1,4 +1,4 @@
-use crate::{Error, NodeType, routing::RoutingNode};
+use crate::{Error, routing::RoutingNode};
 use bytes::Bytes;
 use ip_network::IpNetwork;
 use libp2p::{
@@ -69,7 +69,6 @@ pub struct LimitsConfig {
     pub tcp_nodelay: bool,
     pub reqres_max_concurrent_streams: usize,
     pub reqres_request_timeout: u64,
-    // TODO mirar en un futuro.
     pub identify_cache: usize,
     pub kademlia_query_timeout: u64,
     pub conn_limmits_max_pending_incoming: Option<u32>,
@@ -81,40 +80,76 @@ pub struct LimitsConfig {
 }
 
 impl LimitsConfig {
-    pub fn build(node_type: &NodeType) -> Self {
-        match node_type {
-            NodeType::Bootstrap | NodeType::Addressable => Self {
-                // reqres(2048) + tell(2048) + kad/identify overhead(~32) = 4128
-                yamux_max_num_streams: 4128,
-                tcp_listen_backlog: 8192,
-                tcp_nodelay: true,
-                reqres_max_concurrent_streams: 2048,
-                reqres_request_timeout: 15,
-                identify_cache: 1024,
-                kademlia_query_timeout: 25,
-                conn_limmits_max_pending_incoming: Some(512),
-                conn_limmits_max_pending_outgoing: Some(128),
-                conn_limmits_max_established_incoming: Some(8000),
-                conn_limmits_max_established_outgoing: Some(1000),
-                conn_limmits_max_established_per_peer: Some(2),
-                conn_limmits_max_established_total: Some(9000),
-            },
-            NodeType::Ephemeral => Self {
-                // reqres(128) + tell(128) + identify overhead(~8) = 264 → 256
-                yamux_max_num_streams: 256,
-                tcp_listen_backlog: 512,
-                tcp_nodelay: true,
-                reqres_max_concurrent_streams: 128,
-                reqres_request_timeout: 10,
-                identify_cache: 0,
-                kademlia_query_timeout: 15,
-                conn_limmits_max_pending_incoming: Some(50),
-                conn_limmits_max_pending_outgoing: Some(100),
-                conn_limmits_max_established_incoming: Some(100),
-                conn_limmits_max_established_outgoing: Some(200),
-                conn_limmits_max_established_per_peer: Some(2),
-                conn_limmits_max_established_total: Some(300),
-            },
+    /// Build network limits from the total machine RAM and CPU count.
+    ///
+    /// `ram_mb` and `cpu_cores` are **total machine specs** shared by all components
+    /// (DB backends, actor runtime, libp2p, OS).
+    ///
+    /// ## Resource split
+    ///
+    /// - **RAM-driven**: connection counts. Each established connection ≈ 50 KB
+    ///   (TCP state ~20 KB + yamux ~4 KB + Noise ~3 KB + bookkeeping ~3 KB).
+    ///   Budget: 10 % of total RAM. Split: 80 % inbound / 20 % outbound.
+    ///
+    /// - **CPU-driven**: stream concurrency and pending handshakes.
+    ///   Noise handshakes (pending connections) are asymmetric-crypto intensive.
+    ///   ReqRes concurrent streams are tokio tasks — more cores = more parallelism.
+    pub fn build(ram_mb: u64, cpu_cores: usize) -> Self {
+        let cores = cpu_cores.max(1);
+
+        // ── Connection limits (RAM) ──────────────────────────────────────────────
+        let budget_bytes = ram_mb * 1024 * 1024 * 10 / 100;
+        let bytes_per_conn: u64 = 50 * 1024; // ~50 KB per established connection
+
+        // Total connections: floor 50, cap 9 000 (file-descriptor & kernel limits)
+        let max_total = ((budget_bytes / bytes_per_conn) as u32)
+            .max(50)
+            .min(9_000);
+
+        // 80 % incoming (nodes are mostly servers), 20 % outgoing
+        let max_incoming = (max_total * 80 / 100).max(30).min(8_000);
+        let max_outgoing = (max_total * 20 / 100).max(20).min(1_000);
+
+        // ── Pending connections (CPU) ────────────────────────────────────────────
+        // Each pending connection performs a Noise handshake (X25519 + ChaCha20).
+        // ~64 parallel handshakes per core is a practical bound.
+        let pending_incoming = (max_incoming / 10)
+            .max(10)
+            .min((cores as u32) * 64)
+            .min(512);
+        let pending_outgoing = (max_outgoing / 4).max(20).min(128);
+
+        // ── Stream concurrency (CPU) ─────────────────────────────────────────────
+        // Each concurrent ReqRes stream is a tokio task. More cores → more tasks
+        // that run in true parallel. ~512 concurrent tasks per core is sensible.
+        let reqres_streams = (cores * 512).max(64).min(4_096);
+
+        // Yamux per-connection stream limit: must cover the worst case where a
+        // single peer saturates the full ReqRes budget, plus routing/kad overhead.
+        let yamux_streams = (reqres_streams + 64).max(256).min(8_192);
+
+        // ── TCP listen backlog (kernel-managed) ──────────────────────────────────
+        // Sized for SYN bursts: 1/8 of max_incoming, floor 128, cap 8 192.
+        let tcp_backlog = ((max_incoming / 8) as u32).max(128).min(8_192);
+
+        // ── Identify cache (RAM) ─────────────────────────────────────────────────
+        // Metadata for frequently-contacted peers: 1/4 of total, cap 1 024.
+        let identify_cache = ((max_total / 4) as usize).min(1_024);
+
+        Self {
+            yamux_max_num_streams: yamux_streams,
+            tcp_listen_backlog: tcp_backlog,
+            tcp_nodelay: true,
+            reqres_max_concurrent_streams: reqres_streams,
+            reqres_request_timeout: 15,
+            identify_cache,
+            kademlia_query_timeout: 25,
+            conn_limmits_max_pending_incoming: Some(pending_incoming),
+            conn_limmits_max_pending_outgoing: Some(pending_outgoing),
+            conn_limmits_max_established_incoming: Some(max_incoming),
+            conn_limmits_max_established_outgoing: Some(max_outgoing),
+            conn_limmits_max_established_per_peer: Some(2),
+            conn_limmits_max_established_total: Some(max_total),
         }
     }
 }

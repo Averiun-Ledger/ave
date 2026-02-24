@@ -2,11 +2,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     evaluation::{
-        request::EvaluateData,
-        response::{
+        compiler::{CompilerResponse, error::CompilerError}, request::EvaluateData, response::{
             EvalRunnerError, EvaluatorError, EvaluatorResponse as EvalRes,
-        },
-        runner::types::EvaluateInfo,
+        }, runner::types::EvaluateInfo
     },
     governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
@@ -87,7 +85,7 @@ impl EvalWorker {
         ctx: &mut ActorContext<EvalWorker>,
         ids: &[SchemaType],
         schemas: BTreeMap<SchemaType, Schema>,
-    ) -> Result<(), ActorError> {
+    ) -> Result<Option<CompilerError>, ActorError> {
         let contracts_path = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
         {
@@ -108,7 +106,7 @@ impl EvalWorker {
                 return Err(ActorError::Functional { description: "There is a contract that requires compilation but its scheme could not be found".to_owned()});
             };
 
-            compiler
+            let response = compiler
                 .ask(CompilerMessage::TemporalCompile {
                     contract_name: format!("{}_{}", self.governance_id, id),
                     contract: schema.contract.clone(),
@@ -117,10 +115,16 @@ impl EvalWorker {
                         .join("contracts")
                         .join(format!("{}_temp_{}", self.governance_id, id)),
                 })
-                .await?
+                .await?;
+
+            if let CompilerResponse::Error(e) = response {
+                compiler.ask_stop().await?;        
+                return Ok(Some(e));
+            }
         }
 
-        compiler.ask_stop().await
+        compiler.ask_stop().await?;
+        Ok(None)
     }
 
     async fn check_governance(
@@ -190,9 +194,11 @@ impl EvalWorker {
                 EvaluatorError::InternalError(e.to_string())
             })?;
 
-            self.compile_contracts(ctx, &compilations, governance_data.schemas)
+            if let Some(error) = self.compile_contracts(ctx, &compilations, governance_data.schemas)
                 .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
+                .map_err(|e| EvaluatorError::InternalError(e.to_string()))? {
+                    return Err(EvaluatorError::from(error));
+                };
         }
 
         Ok(result)

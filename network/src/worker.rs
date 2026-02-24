@@ -2,16 +2,11 @@
 //!
 
 use crate::{
-    Command, CommandHelper, Config, Error, Event as NetworkEvent, Monitor,
-    MonitorMessage, NodeType,
-    behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage},
-    service::NetworkService,
-    transport::build_transport,
-    utils::{
+    Command, CommandHelper, Config, Error, Event as NetworkEvent, MachineSpec, Monitor, MonitorMessage, NodeType, ResolvedSpec, behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage}, resolve_spec, service::NetworkService, transport::build_transport, utils::{
         Action, Due, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
         NetworkState, REQRES_PROTOCOL, RetryKind, RetryState, ScheduleType,
         convert_addresses, convert_boot_nodes, peer_id_to_ed25519_pubkey_bytes,
-    },
+    }
 };
 
 use std::{
@@ -22,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use ave_actors::ActorRef;
+use ave_actors::{ActorRef};
 use ave_common::identity::KeyPair;
 
 use libp2p::{
@@ -45,6 +40,7 @@ use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 
 const TARGET_WORKER: &str = "AveNetwork-Worker";
+
 
 /// Main network worker. Must be polled in order for the network to advance.
 ///
@@ -119,6 +115,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         config: Config,
         monitor: Option<ActorRef<Monitor>>,
         cancel: CancellationToken,
+        machine_spec: Option<MachineSpec>
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(TARGET_WORKER, "Creating network");
@@ -159,9 +156,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         // Create the listen addressess.
         let external_addresses = convert_addresses(&config.external_addresses)?;
 
-        // Is Ephemeral?
         let node_type = config.node_type.clone();
-        let limits = LimitsConfig::build(&node_type);
+
+        // Resolve machine sizing from the declared spec, or auto-detect from host.
+        let ResolvedSpec { ram_mb, cpu_cores } = resolve_spec(machine_spec);
+
+        let limits = LimitsConfig::build(ram_mb, cpu_cores);
 
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
@@ -171,7 +171,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             config.clone(),
             cancel.clone(),
             limits,
-            config.memory_limit,
         );
 
         // Create the swarm.
@@ -1307,7 +1306,7 @@ mod tests {
         );
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        NetworkWorker::new(&keys, config, None, token).unwrap()
+        NetworkWorker::new(&keys, config, None, token, None).unwrap()
     }
 
     // Create a config

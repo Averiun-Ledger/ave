@@ -18,7 +18,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{Span, debug, error, info_span};
 use types::{ContractResult, RunnerResult};
-use wasmtime::{Engine, Module, Store};
+use wasmtime::{Module, Store};
 
 use crate::{
     evaluation::runner::{error::RunnerError, types::EvaluateInfo},
@@ -30,7 +30,7 @@ use crate::{
         },
         model::{HashThisRole, RoleTypes, Schema},
     },
-    model::common::contract::{MAX_FUEL, MemoryManager, generate_linker},
+    model::common::contract::{MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker},
 };
 
 type AddRemoveChangeSchema = (
@@ -317,10 +317,10 @@ impl Runner {
         contract_name: &str,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
-        let Some(engine) =
-            ctx.system().get_helper::<Arc<Engine>>("engine").await
+        let Some(wasm_runtime) =
+            ctx.system().get_helper::<Arc<WasmRuntime>>("wasm_runtime").await
         else {
-            return Err(RunnerError::MissingHelper { name: "engine" });
+            return Err(RunnerError::MissingHelper { name: "wasm_runtime" });
         };
 
         let Some(contracts) = ctx
@@ -342,7 +342,7 @@ impl Runner {
         };
 
         let module = unsafe {
-            Module::deserialize(&engine, contract).map_err(|e| {
+            Module::deserialize(&wasm_runtime.engine, contract).map_err(|e| {
                 RunnerError::WasmError {
                     operation: "deserialize module",
                     details: e.to_string(),
@@ -351,9 +351,9 @@ impl Runner {
         };
 
         let (context, state_ptr, init_state_ptr, event_ptr) =
-            Self::generate_context(state, init_state, payload)?;
+            Self::generate_context(state, init_state, payload, &wasm_runtime.limits)?;
 
-        let mut store = Store::new(&engine, context);
+        let mut store = Store::new(&wasm_runtime.engine, context);
 
         // Limit WASM linear memory and table growth to prevent resource exhaustion.
         store.limiter(|data| &mut data.store_limits);
@@ -365,7 +365,7 @@ impl Runner {
                 details: e.to_string(),
             })?;
 
-        let linker = generate_linker(&engine)?;
+        let linker = generate_linker(&wasm_runtime.engine)?;
 
         let instance =
             linker.instantiate(&mut store, &module).map_err(|e| {
@@ -1131,8 +1131,9 @@ impl Runner {
         state: &ValueWrapper,
         init_state: &ValueWrapper,
         event: &ValueWrapper,
+        limits: &WasmLimits,
     ) -> Result<(MemoryManager, u32, u32, u32), RunnerError> {
-        let mut context = MemoryManager::default();
+        let mut context = MemoryManager::from_limits(limits);
 
         let state_bytes =
             to_vec(&state).map_err(|e| RunnerError::SerializationError {

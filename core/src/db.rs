@@ -5,7 +5,7 @@ use crate::config::{AveDbConfig, AveStoreConfig};
 
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
-use ave_actors::{Actor, ActorContext, ActorError, EncryptedKey};
+use ave_actors::{Actor, ActorContext, ActorError, EncryptedKey, MachineSpec};
 use ave_actors::{Collection, DbManager, PersistentActor, State, StoreError};
 #[cfg(feature = "rocksdb")]
 use ave_actors::{RocksDbManager, RocksDbStore};
@@ -22,16 +22,16 @@ pub enum Database {
 }
 
 impl Database {
-    pub fn open(config: &AveStoreConfig) -> Result<Self, StoreError> {
+    pub fn open(config: &AveStoreConfig, spec: Option<MachineSpec>) -> Result<Self, StoreError> {
         match &config.db {
             #[cfg(feature = "rocksdb")]
             AveDbConfig::Rocksdb { path } => {
-                let manager = RocksDbManager::new(path, config.tunning.clone())?;
+                let manager = RocksDbManager::new(path, config.durability, spec)?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
             AveDbConfig::Sqlite { path } => {
-                let manager = SqliteManager::new(path, config.tunning.clone())?;
+                let manager = SqliteManager::new(path, config.durability, spec)?;
                 Ok(Database::SQLite(manager))
             }
         }

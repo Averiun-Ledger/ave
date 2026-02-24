@@ -66,7 +66,6 @@ pub async fn create_node(
         vec![listen_address.to_owned()],
         vec![],
         peers,
-        None,
     );
 
     let contract_dir =
@@ -84,6 +83,7 @@ pub async fn create_node(
         contracts_path,
         always_accept,
         tracking_size: 100,
+        spec: None
     };
 
     let token = CancellationToken::new();

@@ -3,6 +3,7 @@ use ave_common::{ValueWrapper, identity::DigestIdentifier};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::evaluation::compiler::error::CompilerError;
 use crate::evaluation::runner::error::RunnerError;
 
 /// A struct representing an evaluation response.
@@ -88,6 +89,40 @@ impl std::fmt::Display for EvaluatorError {
             }
             Self::Runner(e) => write!(f, "runner error: {}", e),
             Self::InternalError(msg) => write!(f, "internal error: {}", msg),
+        }
+    }
+}
+
+impl From<CompilerError> for EvaluatorError {
+    fn from(value: CompilerError) -> Self {
+        match value {
+            // Errores del usuario: el contrato enviado es inválido
+            CompilerError::Base64DecodeFailed { .. } => {
+                Self::InvalidEventRequest(value.to_string())
+            }
+            CompilerError::CompilationFailed
+            | CompilerError::InvalidModule { .. }
+            | CompilerError::EntryPointNotFound { .. }
+            | CompilerError::ContractCheckFailed { .. }
+            | CompilerError::ContractExecutionFailed { .. }
+            | CompilerError::SerializationError {
+                context: "contract result deserialization",
+                ..
+            } => Self::Runner(EvalRunnerError::ContractFailed(value.to_string())),
+            // Fallos del sistema: no deberían ocurrir en un entorno sano
+            CompilerError::CargoBuildFailed { .. }
+            | CompilerError::DirectoryCreationFailed { .. }
+            | CompilerError::FileWriteFailed { .. }
+            | CompilerError::FileReadFailed { .. }
+            | CompilerError::MissingHelper { .. }
+            | CompilerError::FuelLimitError { .. }
+            | CompilerError::WasmPrecompileFailed { .. }
+            | CompilerError::WasmDeserializationFailed { .. }
+            | CompilerError::InstantiationFailed { .. }
+            | CompilerError::MemoryAllocationFailed { .. }
+            | CompilerError::SerializationError { .. } => {
+                Self::InternalError(value.to_string())
+            }
         }
     }
 }

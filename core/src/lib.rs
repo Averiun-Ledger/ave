@@ -42,7 +42,7 @@ use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use network::{Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
+use network::{MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
 
 use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
@@ -124,11 +124,14 @@ impl Api {
                 }
             })?;
 
+        let spec = config.spec.map(MachineSpec::from);
+
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,
             config.network.clone(),
             Some(newtork_monitor_actor.clone()),
             token.clone(),
+            spec,
         )
         .map_err(|e| {
             error!(error = %e, "Can not create networt");

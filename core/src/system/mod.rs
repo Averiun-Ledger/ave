@@ -1,20 +1,18 @@
 pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ave_actors::{ActorSystem, DbManager, EncryptedKey, SystemRef};
+use ave_actors::{ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef};
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use wasmtime::Engine;
-
 use crate::{
     config::{Config, SinkAuth},
     db::Database,
     external_db::DBManager,
     helpers::{db::ExternalDB, sink::AveSink},
-    model::common::contract::create_secure_wasmtime_config,
+    model::common::contract::WasmRuntime,
 };
 
 pub mod error;
@@ -49,19 +47,20 @@ pub async fn system(
         .add_helper("config", ConfigHelper::from(config.clone()))
         .await;
 
-    // Create secure Wasmtime configuration with resource limits
-    let engine = Engine::new(&create_secure_wasmtime_config())
+    // Build engine + limits together; actors fetch both via a single helper access.
+    let wasm_runtime = WasmRuntime::new(config.spec.clone())
         .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
-
-    system.add_helper("engine", Arc::new(engine)).await;
+    system.add_helper("wasm_runtime", Arc::new(wasm_runtime)).await;
 
     let contracts: HashMap<String, Vec<u8>> = HashMap::new();
     system
         .add_helper("contracts", Arc::new(RwLock::new(contracts)))
         .await;
 
+    let spec = config.spec.map(MachineSpec::from);
+
     // Build database manager.
-    let db = Database::open(&config.ave_db)
+    let db = Database::open(&config.ave_db, spec)
         .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
     system.add_helper("store", db.clone()).await;
 
@@ -164,7 +163,6 @@ pub mod tests {
             vec![],
             vec![],
             vec![],
-            None,
         );
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
@@ -179,6 +177,7 @@ pub mod tests {
             always_accept: false,
             tracking_size: 100,
             is_service: true,
+            spec: None
         };
 
         let (sys, handlers) = system(

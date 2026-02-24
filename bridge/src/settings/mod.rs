@@ -67,7 +67,7 @@ mod tests {
     use ave_core::{
         config::{
             AveDbConfig, ExternalDbConfig, LoggingOutput, LoggingRotation,
-            SinkServer,
+            MachineSpec, SinkServer,
         },
         subject::sinkdata::SinkTypes,
     };
@@ -90,12 +90,10 @@ is_service = true
 
 [node.ave_db]
 db = "/data/ave.db"
-
-[node.ave_db.tunning]
-ram_mb = 2048
-cpu_cores = 4
-profile = "medium"
 durability = true
+
+[node.spec]
+custom = { ram_mb = 2048, cpu_cores = 4 }
 
 [node.network]
 node_type = "Addressable"
@@ -121,9 +119,6 @@ block_list = ["Peer1", "Peer2"]
 service_allow_list = ["http://allow.local/list"]
 service_block_list = ["http://block.local/list"]
 interval_request = 42
-
-[node.network.memory_limit]
-Bytes = 1073741824
 
 [logging]
 output = { stdout = false, file = true, api = true }
@@ -192,11 +187,11 @@ node:
   hash_algorithm: Blake3
   ave_db:
     db: /data/ave.db
-    tunning:
+    durability: true
+  spec:
+    custom:
       ram_mb: 2048
       cpu_cores: 4
-      profile: medium
-      durability: true
   external_db: /data/ext.db
   contracts_path: /contracts
   always_accept: true
@@ -230,8 +225,6 @@ node:
       service_allow_list: [http://allow.local/list]
       service_block_list: [http://block.local/list]
       interval_request: 42
-    memory_limit:
-      Bytes: 1073741824
 logging:
   output:
     stdout: false
@@ -301,11 +294,12 @@ http:
     "hash_algorithm": "Blake3",
     "ave_db": {
       "db": "/data/ave.db",
-      "tunning": {
+      "durability": true
+    },
+    "spec": {
+      "custom": {
         "ram_mb": 2048,
-        "cpu_cores": 4,
-        "profile": "medium",
-        "durability": true
+        "cpu_cores": 4
       }
     },
     "external_db": "/data/ext.db",
@@ -347,9 +341,6 @@ http:
         "service_allow_list": ["http://allow.local/list"],
         "service_block_list": ["http://block.local/list"],
         "interval_request": 42
-      },
-      "memory_limit": {
-        "Bytes": 1073741824
       }
     }
   },
@@ -530,9 +521,15 @@ http:
             node.ave_db.db,
             AveDbConfig::build(&PathBuf::from("/data/ave.db"))
         );
-        assert_eq!(node.ave_db.tunning.ram_mb, Some(2048));
-        assert_eq!(node.ave_db.tunning.cpu_cores, Some(4));
-        assert!(node.ave_db.tunning.durability);
+        
+        assert!(node.ave_db.durability);
+        match &node.spec {
+            Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
+                assert_eq!(*ram_mb, 2048);
+                assert_eq!(*cpu_cores, 4);
+            }
+            _ => panic!("Expected MachineSpec::Custom"),
+        }
         assert_eq!(
             node.external_db,
             ExternalDbConfig::build(&PathBuf::from("/data/ext.db"))
@@ -599,13 +596,6 @@ http:
             node.network.control_list.get_interval_request(),
             Duration::from_secs(42)
         );
-        match &node.network.memory_limit {
-            Some(network::MemoryLimit::Bytes(bytes)) => {
-                assert_eq!(*bytes, 1073741824)
-            }
-            _ => panic!("Expected Some(Bytes) variant for memory_limit"),
-        }
-
         let logging = &config.logging;
         assert_eq!(
             logging.output,
@@ -707,6 +697,6 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
-        assert!(config.node.network.memory_limit.is_none());
+        assert!(config.node.spec.is_none());
     }
 }

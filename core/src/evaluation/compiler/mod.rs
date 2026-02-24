@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    NotPersistentActor, Response,
 };
 use ave_common::{
     ValueWrapper,
@@ -21,10 +21,10 @@ use serde_json::Value;
 use tokio::{fs, process::Command, sync::RwLock};
 
 use tracing::{Span, debug, error, info_span};
-use wasmtime::{Engine, ExternType, Module, Store};
+use wasmtime::{ExternType, Module, Store};
 
 use crate::model::common::contract::{
-    MAX_FUEL_COMPILATION, MemoryManager, generate_linker,
+    MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
 };
 
 pub mod error;
@@ -147,11 +147,10 @@ impl Compiler {
         contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, CompilerError> {
-        // Use the same secure configuration as the runner to ensure consistency
-        let Some(engine) =
-            ctx.system().get_helper::<Arc<Engine>>("engine").await
+        let Some(wasm_runtime) =
+            ctx.system().get_helper::<Arc<WasmRuntime>>("wasm_runtime").await
         else {
-            return Err(CompilerError::MissingHelper { name: "engine" });
+            return Err(CompilerError::MissingHelper { name: "wasm_runtime" });
         };
         // Read compile contract
         let wasm_path = contract_path
@@ -167,7 +166,7 @@ impl Compiler {
         })?;
 
         // Precompilation
-        let contract_bytes = engine.precompile_module(&file).map_err(|e| {
+        let contract_bytes = wasm_runtime.engine.precompile_module(&file).map_err(|e| {
             CompilerError::WasmPrecompileFailed {
                 details: e.to_string(),
             }
@@ -178,7 +177,7 @@ impl Compiler {
         // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
-            Module::deserialize(&engine, &contract_bytes).map_err(|e| {
+            Module::deserialize(&wasm_runtime.engine, &contract_bytes).map_err(|e| {
                 CompilerError::WasmDeserializationFailed {
                     details: e.to_string(),
                 }
@@ -223,10 +222,11 @@ impl Compiler {
         }
 
         // We create a context from the state and the event.
-        let (context, state_ptr) = Self::generate_context(state)?;
+        let (context, state_ptr) =
+            Self::generate_context(state, &wasm_runtime.limits)?;
 
         // Container to store and manage the global state of a WebAssembly instance during its execution.
-        let mut store = Store::new(&engine, context);
+        let mut store = Store::new(&wasm_runtime.engine, context);
 
         // Limit WASM linear memory and table growth to prevent resource exhaustion.
         store.limiter(|data| &mut data.store_limits);
@@ -239,7 +239,7 @@ impl Compiler {
         })?;
 
         // Responsible for combining several object files into a single WebAssembly executable file (.wasm).
-        let linker = generate_linker(&engine)?;
+        let linker = generate_linker(&wasm_runtime.engine)?;
 
         // Contract instance.
         let instance =
@@ -303,8 +303,9 @@ impl Compiler {
 
     fn generate_context(
         state: ValueWrapper,
+        limits: &WasmLimits,
     ) -> Result<(MemoryManager, u32), CompilerError> {
-        let mut context = MemoryManager::default();
+        let mut context = MemoryManager::from_limits(limits);
         let state_bytes =
             to_vec(&state).map_err(|e| CompilerError::SerializationError {
                 context: "state serialization",
@@ -339,13 +340,22 @@ pub enum CompilerMessage {
 
 impl Message for CompilerMessage {}
 
+
+#[derive(Debug, Clone)]
+pub enum CompilerResponse {
+    Ok,
+    Error(CompilerError),
+}
+
+impl Response for CompilerResponse {}
+
 impl NotPersistentActor for Compiler {}
 
 #[async_trait]
 impl Actor for Compiler {
     type Event = ();
     type Message = CompilerMessage;
-    type Response = ();
+    type Response = CompilerResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         if let Some(parent_span) = parent_span {
@@ -363,7 +373,7 @@ impl Handler<Compiler> for Compiler {
         _sender: ActorPath,
         msg: CompilerMessage,
         ctx: &mut ActorContext<Compiler>,
-    ) -> Result<(), ActorError> {
+    ) -> Result<CompilerResponse, ActorError> {
         match msg {
             CompilerMessage::TemporalCompile {
                 contract,
@@ -382,9 +392,7 @@ impl Handler<Compiler> for Compiler {
                         "Contract compilation failed"
                     );
                     let _ = fs::remove_dir_all(&contract_path).await;
-                    return Err(ActorError::FunctionalCritical {
-                        description: e.to_string(),
-                    });
+                    return Ok(CompilerResponse::Error(e));
                 };
 
                 if let Err(e) = Self::check_wasm(
@@ -401,9 +409,7 @@ impl Handler<Compiler> for Compiler {
                         "WASM validation failed"
                     );
                     let _ = fs::remove_dir_all(&contract_path).await;
-                    return Err(ActorError::FunctionalCritical {
-                        description: e.to_string(),
-                    });
+                    return Ok(CompilerResponse::Error(e));
                 }
 
                 if let Err(e) = fs::remove_dir_all(&contract_path).await {
@@ -415,7 +421,7 @@ impl Handler<Compiler> for Compiler {
                     );
                 }
 
-                Ok(())
+                Ok(CompilerResponse::Ok)
             }
             CompilerMessage::Compile {
                 contract,
@@ -452,9 +458,7 @@ impl Handler<Compiler> for Compiler {
                             path = %contract_path.display(),
                             "Contract compilation failed"
                         );
-                        return Err(ActorError::FunctionalCritical {
-                            description: e.to_string(),
-                        });
+                        return Ok(CompilerResponse::Error(e));
                     };
 
                     let contract = match Self::check_wasm(
@@ -472,9 +476,7 @@ impl Handler<Compiler> for Compiler {
                                 contract_name = %contract_name,
                                 "WASM validation failed"
                             );
-                            return Err(ActorError::FunctionalCritical {
-                                description: e.to_string(),
-                            });
+                            return Ok(CompilerResponse::Error(e));
                         }
                     };
 
@@ -507,7 +509,7 @@ impl Handler<Compiler> for Compiler {
                     );
                 }
 
-                Ok(())
+                Ok(CompilerResponse::Ok)
             }
         }
     }

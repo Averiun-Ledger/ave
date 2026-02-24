@@ -28,11 +28,11 @@ pub use ave_core::{
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
-pub use network::MemoryLimit;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, RoutingConfig,
     RoutingNode,
 };
+pub use ave_core::config::MachineSpec;
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinHandle,

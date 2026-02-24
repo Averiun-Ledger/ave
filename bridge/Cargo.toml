@@ -27,6 +27,7 @@ getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ave-actors = { workspace = true, features = ["sqlite"] }
 
 [features]
 default = ["sqlite", "ext-sqlite"]
