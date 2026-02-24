@@ -9,9 +9,8 @@ use crate::{
     transport::build_transport,
     utils::{
         Action, Due, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
-        NetworkState, REQRES_PROTOCOL, RetryKind, RetryState,
-        ScheduleType, TELL_PROTOCOL, convert_addresses, convert_boot_nodes,
-        peer_id_to_ed25519_pubkey_bytes,
+        NetworkState, REQRES_PROTOCOL, RetryKind, RetryState, ScheduleType,
+        convert_addresses, convert_boot_nodes, peer_id_to_ed25519_pubkey_bytes,
     },
 };
 
@@ -96,7 +95,7 @@ where
     pending_inbound_messages: HashMap<PeerId, VecDeque<Bytes>>,
 
     /// Ephemeral responses.
-    ephemeral_responses:
+    response_channels:
         HashMap<PeerId, VecDeque<ResponseChannel<ReqResMessage>>>,
 
     /// Successful dials
@@ -241,7 +240,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             retry_boot_nodes: HashMap::new(),
             pending_outbound_messages: HashMap::default(),
             pending_inbound_messages: HashMap::default(),
-            ephemeral_responses: HashMap::default(),
+            response_channels: HashMap::default(),
             successful_dials: 0,
             peer_identify: HashSet::new(),
             retry_by_peer: HashMap::new(),
@@ -362,37 +361,41 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         peer: PeerId,
         message: Bytes,
     ) -> Result<(), Error> {
-        if let Some(responses) = self.ephemeral_responses.get_mut(&peer) {
+        if let Some(mut responses) = self.response_channels.remove(&peer) {
             while let Some(response_channel) = responses.pop_front() {
-                if let Err(e) = self
+                match self
                     .swarm
                     .behaviour_mut()
                     .send_response(response_channel, message.clone())
                 {
-                    warn!(
-                        TARGET_WORKER,
-                        "Can not send response to {}: {}", peer, e
-                    )
+                    Ok(()) => {
+                        if !responses.is_empty() {
+                            self.response_channels.insert(peer, responses);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(
+                            TARGET_WORKER,
+                            "Can not send response to {}: {}", peer, e
+                        );
+                    }
                 }
             }
+        }
 
-            if responses.is_empty() {
-                self.ephemeral_responses.remove(&peer);
+        self.add_pending_outbound_message(peer, message);
+
+        if self.swarm.behaviour_mut().is_known_peer(&peer) {
+            if let Some(Action::Identified(..)) =
+                self.peer_action.get(&peer)
+            {
+                self.send_pending_outbound_messages(peer);
+            } else {
+                self.schedule_retry(peer, ScheduleType::Dial(vec![]));
             }
         } else {
-            self.add_pending_outbound_message(peer, message.clone());
-
-            if self.swarm.behaviour_mut().is_known_peer(&peer) {
-                if let Some(Action::Identified(..)) =
-                    self.peer_action.get(&peer)
-                {
-                    self.send_pending_outbound_messages(peer);
-                } else {
-                    self.schedule_retry(peer, ScheduleType::Dial(vec![]));
-                }
-            } else {
-                self.schedule_retry(peer, ScheduleType::Discover);
-            }
+            self.schedule_retry(peer, ScheduleType::Discover);
         }
 
         Ok(())
@@ -411,7 +414,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         peer: PeerId,
         response_channel: ResponseChannel<ReqResMessage>,
     ) {
-        self.ephemeral_responses
+        self.response_channels
             .entry(peer)
             .or_default()
             .push_back(response_channel);
@@ -421,11 +424,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
         if let Some(messages) = self.pending_outbound_messages.remove(&peer) {
             for message in messages.iter() {
-                self.swarm.behaviour_mut().send_message(
-                    &peer,
-                    message.clone(),
-                    &self.node_type,
-                );
+                self.swarm
+                    .behaviour_mut()
+                    .send_message(&peer, message.clone());
             }
         }
 
@@ -855,16 +856,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .cloned()
             .collect::<HashSet<StreamProtocol>>();
 
-        let is_ok = match self.node_type {
-            NodeType::Bootstrap | NodeType::Addressable => {
-                supp_protocols.contains(&StreamProtocol::new(TELL_PROTOCOL))
-            }
-            NodeType::Ephemeral => {
-                supp_protocols.contains(&StreamProtocol::new(REQRES_PROTOCOL))
-            }
-        };
-
-        protocol_version == IDENTIFY_PROTOCOL && is_ok
+        protocol_version == IDENTIFY_PROTOCOL
+            && supp_protocols.contains(&StreamProtocol::new(REQRES_PROTOCOL))
     }
 
     /// Run network worker.
@@ -1125,24 +1118,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 .push_back(message_data);
                         }
                     }
-                    BehaviourEvent::TellMessage { peer_id, message } => {
-                        info!(
-                            TARGET_WORKER,
-                            "A tell was received from {}", peer_id,
-                        );
-                        if self.peer_identify.contains(&peer_id) {
-                            self.message_to_helper(
-                                MessagesHelper::Single(message.message),
-                                &peer_id,
-                            )
-                            .await;
-                        } else {
-                            self.pending_inbound_messages
-                                .entry(peer_id)
-                                .or_default()
-                                .push_back(message.message);
-                        }
-                    }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
                         if let Some(Action::Discover) =
                             self.peer_action.get(&peer_id)
@@ -1181,7 +1156,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
                     }
                     BehaviourEvent::Dummy => {
-                        // For contron_list, ReqRes, Tell events
+                        // For contron_list, ReqRes events
                     }
                 }
             }
@@ -1243,7 +1218,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                     self.peer_identify.remove(&peer_id);
                     self.pending_inbound_messages.remove(&peer_id);
-                    self.ephemeral_responses.remove(&peer_id);
+                    self.response_channels.remove(&peer_id);
 
                     self.retry_by_peer.remove(&peer_id);
 
@@ -1259,14 +1234,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     self.peer_action.remove(&peer_id);
                     self.retry_by_peer.remove(&peer_id);
                     self.pending_inbound_messages.remove(&peer_id);
-                    self.ephemeral_responses.remove(&peer_id);
+                    self.response_channels.remove(&peer_id);
                     self.peer_identify.remove(&peer_id);
 
                     if self.pending_outbound_messages.contains_key(&peer_id) {
-                        self.schedule_retry(
-                            peer_id,
-                            ScheduleType::Discover,
-                        );
+                        self.schedule_retry(peer_id, ScheduleType::Discover);
                     }
                 }
             }

@@ -421,7 +421,7 @@ impl Handler<ApprPersist> for ApprPersist {
             }
             ApprPersistMessage::ChangeResponse { response } => {
                 let Some(state) = self.state.clone() else {
-                    error!(
+                    warn!(
                         msg_type = "ChangeResponse",
                         "Approval state not found"
                     );
@@ -431,7 +431,7 @@ impl Handler<ApprPersist> for ApprPersist {
                 };
 
                 if response == ApprovalStateRes::Obsolete {
-                    error!(
+                    warn!(
                         msg_type = "ChangeResponse",
                         "Invalid state transition to Obsolete"
                     );
@@ -619,7 +619,7 @@ impl Handler<ApprPersist> for ApprPersist {
                         )
                         .await
                     {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
                             "Failed to check governance"
@@ -676,7 +676,7 @@ impl Handler<ApprPersist> for ApprPersist {
                     let state = if let Some(state) = self.state.clone() {
                         state
                     } else {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             "Approval state not found"
                         );

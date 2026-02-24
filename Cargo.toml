@@ -4,7 +4,6 @@ members = [
     "core",
     "bridge",
     "network",
-    "protocols/tell",
     "http",
     "common"
 ]

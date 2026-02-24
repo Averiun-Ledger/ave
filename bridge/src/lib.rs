@@ -30,8 +30,8 @@ use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
 pub use network::MemoryLimit;
 pub use network::{
-    Config as NetworkConfig, ControlListConfig, ReqResConfig, RoutingConfig,
-    RoutingNode, TellConfig,
+    Config as NetworkConfig, ControlListConfig, RoutingConfig,
+    RoutingNode,
 };
 use tokio::{
     signal::unix::{SignalKind, signal},

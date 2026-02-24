@@ -22,7 +22,7 @@ use ts_rs::TS;
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
-#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "typescript", ts(export, type = "string"))]
 pub enum SchemaType {
     #[default]
     Governance,

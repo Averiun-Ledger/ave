@@ -1094,7 +1094,7 @@ impl Handler<ValiWorker> for ValiWorker {
                 {
                     Ok(reboot) => reboot,
                     Err(e) => {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
                             "Failed to check governance"

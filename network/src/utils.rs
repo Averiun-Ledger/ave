@@ -21,7 +21,6 @@ use std::{
 
 const TARGET_UTILS: &str = "AveNetwork-Utils";
 pub const NOISE_PROTOCOL: &str = "ave-p2p-v1";
-pub const TELL_PROTOCOL: &str = "/ave/tell/1.0.0";
 pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
 pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
@@ -70,8 +69,6 @@ pub struct LimitsConfig {
     pub tcp_nodelay: bool,
     pub reqres_max_concurrent_streams: usize,
     pub reqres_request_timeout: u64,
-    pub tell_max_concurrent_streams: usize,
-    pub tell_request_timeout: u64,
     // TODO mirar en un futuro.
     pub identify_cache: usize,
     pub kademlia_query_timeout: u64,
@@ -93,8 +90,6 @@ impl LimitsConfig {
                 tcp_nodelay: true,
                 reqres_max_concurrent_streams: 2048,
                 reqres_request_timeout: 15,
-                tell_max_concurrent_streams: 2048,
-                tell_request_timeout: 15,
                 identify_cache: 1024,
                 kademlia_query_timeout: 25,
                 conn_limmits_max_pending_incoming: Some(512),
@@ -111,8 +106,6 @@ impl LimitsConfig {
                 tcp_nodelay: true,
                 reqres_max_concurrent_streams: 128,
                 reqres_request_timeout: 10,
-                tell_max_concurrent_streams: 128,
-                tell_request_timeout: 10,
                 identify_cache: 0,
                 kademlia_query_timeout: 15,
                 conn_limmits_max_pending_incoming: Some(50),

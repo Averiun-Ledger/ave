@@ -7,7 +7,7 @@ use crate::{
     routing::{self},
     utils::{
         IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
-        TELL_PROTOCOL, USER_AGENT,
+        USER_AGENT,
     },
 };
 
@@ -26,15 +26,12 @@ use libp2p::{
         behaviour::toggle::Toggle,
     },
 };
-use tell::{
-    Event as TellEvent, ProtocolSupport as TellProtocol, binary as TellBinary,
-};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 use std::{convert::Infallible, iter, time::Duration};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 /// The network composed behaviour.
 #[derive(NetworkBehaviour)]
@@ -45,9 +42,6 @@ pub struct Behaviour {
 
     /// The `request-response` behaviour.
     req_res: request_response::cbor::Behaviour<ReqResMessage, ReqResMessage>,
-
-    /// The `tell` behaviour.
-    tell: TellBinary::Behaviour,
 
     /// The `routing` behaviour.
     routing: routing::Behaviour,
@@ -69,34 +63,8 @@ impl Behaviour {
         limits: LimitsConfig,
         memory_limit: Option<MemoryLimit>,
     ) -> Self {
-        let stream_tell = StreamProtocol::new(TELL_PROTOCOL);
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
         let stream_routing = StreamProtocol::new(ROUTING_PROTOCOL);
-
-        // TELL
-        let tell_protocol = if config.node_type == NodeType::Ephemeral {
-            TellProtocol::Inbound
-        } else {
-            TellProtocol::Full
-        };
-
-        let config_tell = tell::Config::default()
-            .with_max_concurrent_streams(limits.tell_max_concurrent_streams)
-            .with_request_timeout(Duration::from_secs(
-                limits.tell_request_timeout,
-            ));
-
-        let tell = TellBinary::Behaviour::new(
-            iter::once((stream_tell, tell_protocol)),
-            config_tell,
-        );
-
-        // REQRES
-        let reqres_protocol = if config.node_type == NodeType::Ephemeral {
-            ProtocolSupport::Outbound
-        } else {
-            ProtocolSupport::Inbound
-        };
 
         let config_req_res = ReqResConfig::default()
             .with_max_concurrent_streams(limits.reqres_max_concurrent_streams)
@@ -105,7 +73,7 @@ impl Behaviour {
             ));
 
         let req_res = request_response::cbor::Behaviour::new(
-            iter::once((stream_reqres, reqres_protocol)),
+            iter::once((stream_reqres, ProtocolSupport::Full)),
             config_req_res,
         );
 
@@ -152,20 +120,26 @@ impl Behaviour {
             Toggle::from(None)
         };
 
+        let identify_config = identify::Config::new(
+            IDENTIFY_PROTOCOL.to_owned(),
+            public_key.clone(),
+        )
+        .with_agent_version(USER_AGENT.to_string())
+        .with_cache_size(limits.identify_cache);
+
+        let identify_config = if config.node_type == NodeType::Ephemeral {
+            identify_config.with_hide_listen_addrs(true)
+        } else {
+            identify_config
+        };
+
         Self {
             control_list: control_list::Behaviour::new(
                 config.control_list,
                 &boot_nodes,
                 control_list_receiver,
             ),
-            identify: identify::Behaviour::new(
-                identify::Config::new(
-                    IDENTIFY_PROTOCOL.to_owned(),
-                    public_key.clone(),
-                )
-                .with_agent_version(USER_AGENT.to_string())
-                .with_cache_size(limits.identify_cache),
-            ),
+            identify: identify::Behaviour::new(identify_config),
             routing: routing::Behaviour::new(
                 PeerId::from_public_key(public_key),
                 config.routing,
@@ -173,7 +147,6 @@ impl Behaviour {
                 config.node_type,
                 limits,
             ),
-            tell,
             req_res,
             mem_limits,
             conn_limits: connection_limits::Behaviour::new(conn_limmits),
@@ -230,17 +203,8 @@ impl Behaviour {
     }
 
     /// Send request messasge to peer.
-    pub fn send_message(
-        &mut self,
-        peer_id: &PeerId,
-        message: Bytes,
-        node_type: &NodeType,
-    ) {
-        if node_type == &NodeType::Ephemeral {
-            self.req_res.send_request(peer_id, ReqResMessage(message));
-        } else {
-            self.tell.send_message(peer_id, message);
-        }
+    pub fn send_message(&mut self, peer_id: &PeerId, message: Bytes) {
+        self.req_res.send_request(peer_id, ReqResMessage(message));
     }
 
     /// Send response message to peer.
@@ -278,12 +242,6 @@ pub enum Event {
     ReqresMessage {
         peer_id: PeerId,
         message: request_response::Message<ReqResMessage, ReqResMessage>,
-    },
-
-    /// Tell message recieved from a peer.
-    TellMessage {
-        peer_id: PeerId,
-        message: tell::TellMessage<Bytes>,
     },
 
     /// Closets peers founded.
@@ -336,20 +294,6 @@ impl From<identify::Event> for Event {
             identify::Event::Sent { .. } | identify::Event::Pushed { .. } => {
                 Event::Dummy
             }
-        }
-    }
-}
-
-impl From<TellEvent<Bytes>> for Event {
-    fn from(event: TellEvent<Bytes>) -> Self {
-        match event {
-            TellEvent::Message { peer_id, message } => {
-                Event::TellMessage { peer_id, message }
-            }
-            TellEvent::MessageProcessed { .. }
-            | TellEvent::MessageSent { .. }
-            | TellEvent::InboundFailure { .. }
-            | TellEvent::OutboundFailure { .. } => Event::Dummy,
         }
     }
 }
@@ -459,7 +403,6 @@ mod tests {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
                                 Bytes::from("Hello Node B"),
-                                &NodeType::Ephemeral,
                             );
                         }
                     }
@@ -477,92 +420,6 @@ mod tests {
                             }
                         }
                     },
-                    _ => {}
-                }
-            }
-        };
-
-        tokio::task::spawn(Box::pin(peer_b));
-        peer_a.await;
-    }
-
-    #[test(tokio::test)]
-    #[serial]
-    async fn test_tell() {
-        let boot_nodes = vec![];
-
-        // Build node a.
-        let config =
-            create_config(boot_nodes.clone(), false, NodeType::Addressable);
-        let mut node_a = build_node(config);
-        let node_a_addr: Multiaddr = "/memory/1003".parse().unwrap();
-        let _ = node_a.listen_on(node_a_addr.clone());
-        node_a.add_external_address(node_a_addr.clone());
-        node_a.behaviour_mut().finish_prerouting_state();
-
-        // Build node b.
-        let config =
-            create_config(boot_nodes.clone(), true, NodeType::Addressable);
-        let mut node_b = build_node(config);
-        let node_b_addr: Multiaddr = "/memory/1004".parse().unwrap();
-        let _ = node_b.listen_on(node_b_addr.clone());
-        node_b.add_external_address(node_b_addr.clone());
-        node_b.behaviour_mut().finish_prerouting_state();
-
-        let _ = node_a.dial(node_b_addr.clone());
-
-        let peer_b = async move {
-            loop {
-                match node_b.select_next_some().await {
-                    SwarmEvent::Behaviour(Event::TellMessage {
-                        peer_id,
-                        message,
-                    }) => {
-                        // Message received from node a.
-                        assert_eq!(message.message, b"Hello Node B".to_vec());
-                        // Send response to node a.
-                        let _ = node_b.behaviour_mut().send_message(
-                            &peer_id,
-                            Bytes::from("Hello Node A"),
-                            &NodeType::Addressable,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        };
-
-        let peer_a = async move {
-            let mut counter = 0;
-            loop {
-                match node_a.select_next_some().await {
-                    SwarmEvent::Behaviour(Event::Identified {
-                        peer_id,
-                        ..
-                    }) => {
-                        //node_a.behaviour_mut().add_identified_peer(peer_id, *info);
-                        node_a.behaviour_mut().send_message(
-                            &peer_id,
-                            Bytes::from("Hello Node B"),
-                            &NodeType::Addressable,
-                        );
-                    }
-                    SwarmEvent::Behaviour(Event::TellMessage {
-                        peer_id,
-                        message,
-                    }) => {
-                        assert_eq!(message.message, b"Hello Node A".to_vec());
-                        counter += 1;
-                        if counter == 100 {
-                            break;
-                        } else {
-                            node_a.behaviour_mut().send_message(
-                                &peer_id,
-                                Bytes::from("Hello Node B"),
-                                &NodeType::Addressable,
-                            );
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -683,7 +540,6 @@ mod tests {
                             node_a.behaviour_mut().send_message(
                                 &peer_id,
                                 Bytes::from("Hello Node B"),
-                                &NodeType::Ephemeral,
                             );
                         } else {
                             node_a.behaviour_mut().discover(&node_b_peer_id);

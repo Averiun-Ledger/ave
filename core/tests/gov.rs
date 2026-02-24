@@ -297,6 +297,12 @@ async fn test_basic_use_case_1b_1e_1a() {
         json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
     );
 
+    ephimeral
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+
     let state = get_subject(ephimeral, governance_id.clone(), Some(1))
         .await
         .unwrap();

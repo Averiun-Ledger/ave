@@ -28,7 +28,6 @@ pub use libp2p::{
 pub use monitor::*;
 pub use routing::{Config as RoutingConfig, RoutingNode};
 pub use service::NetworkService;
-pub use tell::Config as TellConfig;
 pub use utils::NetworkState;
 pub use worker::NetworkWorker;
 

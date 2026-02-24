@@ -100,7 +100,7 @@ impl EvalWorker {
         };
 
         let compiler = ctx
-            .create_child(&format!("compiler",), Compiler::new(self.hash))
+            .create_child("compiler", Compiler::new(self.hash))
             .await?;
 
         for id in ids {
@@ -585,7 +585,7 @@ impl Handler<EvalWorker> for EvalWorker {
                 {
                     Ok(reboot) => reboot,
                     Err(e) => {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
                             "Failed to check governance"

@@ -74,11 +74,10 @@ async fn main() {
         config_path = build_config_path();
     }
 
-    let config = build_config(&config_path)
-        .map_err(|e| {
-            error!("Can not build config: {}", e);
-        })
-        .expect("Can not build config");
+    let config = build_config(&config_path).unwrap_or_else(|e| {
+        eprintln!("Can not build config: {e}");
+        panic!("Can not build config");
+    });
 
     let listener_http =
         tokio::net::TcpListener::bind(&config.http.http_address)

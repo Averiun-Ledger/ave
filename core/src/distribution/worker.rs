@@ -419,7 +419,7 @@ impl Handler<DistriWorker> for DistriWorker {
                     receiver: sender.clone(),
                     request_id: info.request_id,
                     version: info.version,
-                    receiver_actor: receiver_actor,
+                    receiver_actor,
                 };
 
                 if let Err(e) = self

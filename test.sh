@@ -12,7 +12,6 @@ PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
 # Matrix of combinations per package
 read -r -d '' MATRIX <<'EOF'
 ave-identity|--all-features
-ave-tell|--all-features
 ave-network|--all-features
 ave-core|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
 ave-bridge|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
