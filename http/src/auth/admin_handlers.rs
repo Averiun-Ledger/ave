@@ -12,7 +12,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::warn;
 use utoipa::ToSchema;
+
+const TARGET: &str = "ave::http::auth";
 
 // =============================================================================
 // ERROR HANDLING
@@ -23,9 +26,9 @@ fn db_error_to_response(
     err: DatabaseError,
 ) -> (StatusCode, Json<ErrorResponse>) {
     let (status, message) = match err {
-        DatabaseError::NotFoundError(msg) => (StatusCode::NOT_FOUND, msg),
-        DatabaseError::DuplicateError(msg) => (StatusCode::CONFLICT, msg),
-        DatabaseError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
+        DatabaseError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+        DatabaseError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
+        DatabaseError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
         DatabaseError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, msg),
         DatabaseError::AccountLocked(msg) => (StatusCode::FORBIDDEN, msg),
         DatabaseError::RateLimitExceeded(msg) => {
@@ -277,7 +280,7 @@ pub async fn create_user(
         "role_ids": req.role_ids,
         "must_change_password": req.must_change_password,
     });
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_created",
@@ -289,7 +292,9 @@ pub async fn create_user(
         details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok((StatusCode::CREATED, Json(user_info)))
 }
@@ -524,7 +529,7 @@ pub async fn update_user(
         "role_ids": req.role_ids,
         "password_changed": req.password.is_some(),
     });
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_updated",
@@ -536,7 +541,9 @@ pub async fn update_user(
         details: Some(&audit_details.to_string()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(Json(user_info))
 }
@@ -588,7 +595,7 @@ pub async fn reset_user_password(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_password_reset",
@@ -600,7 +607,9 @@ pub async fn reset_user_password(
         details: None,
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::OK)
 }
@@ -654,7 +663,7 @@ pub async fn delete_user(
     db.delete_user(user_id).map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_deleted",
@@ -666,7 +675,9 @@ pub async fn delete_user(
         details: None,
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -724,7 +735,7 @@ pub async fn assign_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_assigned",
@@ -736,7 +747,9 @@ pub async fn assign_role(
         details: Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::OK)
 }
@@ -794,7 +807,7 @@ pub async fn remove_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_removed",
@@ -806,7 +819,9 @@ pub async fn remove_role(
         details: Some(&format!(r#"{{"role_id": {}}}"#, role_id)),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -843,7 +858,7 @@ pub async fn create_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_created",
@@ -855,7 +870,9 @@ pub async fn create_role(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok((StatusCode::CREATED, Json(role)))
 }
@@ -945,7 +962,7 @@ pub async fn update_role(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_updated",
@@ -957,7 +974,9 @@ pub async fn update_role(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(Json(role))
 }
@@ -989,7 +1008,7 @@ pub async fn delete_role(
     db.delete_role(role_id).map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "role_deleted",
@@ -1001,7 +1020,9 @@ pub async fn delete_role(
         details: None,
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1081,7 +1102,7 @@ pub async fn set_role_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_set",
@@ -1093,7 +1114,9 @@ pub async fn set_role_permission(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::OK)
 }
@@ -1193,7 +1216,7 @@ pub async fn set_user_permission(
     .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_set",
@@ -1205,7 +1228,9 @@ pub async fn set_user_permission(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::OK)
 }
@@ -1266,7 +1291,7 @@ pub async fn remove_user_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "user_permission_removed",
@@ -1278,7 +1303,9 @@ pub async fn remove_user_permission(
         details: Some(&serde_json::to_string(&params).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1327,7 +1354,7 @@ pub async fn remove_role_permission(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "permission_removed",
@@ -1339,7 +1366,9 @@ pub async fn remove_role_permission(
         details: Some(&serde_json::to_string(&params).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

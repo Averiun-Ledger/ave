@@ -13,7 +13,7 @@ use ave_common::{
 };
 use ave_core::{
     Api,
-    config::{AveDbConfig, AveStoreConfig, Config, ExternalDbConfig, SinkAuth},
+    config::{AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig, AveInternalDBFeatureConfig, Config, SinkAuth},
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use std::{
@@ -77,8 +77,8 @@ pub async fn create_node(
         is_service: true,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
-        ave_db: AveStoreConfig {db: AveDbConfig::build(&local_db), ..Default::default()},
-        external_db: ExternalDbConfig::build(&ext_db),
+        internal_db: AveInternalDBConfig {db: AveInternalDBFeatureConfig::build(&local_db), ..Default::default()},
+        external_db: AveExternalDBConfig {db: AveExternalDBFeatureConfig::build(&ext_db), ..Default::default()},
         network: network_config,
         contracts_path,
         always_accept,
@@ -204,14 +204,13 @@ pub async fn create_nodes_and_connections(
 pub async fn create_and_authorize_governance(
     owner_node: &Api,
     other_nodes: Vec<&Api>,
-    namespace: &str,
 ) -> DigestIdentifier {
     let request = EventRequest::Create(CreateRequest {
         name: Some("Governance Tests".to_owned()),
         description: Some("A description for Governance Tests".to_owned()),
         governance_id: DigestIdentifier::default(),
         schema_id: SchemaType::Governance,
-        namespace: Namespace::from(namespace),
+        namespace: Namespace::new(),
     });
     let data = owner_node.own_request(request).await.unwrap();
     let governance_id = data.subject_id;

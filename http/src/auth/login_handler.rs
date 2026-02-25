@@ -11,15 +11,18 @@ use axum::{
 };
 use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc};
+use tracing::warn;
+
+const TARGET: &str = "ave::http::auth";
 
 /// Convert DatabaseError to HTTP response tuple
 fn db_error_to_response(
     err: DatabaseError,
 ) -> (StatusCode, Json<ErrorResponse>) {
     let (status, message) = match err {
-        DatabaseError::NotFoundError(msg) => (StatusCode::NOT_FOUND, msg),
-        DatabaseError::DuplicateError(msg) => (StatusCode::CONFLICT, msg),
-        DatabaseError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
+        DatabaseError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+        DatabaseError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
+        DatabaseError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
         DatabaseError::PermissionDenied(msg) => (StatusCode::UNAUTHORIZED, msg),
         DatabaseError::AccountLocked(msg) => (StatusCode::UNAUTHORIZED, msg),
         DatabaseError::RateLimitExceeded(msg) => {
@@ -81,8 +84,16 @@ pub async fn login(
     let user = db
         .verify_credentials(&req.username, &req.password)
         .map_err(|e| {
+            warn!(
+                target: TARGET,
+                username = %req.username,
+                ip = ?ip_address,
+                error = %e,
+                "login failed"
+            );
+
             // Log failed login attempt
-            let _ = db.create_audit_log(
+            if let Err(ae) = db.create_audit_log(
                 crate::auth::database_audit::AuditLogParams {
                     user_id: None,    // No user_id for failed login
                     api_key_id: None, // No API key yet
@@ -99,7 +110,9 @@ pub async fn login(
                     success: false,
                     error_message: Some(&e.to_string()),
                 },
-            );
+            ) {
+                warn!(target: TARGET, error = %ae, "failed to write login audit log");
+            }
 
             db_error_to_response(e)
         })?;
@@ -137,7 +150,7 @@ pub async fn login(
     };
 
     // Log successful login
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(user.id),
         api_key_id: Some(&key_info.id),
         action_type: "login_success",
@@ -152,7 +165,9 @@ pub async fn login(
         )),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write login audit log");
+    }
 
     Ok(Json(LoginResponse {
         api_key,

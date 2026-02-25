@@ -171,13 +171,13 @@ pub(crate) fn detect_ram_mb() -> u64 {
     {
         if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
             for line in meminfo.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb_str) = rest.split_whitespace().next() {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") 
+                    && let Some(kb_str) = rest.split_whitespace().next() 
+                        && let Ok(kb) = kb_str.parse::<u64>() {
                             return kb / 1024;
                         }
-                    }
-                }
+                    
+                
             }
         }
     }
@@ -192,6 +192,70 @@ pub(crate) fn detect_cpu_cores() -> usize {
 }
 
 /// The network configuration.
+/// Memory-based connection limit policy.
+///
+/// Controls when libp2p should stop accepting new connections based on
+/// process memory usage. The default is `Disabled`.
+///
+/// # Config examples
+/// ```toml
+/// # Reject new connections when process RAM exceeds 80% of system RAM (value must be 0.0–1.0)
+/// [network.memory_limits]
+/// type = "percentage"
+/// value = 0.8
+///
+/// # Reject new connections when process RAM exceeds 512 MB
+/// [network.memory_limits]
+/// type = "mb"
+/// value = 512
+///
+/// # No memory-based limit (default — omit the section or set type = "disabled")
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MemoryLimitsConfig {
+    /// No memory-based connection limit (default).
+    Disabled,
+    /// Reject new connections when process memory exceeds `value` fraction of total RAM.
+    /// Must be in the range 0.0–1.0 (e.g. `0.8` means 80% of system RAM).
+    Percentage { value: f64 },
+    /// Reject new connections when process memory exceeds `value` megabytes.
+    Mb { value: usize },
+}
+
+impl Default for MemoryLimitsConfig {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+impl MemoryLimitsConfig {
+    /// Returns an error string if the configuration values are out of range.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::Percentage { value } = self {
+            if *value <= 0.0 || *value > 1.0 {
+                return Err(format!(
+                    "network.memory_limits percentage must be in range (0.0, 1.0], got {}",
+                    value
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Display for MemoryLimitsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "disabled"),
+            Self::Percentage { value } => {
+                write!(f, "{:.0}% of system RAM", value * 100.0)
+            }
+            Self::Mb { value } => write!(f, "{} MB", value),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -213,6 +277,9 @@ pub struct Config {
 
     /// Control List configuration.
     pub control_list: control_list::Config,
+
+    /// Memory-based connection limit policy.
+    pub memory_limits: MemoryLimitsConfig,
 }
 
 impl Config {
@@ -230,6 +297,7 @@ impl Config {
             external_addresses,
             routing: routing::Config::default(),
             control_list: control_list::Config::default(),
+            memory_limits: MemoryLimitsConfig::default(),
         }
     }
 }

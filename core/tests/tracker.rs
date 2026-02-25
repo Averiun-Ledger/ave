@@ -33,7 +33,6 @@ async fn test_limits_in_subjects() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![emit_events],
-        "",
     )
     .await;
 
@@ -321,7 +320,6 @@ async fn test_namespace_in_role_1() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![evaluator, emit_events, witness_schema, witness_not_schema],
-        "",
     )
     .await;
 
@@ -580,7 +578,6 @@ async fn test_namespace_in_role_2() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![evaluator, emit_events, witness_schema, witness_not_schema],
-        "",
     )
     .await;
 
@@ -832,7 +829,6 @@ async fn test_subject_transfer_event_1() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![future_owner],
-        "",
     )
     .await;
 
@@ -1085,7 +1081,6 @@ async fn test_subject_transfer_event_2() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![future_owner, old_owner],
-        "",
     )
     .await;
 
@@ -1439,7 +1434,6 @@ async fn test_subject_transfer_event_3() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![future_owner, old_owner],
-        "",
     )
     .await;
 
@@ -1815,7 +1809,7 @@ async fn test_dynamic_witnesses_1() {
     let witness = &nodes[2];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![creator], "")
+        create_and_authorize_governance(owner_governance, vec![creator], )
             .await;
 
     // add member to governance
@@ -2053,7 +2047,6 @@ async fn test_dynamic_witnesses_2() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![creator, witness],
-        "",
     )
     .await;
 
@@ -2332,7 +2325,6 @@ async fn test_dynamic_witnesses_explicit_1() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![creator, witness],
-        "",
     )
     .await;
 
@@ -2519,7 +2511,6 @@ async fn test_dynamic_witnesses_explicit_2() {
     let governance_id = create_and_authorize_governance(
         owner_governance,
         vec![creator, witness],
-        "",
     )
     .await;
 
@@ -2744,7 +2735,7 @@ async fn test_no_subject_validator() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     // add member to governance
     let json = json!({
@@ -2846,7 +2837,7 @@ async fn test_no_subject_evaluator() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![],).await;
 
     // add member to governance
     let json = json!({
@@ -2991,7 +2982,7 @@ async fn test_no_subject_issuer() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     // add member to governance
     let json = json!({
@@ -3090,7 +3081,7 @@ async fn test_1000_events() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -3212,7 +3203,7 @@ async fn test_subj_no_all_validators() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     let offline_controller =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
@@ -3368,7 +3359,7 @@ async fn test_subj_no_all_evaluators() {
     let owner_governance = &nodes[0];
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], "").await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     let offline_controller =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap())

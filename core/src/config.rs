@@ -22,10 +22,9 @@ pub struct Config {
     /// Digest derivator.
     pub hash_algorithm: HashAlgorithm,
     /// Database configuration.
-    pub ave_db: AveStoreConfig,
+    pub internal_db: AveInternalDBConfig,
     /// External database configuration.
-    #[serde(deserialize_with = "ExternalDbConfig::deserialize_db")]
-    pub external_db: ExternalDbConfig,
+    pub external_db: AveExternalDBConfig,
     /// Network configuration.
     pub network: NetworkConfig,
     /// Contract dir.
@@ -46,7 +45,7 @@ impl Default for Config {
         Self {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
-            ave_db: Default::default(),
+            internal_db: Default::default(),
             external_db: Default::default(),
             network: Default::default(),
             contracts_path: PathBuf::new(),
@@ -156,6 +155,62 @@ impl Display for MachineProfile {
     }
 }
 
+// ── Spec resolution ───────────────────────────────────────────────────────────
+
+/// Resolved machine parameters ready to be consumed by any tuned subsystem.
+pub struct ResolvedSpec {
+    /// Total RAM in megabytes.
+    pub ram_mb: u64,
+    /// Available CPU cores.
+    pub cpu_cores: usize,
+}
+
+/// Resolve the final sizing parameters from a [`MachineSpec`]:
+///
+/// - `Profile(p)` → use the profile's canonical RAM and vCPU.
+/// - `Custom { ram_mb, cpu_cores }` → use the supplied values directly.
+/// - `None` → auto-detect total RAM and available CPU cores from the host.
+pub fn resolve_spec(spec: Option<&MachineSpec>) -> ResolvedSpec {
+    match spec {
+        Some(MachineSpec::Profile(p)) => ResolvedSpec {
+            ram_mb: p.ram_mb(),
+            cpu_cores: p.cpu_cores(),
+        },
+        Some(MachineSpec::Custom { ram_mb, cpu_cores }) => ResolvedSpec {
+            ram_mb: *ram_mb,
+            cpu_cores: *cpu_cores,
+        },
+        None => ResolvedSpec {
+            ram_mb: detect_ram_mb(),
+            cpu_cores: detect_cpu_cores(),
+        },
+    }
+}
+
+pub(crate) fn detect_ram_mb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            for line in meminfo.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") 
+                    && let Some(kb_str) = rest.split_whitespace().next() 
+                        && let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb / 1024;
+                        }
+                    
+                
+            }
+        }
+    }
+    4_096
+}
+
+pub(crate) fn detect_cpu_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+}
+
 // ── Conversions to peer-crate MachineSpec types ───────────────────────────────
 
 impl From<MachineProfile> for network::MachineProfile {
@@ -210,15 +265,15 @@ impl From<MachineSpec> for ave_actors::MachineSpec {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
-pub struct AveStoreConfig {
-    #[serde(deserialize_with = "AveDbConfig::deserialize_db")]
-    pub db: AveDbConfig,
+pub struct AveInternalDBConfig {
+    #[serde(deserialize_with = "AveInternalDBFeatureConfig::deserialize_db")]
+    pub db: AveInternalDBFeatureConfig,
     pub durability: bool
 }
 
 /// Database configuration.
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
-pub enum AveDbConfig {
+pub enum AveInternalDBFeatureConfig {
     /// Rocksdb database.
     #[cfg(feature = "rocksdb")]
     Rocksdb {
@@ -233,63 +288,71 @@ pub enum AveDbConfig {
     },
 }
 
-impl Default for AveDbConfig {
+impl Default for AveInternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "rocksdb")]
-        return AveDbConfig::Rocksdb {
+        return AveInternalDBFeatureConfig::Rocksdb {
             path: PathBuf::from("db").join("local").join("rocksdb"),
         };
         #[cfg(feature = "sqlite")]
-        return AveDbConfig::Sqlite {
+        return AveInternalDBFeatureConfig::Sqlite {
             path: PathBuf::from("db").join("local").join("sqlite"),
         };
     }
 }
 
-impl AveDbConfig {
+impl AveInternalDBFeatureConfig {
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "rocksdb")]
-        return AveDbConfig::Rocksdb {
+        return AveInternalDBFeatureConfig::Rocksdb {
             path: path.to_owned(),
         };
         #[cfg(feature = "sqlite")]
-        return AveDbConfig::Sqlite {
+        return AveInternalDBFeatureConfig::Sqlite {
             path: path.to_owned(),
         };
     }
 
     pub fn deserialize_db<'de, D>(
         deserializer: D,
-    ) -> Result<AveDbConfig, D::Error>
+    ) -> Result<AveInternalDBFeatureConfig, D::Error>
     where
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "rocksdb")]
-        return Ok(AveDbConfig::Rocksdb {
+        return Ok(AveInternalDBFeatureConfig::Rocksdb {
             path: PathBuf::from(path),
         });
         #[cfg(feature = "sqlite")]
-        return Ok(AveDbConfig::Sqlite {
+        return Ok(AveInternalDBFeatureConfig::Sqlite {
             path: PathBuf::from(path),
         });
     }
 }
 
-impl fmt::Display for AveDbConfig {
+impl fmt::Display for AveInternalDBFeatureConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(feature = "rocksdb")]
-            AveDbConfig::Rocksdb { .. } => write!(f, "Rocksdb"),
+            AveInternalDBFeatureConfig::Rocksdb { .. } => write!(f, "Rocksdb"),
             #[cfg(feature = "sqlite")]
-            AveDbConfig::Sqlite { .. } => write!(f, "Sqlite"),
+            AveInternalDBFeatureConfig::Sqlite { .. } => write!(f, "Sqlite"),
         }
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct AveExternalDBConfig {
+    #[serde(deserialize_with = "AveExternalDBFeatureConfig::deserialize_db")]
+    pub db: AveExternalDBFeatureConfig,
+    pub durability: bool
+}
+
 /// Database configuration.
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
-pub enum ExternalDbConfig {
+pub enum AveExternalDBFeatureConfig {
     /// Sqlite database.
     #[cfg(feature = "ext-sqlite")]
     Sqlite {
@@ -298,38 +361,38 @@ pub enum ExternalDbConfig {
     },
 }
 
-impl Default for ExternalDbConfig {
+impl Default for AveExternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "ext-sqlite")]
-        return ExternalDbConfig::Sqlite {
+        return AveExternalDBFeatureConfig::Sqlite {
             path: PathBuf::from("db").join("ext").join("sqlite"),
         };
     }
 }
 
-impl ExternalDbConfig {
+impl AveExternalDBFeatureConfig {
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "ext-sqlite")]
-        return ExternalDbConfig::Sqlite {
+        return AveExternalDBFeatureConfig::Sqlite {
             path: path.to_owned(),
         };
     }
 
     pub fn deserialize_db<'de, D>(
         deserializer: D,
-    ) -> Result<ExternalDbConfig, D::Error>
+    ) -> Result<AveExternalDBFeatureConfig, D::Error>
     where
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "ext-sqlite")]
-        return Ok(ExternalDbConfig::Sqlite {
+        return Ok(AveExternalDBFeatureConfig::Sqlite {
             path: PathBuf::from(path),
         });
     }
 }
 
-impl fmt::Display for ExternalDbConfig {
+impl fmt::Display for AveExternalDBFeatureConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Sqlite")
     }
@@ -388,6 +451,10 @@ pub struct LoggingConfig {
     pub rotation: LoggingRotation,
     pub max_size: usize,  // bytes
     pub max_files: usize, // copias a conservar
+    /// Log level filter. Accepts tracing/RUST_LOG syntax: "info", "debug",
+    /// "warn", "error", "trace", or per-crate directives like "info,ave=debug".
+    /// The RUST_LOG environment variable takes priority over this field.
+    pub level: String,
 }
 
 impl Default for LoggingConfig {
@@ -399,6 +466,7 @@ impl Default for LoggingConfig {
             rotation: LoggingRotation::default(),
             max_size: 100 * 1024 * 1024,
             max_files: 3,
+            level: "info".to_string(),
         }
     }
 }

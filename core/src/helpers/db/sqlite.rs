@@ -16,6 +16,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::{debug, error};
 
 use super::{DatabaseError, Querys};
+use crate::config::{MachineSpec, resolve_spec};
 use crate::external_db::{DBManager, DBManagerMessage};
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
@@ -739,6 +740,8 @@ impl SqliteLocal {
     pub async fn new(
         path: &PathBuf,
         manager: ActorRef<DBManager>,
+        durability: bool,
+        spec: Option<MachineSpec>,
     ) -> Result<Self, DatabaseError> {
         let flags = OpenFlags::default();
         let conn = Connection::open_with_flags(path, flags).map_err(|e| {
@@ -747,6 +750,33 @@ impl SqliteLocal {
                 error = %e,
                 "Failed to open SQLite database connection"
             );
+            DatabaseError::ConnectionOpen(e.to_string())
+        })?;
+
+        let resolved = resolve_spec(spec.as_ref());
+        let tuning = tuning_for_ram(resolved.ram_mb);
+        let sync_mode = if durability { "FULL" } else { "NORMAL" };
+
+        conn.execute_batch(&format!(
+            "
+            PRAGMA journal_mode=WAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA synchronous={};
+            PRAGMA wal_autocheckpoint={};       -- pages
+            PRAGMA journal_size_limit={};       -- bytes
+            PRAGMA temp_store=MEMORY;
+            PRAGMA cache_size={};               -- negative = KB
+            PRAGMA mmap_size={};                -- bytes
+            PRAGMA optimize=0x10002;            -- analyze + run on open
+            ",
+            sync_mode,
+            tuning.wal_autocheckpoint_pages,
+            tuning.journal_size_limit_bytes,
+            tuning.cache_size_kb,
+            tuning.mmap_size_bytes,
+        ))
+        .map_err(|e| {
+            error!(error = %e, "Failed to apply SQLite PRAGMA tuning");
             DatabaseError::ConnectionOpen(e.to_string())
         })?;
 
@@ -763,6 +793,7 @@ impl SqliteLocal {
 
         debug!(
             path = %path.display(),
+            ram_mb = resolved.ram_mb,
             "SQLite database connection established and migrations applied"
         );
 
@@ -771,6 +802,49 @@ impl SqliteLocal {
             manager,
         })
     }
+}
+
+/// Compute SQLite tuning parameters from available RAM.
+///
+/// SQLite is single-writer so CPU cores don't affect tuning here.
+/// Designed for a shared Docker container with 3 co-located SQLite instances
+/// plus a libp2p process — total DB cache footprint stays at ~6 % of host RAM.
+fn tuning_for_ram(ram_mb: u64) -> SqliteTuning {
+    // Cache: 2 % of RAM, floor 8 MB, cap 1 GB.
+    let cache_mb = (ram_mb * 2 / 100).clamp(8, 1024);
+    let cache_size_kb = -(cache_mb as i64 * 1024); // negative = KB in SQLite
+
+    // mmap: half of cache, hard cap 128 MB.
+    // Supplements the page cache for sequential reads; kept below cache to
+    // avoid doubling memory pressure in a shared container.
+    let mmap_size_bytes = (cache_mb as i64 / 2).min(128) * 1024 * 1024;
+
+    // WAL checkpoint: fire when WAL ≈ cache/2.
+    // pages = (cache_mb/2 MB) / (4 KB/page) = cache_mb * 128.
+    // Floor 1000 (SQLite default, prevents thrashing on tiny RAM).
+    // Cap 8000 (32 MB WAL max, bounds checkpoint stall under write bursts).
+    let wal_autocheckpoint_pages = (cache_mb as i64 * 128).clamp(1_000, 8_000);
+
+    // journal_size_limit: 3× the WAL ceiling — a safety net never reached in
+    // normal operation (checkpoints fire first); prevents runaway WAL growth
+    // if a checkpoint is delayed. Cap 256 MB to bound disk use in Docker.
+    let journal_size_limit_bytes = (wal_autocheckpoint_pages * 4096 * 3)
+        .clamp(32 * 1024 * 1024, 256 * 1024 * 1024);
+
+    SqliteTuning {
+        wal_autocheckpoint_pages,
+        journal_size_limit_bytes,
+        cache_size_kb,
+        mmap_size_bytes,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SqliteTuning {
+    wal_autocheckpoint_pages: i64,
+    journal_size_limit_bytes: i64,
+    cache_size_kb: i64,
+    mmap_size_bytes: i64,
 }
 
 impl SqliteLocal {

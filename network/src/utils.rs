@@ -10,7 +10,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
-use tracing::error;
+use tracing::warn;
 
 use std::{
     cmp::Ordering,
@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-const TARGET_UTILS: &str = "AveNetwork-Utils";
+const TARGET: &str = "ave::network::utils";
 pub const NOISE_PROTOCOL: &str = "ave-p2p-v1";
 pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
 pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
@@ -102,13 +102,11 @@ impl LimitsConfig {
         let bytes_per_conn: u64 = 50 * 1024; // ~50 KB per established connection
 
         // Total connections: floor 50, cap 9 000 (file-descriptor & kernel limits)
-        let max_total = ((budget_bytes / bytes_per_conn) as u32)
-            .max(50)
-            .min(9_000);
+        let max_total = ((budget_bytes / bytes_per_conn) as u32).clamp(50, 9_000);
 
         // 80 % incoming (nodes are mostly servers), 20 % outgoing
-        let max_incoming = (max_total * 80 / 100).max(30).min(8_000);
-        let max_outgoing = (max_total * 20 / 100).max(20).min(1_000);
+        let max_incoming = (max_total * 80 / 100).clamp(30, 8_000);
+        let max_outgoing = (max_total * 20 / 100).clamp(20, 1_000);
 
         // ── Pending connections (CPU) ────────────────────────────────────────────
         // Each pending connection performs a Noise handshake (X25519 + ChaCha20).
@@ -117,20 +115,20 @@ impl LimitsConfig {
             .max(10)
             .min((cores as u32) * 64)
             .min(512);
-        let pending_outgoing = (max_outgoing / 4).max(20).min(128);
+        let pending_outgoing = (max_outgoing / 4).clamp(20, 128);
 
         // ── Stream concurrency (CPU) ─────────────────────────────────────────────
         // Each concurrent ReqRes stream is a tokio task. More cores → more tasks
         // that run in true parallel. ~512 concurrent tasks per core is sensible.
-        let reqres_streams = (cores * 512).max(64).min(4_096);
+        let reqres_streams = (cores * 512).clamp(64, 4_096);
 
         // Yamux per-connection stream limit: must cover the worst case where a
         // single peer saturates the full ReqRes budget, plus routing/kad overhead.
-        let yamux_streams = (reqres_streams + 64).max(256).min(8_192);
+        let yamux_streams =(reqres_streams + 64).clamp(256, 8_192);
 
         // ── TCP listen backlog (kernel-managed) ──────────────────────────────────
         // Sized for SYN bursts: 1/8 of max_incoming, floor 128, cap 8 192.
-        let tcp_backlog = ((max_incoming / 8) as u32).max(128).min(8_192);
+        let tcp_backlog = (max_incoming / 8).clamp(128, 8_192);
 
         // ── Identify cache (RAM) ─────────────────────────────────────────────────
         // Metadata for frequently-contacted peers: 1/4 of total, cap 1 024.
@@ -250,25 +248,15 @@ pub async fn request_update_lists(
                             successful_allow += 1;
                         }
                         Err(e) => {
-                            error!(
-                                TARGET_UTILS,
-                                "Error performing Get {}, The server did not return what was expected: {}",
-                                service,
-                                e
-                            );
+                            warn!(target: TARGET, url = %service, error = %e, "allow-list service returned unexpected body");
                         }
                     }
                 } else {
-                    error!(
-                        TARGET_UTILS,
-                        "Error performing Get {}, The server did not return a correct code: {}",
-                        service,
-                        res.status()
-                    );
+                    warn!(target: TARGET, url = %service, status = %res.status(), "allow-list service returned error status");
                 }
             }
             Err(e) => {
-                error!(TARGET_UTILS, "Error performing Get {}: {}", service, e);
+                warn!(target: TARGET, url = %service, error = %e, "allow-list service unreachable");
             }
         }
     }
@@ -285,25 +273,15 @@ pub async fn request_update_lists(
                             successful_block += 1;
                         }
                         Err(e) => {
-                            error!(
-                                TARGET_UTILS,
-                                "Error performing Get {}, The server did not return what was expected: {}",
-                                service,
-                                e
-                            );
+                            warn!(target: TARGET, url = %service, error = %e, "block-list service returned unexpected body");
                         }
                     }
                 } else {
-                    error!(
-                        TARGET_UTILS,
-                        "Error performing Get {}, The server did not return a correct code: {}",
-                        service,
-                        res.status()
-                    );
+                    warn!(target: TARGET, url = %service, status = %res.status(), "block-list service returned error status");
                 }
             }
             Err(e) => {
-                error!(TARGET_UTILS, "Error performing Get {}: {}", service, e);
+                warn!(target: TARGET, url = %service, error = %e, "block-list service unreachable");
             }
         }
     }
@@ -355,10 +333,7 @@ pub fn convert_addresses(
         if let Some(value) = multiaddr(address) {
             addrs.insert(value);
         } else {
-            return Err(Error::Address(format!(
-                "Invalid MultiAddress conversion in External Address: {}",
-                address
-            )));
+            return Err(Error::InvalidAddress(address.clone()));
         }
     }
     Ok(addrs)

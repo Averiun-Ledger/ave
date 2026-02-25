@@ -6,7 +6,7 @@ use crate::{
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
 
-use crate::config::ExternalDbConfig;
+use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
@@ -74,12 +74,14 @@ pub enum ExternalDB {
 
 impl ExternalDB {
     pub async fn build(
-        ext_db: ExternalDbConfig,
+        ext_db: AveExternalDBFeatureConfig,
+        durability: bool,
         manager: ActorRef<DBManager>,
+        spec: Option<MachineSpec>,
     ) -> Result<Self, DatabaseError> {
         match ext_db {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDbConfig::Sqlite { path } => {
+            AveExternalDBFeatureConfig::Sqlite { path } => {
                 if !Path::new(&path).exists() {
                     fs::create_dir_all(&path).await.map_err(|e| {
                         error!(
@@ -95,7 +97,9 @@ impl ExternalDB {
                     );
                 }
                 let db_path = path.join("database.db");
-                let sqlite = SqliteLocal::new(&db_path, manager).await?;
+                let sqlite =
+                    SqliteLocal::new(&db_path, manager, durability, spec)
+                        .await?;
                 debug!(
                     path = %db_path.display(),
                     "External SQLite database built successfully"

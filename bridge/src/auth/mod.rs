@@ -16,6 +16,9 @@ pub struct AuthConfig {
     /// Path to the SQLite database file
     pub database_path: PathBuf,
 
+    /// Durable writes: PRAGMA synchronous=FULL (true) vs NORMAL (false).
+    pub durability: bool,
+
     /// Superadmin bootstrap credentials
     /// Only used on first run to create initial superadmin account
     pub superadmin: String,
@@ -38,6 +41,7 @@ impl Default for AuthConfig {
         Self {
             enable: false,
             database_path: PathBuf::from("auth"),
+            durability: false,
             superadmin: String::default(),
             api_key: ApiKeyConfig::default(),
             lockout: LockoutConfig::default(),

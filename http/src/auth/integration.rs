@@ -3,11 +3,11 @@
 // This module provides helper functions to integrate the auth system into the server
 
 use super::database::AuthDatabase;
-use ave_bridge::auth::AuthConfig;
+use ave_bridge::{MachineSpec, auth::AuthConfig};
 use std::sync::Arc;
 use tracing::{error, info};
 
-const TARGET: &str = "AveHttpAuth";
+const TARGET: &str = "ave::http::auth";
 
 /// Initialize the authentication database
 ///
@@ -17,51 +17,30 @@ const TARGET: &str = "AveHttpAuth";
 pub async fn initialize_auth_database(
     config: &AuthConfig,
     password: &str,
+    spec: Option<MachineSpec>,
 ) -> Result<Arc<AuthDatabase>, String> {
     if !config.enable {
         return Err("Authentication system is disabled".to_string());
     }
 
     info!(
-        TARGET,
-        "Initializing authentication database at: {}",
-        config.database_path.display()
+        target: TARGET,
+        path = %config.database_path.display(),
+        "initializing authentication database"
     );
 
     // Initialize database (runs migrations and bootstraps superadmin automatically)
-    let db = AuthDatabase::new(config.clone(), password)
+    let db = AuthDatabase::new(config.clone(), password, spec)
         .map_err(|e| format!("Failed to initialize auth database: {}", e))?;
 
-    info!(TARGET, "Authentication database initialized successfully");
-
-    // Log configuration summary
-    info!(TARGET, "Auth System Configuration:");
-    info!(TARGET, "  - Database: {}", config.database_path.display());
     info!(
-        TARGET,
-        "  - API Key TTL: {} seconds", config.api_key.default_ttl_seconds
-    );
-    info!(
-        TARGET,
-        "  - Rate Limiting: {}",
-        if config.rate_limit.enable {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    info!(
-        TARGET,
-        "  - Audit Logging: {}",
-        if config.session.audit_enable {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    info!(
-        TARGET,
-        "  - Account Lockout: {} max attempts", config.lockout.max_attempts
+        target: TARGET,
+        path = %config.database_path.display(),
+        api_key_ttl_s = config.api_key.default_ttl_seconds,
+        rate_limiting = config.rate_limit.enable,
+        audit_logging = config.session.audit_enable,
+        lockout_max_attempts = config.lockout.max_attempts,
+        "authentication database initialized"
     );
 
     Ok(Arc::new(db))
@@ -74,30 +53,28 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
     // Get total users (using a high limit to get all users for statistics)
     match db.list_users(false, 10000, 0) {
         Ok(users) => {
-            info!(TARGET, "Total active users: {}", users.len());
+            info!(target: TARGET, count = users.len(), "active users");
         }
         Err(e) => {
-            error!(TARGET, "Failed to get user count: {}", e);
+            error!(target: TARGET, error = %e, "failed to get user count");
         }
     }
 
-    // Get total roles
     match db.list_roles() {
         Ok(roles) => {
-            info!(TARGET, "Total roles: {}", roles.len());
+            info!(target: TARGET, count = roles.len(), "roles");
         }
         Err(e) => {
-            error!(TARGET, "Failed to get role count: {}", e);
+            error!(target: TARGET, error = %e, "failed to get role count");
         }
     }
 
-    // Get audit stats for last 7 days
     match db.get_audit_stats(7) {
         Ok(stats) => {
-            info!(TARGET, "Audit stats (last 7 days): {}", stats);
+            info!(target: TARGET, stats = %stats, "audit stats (last 7 days)");
         }
         Err(e) => {
-            error!(TARGET, "Failed to get audit stats: {}", e);
+            error!(target: TARGET, error = %e, "failed to get audit stats");
         }
     }
 }
@@ -112,62 +89,51 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
     if db.config.session.audit_retention_days > 0 {
         match db.cleanup_old_audit_logs(db.config.session.audit_retention_days)
         {
-            Ok(deleted) => {
-                if deleted > 0 {
-                    info!(
-                        TARGET,
-                        "Cleaned up {} old audit log entries (by time)",
-                        deleted
-                    );
-                }
+            Ok(deleted) if deleted > 0 => {
+                info!(target: TARGET, deleted, "cleaned up expired audit log entries");
             }
+            Ok(_) => {}
             Err(e) => {
-                error!(TARGET, "Failed to cleanup audit logs by time: {}", e);
+                error!(target: TARGET, error = %e, "failed to clean up audit logs by time");
             }
         }
     }
 
-    // Clean up excess audit logs by count (LRU)
     if db.config.session.audit_max_entries > 0 {
         match db.cleanup_excess_audit_logs(db.config.session.audit_max_entries)
         {
-            Ok(deleted) => {
-                if deleted > 0 {
-                    info!(
-                        TARGET,
-                        "Cleaned up {} excess audit log entries (LRU, limit: {})",
-                        deleted,
-                        db.config.session.audit_max_entries
-                    );
-                }
+            Ok(deleted) if deleted > 0 => {
+                info!(
+                    target: TARGET,
+                    deleted,
+                    limit = db.config.session.audit_max_entries,
+                    "evicted excess audit log entries (LRU)"
+                );
             }
+            Ok(_) => {}
             Err(e) => {
-                error!(TARGET, "Failed to cleanup excess audit logs: {}", e);
+                error!(target: TARGET, error = %e, "failed to clean up excess audit logs");
             }
         }
     }
 
-    // Clean up expired API keys
     match db.cleanup_expired_api_keys() {
-        Ok(deleted) => {
-            if deleted > 0 {
-                info!(TARGET, "Cleaned up {} expired API keys", deleted);
-            }
+        Ok(deleted) if deleted > 0 => {
+            info!(target: TARGET, deleted, "cleaned up expired API keys");
         }
+        Ok(_) => {}
         Err(e) => {
-            error!(TARGET, "Failed to cleanup expired API keys: {}", e);
+            error!(target: TARGET, error = %e, "failed to clean up expired API keys");
         }
     }
 
-    // Clean up old rate limit entries
     match db.cleanup_rate_limits() {
-        Ok(deleted) => {
-            if deleted > 0 {
-                info!(TARGET, "Cleaned up {} old rate limit entries", deleted);
-            }
+        Ok(deleted) if deleted > 0 => {
+            info!(target: TARGET, deleted, "cleaned up stale rate limit entries");
         }
+        Ok(_) => {}
         Err(e) => {
-            error!(TARGET, "Failed to cleanup rate limits: {}", e);
+            error!(target: TARGET, error = %e, "failed to clean up rate limit entries");
         }
     }
 

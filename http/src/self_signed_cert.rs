@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use x509_parser::pem::parse_x509_pem;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-const TARGET: &str = "SelfSignedCert";
+const TARGET: &str = "ave::http::cert";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CertError {

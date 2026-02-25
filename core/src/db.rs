@@ -1,7 +1,7 @@
 //! # Store module.
 //!
 
-use crate::config::{AveDbConfig, AveStoreConfig};
+use crate::config::{AveInternalDBConfig, AveInternalDBFeatureConfig};
 
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
@@ -22,15 +22,15 @@ pub enum Database {
 }
 
 impl Database {
-    pub fn open(config: &AveStoreConfig, spec: Option<MachineSpec>) -> Result<Self, StoreError> {
+    pub fn open(config: &AveInternalDBConfig, spec: Option<MachineSpec>) -> Result<Self, StoreError> {
         match &config.db {
             #[cfg(feature = "rocksdb")]
-            AveDbConfig::Rocksdb { path } => {
+            AveInternalDBFeatureConfig::Rocksdb { path } => {
                 let manager = RocksDbManager::new(path, config.durability, spec)?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
-            AveDbConfig::Sqlite { path } => {
+            AveInternalDBFeatureConfig::Sqlite { path } => {
                 let manager = SqliteManager::new(path, config.durability, spec)?;
                 Ok(Database::SQLite(manager))
             }

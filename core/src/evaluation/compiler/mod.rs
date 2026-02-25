@@ -286,8 +286,7 @@ impl Compiler {
         let bytes = store.data().read_data(pointer as usize)?;
         let contract_result: ContractResult =
             BorshDeserialize::try_from_slice(bytes).map_err(|e| {
-                CompilerError::SerializationError {
-                    context: "contract result deserialization",
+                CompilerError::InvalidContractOutput {
                     details: e.to_string(),
                 }
             })?;

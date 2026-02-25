@@ -57,10 +57,10 @@ pub async fn system(
         .add_helper("contracts", Arc::new(RwLock::new(contracts)))
         .await;
 
-    let spec = config.spec.map(MachineSpec::from);
+    let actor_spec = config.spec.clone().map(MachineSpec::from);
 
     // Build database manager.
-    let db = Database::open(&config.ave_db, spec)
+    let db = Database::open(&config.internal_db, actor_spec)
         .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
     system.add_helper("store", db.clone()).await;
 
@@ -99,9 +99,14 @@ pub async fn system(
         .await
         .map_err(|e| SystemError::RootActorCreation(e.to_string()))?;
 
-    let ext_db = ExternalDB::build(config.external_db, db_manager_actor)
-        .await
-        .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?;
+    let ext_db = ExternalDB::build(
+        config.external_db.db,
+        config.external_db.durability,
+        db_manager_actor,
+        config.spec.clone(),
+    )
+    .await
+    .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?;
 
     system.add_helper("ext_db", Arc::new(ext_db)).await;
 
@@ -118,11 +123,12 @@ pub async fn system(
 #[cfg(test)]
 pub mod tests {
 
-    use crate::config::{AveDbConfig, AveStoreConfig, ExternalDbConfig};
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
     use tempfile::TempDir;
     use test_log::test;
+
+    use crate::config::{AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig, AveInternalDBFeatureConfig};
 
     use super::*;
 
@@ -167,11 +173,14 @@ pub mod tests {
         let config = Config {
             keypair_algorithm: KeyPairAlgorithm::Ed25519,
             hash_algorithm: HashAlgorithm::Blake3,
-            ave_db: AveStoreConfig {
-                db: AveDbConfig::build(&ave_path),
+            internal_db: AveInternalDBConfig {
+                db: AveInternalDBFeatureConfig::build(&ave_path),
                 ..Default::default()
             },
-            external_db: ExternalDbConfig::build(&ext_path),
+            external_db: AveExternalDBConfig {
+                db: AveExternalDBFeatureConfig::build(&ext_path),
+                ..Default::default()
+            },
             network: newtork_config,
             contracts_path: contracts_path,
             always_accept: false,

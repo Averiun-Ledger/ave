@@ -12,16 +12,19 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use tracing::warn;
 use utoipa::ToSchema;
+
+const TARGET: &str = "ave::http::auth";
 
 /// Convert DatabaseError to HTTP response tuple
 fn db_error_to_response(
     err: DatabaseError,
 ) -> (StatusCode, Json<ErrorResponse>) {
     let (status, message) = match err {
-        DatabaseError::NotFoundError(msg) => (StatusCode::NOT_FOUND, msg),
-        DatabaseError::DuplicateError(msg) => (StatusCode::CONFLICT, msg),
-        DatabaseError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
+        DatabaseError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+        DatabaseError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
+        DatabaseError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
         DatabaseError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, msg),
         DatabaseError::AccountLocked(msg) => (StatusCode::FORBIDDEN, msg),
         DatabaseError::RateLimitExceeded(msg) => {
@@ -92,7 +95,7 @@ pub async fn create_api_key_for_user(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
@@ -104,7 +107,9 @@ pub async fn create_api_key_for_user(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -263,7 +268,7 @@ pub async fn revoke_api_key(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
@@ -278,7 +283,9 @@ pub async fn revoke_api_key(
         ),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -363,7 +370,7 @@ pub async fn rotate_api_key(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_rotated",
@@ -375,7 +382,9 @@ pub async fn rotate_api_key(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -438,7 +447,7 @@ pub async fn create_my_api_key(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_created",
@@ -450,7 +459,9 @@ pub async fn create_my_api_key(
         details: Some(&serde_json::to_string(&req).unwrap_or_default()),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -574,7 +585,7 @@ pub async fn revoke_my_api_key(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    let _ = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
         user_id: Some(auth_ctx.user_id),
         api_key_id: Some(&auth_ctx.api_key_id),
         action_type: "api_key_revoked",
@@ -589,7 +600,9 @@ pub async fn revoke_my_api_key(
         ),
         success: true,
         error_message: None,
-    });
+    }) {
+        warn!(target: TARGET, error = %e, "failed to write audit log");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

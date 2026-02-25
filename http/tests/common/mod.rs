@@ -36,6 +36,7 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
 
     let config = AuthConfig {
         enable: true,
+        durability: false,
         database_path: path,
         superadmin: "admin".to_string(),
         api_key: ApiKeyConfig {
@@ -62,7 +63,7 @@ pub fn create_test_db() -> (AuthDatabase, TempDir) {
         },
     };
 
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     (db, dir)
 }
@@ -131,8 +132,8 @@ impl TestServer {
             "is_service": true,
             "tracking_size": 200,
             "always_accept": {always_accept},
-            "ave_db": {{ "db": "{ave_db_path}" }},
-            "external_db": "{external_db_path}",
+            "internal_db": {{ "db": "{ave_db_path}" }},
+            "external_db": {{ "db": "{external_db_path}" }},
             "contracts_path": "{contracts_path}",
             "network": {{
                 "node_type": "Bootstrap",
@@ -191,7 +192,7 @@ impl TestServer {
                 .expect("Failed to create bridge");
 
         let auth_db: Option<Arc<AuthDatabase>> =
-            build_auth(&bridge_config.auth, "AdminPass123!").await;
+            build_auth(&bridge_config.auth, "AdminPass123!", None).await;
 
         // Build the REAL router using the actual server code
         let app = build_routes(false, bridge, auth_db);

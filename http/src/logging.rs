@@ -55,6 +55,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
         rotation,
         max_size,
         max_files,
+        level,
     } = cfg.clone();
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
@@ -62,7 +63,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
     let env_filter = if let Ok(env_filter) = EnvFilter::try_from_default_env() {
         env_filter
     } else {
-        EnvFilter::new("info")
+        EnvFilter::new(&level)
     };
 
     let stdout_layer = output.stdout.then(|| {

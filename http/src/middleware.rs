@@ -1,6 +1,8 @@
 use std::time::Duration;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
-use tracing::{Span, debug, info_span};
+use tracing::{Span, debug, info_span, trace, warn};
+
+const TARGET: &str = "ave::http";
 
 use axum::{
     Router,
@@ -21,41 +23,51 @@ pub fn tower_trace(routes: Router) -> Router {
 
                 info_span!(
                     "http_request",
-                    method = ?request.method(),
+                    method = %request.method(),
                     matched_path,
-                    some_other_field = tracing::field::Empty,
                 )
             })
             .on_request(|request: &Request<_>, _span: &Span| {
                 debug!(
-                    "New request: {} {}",
-                    request.method(),
-                    request.uri().path()
+                    target: TARGET,
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                    "request received"
                 )
             })
             .on_response(
-                |_response: &Response, latency: Duration, _span: &Span| {
-                    debug!("Response generated in {:?}", latency)
+                |response: &Response, latency: Duration, _span: &Span| {
+                    debug!(
+                        target: TARGET,
+                        status = response.status().as_u16(),
+                        latency_ms = latency.as_millis(),
+                        "response sent"
+                    )
                 },
             )
             .on_body_chunk(|chunk: &Bytes, _latency: Duration, _span: &Span| {
-                debug!("Sending {} bytes", chunk.len())
+                trace!(target: TARGET, bytes = chunk.len(), "sending body chunk")
             })
             .on_eos(
                 |_trailers: Option<&HeaderMap>,
                  stream_duration: Duration,
                  _span: &Span| {
-                    debug!("Stream closed after {:?}", stream_duration)
+                    trace!(
+                        target: TARGET,
+                        duration_ms = stream_duration.as_millis(),
+                        "stream closed"
+                    )
                 },
             )
             .on_failure(
                 |error: ServerErrorsFailureClass,
                  latency: Duration,
                  _span: &Span| {
-                    debug!(
-                        "Something went wrong {} in {:?}",
-                        error.to_string(),
-                        latency
+                    warn!(
+                        target: TARGET,
+                        error = %error,
+                        latency_ms = latency.as_millis(),
+                        "request failed"
                     )
                 },
             ),

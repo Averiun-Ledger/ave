@@ -37,7 +37,7 @@ async fn test_password_too_short() {
 
     let result = db.create_user("testuser", "Short1!", None, None, Some(false));
 
-    assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
 }
 
 #[test(tokio::test)]
@@ -48,7 +48,7 @@ async fn test_password_too_long() {
     let result =
         db.create_user("testuser", &long_pass, None, None, Some(false));
 
-    assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
 }
 
 #[test(tokio::test)]
@@ -57,7 +57,7 @@ async fn test_password_missing_uppercase() {
 
     let result = db.create_user("testuser", "lowercase123!", None, None, None);
 
-    assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
 }
 
 #[test(tokio::test)]
@@ -66,7 +66,7 @@ async fn test_password_missing_lowercase() {
 
     let result = db.create_user("testuser", "UPPERCASE123!", None, None, None);
 
-    assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
 }
 
 #[test(tokio::test)]
@@ -75,7 +75,7 @@ async fn test_password_missing_digit() {
 
     let result = db.create_user("testuser", "NoDigitsHere!", None, None, None);
 
-    assert!(matches!(result, Err(DatabaseError::ValidationError(_))));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
 }
 
 #[test(tokio::test)]
@@ -201,7 +201,7 @@ async fn test_concurrent_duplicate_user_creation() {
     // Others should fail with duplicate error
     let duplicate_count = results
         .iter()
-        .filter(|r| matches!(r, Err(DatabaseError::DuplicateError(_))))
+        .filter(|r| matches!(r, Err(DatabaseError::Duplicate(_))))
         .count();
     assert_eq!(duplicate_count, 9);
 }
@@ -343,6 +343,7 @@ async fn test_explicit_zero_ttl_overrides_default() {
 
     // Create config with a default TTL of 30 days
     let config = AuthConfig {
+        durability: false,
         enable: true,
         database_path: _tmp_dir.path().to_path_buf(),
         superadmin: "admin".to_string(),
@@ -355,7 +356,7 @@ async fn test_explicit_zero_ttl_overrides_default() {
         session: SessionConfig::default(),
     };
 
-    let db = AuthDatabase::new(config, "TestPass123!")
+    let db = AuthDatabase::new(config, "TestPass123!", None)
         .expect("Failed to create database");
 
     let user = db
@@ -646,7 +647,7 @@ async fn test_get_nonexistent_user() {
 
     let result = db.get_user_by_id(99999);
 
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 #[test(tokio::test)]
@@ -655,7 +656,7 @@ async fn test_get_nonexistent_role() {
 
     let result = db.get_role_by_name("nonexistent_role");
 
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 #[test(tokio::test)]
@@ -699,7 +700,7 @@ async fn test_update_nonexistent_user() {
 
     let result = db.update_user(99999, Some("NewPass123!"), None);
 
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 #[test(tokio::test)]
@@ -718,7 +719,7 @@ async fn test_delete_nonexistent_role() {
 
     let result = db.delete_role(99999);
 
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 // =============================================================================
@@ -812,7 +813,7 @@ async fn test_double_revoke_api_key() {
     // Either succeeds or fails with NotFound
     assert!(
         result.is_ok()
-            || matches!(result, Err(DatabaseError::NotFoundError(_)))
+            || matches!(result, Err(DatabaseError::NotFound(_)))
     );
 }
 
@@ -957,6 +958,7 @@ async fn test_pre_auth_rate_limiting_on_login() {
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {
+        durability: false,
         enable: true,
         database_path: path,
         superadmin: "admin".to_string(),
@@ -984,7 +986,7 @@ async fn test_pre_auth_rate_limiting_on_login() {
         },
     };
 
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     // Create a test user
     db.create_user("testuser", "Password123!", None, None, Some(false))
@@ -1136,7 +1138,7 @@ async fn test_dangerous_characters_in_api_key_names_rejected() {
 
         if let Err(e) = result {
             match e {
-                DatabaseError::ValidationError(_) => {
+                DatabaseError::Validation(_) => {
                     // Expected error type
                 }
                 _ => panic!("Expected ValidationError, got: {:?}", e),
@@ -1233,7 +1235,7 @@ async fn test_crlf_injection_prevented_in_text_fields() {
         );
         if let Err(e) = result {
             match e {
-                DatabaseError::ValidationError(msg) => {
+                DatabaseError::Validation(msg) => {
                     assert!(msg.contains("CRLF") || msg.contains("control"));
                 }
                 _ => panic!("Expected ValidationError for CRLF, got: {:?}", e),
@@ -1268,7 +1270,7 @@ async fn test_crlf_injection_prevented_in_text_fields() {
         );
         if let Err(e) = result {
             match e {
-                DatabaseError::ValidationError(msg) => {
+                DatabaseError::Validation(msg) => {
                     assert!(msg.contains("CRLF") || msg.contains("control"));
                 }
                 _ => panic!(
@@ -3449,7 +3451,7 @@ async fn test_all_permission_validation() {
         "Should not allow individual permission when 'all' exists"
     );
 
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(
             msg.contains("already has 'all' permission"),
             "Error message should mention 'all' permission"
@@ -3532,6 +3534,7 @@ async fn test_system_config_ttl_validation() {
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config = AuthConfig {
+        durability: false,
         enable: true,
         database_path: tmp_dir.path().join("auth.db"),
         superadmin: "admin".to_string(),
@@ -3541,7 +3544,7 @@ async fn test_system_config_ttl_validation() {
         session: SessionConfig::default(),
     };
 
-    let db = AuthDatabase::new(config, "TestPass123!")
+    let db = AuthDatabase::new(config, "TestPass123!", None)
         .expect("Failed to create database");
 
     // ========== API Key TTL Tests ==========
@@ -3566,7 +3569,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("api_key_default_ttl_seconds", "-1", Some(1));
     assert!(result.is_err(), "Negative TTL should be rejected");
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(msg.contains("must be >= 0"));
     } else {
         panic!("Expected ValidationError for negative TTL");
@@ -3597,7 +3600,7 @@ async fn test_system_config_ttl_validation() {
         result.is_err(),
         "Zero max_login_attempts should be rejected"
     );
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(msg.contains("must be > 0"));
     } else {
         panic!("Expected ValidationError for zero max_login_attempts");
@@ -3624,7 +3627,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("lockout_duration_seconds", "0", Some(1));
     assert!(result.is_err(), "Zero lockout_duration should be rejected");
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(msg.contains("must be > 0"));
     } else {
         panic!("Expected ValidationError for zero lockout_duration");
@@ -3651,7 +3654,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("rate_limit_window_seconds", "0", Some(1));
     assert!(result.is_err(), "Zero rate_limit_window should be rejected");
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(msg.contains("must be > 0"));
     } else {
         panic!("Expected ValidationError for zero rate_limit_window");
@@ -3684,7 +3687,7 @@ async fn test_system_config_ttl_validation() {
         result.is_err(),
         "Zero rate_limit_max_requests should be rejected"
     );
-    if let Err(DatabaseError::ValidationError(msg)) = result {
+    if let Err(DatabaseError::Validation(msg)) = result {
         assert!(msg.contains("must be > 0"));
     } else {
         panic!("Expected ValidationError for zero rate_limit_max_requests");

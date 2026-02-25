@@ -26,7 +26,7 @@ impl NetworkService {
         self.command_sender
             .send(command)
             .await
-            .map_err(|e| Error::Command(e.to_string()))
+            .map_err(|e| Error::CommandSend(e.to_string()))
     }
 
     /// Send a message to the network worker.

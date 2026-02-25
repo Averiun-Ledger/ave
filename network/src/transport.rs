@@ -49,7 +49,7 @@ pub fn build_transport(
     limits: LimitsConfig,
 ) -> Result<AveTransport, Error> {
     let noise = noise::Config::new(keys)
-        .map_err(|e| Error::Transport(format!("Noise authentication {:?}", e)))?
+        .map_err(|e| Error::NoiseBuild(e.to_string()))?
         .with_prologue(NOISE_PROTOCOL.as_bytes().to_vec());
 
     let mut binding = yamux::Config::default();
@@ -69,7 +69,7 @@ pub fn build_transport(
         .boxed();
 
         dns::tokio::Transport::system(tcp)
-            .map_err(|e| Error::Transport(format!("DNS error {:?}", e)))?
+            .map_err(|e| Error::DnsBuild(e.to_string()))?
     };
 
     #[cfg(feature = "test")]

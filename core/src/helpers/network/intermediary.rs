@@ -51,17 +51,13 @@ impl Intermediary {
             loop {
                 tokio::select! {
                     command = command_receiver.recv() => {
-                        if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await {
-                                error!(
-                                    error = %e,
-                                    "Network intermediary command handling failed"
-                                );
-                                if let IntermediaryError::NetworkSendFailed { .. } = e {
-                                    error!("Network send failed, cancelling token and stopping intermediary");
+                        if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await
+                                && let IntermediaryError::NetworkSendFailed { .. } = e {
+                                    error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
                                     token.cancel();
                                     break;
                                 }
-                        }
+
                     },
                     _ = token.cancelled() => {
                         debug!("Network intermediary cancelled, stopping");
@@ -173,7 +169,10 @@ impl Intermediary {
                 let path = ActorPath::from(message.info.receiver_actor.clone());
                 let request_id = message.info.request_id.clone();
                 match message.message {
-                    ActorMessage::DistributionGetLastSn { subject_id, receiver_actor } => {
+                    ActorMessage::DistributionGetLastSn {
+                        subject_id,
+                        receiver_actor,
+                    } => {
                         let actor = system
                             .get_actor::<DistriWorker>(&path)
                             .await
@@ -186,7 +185,7 @@ impl Intermediary {
                                 subject_id,
                                 info: message.info,
                                 sender: sender.clone(),
-                                receiver_actor
+                                receiver_actor,
                             })
                             .await
                             .map_err(|e| {

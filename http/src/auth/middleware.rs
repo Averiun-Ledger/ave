@@ -16,6 +16,9 @@ use axum::{
 use rand::RngExt;
 use std::fmt::Display;
 use std::{net::SocketAddr, sync::Arc};
+use tracing::{error, warn};
+
+const TARGET: &str = "ave::http::auth";
 
 // =============================================================================
 // API KEY AUTHENTICATION EXTRACTOR
@@ -70,6 +73,12 @@ where
         // Check rate limit BEFORE verifying credentials to prevent brute force attacks
         db.check_rate_limit(None, ip_address.as_deref(), Some("/auth/*"))
             .map_err(|e| {
+                warn!(
+                    target: TARGET,
+                    ip = ?ip_address,
+                    error = %e,
+                    "pre-auth rate limit exceeded"
+                );
                 (
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(ErrorResponse {
@@ -79,6 +88,12 @@ where
             })?;
 
         let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
+            warn!(
+                target: TARGET,
+                ip = ?ip_address,
+                error = %e,
+                "api key authentication failed"
+            );
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
@@ -90,8 +105,16 @@ where
         auth_ctx.ip_address = ip_address.clone();
 
         // Update API key last used
-        let _ = db
-            .update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref());
+        if let Err(e) =
+            db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref())
+        {
+            warn!(
+                target: TARGET,
+                error = %e,
+                key_id = %auth_ctx.api_key_id,
+                "failed to update api key last used"
+            );
+        }
 
         // Post-authentication rate limit (per API key)
         db.check_rate_limit(
@@ -100,6 +123,13 @@ where
             parts.uri.path().into(),
         )
         .map_err(|e| {
+            warn!(
+                target: TARGET,
+                key_id = %auth_ctx.api_key_id,
+                ip = ?ip_address,
+                error = %e,
+                "post-auth rate limit exceeded"
+            );
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(ErrorResponse {
@@ -222,7 +252,7 @@ pub async fn audit_log_middleware(
 
         // If we have auth_ctx, use normal logging
         if let Some(ctx) = auth_ctx {
-            let _ = db.log_api_request(
+            if let Err(e) = db.log_api_request(
                 &ctx,
                 crate::auth::database_audit::ApiRequestParams {
                     path: &path,
@@ -233,10 +263,12 @@ pub async fn audit_log_middleware(
                     success,
                     error_message: error_message.as_deref(),
                 },
-            );
+            ) {
+                error!(target: TARGET, error = %e, "failed to write request audit log");
+            }
         } else {
             // No auth context - log as unauthenticated request
-            let _ = db.create_audit_log(
+            if let Err(e) = db.create_audit_log(
                 crate::auth::database_audit::AuditLogParams {
                     user_id: None,
                     api_key_id: None,
@@ -254,7 +286,9 @@ pub async fn audit_log_middleware(
                     success,
                     error_message: error_message.as_deref(),
                 },
-            );
+            ) {
+                error!(target: TARGET, error = %e, "failed to write audit log");
+            }
         }
     }
 

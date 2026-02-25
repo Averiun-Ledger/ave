@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    Config, Error, NodeType,
+    Config, Error, MemoryLimitsConfig, NodeType,
     control_list::{self, build_control_lists_updaters},
     routing::{self},
     utils::{
@@ -94,16 +94,19 @@ impl Behaviour {
                 limits.conn_limmits_max_established_per_peer,
             );
 
-        
-            #[cfg(feature = "test")]
-            let mem_limits = Toggle::from(None);
+        #[cfg(feature = "test")]
+        let mem_limits = Toggle::from(None::<memory_connection_limits::Behaviour>);
 
-            #[cfg(not(feature = "test"))]
-            let mem_limits = Toggle::from(Some(
-                        memory_connection_limits::Behaviour::with_max_percentage(
-                            0.9,
-                        ),
-                    ));
+        #[cfg(not(feature = "test"))]
+        let mem_limits = match &config.memory_limits {
+            MemoryLimitsConfig::Disabled => Toggle::from(None),
+            MemoryLimitsConfig::Percentage { value } => Toggle::from(Some(
+                memory_connection_limits::Behaviour::with_max_percentage(*value),
+            )),
+            MemoryLimitsConfig::Mb { value } => Toggle::from(Some(
+                memory_connection_limits::Behaviour::with_max_bytes(value * 1024 * 1024),
+            )),
+        };
         
 
 
@@ -202,7 +205,7 @@ impl Behaviour {
     ) -> Result<(), Error> {
         self.req_res
             .send_response(channel, ReqResMessage(message))
-            .map_err(|_| Error::Behaviour("Cannot send response".to_owned()))
+            .map_err(|_| Error::ResponseSend)
     }
 }
 

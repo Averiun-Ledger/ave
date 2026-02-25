@@ -6,7 +6,7 @@ use crate::auth::validate_password;
 
 use super::crypto::hash_password;
 use super::models::*;
-use ave_bridge::auth::AuthConfig;
+use ave_bridge::{MachineSpec, auth::AuthConfig, resolve_spec};
 use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, params};
 use std::{
@@ -17,55 +17,57 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, info};
 
+const TARGET: &str = "ave::http::auth";
+
 // =============================================================================
 // ERROR TYPE
 // =============================================================================
 
 #[derive(Debug, Error, Clone)]
 pub enum DatabaseError {
-    #[error("Initialization error: {0}")]
-    InitializationError(String),
+    #[error("failed to initialize: {0}")]
+    Initialize(String),
 
-    #[error("Connection error: {0}")]
-    ConnectionError(String),
+    #[error("database connection failed: {0}")]
+    Connection(String),
 
-    #[error("Migration error: {0}")]
-    MigrationError(String),
+    #[error("migration failed: {0}")]
+    Migration(String),
 
-    #[error("Query error: {0}")]
-    QueryError(String),
+    #[error("query failed: {0}")]
+    Query(String),
 
-    #[error("Insert error: {0}")]
-    InsertError(String),
+    #[error("insert failed: {0}")]
+    Insert(String),
 
-    #[error("Update error: {0}")]
-    UpdateError(String),
+    #[error("update failed: {0}")]
+    Update(String),
 
-    #[error("Delete error: {0}")]
-    DeleteError(String),
+    #[error("delete failed: {0}")]
+    Delete(String),
 
-    #[error("Validation error: {0}")]
-    ValidationError(String),
+    #[error("validation failed: {0}")]
+    Validation(String),
 
-    #[error("Crypto error: {0}")]
-    CryptoError(String),
+    #[error("crypto operation failed: {0}")]
+    Crypto(String),
 
-    #[error("Permission denied: {0}")]
+    #[error("permission denied: {0}")]
     PermissionDenied(String),
 
-    #[error("Account locked: {0}")]
+    #[error("account locked: {0}")]
     AccountLocked(String),
 
-    #[error("Rate limit exceeded: {0}")]
+    #[error("rate limit exceeded: {0}")]
     RateLimitExceeded(String),
 
-    #[error("Not found: {0}")]
-    NotFoundError(String),
+    #[error("not found: {0}")]
+    NotFound(String),
 
-    #[error("Duplicate: {0}")]
-    DuplicateError(String),
+    #[error("duplicate entry: {0}")]
+    Duplicate(String),
 
-    #[error("Password change required: {0}")]
+    #[error("password change required: {0}")]
     PasswordChangeRequired(String),
 }
 
@@ -91,7 +93,7 @@ impl AuthDatabase {
         &self,
     ) -> Result<MutexGuard<'_, Connection>, DatabaseError> {
         self.connection.lock().map_err(|e| {
-            DatabaseError::ConnectionError(format!("DB lock poisoned: {}", e))
+            DatabaseError::Connection(format!("DB mutex poisoned: {}", e))
         })
     }
 
@@ -104,13 +106,14 @@ impl AuthDatabase {
     pub fn new(
         config: AuthConfig,
         password: &str,
+        spec: Option<MachineSpec>,
     ) -> Result<Self, DatabaseError> {
         // Create parent directory if it doesn't exist
         let path = config.database_path.clone();
         if !Path::new(&path).exists() {
             fs::create_dir_all(&path).map_err(|e| {
-                DatabaseError::InitializationError(format!(
-                    "Can not create auth dir: {}",
+                DatabaseError::Initialize(format!(
+                    "cannot create auth directory: {}",
                     e
                 ))
             })?;
@@ -120,12 +123,31 @@ impl AuthDatabase {
 
         // Open connection
         let connection = Connection::open(&path)
-            .map_err(|e| DatabaseError::ConnectionError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Connection(e.to_string()))?;
 
-        // Enable foreign keys
+        // Apply tuning PRAGMAs
+        let resolved = resolve_spec(spec.as_ref());
+        let tuning = auth_tuning_for_ram(resolved.ram_mb);
+        let sync_mode = if config.durability { "FULL" } else { "NORMAL" };
         connection
-            .execute("PRAGMA foreign_keys = ON", [])
-            .map_err(|e| DatabaseError::ConnectionError(e.to_string()))?;
+            .execute_batch(&format!(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA synchronous={sync_mode};
+                 PRAGMA wal_autocheckpoint={wal};
+                 PRAGMA journal_size_limit={jsl};
+                 PRAGMA temp_store=MEMORY;
+                 PRAGMA cache_size={cache};
+                 PRAGMA mmap_size={mmap};
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA optimize=0x10002;",
+                sync_mode = sync_mode,
+                wal = tuning.wal_autocheckpoint_pages,
+                jsl = tuning.journal_size_limit_bytes,
+                cache = tuning.cache_size_kb,
+                mmap = tuning.mmap_size_bytes,
+            ))
+            .map_err(|e| DatabaseError::Connection(e.to_string()))?;
 
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -146,7 +168,7 @@ impl AuthDatabase {
 
     /// Run database migrations
     pub fn run_migrations(&self) -> Result<(), DatabaseError> {
-        info!("Running database migrations...");
+        info!(target: TARGET, "running database migrations");
 
         let conn = self.lock_conn()?;
 
@@ -154,22 +176,16 @@ impl AuthDatabase {
         let migration_001 =
             include_str!("../../migrations/001_initial_schema.sql");
         conn.execute_batch(migration_001).map_err(|e| {
-            DatabaseError::MigrationError(format!(
-                "Migration 001 failed: {}",
-                e
-            ))
+            DatabaseError::Migration(format!("migration 001 failed: {}", e))
         })?;
 
         let migration_002 =
             include_str!("../../migrations/002_role_permissions.sql");
         conn.execute_batch(migration_002).map_err(|e| {
-            DatabaseError::MigrationError(format!(
-                "Migration 002 failed: {}",
-                e
-            ))
+            DatabaseError::Migration(format!("migration 002 failed: {}", e))
         })?;
 
-        info!("Database migrations completed successfully");
+        info!(target: TARGET, "database migrations completed");
         Ok(())
     }
 
@@ -213,7 +229,7 @@ impl AuthDatabase {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = COALESCE(system_config.description, excluded.description)",
                 params![key, value, desc],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
         Ok(())
@@ -233,10 +249,10 @@ impl AuthDatabase {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if user_count > 0 {
-            debug!("Users already exist, skipping superadmin bootstrap");
+            debug!(target: TARGET, "users already exist, skipping superadmin bootstrap");
             return Ok(());
         }
 
@@ -247,11 +263,11 @@ impl AuthDatabase {
             "admin".to_owned()
         };
 
-        info!("Bootstrapping superadmin account: {}", superadmin);
+        info!(target: TARGET, username = %superadmin, "bootstrapping superadmin account");
 
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
-            DatabaseError::CryptoError(format!(
+            DatabaseError::Crypto(format!(
                 "Failed to hash superadmin password: {}",
                 e
             ))
@@ -264,7 +280,7 @@ impl AuthDatabase {
             params![superadmin, password_hash],
         )
         .map_err(|e| {
-            DatabaseError::InsertError(format!(
+            DatabaseError::Insert(format!(
                 "Failed to create superadmin: {}",
                 e
             ))
@@ -280,7 +296,7 @@ impl AuthDatabase {
                 |row| row.get(0),
             )
             .map_err(|e| {
-                DatabaseError::QueryError(format!(
+                DatabaseError::Query(format!(
                     "Failed to get superadmin role: {}",
                     e
                 ))
@@ -291,13 +307,13 @@ impl AuthDatabase {
             params![user_id, superadmin_role_id],
         )
         .map_err(|e| {
-            DatabaseError::InsertError(format!(
+            DatabaseError::Insert(format!(
                 "Failed to assign superadmin role: {}",
                 e
             ))
         })?;
 
-        info!("Superadmin account created successfully");
+        info!(target: TARGET, "superadmin account created");
         Ok(())
     }
 
@@ -351,17 +367,17 @@ impl AuthDatabase {
                 params![username],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if exists {
-            return Err(DatabaseError::DuplicateError(format!(
+            return Err(DatabaseError::Duplicate(format!(
                 "Username '{}' already exists",
                 username
             )));
         }
 
         // Validate password
-        validate_password(password).map_err(DatabaseError::ValidationError)?;
+        validate_password(password).map_err(DatabaseError::Validation)?;
 
         // SECURITY FIX: Enforce single superadmin rule
         // Check if trying to assign superadmin role
@@ -390,14 +406,14 @@ impl AuthDatabase {
                         |row| row.get(0),
                     )
                     .map_err(|e| {
-                        DatabaseError::QueryError(format!(
+                        DatabaseError::Query(format!(
                             "Failed to count superadmins: {}",
                             e
                         ))
                     })?;
 
                 if existing_count > 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                             "A superadmin already exists. Only one superadmin is allowed".to_string()
                         ));
                 }
@@ -406,7 +422,7 @@ impl AuthDatabase {
 
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
-            DatabaseError::CryptoError(format!(
+            DatabaseError::Crypto(format!(
                 "Failed to hash password: {}",
                 e
             ))
@@ -418,7 +434,7 @@ impl AuthDatabase {
             "INSERT INTO users (username, password_hash, is_active, must_change_password)
              VALUES (?1, ?2, ?3, ?4)",
             params![username, password_hash, true, must_change],
-        ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let user_id = conn.last_insert_rowid();
 
@@ -428,7 +444,7 @@ impl AuthDatabase {
                 conn.execute(
                     "INSERT INTO user_roles (user_id, role_id, assigned_by) VALUES (?1, ?2, ?3)",
                     params![user_id, role_id, created_by],
-                ).map_err(|e| DatabaseError::InsertError(format!("Failed to assign role: {}", e)))?;
+                ).map_err(|e| DatabaseError::Insert(format!("Failed to assign role: {}", e)))?;
             }
         }
 
@@ -465,8 +481,8 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-        .ok_or_else(|| DatabaseError::NotFoundError(format!("User with id {} not found", user_id)))
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .ok_or_else(|| DatabaseError::NotFound(format!("User with id {} not found", user_id)))
     }
 
     /// Get user by ID
@@ -489,7 +505,7 @@ impl AuthDatabase {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(count)
     }
@@ -521,7 +537,7 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(query)
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let users = stmt
             .query_map(params![limit, offset], |row| {
@@ -541,9 +557,9 @@ impl AuthDatabase {
                     },
                 ))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get roles for each user
         let mut result = Vec::new();
@@ -569,10 +585,10 @@ impl AuthDatabase {
 
         // Update password if provided
         if let Some(pwd) = password {
-            validate_password(pwd).map_err(DatabaseError::ValidationError)?;
+            validate_password(pwd).map_err(DatabaseError::Validation)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {
-                DatabaseError::CryptoError(format!(
+                DatabaseError::Crypto(format!(
                     "Failed to hash password: {}",
                     e
                 ))
@@ -582,7 +598,7 @@ impl AuthDatabase {
                 "UPDATE users SET password_hash = ?1, must_change_password = 0, failed_login_attempts = 0, locked_until = NULL WHERE id = ?2",
                 params![password_hash, user_id],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             // SECURITY FIX: Revoke all API keys when password is changed
             // This prevents compromised accounts from maintaining persistent access
@@ -601,7 +617,7 @@ impl AuthDatabase {
                 "UPDATE users SET is_active = ?1 WHERE id = ?2",
                 params![active, user_id],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
         Self::get_user_by_id_internal(&conn, user_id)
@@ -615,7 +631,7 @@ impl AuthDatabase {
             "UPDATE users SET is_deleted = 1 WHERE id = ?1",
             params![user_id],
         )
-        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -633,13 +649,13 @@ impl AuthDatabase {
              WHERE ur.user_id = ?1 AND r.is_deleted = 0
              ORDER BY r.name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let roles = stmt
             .query_map(params![user_id], |row| row.get(0))
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<String>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(roles)
     }
@@ -667,7 +683,7 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3)",
             params![user_id, role_id, assigned_by],
         )
-        .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         // Revoke API keys
         Self::revoke_user_api_keys_internal(
@@ -692,7 +708,7 @@ impl AuthDatabase {
             "DELETE FROM user_roles WHERE user_id = ?1 AND role_id = ?2",
             params![user_id, role_id],
         )
-        .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         // Revoke API keys
         Self::revoke_user_api_keys_internal(
@@ -750,7 +766,7 @@ impl AuthDatabase {
                 let valid =
                     super::crypto::verify_password(password, &u.password_hash)
                         .map_err(|e| {
-                            DatabaseError::CryptoError(format!(
+                            DatabaseError::Crypto(format!(
                                 "Password verification failed: {}",
                                 e
                             ))
@@ -878,7 +894,7 @@ impl AuthDatabase {
                 },
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()));
+            .map_err(|e| DatabaseError::Query(e.to_string()));
 
         // SECURITY: Constant-time username enumeration mitigation
         // Always perform password hash verification with equal timing
@@ -891,7 +907,7 @@ impl AuthDatabase {
                     &u.password_hash,
                 )
                 .map_err(|e| {
-                    DatabaseError::CryptoError(format!(
+                    DatabaseError::Crypto(format!(
                         "Password verification failed: {}",
                         e
                     ))
@@ -945,18 +961,18 @@ impl AuthDatabase {
 
         // Validate new password
         validate_password(new_password)
-            .map_err(DatabaseError::ValidationError)?;
+            .map_err(DatabaseError::Validation)?;
 
         // Prevent setting the same password
         if current_password == new_password {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "New password must be different from current password"
                     .to_string(),
             ));
         }
 
         let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::CryptoError(format!(
+            DatabaseError::Crypto(format!(
                 "Failed to hash password: {}",
                 e
             ))
@@ -968,7 +984,7 @@ impl AuthDatabase {
              WHERE id = ?2",
             params![password_hash, user.id],
         )
-        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         // SECURITY FIX: Revoke all API keys when password is changed
         // This prevents compromised accounts from maintaining persistent access
@@ -997,10 +1013,10 @@ impl AuthDatabase {
     ) -> Result<User, DatabaseError> {
         // Validate password
         validate_password(new_password)
-            .map_err(DatabaseError::ValidationError)?;
+            .map_err(DatabaseError::Validation)?;
 
         let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::CryptoError(format!(
+            DatabaseError::Crypto(format!(
                 "Failed to hash password: {}",
                 e
             ))
@@ -1017,7 +1033,7 @@ impl AuthDatabase {
              WHERE id = ?2",
             params![password_hash, user_id],
         )
-        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         // SECURITY FIX: Revoke all API keys when password is reset
         // This prevents compromised accounts from maintaining persistent access
@@ -1044,34 +1060,34 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         // Check length (reasonable username limit)
         if username.len() > 64 {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username must be 64 characters or less".to_string(),
             ));
         }
 
         if username.is_empty() || username.trim().is_empty() {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username cannot be empty".to_string(),
             ));
         }
 
         // SECURITY: Check for CRLF injection
         if username.contains('\r') || username.contains('\n') {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username contains invalid characters (CRLF)".to_string(),
             ));
         }
 
         // Check for null bytes
         if username.contains('\0') {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username contains null bytes".to_string(),
             ));
         }
 
         // Check for other control characters
         if username.chars().any(|c| c.is_control() && c != '\t') {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username contains invalid control characters".to_string(),
             ));
         }
@@ -1079,7 +1095,7 @@ impl AuthDatabase {
         // Check for dangerous characters commonly used in attacks
         let dangerous = ['<', '>', '"', '\'', '`', '&', '|', ';', '$', '\\'];
         if username.chars().any(|c| dangerous.contains(&c)) {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Username contains invalid characters. Only alphanumeric, underscore, hyphen, period, and @ allowed".to_string(),
             ));
         }
@@ -1096,14 +1112,14 @@ impl AuthDatabase {
         if let Some(desc) = description {
             // Check length
             if desc.len() > 500 {
-                return Err(DatabaseError::ValidationError(
+                return Err(DatabaseError::Validation(
                     "Description must be 500 characters or less".to_string(),
                 ));
             }
 
             // SECURITY: Check for CRLF injection
             if desc.contains('\r') || desc.contains('\n') {
-                return Err(DatabaseError::ValidationError(
+                return Err(DatabaseError::Validation(
                     "Description contains invalid characters (CRLF)"
                         .to_string(),
                 ));
@@ -1111,14 +1127,14 @@ impl AuthDatabase {
 
             // Check for null bytes
             if desc.contains('\0') {
-                return Err(DatabaseError::ValidationError(
+                return Err(DatabaseError::Validation(
                     "Description contains null bytes".to_string(),
                 ));
             }
 
             // Check for excessive control characters (allow tab)
             if desc.chars().any(|c| c.is_control() && c != '\t') {
-                return Err(DatabaseError::ValidationError(
+                return Err(DatabaseError::Validation(
                     "Description contains invalid control characters"
                         .to_string(),
                 ));
@@ -1126,5 +1142,50 @@ impl AuthDatabase {
         }
 
         Ok(())
+    }
+}
+
+// =============================================================================
+// SQLITE TUNING
+// =============================================================================
+
+struct AuthSqliteTuning {
+    wal_autocheckpoint_pages: i64,
+    journal_size_limit_bytes: i64,
+    cache_size_kb: i64,
+    mmap_size_bytes: i64,
+}
+
+/// Compute SQLite tuning parameters from available RAM.
+///
+/// Designed for a shared Docker container with 3 co-located SQLite instances
+/// plus a libp2p process — total DB cache footprint stays at ~6 % of host RAM.
+fn auth_tuning_for_ram(ram_mb: u64) -> AuthSqliteTuning {
+    // Cache: 2 % of RAM, floor 8 MB, cap 1 GB.
+    let cache_mb = (ram_mb * 2 / 100).clamp(8, 1024);
+    let cache_size_kb = -(cache_mb as i64 * 1024); // negative = KB in SQLite
+
+    // mmap: half of cache, hard cap 128 MB.
+    // Supplements the page cache for sequential reads; kept below cache to
+    // avoid doubling memory pressure in a shared container.
+    let mmap_size_bytes = (cache_mb as i64 / 2).min(128) * 1024 * 1024;
+
+    // WAL checkpoint: fire when WAL ≈ cache/2.
+    // pages = (cache_mb/2 MB) / (4 KB/page) = cache_mb * 128.
+    // Floor 1000 (SQLite default, prevents thrashing on tiny RAM).
+    // Cap 8000 (32 MB WAL max, bounds checkpoint stall under write bursts).
+    let wal_autocheckpoint_pages = (cache_mb as i64 * 128).clamp(1_000, 8_000);
+
+    // journal_size_limit: 3× the WAL ceiling — a safety net never reached in
+    // normal operation (checkpoints fire first); prevents runaway WAL growth
+    // if a checkpoint is delayed. Cap 256 MB to bound disk use in Docker.
+    let journal_size_limit_bytes = (wal_autocheckpoint_pages * 4096 * 3)
+        .clamp(32 * 1024 * 1024, 256 * 1024 * 1024);
+
+    AuthSqliteTuning {
+        wal_autocheckpoint_pages,
+        journal_size_limit_bytes,
+        cache_size_kb,
+        mmap_size_bytes,
     }
 }

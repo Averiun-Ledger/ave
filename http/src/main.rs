@@ -32,7 +32,7 @@ use tower_http::{
     cors::{Any, CorsLayer},
     set_header::SetResponseHeaderLayer,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::auth::build_auth;
 use crate::self_signed_cert::{
@@ -63,7 +63,7 @@ struct Ports {
     https: String,
 }
 
-const TARGET_HTTP: &str = "AveHttp";
+const TARGET: &str = "ave::http";
 
 #[tokio::main]
 async fn main() {
@@ -78,6 +78,90 @@ async fn main() {
         eprintln!("Can not build config: {e}");
         panic!("Can not build config");
     });
+
+    let _log_handle = logging::init_logging(&config.logging).await;
+
+    // Log effective configuration so misconfiguration is visible at startup
+    info!(target: TARGET, "--- configuration ---");
+
+    info!(target: TARGET, "[http]");
+    info!(target: TARGET, "  address   : {}", config.http.http_address);
+    if let Some(ref https) = config.http.https_address {
+        info!(target: TARGET, "  https     : {}", https);
+        if let Some(ref cert) = config.http.https_cert_path {
+            info!(target: TARGET, "  cert      : {}", cert.display());
+        }
+        if config.http.self_signed_cert.enabled {
+            info!(target: TARGET, "  self-signed: enabled ({})", config.http.self_signed_cert.common_name);
+        }
+    } else {
+        info!(target: TARGET, "  https     : disabled");
+    }
+    info!(target: TARGET, "  docs      : {}", config.http.enable_doc);
+    if config.http.cors.enabled {
+        if config.http.cors.allow_any_origin {
+            info!(target: TARGET, "  cors      : enabled (any origin - WARNING)");
+        } else {
+            info!(target: TARGET, "  cors      : enabled ({} origins)", config.http.cors.allowed_origins.len());
+        }
+    } else {
+        info!(target: TARGET, "  cors      : disabled");
+    }
+
+    info!(target: TARGET, "[network]");
+    info!(target: TARGET, "  type      : {}", config.node.network.node_type);
+    if config.node.network.listen_addresses.is_empty() {
+        info!(target: TARGET, "  listen    : none");
+    } else {
+        for addr in &config.node.network.listen_addresses {
+            info!(target: TARGET, "  listen    : {}", addr);
+        }
+    }
+    for addr in &config.node.network.external_addresses {
+        info!(target: TARGET, "  external  : {}", addr);
+    }
+    info!(target: TARGET, "  boot nodes: {}", config.node.network.boot_nodes.len());
+    info!(target: TARGET, "  mem limits: {}", config.node.network.memory_limits);
+
+    info!(target: TARGET, "[node]");
+    info!(target: TARGET, "  keys      : {}", config.keys_path.display());
+    info!(target: TARGET, "  db        : {:?}", config.node.internal_db.db);
+    info!(target: TARGET, "  keypair   : {:?}", config.node.keypair_algorithm);
+    info!(target: TARGET, "  always acc: {}", config.node.always_accept);
+    info!(target: TARGET, "  service   : {}", config.node.is_service);
+
+    info!(target: TARGET, "[auth]");
+    info!(target: TARGET, "  enabled   : {}", config.auth.enable);
+    if config.auth.enable {
+        info!(target: TARGET, "  database  : {}", config.auth.database_path.display());
+        info!(target: TARGET, "  superadmin: {}", config.auth.superadmin);
+        info!(target: TARGET, "  key ttl   : {}s | max {} per user", config.auth.api_key.default_ttl_seconds, config.auth.api_key.max_keys_per_user);
+        info!(target: TARGET, "  lockout   : {} attempts -> {}s", config.auth.lockout.max_attempts, config.auth.lockout.duration_seconds);
+        if config.auth.rate_limit.enable {
+            info!(target: TARGET, "  ratelimit : {} req / {}s window", config.auth.rate_limit.max_requests, config.auth.rate_limit.window_seconds);
+        } else {
+            info!(target: TARGET, "  ratelimit : disabled");
+        }
+    }
+
+    info!(target: TARGET, "[logging]");
+    info!(target: TARGET, "  level     : {}", config.logging.level);
+    info!(target: TARGET, "  stdout    : {}", config.logging.output.stdout);
+    if config.logging.output.file {
+        info!(target: TARGET, "  file      : {} | rotation: {} | max files: {}", config.logging.file_path.display(), config.logging.rotation, config.logging.max_files);
+    }
+
+    if !config.sink.sinks.is_empty() {
+        info!(target: TARGET, "[sink]");
+        for (schema, servers) in &config.sink.sinks {
+            info!(target: TARGET, "  schema '{}': {} server(s)", schema, servers.len());
+            for s in servers {
+                info!(target: TARGET, "    - {} (auth: {})", s.url, s.auth);
+            }
+        }
+    }
+
+    info!(target: TARGET, "--- end ---");
 
     let listener_http =
         tokio::net::TcpListener::bind(&config.http.http_address)
@@ -105,8 +189,9 @@ async fn main() {
         if cors_config.allow_any_origin {
             // SECURITY WARNING: This allows ANY website to make requests (CVSS 6.5)
             // Only use in development or if API is not accessed from browsers
-            tracing::warn!(
-                "CORS configured with allow_any_origin=true. This is a security risk in production!"
+            warn!(
+                target: TARGET,
+                "CORS configured with allow_any_origin=true — security risk in production"
             );
             cors_layer.allow_origin(Any)
         } else if !cors_config.allowed_origins.is_empty() {
@@ -118,10 +203,11 @@ async fn main() {
                     origin
                         .parse::<HeaderValue>()
                         .inspect_err(|e| {
-                            tracing::error!(
-                                "Invalid CORS origin '{}': {}",
-                                origin,
-                                e
+                            error!(
+                                target: TARGET,
+                                origin = %origin,
+                                error = %e,
+                                "invalid CORS origin"
                             );
                         })
                         .ok()
@@ -170,10 +256,8 @@ async fn main() {
             HeaderValue::from_static("DENY"),
         ));
 
-    let _log_handle = logging::init_logging(&config.logging).await;
-
     let auth_db: Option<Arc<AuthDatabase>> =
-        build_auth(&config.auth, &args.auth_password).await;
+        build_auth(&config.auth, &args.auth_password, config.node.spec.clone()).await;
 
     let mut key_password = args.key_password;
     if key_password.is_empty() {
@@ -199,7 +283,7 @@ async fn main() {
     )
     .await
     .map_err(|e| {
-        error!("Can not build Bridge: {}", e);
+        error!(target: TARGET, error = %e, "failed to build bridge");
     })
     .expect("Can not build Bridge");
 
@@ -230,7 +314,7 @@ async fn main() {
         // If self-signed mode is enabled, generate certificate if needed
         if self_signed_config.enabled {
             info!(
-                target: TARGET_HTTP,
+                target: TARGET,
                 "Self-signed certificate mode enabled"
             );
 
@@ -246,16 +330,16 @@ async fn main() {
                 {
                     Ok(()) => {
                         info!(
-                            target: TARGET_HTTP,
-                            "Self-signed certificate generated at {:?}",
-                            cert_path
+                            target: TARGET,
+                            path = %cert_path.display(),
+                            "self-signed certificate generated"
                         );
                     }
                     Err(e) => {
                         error!(
-                            target: TARGET_HTTP,
-                            "Failed to generate self-signed certificate: {}",
-                            e
+                            target: TARGET,
+                            error = %e,
+                            "failed to generate self-signed certificate"
                         );
                         return;
                     }
@@ -287,7 +371,7 @@ async fn main() {
         tokio::spawn(async move {
             join_all(runners).await;
             handle.graceful_shutdown(Some(Duration::from_secs(10)));
-            info!(TARGET_HTTP, "All the runners have stopped");
+            info!(target: TARGET, "all runners stopped");
         });
 
         axum_server::bind_rustls(https_address, tls)
@@ -314,7 +398,7 @@ async fn main() {
         )
         .with_graceful_shutdown(async move {
             join_all(runners).await;
-            info!(TARGET_HTTP, "All the runners have stopped");
+            info!(target: TARGET, "all runners stopped");
         })
         .await
         .expect("Can not run axum server");

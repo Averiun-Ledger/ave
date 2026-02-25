@@ -35,9 +35,9 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
         .ok_or_else(|| {
-            DatabaseError::NotFoundError(format!(
+            DatabaseError::NotFound(format!(
                 "Role with id {} not found",
                 role_id
             ))
@@ -68,9 +68,9 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
         .ok_or_else(|| {
-            DatabaseError::NotFoundError(format!("Role '{}' not found", name))
+            DatabaseError::NotFound(format!("Role '{}' not found", name))
         })
     }
 
@@ -87,13 +87,13 @@ impl AuthDatabase {
         const MAX_DESC_LENGTH: usize = 500;
 
         if name.trim().is_empty() {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Role name cannot be empty".to_string(),
             ));
         }
 
         if name.len() > MAX_NAME_LENGTH {
-            return Err(DatabaseError::ValidationError(format!(
+            return Err(DatabaseError::Validation(format!(
                 "Role name must not exceed {} characters (got {})",
                 MAX_NAME_LENGTH,
                 name.len()
@@ -102,7 +102,7 @@ impl AuthDatabase {
 
         // Validate no dangerous control characters
         if name.chars().any(|c| c.is_control() && c != '\t') {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "Role name contains invalid control characters".to_string(),
             ));
         }
@@ -111,7 +111,7 @@ impl AuthDatabase {
         if let Some(desc) = description
             && desc.len() > MAX_DESC_LENGTH
         {
-            return Err(DatabaseError::ValidationError(format!(
+            return Err(DatabaseError::Validation(format!(
                 "Description must not exceed {} characters (got {})",
                 MAX_DESC_LENGTH,
                 desc.len()
@@ -123,10 +123,10 @@ impl AuthDatabase {
                 params![name],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if exists {
-            return Err(DatabaseError::DuplicateError(format!(
+            return Err(DatabaseError::Duplicate(format!(
                 "Role '{}' already exists",
                 name
             )));
@@ -137,7 +137,7 @@ impl AuthDatabase {
              VALUES (?1, ?2)",
             params![name, description],
         )
-        .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let role_id = conn.last_insert_rowid();
         Self::get_role_by_id_internal(&conn, role_id)
@@ -165,7 +165,7 @@ impl AuthDatabase {
              FROM roles r
              WHERE r.is_deleted = 0
              ORDER BY r.name"
-        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let roles = stmt
             .query_map([], |row| {
@@ -178,9 +178,9 @@ impl AuthDatabase {
                     permission_count: row.get(5)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(roles)
     }
@@ -199,7 +199,7 @@ impl AuthDatabase {
         if let Some(desc) = description
             && desc.len() > MAX_DESC_LENGTH
         {
-            return Err(DatabaseError::ValidationError(format!(
+            return Err(DatabaseError::Validation(format!(
                 "Description must not exceed {} characters (got {})",
                 MAX_DESC_LENGTH,
                 desc.len()
@@ -219,7 +219,7 @@ impl AuthDatabase {
                 "UPDATE roles SET description = ?1 WHERE id = ?2",
                 params![desc, role_id],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
         Self::get_role_by_id_internal(&conn, role_id)
@@ -241,7 +241,7 @@ impl AuthDatabase {
             "UPDATE roles SET is_deleted = 1 WHERE id = ?1",
             params![role_id],
         )
-        .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -273,9 +273,9 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
         .ok_or_else(|| {
-            DatabaseError::NotFoundError(format!(
+            DatabaseError::NotFound(format!(
                 "Resource '{}' not found",
                 name
             ))
@@ -303,9 +303,9 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
         .ok_or_else(|| {
-            DatabaseError::NotFoundError(format!("Action '{}' not found", name))
+            DatabaseError::NotFound(format!("Action '{}' not found", name))
         })
     }
 
@@ -319,7 +319,7 @@ impl AuthDatabase {
              FROM resources
              ORDER BY name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let resources = stmt
             .query_map([], |row| {
@@ -331,9 +331,9 @@ impl AuthDatabase {
                     created_at: row.get(4)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(resources)
     }
@@ -348,7 +348,7 @@ impl AuthDatabase {
              FROM actions
              ORDER BY name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let actions = stmt
             .query_map([], |row| {
@@ -360,9 +360,9 @@ impl AuthDatabase {
                     created_at: row.get(4)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(actions)
     }
@@ -391,7 +391,7 @@ impl AuthDatabase {
                 |row| row.get(0),
             )
             .map_err(|e| {
-                DatabaseError::NotFoundError(format!("Role not found: {}", e))
+                DatabaseError::NotFound(format!("Role not found: {}", e))
             })?;
 
         if is_system {
@@ -410,7 +410,7 @@ impl AuthDatabase {
             "INSERT OR REPLACE INTO role_permissions (role_id, resource_id, action_id, allowed)
              VALUES (?1, ?2, ?3, ?4)",
             params![role_id, resource_id, action_id, allowed],
-        ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         Ok(())
     }
@@ -432,7 +432,7 @@ impl AuthDatabase {
                 |row| row.get(0),
             )
             .map_err(|e| {
-                DatabaseError::NotFoundError(format!("Role not found: {}", e))
+                DatabaseError::NotFound(format!("Role not found: {}", e))
             })?;
 
         if is_system {
@@ -450,7 +450,7 @@ impl AuthDatabase {
              WHERE role_id = ?1 AND resource_id = ?2 AND action_id = ?3",
             params![role_id, resource_id, action_id],
         )
-        .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(())
     }
@@ -471,7 +471,7 @@ impl AuthDatabase {
              WHERE rp.role_id = ?1
              ORDER BY res.name, act.name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let permissions = stmt
             .query_map(params![role_id], |row| {
@@ -484,9 +484,9 @@ impl AuthDatabase {
                     role_name: None,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(permissions)
     }
@@ -518,7 +518,7 @@ impl AuthDatabase {
                     params![user_id, resource_id],
                     |row| row.get(0),
                 )
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             if individual_perms > 0 {
                 // Remove individual direct permissions when assigning "all"
@@ -530,7 +530,7 @@ impl AuthDatabase {
                      )",
                     params![user_id, resource_id],
                 )
-                .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Delete(e.to_string()))?;
             }
         } else {
             // Check if user already has direct "all" permission for this resource
@@ -544,10 +544,10 @@ impl AuthDatabase {
                     params![user_id, resource_id],
                     |row| row.get(0),
                 )
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             if has_all {
-                return Err(DatabaseError::ValidationError(format!(
+                return Err(DatabaseError::Validation(format!(
                     "User already has 'all' permission for resource '{}'. Remove 'all' permission first to assign individual actions",
                     resource
                 )));
@@ -559,7 +559,7 @@ impl AuthDatabase {
             "INSERT OR REPLACE INTO user_permissions (user_id, resource_id, action_id, allowed, granted_by)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![user_id, resource_id, action_id, allowed, granted_by],
-        ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         Ok(())
     }
@@ -582,7 +582,7 @@ impl AuthDatabase {
              WHERE user_id = ?1 AND resource_id = ?2 AND action_id = ?3",
             params![user_id, resource_id, action_id],
         )
-        .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(())
     }
@@ -611,7 +611,7 @@ impl AuthDatabase {
                      AND up2.action_id = rp.action_id
                )
              ORDER BY res.name, act.name"
-        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let mut permissions: Vec<Permission> = role_perms_stmt
             .query_map(params![user_id], |row| {
@@ -624,9 +624,9 @@ impl AuthDatabase {
                     role_name: row.get(4)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get direct permissions
         let mut direct_perms_stmt = conn
@@ -638,7 +638,7 @@ impl AuthDatabase {
              WHERE up.user_id = ?1
              ORDER BY res.name, act.name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let direct_perms: Vec<Permission> = direct_perms_stmt
             .query_map(params![user_id], |row| {
@@ -651,9 +651,9 @@ impl AuthDatabase {
                     role_name: None,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Combine both
         permissions.extend(direct_perms);
@@ -686,7 +686,7 @@ impl AuthDatabase {
              CROSS JOIN actions act
              WHERE allowed IS NOT NULL
              ORDER BY res.name, act.name"
-        ).map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let permissions = stmt
             .query_map(params![user_id], |row| {
@@ -699,9 +699,9 @@ impl AuthDatabase {
                     role_name: None,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(permissions)
     }
@@ -732,7 +732,7 @@ impl AuthDatabase {
              WHERE (rp.allowed IS NOT NULL OR up.allowed IS NOT NULL)
              ORDER BY r.name, a.name",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let permissions = stmt
             .query_map(params![user_id], |row| {
@@ -745,9 +745,9 @@ impl AuthDatabase {
                     role_name: None,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(permissions)
     }

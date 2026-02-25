@@ -18,11 +18,11 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, warn};
 
 use crate::{RoutingNode, utils::request_update_lists};
 
-const TARGET_CONTROL_LIST: &str = "AveNetwork-Control-list";
+const TARGET: &str = "ave::network::control";
 
 /// Configuration for the control list behaviour.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -150,7 +150,7 @@ pub fn build_control_lists_updaters(
     token: CancellationToken,
 ) -> Option<Receiver<Event>> {
     if config.enable {
-        info!(TARGET_CONTROL_LIST, "Control list is enable");
+        debug!(target: TARGET, "control list enabled");
 
         let (sender, receiver) = mpsc::channel(1000);
         let interval = config.interval_request;
@@ -173,29 +173,23 @@ pub fn build_control_lists_updaters(
                 // If at least 1 update of the list was possible
                 if successful_allow != 0 {
                     if let Err(e) = sender.send(Event::AllowListUpdated(vec_allow_peers)).await {
-                        error!(TARGET_CONTROL_LIST, "Can not send Event::AllowListUpdated, {}", e)
+                        debug!(target: TARGET, error = %e, "allow-list update dropped: channel closed");
                     }
                 } else {
-                    warn!(
-                        TARGET_CONTROL_LIST,
-                        "No get to the services providing the list of allowed peers was performed"
-                    );
+                    warn!(target: TARGET, "allow-list not updated: no service responded successfully");
                 }
 
                 // If at least 1 update of the list was possible
                 if successful_block != 0 {
                     if let Err(e) = sender.send(Event::BlockListUpdated(vec_block_peers)).await {
-                        error!(TARGET_CONTROL_LIST, "Can not send Event::BlockListUpdated, {}", e)
+                        debug!(target: TARGET, error = %e, "block-list update dropped: channel closed");
                     }
                 } else {
-                    warn!(
-                        TARGET_CONTROL_LIST,
-                        "No get to the services providing the list of block peers was performed"
-                    );
+                    warn!(target: TARGET, "block-list not updated: no service responded successfully");
                 }
                     }
                     _ = token.cancelled() => {
-                        info!(TARGET_CONTROL_LIST, "Control list updater cancelled");
+                        debug!(target: TARGET, "control list updater stopped");
                         break;
                     }
                 };
@@ -204,7 +198,6 @@ pub fn build_control_lists_updaters(
 
         Some(receiver)
     } else {
-        info!(TARGET_CONTROL_LIST, "Control list is not enable");
         None
     }
 }
@@ -288,10 +281,7 @@ impl Behaviour {
             return Ok(());
         }
 
-        warn!(
-            TARGET_CONTROL_LIST,
-            "Node {} has been blocked, it is not in the allowed list", peer
-        );
+        debug!(target: TARGET, peer_id = %peer, "connection denied: peer not in allow list");
         Err(ConnectionDenied::new(NotAllowed { peer: *peer }))
     }
 
@@ -301,10 +291,7 @@ impl Behaviour {
             return Ok(());
         }
 
-        warn!(
-            TARGET_CONTROL_LIST,
-            "Node {} has been blocked, it is in the blocked list", peer
-        );
+        debug!(target: TARGET, peer_id = %peer, "connection denied: peer is blocked");
         Err(ConnectionDenied::new(Blocked { peer: *peer }))
     }
 

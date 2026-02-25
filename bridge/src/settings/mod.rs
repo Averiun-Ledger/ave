@@ -27,8 +27,24 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
     // Validate HTTPS configuration
     validate_https_config(&bridge_config)?;
 
+    // Validate network configuration
+    validate_network_config(&bridge_config)?;
+
     // Mix configurations.
     Ok(bridge_config)
+}
+
+/// Validate network configuration
+fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
+    config
+        .node
+        .network
+        .memory_limits
+        .validate()
+        .map_err(|e| {
+            error!(error = %e, "Invalid network configuration");
+            BridgeError::ConfigBuild(e)
+        })
 }
 
 /// Validate HTTPS configuration consistency
@@ -66,12 +82,11 @@ mod tests {
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::{
         config::{
-            AveDbConfig, ExternalDbConfig, LoggingOutput, LoggingRotation,
-            MachineSpec, SinkServer,
+            AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, LoggingOutput, LoggingRotation, MachineSpec, SinkServer
         },
         subject::sinkdata::SinkTypes,
     };
-    use network::{NodeType, RoutingNode};
+    use network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
 
     use crate::{config::Config as BridgeConfig, settings::build_config};
@@ -82,14 +97,17 @@ keys_path = "/custom/keys"
 [node]
 keypair_algorithm = "Ed25519"
 hash_algorithm = "Blake3"
-external_db = "/data/ext.db"
 contracts_path = "/contracts"
 always_accept = true
 tracking_size = 200
 is_service = true
 
-[node.ave_db]
+[node.internal_db]
 db = "/data/ave.db"
+durability = true
+
+[node.external_db]
+db = "/data/ext.db"
 durability = true
 
 [node.spec]
@@ -120,6 +138,10 @@ service_allow_list = ["http://allow.local/list"]
 service_block_list = ["http://block.local/list"]
 interval_request = 42
 
+[node.network.memory_limits]
+type = "percentage"
+value = 0.8
+
 [logging]
 output = { stdout = false, file = true, api = true }
 api_url = "https://example.com/logs"
@@ -127,6 +149,7 @@ file_path = "/tmp/my.log"
 rotation = "hourly"
 max_size = 52428800
 max_files = 5
+level = "debug"
 
 [sink]
 auth = "https://auth.service"
@@ -185,14 +208,16 @@ keys_path: /custom/keys
 node:
   keypair_algorithm: Ed25519
   hash_algorithm: Blake3
-  ave_db:
+  internal_db:
     db: /data/ave.db
+    durability: true
+  external_db:
+    db: /data/ext.db
     durability: true
   spec:
     custom:
       ram_mb: 2048
       cpu_cores: 4
-  external_db: /data/ext.db
   contracts_path: /contracts
   always_accept: true
   tracking_size: 200
@@ -225,6 +250,9 @@ node:
       service_allow_list: [http://allow.local/list]
       service_block_list: [http://block.local/list]
       interval_request: 42
+    memory_limits:
+      type: percentage
+      value: 0.8
 logging:
   output:
     stdout: false
@@ -235,6 +263,7 @@ logging:
   rotation: hourly
   max_size: 52428800
   max_files: 5
+  level: debug
 sink:
   auth: https://auth.service
   username: sink-user
@@ -292,8 +321,12 @@ http:
   "node": {
     "keypair_algorithm": "Ed25519",
     "hash_algorithm": "Blake3",
-    "ave_db": {
+    "internal_db": {
       "db": "/data/ave.db",
+      "durability": true
+    },
+    "external_db": {
+      "db": "/data/ext.db",
       "durability": true
     },
     "spec": {
@@ -302,7 +335,6 @@ http:
         "cpu_cores": 4
       }
     },
-    "external_db": "/data/ext.db",
     "contracts_path": "/contracts",
     "always_accept": true,
     "tracking_size": 200,
@@ -341,6 +373,10 @@ http:
         "service_allow_list": ["http://allow.local/list"],
         "service_block_list": ["http://block.local/list"],
         "interval_request": 42
+      },
+      "memory_limits": {
+        "type": "percentage",
+        "value": 0.8
       }
     }
   },
@@ -354,7 +390,8 @@ http:
     "file_path": "/tmp/my.log",
     "rotation": "hourly",
     "max_size": 52428800,
-    "max_files": 5
+    "max_files": 5,
+    "level": "debug"
   },
   "sink": {
     "auth": "https://auth.service",
@@ -518,11 +555,11 @@ http:
         assert_eq!(node.tracking_size, 200);
         assert!(node.is_service);
         assert_eq!(
-            node.ave_db.db,
-            AveDbConfig::build(&PathBuf::from("/data/ave.db"))
+            node.internal_db.db,
+            AveInternalDBFeatureConfig::build(&PathBuf::from("/data/ave.db"))
         );
         
-        assert!(node.ave_db.durability);
+        assert!(node.internal_db.durability);
         match &node.spec {
             Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
                 assert_eq!(*ram_mb, 2048);
@@ -531,9 +568,10 @@ http:
             _ => panic!("Expected MachineSpec::Custom"),
         }
         assert_eq!(
-            node.external_db,
-            ExternalDbConfig::build(&PathBuf::from("/data/ext.db"))
+            node.external_db.db,
+            AveExternalDBFeatureConfig::build(&PathBuf::from("/data/ext.db"))
         );
+		assert!(node.external_db.durability);
 
         assert_eq!(node.network.node_type, NodeType::Addressable);
         assert_eq!(
@@ -596,6 +634,10 @@ http:
             node.network.control_list.get_interval_request(),
             Duration::from_secs(42)
         );
+        assert_eq!(
+            node.network.memory_limits,
+            MemoryLimitsConfig::Percentage { value: 0.8 }
+        );
         let logging = &config.logging;
         assert_eq!(
             logging.output,
@@ -613,6 +655,7 @@ http:
         assert_eq!(logging.rotation, LoggingRotation::Hourly);
         assert_eq!(logging.max_size, 52_428_800);
         assert_eq!(logging.max_files, 5);
+        assert_eq!(logging.level, "debug");
 
         let mut expected_sinks = BTreeMap::new();
         expected_sinks.insert(
@@ -685,8 +728,8 @@ http:
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
         assert_eq!(config.node.contracts_path, PathBuf::new());
-        assert_eq!(config.node.ave_db.db, AveDbConfig::default());
-        assert_eq!(config.node.external_db, ExternalDbConfig::default());
+        assert_eq!(config.node.internal_db.db, AveInternalDBFeatureConfig::default());
+        assert_eq!(config.node.external_db.db, AveExternalDBFeatureConfig::default());
         assert_eq!(config.node.tracking_size, 100);
         assert!(!config.node.is_service);
         assert_eq!(config.node.network.node_type, NodeType::Bootstrap);

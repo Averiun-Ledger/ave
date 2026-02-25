@@ -10,6 +10,8 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
+const TARGET: &str = "ave::core::sink";
+
 pub use error::SinkError;
 
 use crate::{
@@ -105,6 +107,7 @@ impl AveSink {
             Ok(t) => Some(t),
             Err(e) => {
                 error!(
+                    target: TARGET,
                     error = %e,
                     "Failed to obtain new auth token"
                 );
@@ -175,12 +178,14 @@ impl AveSink {
         match Self::send_once(client, url, event, header_ref).await {
             Ok(_) => {
                 debug!(
+                    target: TARGET,
                     url = %url,
                     "Data sent to sink successfully"
                 );
             }
             Err(SinkError::UnprocessableEntity) => {
                 warn!(
+                    target: TARGET,
                     url = %url,
                     "Sink rejected data format (422)"
                 );
@@ -192,6 +197,7 @@ impl AveSink {
                     && self.token.is_some() =>
             {
                 warn!(
+                    target: TARGET,
                     url = %url,
                     "Authentication failed, refreshing token"
                 );
@@ -200,7 +206,7 @@ impl AveSink {
                     if let Some(arc) = &self.token {
                         *arc.write().await = new_token.clone();
                     }
-                    debug!("Token refreshed, retrying request");
+                    debug!(target: TARGET, "Token refreshed, retrying request");
                     let new_header = format!(
                         "{} {}",
                         new_token.token_type, new_token.access_token
@@ -216,18 +222,21 @@ impl AveSink {
                     {
                         Ok(_) => {
                             debug!(
+                                target: TARGET,
                                 url = %url,
                                 "Data sent to sink successfully after token refresh"
                             );
                         }
                         Err(SinkError::UnprocessableEntity) => {
                             warn!(
+                                target: TARGET,
                                 url = %url,
                                 "Sink rejected data format (422)"
                             );
                         }
                         Err(e) => {
                             error!(
+                                target: TARGET,
                                 url = %url,
                                 error = %e,
                                 "Failed to send data to sink after token refresh"
@@ -238,6 +247,7 @@ impl AveSink {
             }
             Err(e) => {
                 error!(
+                    target: TARGET,
                     url = %url,
                     error = %e,
                     "Failed to send data to sink"
@@ -258,6 +268,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
         let (subject_id, schema_id) = data.event.get_subject_schema();
         let Some(servers) = self.sinks.get(&schema_id) else {
             debug!(
+                target: TARGET,
                 schema_id = %schema_id,
                 "No sink servers configured for schema"
             );
@@ -268,6 +279,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
         }
 
         debug!(
+            target: TARGET,
             subject_id = %subject_id,
             schema_id = %schema_id,
             servers_count = servers.len(),

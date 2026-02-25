@@ -21,7 +21,7 @@ pub use ave_core::{
     auth::AuthWitness,
     config::Config as AveConfig,
     config::{
-        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer, AveStoreConfig
+        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer, AveExternalDBConfig, AveInternalDBConfig
     },
     error::Error,
 
@@ -29,10 +29,10 @@ pub use ave_core::{
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
 pub use network::{
-    Config as NetworkConfig, ControlListConfig, RoutingConfig,
-    RoutingNode,
+    Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
+    RoutingConfig, RoutingNode,
 };
-pub use ave_core::config::MachineSpec;
+pub use ave_core::config::{MachineSpec, resolve_spec};
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinHandle,

@@ -25,7 +25,7 @@ pub mod system_handlers;
 
 use std::{sync::Arc, time::Duration};
 
-use ave_bridge::{auth::AuthConfig, settings::command::build_auth_password};
+use ave_bridge::{MachineSpec, auth::AuthConfig, settings::command::build_auth_password};
 // Re-exports for convenience
 pub use database::AuthDatabase;
 use tokio::time::interval;
@@ -35,7 +35,7 @@ use crate::auth::integration::{
     cleanup_old_data, initialize_auth_database, log_auth_statistics,
 };
 
-const TARGET_HTTP: &str = "AveHttp";
+const TARGET: &str = "ave::http";
 const MIN_LENGTH: usize = 8;
 const MAX_LENGTH: usize = 128;
 const REQUIRE_UPPERCASE: bool = true;
@@ -46,6 +46,7 @@ const REQUIRE_SPECIAL: bool = true;
 pub async fn build_auth(
     auth_config: &AuthConfig,
     password: &str,
+    spec: Option<MachineSpec>,
 ) -> Option<Arc<AuthDatabase>> {
     if auth_config.enable {
         let mut auth_password = password.to_string();
@@ -55,19 +56,20 @@ pub async fn build_auth(
 
         if auth_password.is_empty() {
             error!(
-                "Auth system is enable but superadmin password is not configured"
+                target: TARGET,
+                "auth system is enabled but superadmin password is not configured"
             );
             return None;
         }
 
-        let db = initialize_auth_database(auth_config, &auth_password)
+        let db = initialize_auth_database(auth_config, &auth_password, spec)
             .await
             .map_err(|e| {
-                error!(TARGET_HTTP, "Failed to initialize auth system: {}", e);
+                error!(target: TARGET, error = %e, "failed to initialize auth system");
             })
             .expect("Can not initialize auth database");
 
-        info!(TARGET_HTTP, "Authentication system ENABLED");
+        info!(target: TARGET, "authentication system enabled");
         log_auth_statistics(&db).await;
         // Background maintenance: cleanup audit logs, rate limits, expired API keys
         let maintenance_db = db.clone();
@@ -76,7 +78,7 @@ pub async fn build_auth(
             loop {
                 ticker.tick().await;
                 if let Err(e) = cleanup_old_data(&maintenance_db).await {
-                    warn!(TARGET_HTTP, "Maintenance task failed: {}", e);
+                    warn!(target: TARGET, error = %e, "maintenance task failed");
                 }
             }
         });

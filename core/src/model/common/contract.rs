@@ -70,20 +70,14 @@ impl WasmLimits {
     pub fn build(ram_mb: u64, cpu_cores: usize) -> Self {
         // WASM linear memory per instance: floor 4 MB, cap 32 MB.
         let memory_size = ((ram_mb / 512) as usize)
-            .saturating_mul(4 * 1024 * 1024)
-            .max(4 * 1024 * 1024)
-            .min(32 * 1024 * 1024);
+            .saturating_mul(4 * 1024 * 1024).clamp(4 * 1024 * 1024, 32 * 1024 * 1024);
 
         // Host I/O total per call: floor 3 MB, cap 24 MB.
         let max_total_memory = ((ram_mb / 512) as usize)
-            .saturating_mul(3 * 1024 * 1024)
-            .max(3 * 1024 * 1024)
-            .min(24 * 1024 * 1024);
+             .saturating_mul(3 * 1024 * 1024).clamp(3 * 1024 * 1024, 24 * 1024 * 1024);
 
         // Single alloc cap ≈ ⅓ of I/O budget: floor 1 MB, cap 8 MB.
-        let max_single_alloc = (max_total_memory / 3)
-            .max(1 * 1024 * 1024)
-            .min(8 * 1024 * 1024);
+        let max_single_alloc = (max_total_memory / 3).clamp(1024 * 1024, 8 * 1024 * 1024);
 
         // Function table: 256 entries per core, floor 512, cap 2 048.
         let max_table_elements = (256 * cpu_cores.max(2)).min(2_048);
@@ -107,41 +101,8 @@ impl WasmLimits {
 /// - `Custom { ram_mb, cpu_cores }` → use the supplied values directly.
 /// - `None` → auto-detect total RAM and available CPU cores from the host.
 pub fn resolve_wasm_limits(spec: Option<MachineSpec>) -> WasmLimits {
-    match spec {
-        Some(MachineSpec::Profile(p)) => {
-            WasmLimits::build(p.ram_mb(), p.cpu_cores())
-        }
-        Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
-            WasmLimits::build(ram_mb, cpu_cores)
-        }
-        None => WasmLimits::build(detect_ram_mb(), detect_cpu_cores()),
-    }
-}
-
-/// Detect total system RAM from `/proc/meminfo` (Linux). Falls back to 4 096 MB.
-fn detect_ram_mb() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-            for line in meminfo.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb_str) = rest.split_whitespace().next() {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb / 1024;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    4_096
-}
-
-/// Detect available CPU parallelism. Falls back to 2.
-fn detect_cpu_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
+    let resolved = crate::config::resolve_spec(spec.as_ref());
+    WasmLimits::build(resolved.ram_mb, resolved.cpu_cores)
 }
 
 #[derive(Debug, Error, Clone)]

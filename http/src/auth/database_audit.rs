@@ -96,7 +96,7 @@ impl AuthDatabase {
                 sanitized_error.as_deref()
             ],
         )
-        .map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         Ok(conn.last_insert_rowid())
     }
@@ -216,13 +216,13 @@ impl AuthDatabase {
         let limit = match query.limit {
             Some(l) if l > 0 && l <= MAX_LIMIT => l,
             Some(l) if l <= 0 => {
-                return Err(DatabaseError::ValidationError(format!(
+                return Err(DatabaseError::Validation(format!(
                     "Limit must be positive (got {})",
                     l
                 )));
             }
             Some(l) => {
-                return Err(DatabaseError::ValidationError(format!(
+                return Err(DatabaseError::Validation(format!(
                     "Limit must not exceed {} (got {})",
                     MAX_LIMIT, l
                 )));
@@ -233,7 +233,7 @@ impl AuthDatabase {
         let offset = match query.offset {
             Some(o) if o >= 0 => o,
             Some(o) => {
-                return Err(DatabaseError::ValidationError(format!(
+                return Err(DatabaseError::Validation(format!(
                     "Offset must be non-negative (got {})",
                     o
                 )));
@@ -252,7 +252,7 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(&sql)
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let logs = stmt
             .query_map(params_refs.as_slice(), |row| {
@@ -272,9 +272,9 @@ impl AuthDatabase {
                     error_message: row.get(12)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(logs)
     }
@@ -297,7 +297,7 @@ impl AuthDatabase {
                 "DELETE FROM audit_logs WHERE timestamp < ?1",
                 params![cutoff_timestamp],
             )
-            .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }
@@ -316,7 +316,7 @@ impl AuthDatabase {
         // Count current entries
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM audit_logs", [], |row| row.get(0))
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if count <= max_entries as i64 {
             return Ok(0); // Under limit
@@ -332,7 +332,7 @@ impl AuthDatabase {
                 )",
                 params![to_delete],
             )
-            .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }
@@ -353,7 +353,7 @@ impl AuthDatabase {
                 params![cutoff],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Success/failure counts
         let success_count: i64 = conn
@@ -362,7 +362,7 @@ impl AuthDatabase {
                 params![cutoff],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let failure_count: i64 = conn
             .query_row(
@@ -370,19 +370,19 @@ impl AuthDatabase {
                 params![cutoff],
                 |row| row.get(0),
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Common helper to fetch top-N aggregated counts
         let top_n = |sql: &str| -> Result<Vec<(String, i64)>, DatabaseError> {
             let mut stmt = conn
                 .prepare(sql)
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(params![cutoff], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))
+            .map_err(|e| DatabaseError::Query(e.to_string()))
         };
 
         let top_actions = top_n(
@@ -522,7 +522,7 @@ impl AuthDatabase {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if let Some(count) = current_count {
             if count >= max_requests as i64 {
@@ -541,14 +541,14 @@ impl AuthDatabase {
                 &update_query,
                 params![now, api_key_id, ip_address, endpoint, window_start],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         } else {
             // Create new entry
             conn.execute(
                 "INSERT INTO rate_limits (api_key_id, ip_address, endpoint, window_start, request_count, last_request_at)
                  VALUES (?1, ?2, ?3, ?4, 1, ?5)",
                 params![api_key_id, ip_address, endpoint, now, now],
-            ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+            ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
         }
 
         Ok(true)
@@ -594,7 +594,7 @@ impl AuthDatabase {
                 "DELETE FROM rate_limits WHERE window_start < ?1",
                 params![cutoff],
             )
-            .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }
@@ -631,22 +631,22 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(&query)
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let data: Vec<(i64, i64)> = if api_key_id.is_some() {
             stmt.query_map(params![api_key_id, cutoff], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
         } else {
             stmt.query_map(params![cutoff], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
         };
 
         let total_requests: i64 = data.iter().map(|(_, count)| count).sum();
@@ -690,7 +690,7 @@ impl AuthDatabase {
                  ORDER BY total_requests DESC
                  LIMIT 50",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let by_api_key: Vec<serde_json::Value> = stmt
             .query_map(params![cutoff], |row| {
@@ -703,9 +703,9 @@ impl AuthDatabase {
                     "last_request_at": row.get::<_, Option<i64>>(5)?.map(format_ts),
                 }))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get top IPs by request count
         let mut stmt = conn
@@ -721,7 +721,7 @@ impl AuthDatabase {
                  ORDER BY total_requests DESC
                  LIMIT 50",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let by_ip: Vec<serde_json::Value> = stmt
             .query_map(params![cutoff], |row| {
@@ -732,9 +732,9 @@ impl AuthDatabase {
                     "unique_api_keys": row.get::<_, i64>(3)?,
                 }))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get top endpoints by request count
         let mut stmt = conn
@@ -749,7 +749,7 @@ impl AuthDatabase {
                  ORDER BY total_requests DESC
                  LIMIT 50",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let by_endpoint: Vec<serde_json::Value> = stmt
             .query_map(params![cutoff], |row| {
@@ -759,9 +759,9 @@ impl AuthDatabase {
                     "last_request_at": row.get::<_, Option<i64>>(2)?.map(format_ts),
                 }))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get IP + Endpoint breakdown (what endpoint is each IP accessing)
         let mut stmt = conn
@@ -780,7 +780,7 @@ impl AuthDatabase {
                  ORDER BY total_requests DESC
                  LIMIT 100",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let by_ip_endpoint: Vec<serde_json::Value> = stmt
             .query_map(params![cutoff], |row| {
@@ -792,9 +792,9 @@ impl AuthDatabase {
                     "unique_api_keys": row.get::<_, i64>(4)?,
                 }))
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Get total requests in period
         let total_requests: i64 = conn
@@ -849,7 +849,7 @@ impl AuthDatabase {
                 })
             },
         )
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))
+        .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
     /// List all system config
@@ -864,7 +864,7 @@ impl AuthDatabase {
              FROM system_config
              ORDER BY key",
             )
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let configs = stmt
             .query_map([], |row| {
@@ -876,9 +876,9 @@ impl AuthDatabase {
                     updated_by: row.get(4)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(configs)
     }
@@ -896,69 +896,69 @@ impl AuthDatabase {
         match key {
             "api_key_default_ttl_seconds" => {
                 let ttl_value: i64 = value.parse().map_err(|_| {
-                    DatabaseError::ValidationError(
+                    DatabaseError::Validation(
                         "api_key_default_ttl_seconds must be a valid integer"
                             .to_string(),
                     )
                 })?;
 
                 if ttl_value < 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                         "api_key_default_ttl_seconds must be >= 0 (0 = no expiration)".to_string()
                     ));
                 }
             }
             "max_login_attempts" => {
                 let attempts: u32 = value.parse().map_err(|_| {
-                    DatabaseError::ValidationError(
+                    DatabaseError::Validation(
                         "max_login_attempts must be a valid positive integer"
                             .to_string(),
                     )
                 })?;
 
                 if attempts == 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                         "max_login_attempts must be > 0".to_string(),
                     ));
                 }
             }
             "lockout_duration_seconds" => {
                 let duration: i64 = value.parse().map_err(|_| {
-                    DatabaseError::ValidationError(
+                    DatabaseError::Validation(
                         "lockout_duration_seconds must be a valid integer"
                             .to_string(),
                     )
                 })?;
 
                 if duration <= 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                         "lockout_duration_seconds must be > 0".to_string(),
                     ));
                 }
             }
             "rate_limit_window_seconds" => {
                 let window: i64 = value.parse().map_err(|_| {
-                    DatabaseError::ValidationError(
+                    DatabaseError::Validation(
                         "rate_limit_window_seconds must be a valid integer"
                             .to_string(),
                     )
                 })?;
 
                 if window <= 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                         "rate_limit_window_seconds must be > 0".to_string(),
                     ));
                 }
             }
             "rate_limit_max_requests" => {
                 let max_requests: u32 = value.parse().map_err(|_| {
-                    DatabaseError::ValidationError(
+                    DatabaseError::Validation(
                         "rate_limit_max_requests must be a valid positive integer".to_string()
                     )
                 })?;
 
                 if max_requests == 0 {
-                    return Err(DatabaseError::ValidationError(
+                    return Err(DatabaseError::Validation(
                         "rate_limit_max_requests must be > 0".to_string(),
                     ));
                 }
@@ -971,7 +971,7 @@ impl AuthDatabase {
         conn.execute(
             "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
             params![value, updated_by, key],
-        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Self::get_system_config_internal(&conn, key)
     }

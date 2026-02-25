@@ -105,10 +105,9 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::EntryPointNotFound { .. }
             | CompilerError::ContractCheckFailed { .. }
             | CompilerError::ContractExecutionFailed { .. }
-            | CompilerError::SerializationError {
-                context: "contract result deserialization",
-                ..
-            } => Self::Runner(EvalRunnerError::ContractFailed(value.to_string())),
+            | CompilerError::InvalidContractOutput { .. } => {
+                Self::Runner(EvalRunnerError::ContractFailed(value.to_string()))
+            }
             // Fallos del sistema: no deberían ocurrir en un entorno sano
             CompilerError::CargoBuildFailed { .. }
             | CompilerError::DirectoryCreationFailed { .. }

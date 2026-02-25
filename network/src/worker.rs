@@ -34,12 +34,12 @@ use tokio::{
     time::{Instant, Sleep, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 
-const TARGET_WORKER: &str = "AveNetwork-Worker";
+const TARGET: &str = "ave::network::worker";
 
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -118,25 +118,19 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         machine_spec: Option<MachineSpec>
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
-        info!(TARGET_WORKER, "Creating network");
+        info!(target: TARGET, "network initialising");
         let (command_sender, command_receiver) = mpsc::channel(100000);
 
         let key = match keys {
             KeyPair::Ed25519(ed25519_signer) => {
                 let sk_bytes =
                     ed25519_signer.secret_key_bytes().map_err(|e| {
-                        Error::Worker(format!(
-                            "Can not obtain Ed25518 secret key {}",
-                            e
-                        ))
+                        Error::KeyExtraction(e.to_string())
                     })?;
 
                 let sk = ed25519::SecretKey::try_from_bytes(sk_bytes).map_err(
                     |e| {
-                        Error::Worker(format!(
-                            "Invalid Ed25518 secret key {}",
-                            e
-                        ))
+                        Error::KeyExtraction(e.to_string())
                     },
                 )?;
 
@@ -198,31 +192,26 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 .listen_on(
                     "/ip4/0.0.0.0/tcp/0"
                         .parse::<Multiaddr>()
-                        .map_err(|e| Error::Address(e.to_string()))?,
+                        .map_err(|e| Error::InvalidAddress(e.to_string()))?,
                 )
-                .map_err(|e| {
-                    Error::Address(format!(
-                        "Error listening on all interfaces: {}",
-                        e
-                    ))
-                })?;
-            info!(TARGET_WORKER, "Listen in all interfaces");
+                .map_err(|e| Error::Listen(format!("0.0.0.0:0: {e}")))?;
+            info!(target: TARGET, "listening on all interfaces");
         } else {
             // Listen on the external addresses.
             for addr in addresses.iter() {
-                info!(TARGET_WORKER, "Listen in {}", addr);
-                swarm.listen_on(addr.clone()).map_err(|e| Error::Worker(format!("Transport does not support the listening addresss: {}: {}", addr, e)))?;
+                info!(target: TARGET, addr = %addr, "listening on address");
+                swarm.listen_on(addr.clone()).map_err(|e| Error::Listen(format!("{addr}: {e}")))?;
             }
         }
 
         if !external_addresses.is_empty() {
             for addr in external_addresses.iter() {
-                info!(TARGET_WORKER, "Add external address {:?}", addr);
+                debug!(target: TARGET, addr = %addr, "external address registered");
                 swarm.add_external_address(addr.clone());
             }
         }
 
-        info!(TARGET_WORKER, "LOCAL PEER-ID {}", local_peer_id);
+        info!(target: TARGET, peer_id = %local_peer_id, "local peer id");
 
         Ok(Self {
             local_peer_id,
@@ -374,10 +363,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         return Ok(());
                     }
                     Err(e) => {
-                        warn!(
-                            TARGET_WORKER,
-                            "Can not send response to {}: {}", peer, e
-                        );
+                        warn!(target: TARGET, peer_id = %peer, error = %e, "failed to send response: channel may already be consumed");
                     }
                 }
             }
@@ -439,7 +425,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     /// Change the network state.
     async fn change_state(&mut self, state: NetworkState) {
-        trace!(TARGET_WORKER, "Change network state to: {:?}", state);
+        trace!(target: TARGET, state = ?state, "state changed");
         self.state = state.clone();
         self.send_event(NetworkEvent::StateChanged(state)).await;
     }
@@ -449,10 +435,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if let Some(monitor) = self.monitor.clone()
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
         {
-            error!(
-                TARGET_WORKER,
-                "Can't send network event to monitor actor: {}", e
-            );
+            error!(target: TARGET, error = %e, "failed to forward event to monitor");
             self.cancel.cancel();
         }
     }
@@ -461,7 +444,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     pub async fn run(&mut self) {
         // Run connection to bootstrap node.
         if let Err(error) = self.run_connection().await {
-            error!(TARGET_WORKER, "Error running connection: {:?}", error);
+            error!(target: TARGET, error = %error, "bootstrap connection failed");
             self.send_event(NetworkEvent::Error(error)).await;
             // Irrecoverable error. Cancel the node.
             self.cancel.cancel();
@@ -479,7 +462,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     /// Run connection to bootstrap node.
     pub async fn run_connection(&mut self) -> Result<(), Error> {
-        info!(TARGET_WORKER, "Running connection loop");
         // If is the first node of ave network.
         if self.node_type == NodeType::Bootstrap && self.boot_nodes.is_empty() {
             self.change_state(NetworkState::Running).await;
@@ -492,18 +474,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     NetworkState::Dial => {
                         // Dial to boot node.
                         if self.boot_nodes.is_empty() {
-                            error!(TARGET_WORKER, "No bootstrap nodes");
+                            error!(target: TARGET, "no bootstrap nodes available");
                             self.send_event(NetworkEvent::Error(
-                                Error::Network(
-                                    "No more bootstrap nodes".to_owned(),
-                                ),
+                                Error::NoBootstrapNode,
                             ))
                             .await;
-
-                            error!(
-                                TARGET_WORKER,
-                                "Can't connect to ave network"
-                            );
                             self.change_state(NetworkState::Disconnected).await;
                         } else {
                             let copy_boot_nodes = self.boot_nodes.clone();
@@ -535,7 +510,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if !self.boot_nodes.is_empty() {
                                 self.change_state(NetworkState::Dialing).await;
                             } else {
-                                error!(TARGET_WORKER, "All dials fails");
+                                warn!(target: TARGET, "all bootstrap dials failed");
                                 self.change_state(NetworkState::Disconnected)
                                     .await;
                             }
@@ -548,10 +523,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             && !self.retry_boot_nodes.is_empty()
                             && self.retrys < 3
                         {
-                            info!(
-                                TARGET_WORKER,
-                                "Making a new retry: {}", self.retrys
-                            );
+                            debug!(target: TARGET, attempt = self.retrys, "retrying bootstrap dials");
 
                             self.retrys += 1;
                             self.boot_nodes.clone_from(&self.retry_boot_nodes);
@@ -572,9 +544,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         return Ok(());
                     }
                     NetworkState::Disconnected => {
-                        return Err(Error::Network(
-                            "Can't connect to ave network".to_owned(),
-                        ));
+                        return Err(Error::NoBootstrapNode);
                     }
                     _ => {}
                 }
@@ -584,7 +554,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             self.handle_connection_events(event).await;
                         }
                         _ = self.cancel.cancelled() => {
-                            return Err(Error::Network("Token cancellled".to_owned()));
+                            return Err(Error::Cancelled);
                         }
                     }
                 }
@@ -599,82 +569,35 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     ) -> (bool, Vec<Multiaddr>) {
         match e {
             DialError::LocalPeerId { .. } => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, The peer identity obtained on the connection matches the local peer",
-                    retrys,
-                    peer
-                );
+                warn!(target: TARGET, peer_id = %peer, "dial rejected: connected peer-id matches local peer");
             }
             DialError::NoAddresses => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, No addresses have been provided",
-                    retrys,
-                    peer
-                );
+                debug!(target: TARGET, peer_id = %peer, "dial skipped: no addresses");
             }
-            DialError::DialPeerConditionFalse(peer_condition) => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, The provided {:?} evaluated to false and this the dial was aborted",
-                    retrys,
-                    peer,
-                    peer_condition
-                );
+            DialError::DialPeerConditionFalse(_) => {
+                debug!(target: TARGET, peer_id = %peer, "dial skipped: peer condition not met");
             }
             DialError::Denied { cause } => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, One of the NetworkBehaviours rejected the outbound connection: {}",
-                    retrys,
-                    peer,
-                    cause
-                );
+                debug!(target: TARGET, peer_id = %peer, cause = %cause, "dial denied by behaviour");
             }
             DialError::Aborted => {
                 if retrys == 0 {
-                    warn!(
-                        TARGET_WORKER,
-                        "Error dialing, try: {}, peer-id: {}, Pending connection attempt has been aborted, retry one more time",
-                        retrys,
-                        peer
-                    );
-
+                    debug!(target: TARGET, peer_id = %peer, "dial aborted, will retry");
                     return (true, vec![]);
                 } else {
-                    error!(
-                        TARGET_WORKER,
-                        "Error dialing, try: {}, peer-id: {}, Pending connection attempt has been aborted",
-                        retrys,
-                        peer
-                    );
+                    warn!(target: TARGET, peer_id = %peer, attempt = retrys, "dial aborted");
                 }
             }
             DialError::WrongPeerId { obtained, .. } => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, The peer identity obtained on the connection did not match the one that was expected: obtained peer-id -> {}",
-                    retrys,
-                    peer,
-                    obtained
-                );
+                warn!(target: TARGET, expected = %peer, obtained = %obtained, "dial failed: peer identity mismatch");
             }
             DialError::Transport(items) => {
-                error!(
-                    TARGET_WORKER,
-                    "Error dialing, try: {}, peer-id: {}, Transport error, evaluating the error for each address",
-                    retrys,
-                    peer
-                );
+                debug!(target: TARGET, peer_id = %peer, "transport dial failed");
 
                 let mut new_addresses = vec![];
 
                 for (address, error) in items {
-                    warn!(
-                        TARGET_WORKER,
-                        "Error: {:?}, address: {}", error, address,
-                    );
+                    trace!(target: TARGET, addr = %address, err = ?error, "address unreachable");
 
                     if let libp2p::TransportError::Other(e) = error {
                         match e.kind() {
@@ -786,13 +709,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 if !self
                     .check_protocols(&info.protocol_version, &info.protocols)
                 {
-                    warn!(
-                        TARGET_WORKER,
-                        "Invalid protocols, peer-id: {}, protocols: {:?}, protocol-version: {}",
-                        peer_id,
-                        info.protocols,
-                        info.protocol_version
-                    );
+                    warn!(target: TARGET, peer_id = %peer_id, protocol_version = %info.protocol_version, "peer uses incompatible protocols; closing connection");
 
                     self.swarm
                         .behaviour_mut()
@@ -817,11 +734,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         self.peer_identify.insert(peer_id);
                         self.boot_nodes.remove(&peer_id);
                     } else {
-                        warn!(
-                            TARGET_WORKER,
-                            "No bootstrap node address was found to be valid, peer-id: {}",
-                            peer_id
-                        );
+                        warn!(target: TARGET, peer_id = %peer_id, "bootstrap peer has no valid addresses");
 
                         self.swarm
                             .behaviour_mut()
@@ -834,11 +747,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn clear_pending_messages(&mut self, peer_id: &PeerId) {
-        warn!(
-            TARGET_WORKER,
-            "The maximum number of attempts to dial the node has been reached: {}",
-            peer_id
-        );
+        warn!(target: TARGET, peer_id = %peer_id, "max dial attempts reached; dropping pending messages");
 
         self.pending_outbound_messages.remove(peer_id);
         self.peer_action.remove(peer_id);
@@ -861,7 +770,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     /// Run network worker.
     pub async fn run_main(&mut self) {
-        info!(TARGET_WORKER, "Running main loop");
+        info!(target: TARGET, "network worker started");
 
         loop {
             tokio::select! {
@@ -934,7 +843,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         match command {
             Command::SendMessage { peer, message } => {
                 if let Err(error) = self.send_message(peer, message) {
-                    error!(TARGET_WORKER, "Response error: {:?}", error);
+                    error!(target: TARGET, error = %error, "failed to deliver message");
                     self.send_event(NetworkEvent::Error(error)).await;
                 }
             }
@@ -949,7 +858,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let sender = match peer_id_to_ed25519_pubkey_bytes(peer_id) {
             Ok(public_key) => public_key,
             Err(e) => {
-                error!(TARGET_WORKER, "Message to helper: {:?}", e);
+                warn!(target: TARGET, error = %e, "cannot resolve public key from peer id");
                 return;
             }
         };
@@ -989,7 +898,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
         }
 
-        error!(TARGET_WORKER, "Could not send message to network helper");
+        error!(target: TARGET, "helper channel closed; shutting down");
         self.cancel.cancel();
     }
 
@@ -1007,7 +916,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             &info.protocols,
                         ) {
                             warn!(
-                                TARGET_WORKER,
+                                TARGET,
                                 "Invalid protocols, peer-id: {}, protocols: {:?}, protocol-version: {}",
                                 peer_id,
                                 info.protocols,
@@ -1055,12 +964,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
                     }
                     BehaviourEvent::IdentifyError { peer_id, error } => {
-                        error!(
-                            TARGET_WORKER,
-                            "IdentifyError with peer_id: {}, error: {}",
-                            peer_id,
-                            error
-                        );
+                        debug!(target: TARGET, peer_id = %peer_id, error = %error, "identify error");
 
                         match error {
                             swarm::StreamUpgradeError::Timeout => {
@@ -1085,10 +989,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 channel,
                                 ..
                             } => {
-                                info!(
-                                    TARGET_WORKER,
-                                    "A Request was received from {}", peer_id,
-                                );
+                                trace!(target: TARGET, peer_id = %peer_id, "request received");
                                 self.add_ephemeral_response(peer_id, channel);
                                 request.0
                             }
@@ -1096,10 +997,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 response,
                                 ..
                             } => {
-                                info!(
-                                    TARGET_WORKER,
-                                    "A Response was received from {}", peer_id,
-                                );
+                                trace!(target: TARGET, peer_id = %peer_id, "response received");
                                 response.0
                             }
                         };
@@ -1248,13 +1146,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 // confusion for the user is not to filter these errors.
             }
             SwarmEvent::ExpiredListenAddr { address, .. } => {
-                warn!(
-                    TARGET_WORKER,
-                    "Listening address {} is no longer available", address
-                );
+                warn!(target: TARGET, addr = %address, "listen address expired");
             }
             SwarmEvent::ListenerError { error, .. } => {
-                error!(TARGET_WORKER, "ListenerError, {}", error);
+                error!(target: TARGET, error = %error, "listener error");
             }
             SwarmEvent::IncomingConnection { .. }
             | SwarmEvent::ConnectionEstablished { .. }
@@ -1267,9 +1162,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             | SwarmEvent::NewListenAddr { .. } => {
                 // We are not interested in this event at the moment.
             }
-            _ => {
-                warn!(TARGET_WORKER, "Unmatched event type {:?}", event)
-            }
+            _ => {}
         }
     }
 }
@@ -1348,7 +1241,7 @@ mod tests {
         if let Err(e) = node.run_connection().await {
             assert_eq!(
                 e.to_string(),
-                "Network error: Can't connect to ave network"
+                "cannot connect to the ave network: no reachable bootstrap node"
             );
         };
 
@@ -1383,7 +1276,7 @@ mod tests {
         if let Err(e) = node.run_connection().await {
             assert_eq!(
                 e.to_string(),
-                "Network error: Can't connect to ave network"
+                "cannot connect to the ave network: no reachable bootstrap node"
             );
         };
 

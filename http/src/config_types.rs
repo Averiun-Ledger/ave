@@ -3,7 +3,7 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    AveStoreConfig, HttpConfig, SelfSignedCertConfig, auth::{
+    AveExternalDBConfig, AveInternalDBConfig, HttpConfig, SelfSignedCertConfig, auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
     }
@@ -64,6 +64,7 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AuthConfigHttp {
     pub enable: bool,
+    pub durability: bool,
     pub database_path: String,
     pub superadmin: String,
     pub api_key: ApiKeyConfigHttp,
@@ -78,6 +79,7 @@ impl From<AuthConfig> for AuthConfigHttp {
             enable: value.enable,
             database_path: value.database_path.to_string_lossy().to_string(),
             superadmin: value.superadmin,
+            durability: value.durability,
             api_key: ApiKeyConfigHttp::from(value.api_key),
             lockout: LockoutConfigHttp::from(value.lockout),
             rate_limit: RateLimitConfigHttp::from(value.rate_limit),
@@ -265,9 +267,9 @@ pub struct AveConfigHttp {
     /// Hash algorithm
     pub hash_algorithm: String,
     /// AVE database path
-    pub ave_db: AveStoreConfigHttp,
+    pub internal_db: AveStoreConfigHttp,
     /// External database path
-    pub external_db: String,
+    pub external_db: AveStoreConfigHttp,
     /// Network configuration
     pub network: NetworkConfigHttp,
     /// Directory for smart contracts
@@ -287,8 +289,8 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
         Self {
             keypair_algorithm: format!("{:?}", value.keypair_algorithm),
             hash_algorithm: format!("{:?}", value.hash_algorithm),
-            ave_db: AveStoreConfigHttp::from(value.ave_db),
-            external_db: value.external_db.to_string(),
+            internal_db: AveStoreConfigHttp::from(value.internal_db),
+            external_db: AveStoreConfigHttp::from(value.external_db),
             network: NetworkConfigHttp::from(value.network),
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
@@ -313,8 +315,14 @@ pub struct AveActorsStoreConfigHttp {
     pub durability: bool
 }
 
-impl From<AveStoreConfig> for AveStoreConfigHttp {
-    fn from(value: AveStoreConfig) -> Self {
+impl From<AveInternalDBConfig> for AveStoreConfigHttp {
+    fn from(value: AveInternalDBConfig) -> Self {
+        Self { db: value.db.to_string(), durability: value.durability}
+    }
+}
+
+impl From<AveExternalDBConfig> for AveStoreConfigHttp {
+    fn from(value: AveExternalDBConfig) -> Self {
         Self { db: value.db.to_string(), durability: value.durability}
     }
 }
@@ -335,6 +343,8 @@ pub struct NetworkConfigHttp {
     pub routing: RoutingConfigHttp,
     /// Control list configuration (allow/deny lists)
     pub control_list: ControlListConfigHttp,
+    /// Memory-based connection limit policy ("disabled", "80% of system RAM", "512 MB")
+    pub memory_limits: String,
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -350,6 +360,7 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
                 .collect(),
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
+            memory_limits: value.memory_limits.to_string(),
         }
     }
 }
@@ -446,6 +457,8 @@ pub struct LoggingHttp {
     pub max_size: usize,
     /// Maximum number of log files to keep
     pub max_files: usize,
+    /// Log level filter (e.g. "info", "debug", "info,ave=debug")
+    pub level: String,
 }
 
 impl From<ave_bridge::LoggingConfig> for LoggingHttp {
@@ -457,6 +470,7 @@ impl From<ave_bridge::LoggingConfig> for LoggingHttp {
             rotation: format!("{:?}", value.rotation),
             max_size: value.max_size,
             max_files: value.max_files,
+            level: value.level,
         }
     }
 }

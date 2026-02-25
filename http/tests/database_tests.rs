@@ -24,6 +24,7 @@ async fn create_test_db_with_rate_limit(
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {
+        durability: false,
         enable: true,
         database_path: path,
         superadmin: "admin".to_string(),
@@ -43,7 +44,7 @@ async fn create_test_db_with_rate_limit(
         },
     };
 
-    (AuthDatabase::new(config, "AdminPass123!").unwrap(), dir)
+    (AuthDatabase::new(config, "AdminPass123!", None).unwrap(), dir)
 }
 
 // =============================================================================
@@ -72,7 +73,7 @@ async fn test_create_user_duplicate() {
     let result =
         db.create_user("testuser", "TestPass123!", None, None, Some(false));
 
-    assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
+    assert!(matches!(result, Err(DatabaseError::Duplicate(_))));
 }
 
 #[test(tokio::test)]
@@ -193,7 +194,7 @@ async fn test_delete_user() {
 
     // Should not be able to get deleted user
     let result = db.get_user_by_id(user.id);
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 // =============================================================================
@@ -296,7 +297,7 @@ async fn test_create_role_duplicate() {
     db.create_role("editor", None).unwrap();
     let result = db.create_role("editor", None);
 
-    assert!(matches!(result, Err(DatabaseError::DuplicateError(_))));
+    assert!(matches!(result, Err(DatabaseError::Duplicate(_))));
 }
 
 #[test(tokio::test)]
@@ -357,7 +358,7 @@ async fn test_delete_role() {
     db.delete_role(role.id).unwrap();
 
     let result = db.get_role_by_name("temp_role");
-    assert!(matches!(result, Err(DatabaseError::NotFoundError(_))));
+    assert!(matches!(result, Err(DatabaseError::NotFound(_))));
 }
 
 // =============================================================================
@@ -445,7 +446,7 @@ async fn test_api_key_ttl_uses_system_default_when_absent_or_zero() {
     config.enable = true;
     config.database_path = tmp_dir.path().to_path_buf();
     config.api_key.default_ttl_seconds = 100;
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("testuser", "TestPass123!", None, None, Some(false))
@@ -475,7 +476,7 @@ async fn test_api_key_ttl_capped_by_system_default_and_user_when_no_system() {
     config.enable = true;
     config.database_path = tmp_dir.path().to_path_buf();
     config.api_key.default_ttl_seconds = 50;
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("testuser", "TestPass123!", None, None, Some(false))
@@ -492,7 +493,7 @@ async fn test_api_key_ttl_capped_by_system_default_and_user_when_no_system() {
     config.enable = true;
     config.database_path = tmp_dir.path().to_path_buf();
     config.api_key.default_ttl_seconds = 0;
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("testuser2", "TestPass123!", None, None, Some(false))
@@ -988,6 +989,7 @@ async fn test_audit_logging_disabled() {
     let path = dir.path().to_path_buf();
 
     let config = AuthConfig {
+        durability: false,
         enable: true,
         database_path: path,
         superadmin: "admin".to_string(),
@@ -1011,7 +1013,7 @@ async fn test_audit_logging_disabled() {
         session,
     };
 
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     // Attempt to log should be a no-op when audit is disabled
     let log_id = db
@@ -1064,7 +1066,7 @@ async fn test_log_api_request_enabled() {
     config.session.audit_enable = true;
     config.database_path = path;
 
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("apiuser", "Pass123!", None, None, Some(false))
@@ -1136,7 +1138,7 @@ async fn test_log_api_request_always_enabled() {
     config.session.audit_enable = true;
     config.database_path = path;
 
-    let db = AuthDatabase::new(config, "AdminPass123!").unwrap();
+    let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("apiuser", "Pass123!", None, None, Some(false))

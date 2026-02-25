@@ -51,6 +51,9 @@ pub enum CompilerError {
         details: String,
     },
 
+    #[error("invalid contract output: {details}")]
+    InvalidContractOutput { details: String },
+
     #[error("memory allocation failed: {details}")]
     MemoryAllocationFailed { details: String },
 

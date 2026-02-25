@@ -1201,6 +1201,7 @@ mod tests {
         #[allow(deprecated)]
         let tmp = tempfile::tempdir().unwrap().into_path();
         let config = AuthConfig {
+            durability: false,
             enable: true,
             database_path: tmp.join("test.db"),
             superadmin: "admin".to_string(),
@@ -1209,7 +1210,7 @@ mod tests {
             rate_limit: RateLimitConfig::default(),
             session: SessionConfig::default(),
         };
-        Arc::new(AuthDatabase::new(config, "AdminPass123!").unwrap())
+        Arc::new(AuthDatabase::new(config, "AdminPass123!", None).unwrap())
     }
 
     fn auth_ctx_for_role(db: &AuthDatabase, role: &str) -> Arc<AuthContext> {

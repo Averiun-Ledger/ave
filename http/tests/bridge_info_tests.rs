@@ -1757,13 +1757,13 @@ async fn test_system_info_deserialization() {
     assert_eq!(config.node.keypair_algorithm, "Ed25519");
     #[cfg(feature = "sqlite")]
     {
-        assert_eq!(config.node.ave_db.db, "Sqlite");
+        assert_eq!(config.node.internal_db.db, "Sqlite");
     }
     #[cfg(feature = "rocksdb")]
     {
-        assert_eq!(config.node.ave_db.db, "Rocksdb");
+        assert_eq!(config.node.internal_db.db, "Rocksdb");
     }
-    assert_eq!(config.node.external_db, "Sqlite");
+    assert_eq!(config.node.external_db.db, "Sqlite");
     assert_eq!(config.node.hash_algorithm, "Blake3");
 
     assert_eq!(config.node.tracking_size, 200);

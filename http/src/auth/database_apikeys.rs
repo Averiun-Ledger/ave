@@ -45,8 +45,8 @@ impl AuthDatabase {
             },
         )
         .optional()
-        .map_err(|e| DatabaseError::QueryError(e.to_string()))?
-        .ok_or_else(|| DatabaseError::NotFoundError(format!("API key {} not found", key_id)))
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .ok_or_else(|| DatabaseError::NotFound(format!("API key {} not found", key_id)))
     }
 
     /// Get API key info by ID
@@ -88,10 +88,10 @@ impl AuthDatabase {
                     params![user_id],
                     |row| row.get(0),
                 )
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             if key_count >= self.config.api_key.max_keys_per_user as i64 {
-                return Err(DatabaseError::ValidationError(format!(
+                return Err(DatabaseError::Validation(format!(
                     "Maximum number of API keys ({}) reached for this user",
                     self.config.api_key.max_keys_per_user
                 )));
@@ -106,12 +106,12 @@ impl AuthDatabase {
                  WHERE user_id = ?3 AND is_management = 1 AND revoked = 0",
                 params![Self::now(), Some(user_id), user_id],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
         // Enforce unique active name per user for service keys
         if !is_management && name.unwrap_or_default().is_empty() {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name is required".to_string(),
             ));
         }
@@ -131,10 +131,10 @@ impl AuthDatabase {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             if exists.is_some() {
-                return Err(DatabaseError::DuplicateError(
+                return Err(DatabaseError::Duplicate(
                     "API key name already in use for this user".to_string(),
                 ));
             }
@@ -156,7 +156,7 @@ impl AuthDatabase {
         if let Some(ttl) = expires_in_seconds
             && ttl < 0
         {
-            return Err(DatabaseError::ValidationError(format!(
+            return Err(DatabaseError::Validation(format!(
                 "Invalid TTL: {} (must be positive or 0)",
                 ttl
             )));
@@ -204,7 +204,7 @@ impl AuthDatabase {
                 expires_at,
                 is_management
             ],
-        ).map_err(|e| DatabaseError::InsertError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         // Get key info
         let key_info = Self::get_api_key_info_internal(&conn, &key_id)?;
@@ -240,7 +240,7 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(query)
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let keys = stmt
             .query_map(params![user_id], |row| {
@@ -261,9 +261,9 @@ impl AuthDatabase {
                     last_used_ip: row.get(13)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(keys)
     }
@@ -283,9 +283,9 @@ impl AuthDatabase {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .ok_or_else(|| {
-                DatabaseError::NotFoundError(
+                DatabaseError::NotFound(
                     "API key not found for this user/name".into(),
                 )
             })?;
@@ -319,7 +319,7 @@ impl AuthDatabase {
 
         let mut stmt = conn
             .prepare(query)
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let keys = stmt
             .query_map([], |row| {
@@ -340,9 +340,9 @@ impl AuthDatabase {
                     last_used_ip: row.get(13)?,
                 })
             })
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(keys)
     }
@@ -363,7 +363,7 @@ impl AuthDatabase {
              SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
              WHERE id = ?4",
             params![now, revoked_by, reason, key_id],
-        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -383,7 +383,7 @@ impl AuthDatabase {
              SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
              WHERE user_id = ?4 AND revoked = 0",
             params![now, revoked_by, reason, user_id],
-        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -415,7 +415,7 @@ impl AuthDatabase {
                 },
             )
             .optional()
-            .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // SECURITY: Constant-time API key enumeration mitigation
         // If key doesn't exist, perform dummy user query to match timing
@@ -535,7 +535,7 @@ impl AuthDatabase {
         conn.execute(
             "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
             params![now, ip_address, key_id],
-        ).map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+        ).map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -554,7 +554,7 @@ impl AuthDatabase {
                  WHERE expires_at IS NULL AND revoked = 0",
                 params![self.config.api_key.default_ttl_seconds],
             )
-            .map_err(|e| DatabaseError::UpdateError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
         let deleted = conn
@@ -563,7 +563,7 @@ impl AuthDatabase {
              WHERE expires_at IS NOT NULL AND expires_at < ?1",
                 params![now],
             )
-            .map_err(|e| DatabaseError::DeleteError(e.to_string()))?;
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }
@@ -578,21 +578,21 @@ impl AuthDatabase {
     fn validate_api_key_name(name: &str) -> Result<(), DatabaseError> {
         // Check length
         if name.len() > 100 {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name must be 100 characters or less".to_string(),
             ));
         }
 
         // Check for null bytes (command injection, path traversal)
         if name.contains('\0') {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name contains invalid characters".to_string(),
             ));
         }
 
         // Check for control characters (including newlines, tabs, etc)
         if name.chars().any(|c| c.is_control()) {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name contains invalid control characters".to_string(),
             ));
         }
@@ -603,14 +603,14 @@ impl AuthDatabase {
             '[', ']', '\\', '/', ':', '*', '?', '%',
         ];
         if name.chars().any(|c| dangerous_chars.contains(&c)) {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name contains invalid characters. Only alphanumeric, underscore, hyphen, space, and period are allowed".to_string()
             ));
         }
 
         // Check for path traversal patterns
         if name.contains("..") || name.contains("./") || name.contains(".\\") {
-            return Err(DatabaseError::ValidationError(
+            return Err(DatabaseError::Validation(
                 "API key name contains invalid patterns".to_string(),
             ));
         }
