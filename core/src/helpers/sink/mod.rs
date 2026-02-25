@@ -56,15 +56,22 @@ pub async fn obtain_token(
         .map_err(|e| SinkError::TokenParse(e.to_string()))
 }
 
-#[derive(Clone)]
-pub struct AveSink {
+// All fields behind a single Arc so that AveSink::clone is a cheap atomic
+// increment instead of deep-cloning the sinks map and all strings.
+struct AveSinkInner {
     sinks: BTreeMap<String, Vec<SinkServer>>,
-    token: Option<Arc<RwLock<TokenResponse>>>,
+    // Arc removed: the outer Arc<AveSinkInner> already provides shared ownership.
+    token: Option<RwLock<TokenResponse>>,
     auth: String,
     username: String,
     password: String,
     api_key: Option<String>,
+    // Reused across every notify() call; reqwest::Client is a connection pool.
+    client: Client,
 }
+
+#[derive(Clone)]
+pub struct AveSink(Arc<AveSinkInner>);
 
 impl AveSink {
     pub fn new(
@@ -75,14 +82,19 @@ impl AveSink {
         password: &str,
         api_key: Option<String>,
     ) -> Self {
-        Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self(Arc::new(AveSinkInner {
             sinks,
-            token: token.map(|t| Arc::new(RwLock::new(t))),
+            token: token.map(RwLock::new),
             auth: auth.to_owned(),
             username: username.to_owned(),
             password: password.to_owned(),
             api_key,
-        }
+            client,
+        }))
     }
 
     fn server_wants_event(server: &SinkServer, data: &DataToSink) -> bool {
@@ -97,13 +109,15 @@ impl AveSink {
     }
 
     async fn current_auth_header(&self) -> Option<String> {
-        let arc = self.token.as_ref()?;
-        let token = arc.read().await;
+        let lock = self.0.token.as_ref()?;
+        let token = lock.read().await;
         Some(format!("{} {}", token.token_type, token.access_token))
     }
 
     async fn refresh_token(&self) -> Option<TokenResponse> {
-        match obtain_token(&self.auth, &self.username, &self.password).await {
+        match obtain_token(&self.0.auth, &self.0.username, &self.0.password)
+            .await
+        {
             Ok(t) => Some(t),
             Err(e) => {
                 error!(
@@ -162,7 +176,7 @@ impl AveSink {
     ) {
         // Build the auth header: either X-API-Key or Authorization (bearer token)
         let header: Option<(String, String)> = if server_requires_auth {
-            if let Some(ref key) = self.api_key {
+            if let Some(ref key) = self.0.api_key {
                 Some(("X-API-Key".to_owned(), key.clone()))
             } else {
                 self.current_auth_header()
@@ -193,8 +207,8 @@ impl AveSink {
             // Token refresh only applies to bearer token mode, not api_key
             Err(SinkError::Unauthorized)
                 if server_requires_auth
-                    && self.api_key.is_none()
-                    && self.token.is_some() =>
+                    && self.0.api_key.is_none()
+                    && self.0.token.is_some() =>
             {
                 warn!(
                     target: TARGET,
@@ -203,8 +217,8 @@ impl AveSink {
                 );
 
                 if let Some(new_token) = self.refresh_token().await {
-                    if let Some(arc) = &self.token {
-                        *arc.write().await = new_token.clone();
+                    if let Some(lock) = &self.0.token {
+                        *lock.write().await = new_token.clone();
                     }
                     debug!(target: TARGET, "Token refreshed, retrying request");
                     let new_header = format!(
@@ -266,7 +280,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
         };
 
         let (subject_id, schema_id) = data.event.get_subject_schema();
-        let Some(servers) = self.sinks.get(&schema_id) else {
+        let Some(servers) = self.0.sinks.get(&schema_id) else {
             debug!(
                 target: TARGET,
                 schema_id = %schema_id,
@@ -286,7 +300,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
             "Processing sink event"
         );
 
-        let client = Client::new();
+        let client = &self.0.client;
 
         for server in servers {
             if !Self::server_wants_event(server, &data) {
@@ -296,7 +310,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
             let url = Self::build_url(&server.url, &subject_id, &schema_id);
             let requires_auth = server.auth;
 
-            self.send_with_retry_on_401(&client, &url, &data, requires_auth)
+            self.send_with_retry_on_401(client, &url, &data, requires_auth)
                 .await;
         }
     }

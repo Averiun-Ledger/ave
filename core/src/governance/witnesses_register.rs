@@ -255,7 +255,7 @@ impl WitnessesRegister {
                 if namespace.is_ancestor_or_equal_of(parse_namespace) {
                     for range in data.interval_gov_version.iter().rev() {
                         if let Some(actual_lo) = actual_lo
-                            && range.contains(*actual_lo)
+                            && *actual_lo <= range.hi
                         {
                             better_sn = better_sn.max(Some(data.sn));
 
@@ -293,11 +293,11 @@ impl WitnessesRegister {
                 }
 
                 if let Some(range) = interval.iter().last()
-                    && range.contains(gov_version)
+                    && gov_version <= range.hi
                 {
                     // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
                     better_gov_version =
-                        better_gov_version.max(Some(gov_version));
+                        better_gov_version.max(Some(range.hi));
                 }
             }
         }
@@ -423,11 +423,10 @@ impl WitnessesRegister {
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
             if let Some(range) = interval.iter().last()
-                && range.contains(owner_gov_version)
+                && owner_gov_version <= range.hi
             {
                 // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                better_gov_version =
-                    better_gov_version.max(Some(owner_gov_version));
+                better_gov_version = better_gov_version.max(Some(range.hi));
             }
         }
 
@@ -526,7 +525,7 @@ impl WitnessesRegister {
                     for range in old_data.interval_gov_version.iter().rev() {
                         // Sigue siendo testigo.
                         if let Some(actual_lo) = actual_lo
-                            && range.contains(*actual_lo)
+                            && *actual_lo <= range.hi
                         {
                             better_sn = better_sn.max(Some(old_data.sn));
 
@@ -571,7 +570,13 @@ impl WitnessesRegister {
                     }
                 }
                 SnLimit::LastSn => SnLimit::Sn(data.sn),
-                SnLimit::NotSn => SnLimit::NotSn,
+                SnLimit::NotSn => {
+                    if let Some(bs) = better_sn {
+                        SnLimit::Sn(bs)
+                    } else {
+                        SnLimit::NotSn
+                    }
+                }
             }
         } else if let Some(better_sn) = better_sn {
             SnLimit::Sn(better_sn)
@@ -1232,14 +1237,15 @@ impl PersistentActor for WitnessesRegister {
                 if let Some(data) = self.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
-                    if let Some((new_owner, ..)) = new_owner {
+                    if let Some((new_owner, new_owner_gov_version)) = new_owner
+                    {
                         let entry = data
                             .old_owners
                             .entry(new_owner.clone())
                             .or_default();
                         entry.sn = *sn;
                         entry.interval_gov_version.insert(Interval {
-                            lo: data.gov_version,
+                            lo: new_owner_gov_version,
                             hi: *gov_version,
                         });
 

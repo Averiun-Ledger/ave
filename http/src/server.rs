@@ -786,7 +786,7 @@ pub(crate) async fn get_first_or_end_events(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_subject_state(
+pub async fn get_subject_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -1005,7 +1005,7 @@ async fn audit_layer(
     audit_log_middleware(auth_ctx, db, req, next).await
 }
 
-pub(crate) async fn permission_layer(
+pub async fn permission_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
 ) -> Response {
@@ -1079,7 +1079,7 @@ pub(crate) async fn permission_layer(
     next.run(req).await
 }
 
-pub(crate) fn permission_for(
+pub fn permission_for(
     method: &Method,
     path: &str,
 ) -> Option<(&'static str, &'static str)> {

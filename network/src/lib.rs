@@ -211,35 +211,36 @@ pub(crate) fn detect_cpu_cores() -> usize {
 ///
 /// # No memory-based limit (default — omit the section or set type = "disabled")
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemoryLimitsConfig {
     /// No memory-based connection limit (default).
+    #[default]
     Disabled,
     /// Reject new connections when process memory exceeds `value` fraction of total RAM.
     /// Must be in the range 0.0–1.0 (e.g. `0.8` means 80% of system RAM).
-    Percentage { value: f64 },
+    Percentage { 
+        /// Range into 0.0–1.0
+        value: f64 
+    },
     /// Reject new connections when process memory exceeds `value` megabytes.
-    Mb { value: usize },
-}
-
-impl Default for MemoryLimitsConfig {
-    fn default() -> Self {
-        Self::Disabled
-    }
+    Mb { 
+        /// `value` in megabytes
+        value: usize
+    },
 }
 
 impl MemoryLimitsConfig {
     /// Returns an error string if the configuration values are out of range.
     pub fn validate(&self) -> Result<(), String> {
-        if let Self::Percentage { value } = self {
-            if *value <= 0.0 || *value > 1.0 {
+        if let Self::Percentage { value } = self 
+            && (*value <= 0.0 || *value > 1.0) {
                 return Err(format!(
                     "network.memory_limits percentage must be in range (0.0, 1.0], got {}",
                     value
                 ));
             }
-        }
+        
         Ok(())
     }
 }
@@ -259,6 +260,7 @@ impl Display for MemoryLimitsConfig {
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
+/// Network config
 pub struct Config {
     /// The node type.
     pub node_type: NodeType,
