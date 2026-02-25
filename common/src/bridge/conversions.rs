@@ -119,11 +119,7 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
         let schema_id = SchemaType::from_str(&request.schema_id)
             .map_err(ConversionError::InvalidSchemaId)?;
 
-        let namespace = if let Some(namespace) = request.namespace {
-            Namespace::from(namespace)
-        } else {
-            Namespace::new()
-        };
+        let namespace = request.namespace.map_or_else(Namespace::new, Namespace::from);
 
         Ok(Self {
             name: request.name,

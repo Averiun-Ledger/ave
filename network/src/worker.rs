@@ -430,6 +430,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     /// Send event
+    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn send_event(&mut self, event: NetworkEvent) {
         if let Some(monitor) = self.monitor.clone()
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
@@ -849,6 +850,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn message_to_helper(
         &mut self,
         message: MessagesHelper,

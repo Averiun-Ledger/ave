@@ -188,7 +188,7 @@ impl Behaviour {
     }
 
     /// Finish the prerouting state.
-    pub fn finish_prerouting_state(&mut self) {
+    pub const fn finish_prerouting_state(&mut self) {
         self.routing.finish_prerouting_state();
     }
 

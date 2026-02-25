@@ -314,11 +314,7 @@ impl Display for RequestState {
                 sn,
                 error,
             } => {
-                let sn_text = if let Some(sn) = sn {
-                    format!("{sn}")
-                } else {
-                    "None".to_string()
-                };
+                let sn_text = sn.as_ref().map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
 
                 write!(
                     f,
@@ -333,11 +329,7 @@ impl Display for RequestState {
                 sn,
                 error,
             } => {
-                let sn_text = if let Some(sn) = sn {
-                    format!("{sn}")
-                } else {
-                    "None".to_string()
-                };
+                let sn_text = sn.as_ref().map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
 
                 write!(
                     f,

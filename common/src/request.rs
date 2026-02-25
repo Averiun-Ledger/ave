@@ -42,11 +42,7 @@ impl EventRequest {
             | Self::Transfer(..)
             | Self::EOL(..) => signer == owner,
             Self::Confirm(..) | Self::Reject(..) => {
-                if let Some(new_owner) = new_owner {
-                    new_owner == signer
-                } else {
-                    false
-                }
+                new_owner.as_ref() == Some(signer)
             }
             Self::Fact(..) => true,
         }

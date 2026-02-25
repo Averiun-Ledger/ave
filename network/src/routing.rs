@@ -504,20 +504,13 @@ impl NetworkBehaviour for Behaviour {
         {
             if self.num_connections < self.discovery_only_if_under_num {
                 self.kademlia.get_closest_peers(PeerId::random());
-
-                *next = Delay::new(self.duration_to_next_kad);
-
-                self.duration_to_next_kad = std::cmp::min(
-                    self.duration_to_next_kad * 2,
-                    Duration::from_secs(120),
-                );
-            } else {
-                *next = Delay::new(self.duration_to_next_kad);
-                self.duration_to_next_kad = std::cmp::min(
-                    self.duration_to_next_kad * 2,
-                    Duration::from_secs(120),
-                );
             }
+
+            *next = Delay::new(self.duration_to_next_kad);
+            self.duration_to_next_kad = std::cmp::min(
+                self.duration_to_next_kad * 2,
+                Duration::from_secs(120),
+            );
         }
 
         self.waker = Some(cx.waker().clone());

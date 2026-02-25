@@ -162,7 +162,10 @@ impl Signature {
     BorshDeserialize,
     Hash,
 )]
-pub struct Signed<T: BorshSerialize + BorshDeserialize + Clone> {
+pub struct Signed<T>
+where
+    T: BorshSerialize + BorshDeserialize + Clone,
+{
     /// The actual data content
     content: T,
     /// The signature for this content
