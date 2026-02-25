@@ -7,8 +7,7 @@ use crate::error::BridgeError;
 
 pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
     // file configuration (json, yaml or toml)
-    let mut bridge_config = BridgeConfig::default();
-    if !file.is_empty() {
+    let bridge_config = if !file.is_empty() {
         let mut config = Config::builder();
 
         config = config.add_source(config::File::with_name(file));
@@ -18,11 +17,13 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
             BridgeError::ConfigBuild(e.to_string())
         })?;
 
-        bridge_config = config.try_deserialize().map_err(|e| {
+        config.try_deserialize().map_err(|e| {
             error!(file = %file, error = %e, "Failed to deserialize configuration");
             BridgeError::ConfigDeserialize(e.to_string())
-        })?;
-    }
+        })?
+    } else {
+        BridgeConfig::default()
+    };
 
     // Validate HTTPS configuration
     validate_https_config(&bridge_config)?;

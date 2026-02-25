@@ -100,7 +100,7 @@ impl Distribution {
 
     async fn end_request(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if matches!(self.distribution_type, DistributionType::Request) {
             let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -124,11 +124,10 @@ impl Actor for Distribution {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Distribution", id)
-        } else {
-            info_span!("Distribution", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("Distribution", id),
+            |parent_span| info_span!(parent: parent_span, "Distribution", id),
+        )
     }
 }
 

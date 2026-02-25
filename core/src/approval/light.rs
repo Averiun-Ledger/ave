@@ -84,11 +84,10 @@ impl Actor for ApprLight {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ApprLight", id)
-        } else {
-            info_span!("ApprLight", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("ApprLight", id),
+            |parent_span| info_span!(parent: parent_span, "ApprLight", id),
+        )
     }
 }
 

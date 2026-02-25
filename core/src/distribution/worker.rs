@@ -44,7 +44,7 @@ pub struct DistriWorker {
 impl DistriWorker {
     async fn down_tracker(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let subject_path =
@@ -118,7 +118,7 @@ impl DistriWorker {
 
     async fn authorized_subj(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(bool, Option<SubjectData>), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -331,11 +331,10 @@ impl Actor for DistriWorker {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "DistriWorker", id)
-        } else {
-            info_span!("DistriWorker", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("DistriWorker", id),
+            |parent_span| info_span!(parent: parent_span, "DistriWorker", id),
+        )
     }
 }
 

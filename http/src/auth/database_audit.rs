@@ -275,6 +275,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(logs)
     }
@@ -288,12 +290,9 @@ impl AuthDatabase {
             return Ok(0); // Keep forever
         }
 
-        let conn = self.lock_conn()?;
-
         let cutoff_timestamp = Self::now() - (retention_days as i64 * 86400);
 
-        let deleted = conn
-            .execute(
+        let deleted = self.lock_conn()?.execute(
                 "DELETE FROM audit_logs WHERE timestamp < ?1",
                 params![cutoff_timestamp],
             )
@@ -333,11 +332,14 @@ impl AuthDatabase {
                 params![to_delete],
             )
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        drop(conn);
 
         Ok(deleted)
     }
 
     /// Get audit log statistics
+    // conn is captured by the top_n closure, so it cannot be dropped early
+    #[allow(clippy::significant_drop_tightening)]
     pub fn get_audit_stats(
         &self,
         days: u32,
@@ -550,6 +552,7 @@ impl AuthDatabase {
                 params![api_key_id, ip_address, endpoint, now, now],
             ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
         }
+        drop(conn);
 
         Ok(true)
     }
@@ -584,17 +587,14 @@ impl AuthDatabase {
 
     /// Cleanup old rate limit entries
     pub fn cleanup_rate_limits(&self) -> Result<usize, DatabaseError> {
-        let conn = self.lock_conn()?;
-
         let cutoff =
             Self::now() - self.config.rate_limit.cleanup_interval_seconds;
 
-        let deleted = conn
-            .execute(
-                "DELETE FROM rate_limits WHERE window_start < ?1",
-                params![cutoff],
-            )
-            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        let deleted = self.lock_conn()?.execute(
+            "DELETE FROM rate_limits WHERE window_start < ?1",
+            params![cutoff],
+        )
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }
@@ -649,6 +649,9 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         };
 
+        drop(stmt);
+        drop(conn);
+
         let total_requests: i64 = data.iter().map(|(_, count)| count).sum();
         let requests_per_window: Vec<(String, i64)> = data
             .into_iter()
@@ -664,6 +667,8 @@ impl AuthDatabase {
     }
 
     /// Get detailed rate limit breakdown by API key, IP, and endpoint
+    // Multiple stmt rebindings prevent early conn drop without major restructuring
+    #[allow(clippy::significant_drop_tightening)]
     pub fn get_rate_limit_details(
         &self,
         hours: u32,
@@ -879,6 +884,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(configs)
     }
@@ -973,6 +980,8 @@ impl AuthDatabase {
             params![value, updated_by, key],
         ).map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-        Self::get_system_config_internal(&conn, key)
+        let result = Self::get_system_config_internal(&conn, key);
+        drop(conn);
+        result
     }
 }

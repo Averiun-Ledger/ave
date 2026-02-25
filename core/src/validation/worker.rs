@@ -306,11 +306,10 @@ impl ValiWorker {
         }
 
         // vali request signer
-        let signer = if let Some(new_owner) = metadata.new_owner.clone() {
-            new_owner
-        } else {
-            metadata.owner.clone()
-        };
+        let signer = metadata
+            .new_owner
+            .clone()
+            .unwrap_or_else(|| metadata.owner.clone());
 
         if &signer != vali_req_signer {
             return Err(ValidatorError::InvalidSigner {
@@ -843,15 +842,16 @@ impl ValiWorker {
                         }
 
                         let init_state =
-                            if let Some(init_state) = &self.init_state {
-                                init_state.clone()
-                            } else {
-                                let governance_data = GovernanceData::new(
-                                    validation_req.signature().signer.clone(),
-                                );
+                            self.init_state.as_ref().map_or_else(
+                                || {
+                                    let governance_data = GovernanceData::new(
+                                        validation_req.signature().signer.clone(),
+                                    );
 
-                                governance_data.to_value_wrapper()
-                            };
+                                    governance_data.to_value_wrapper()
+                                },
+                                |init_state| init_state.clone(),
+                            );
 
                         let governance_id = if create.schema_id.is_gov() {
                             subject_id.clone()
@@ -979,11 +979,10 @@ impl Actor for ValiWorker {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ValiWorker", id)
-        } else {
-            info_span!("ValiWorker", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("ValiWorker", id),
+            |parent_span| info_span!(parent: parent_span, "ValiWorker", id),
+        )
     }
 }
 

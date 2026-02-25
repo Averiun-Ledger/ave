@@ -323,11 +323,10 @@ impl Actor for ApprPersist {
     type Response = ApprPersistResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ApprPersist")
-        } else {
-            info_span!("ApprPersist")
-        }
+        parent_span.map_or_else(
+            || info_span!("ApprPersist"),
+            |parent_span| info_span!(parent: parent_span, "ApprPersist"),
+        )
     }
 
     async fn pre_start(
@@ -376,21 +375,22 @@ impl Handler<Self> for ApprPersist {
                 let res = if let Some(req) = &self.request
                     && let Some(req_state) = &self.state
                 {
-                    if let Some(query) = state {
-                        if &query == req_state {
-                            ApprPersistResponse::Approval {
-                                request: req.content().clone(),
-                                state: query,
-                            }
-                        } else {
-                            ApprPersistResponse::Ok
-                        }
-                    } else {
-                        ApprPersistResponse::Approval {
+                    state.map_or_else(
+                        || ApprPersistResponse::Approval {
                             request: req.content().clone(),
                             state: req_state.clone(),
-                        }
-                    }
+                        },
+                        |query| {
+                            if &query == req_state {
+                                ApprPersistResponse::Approval {
+                                    request: req.content().clone(),
+                                    state: query,
+                                }
+                            } else {
+                                ApprPersistResponse::Ok
+                            }
+                        },
+                    )
                 } else {
                     ApprPersistResponse::Ok
                 };

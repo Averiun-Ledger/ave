@@ -370,7 +370,7 @@ impl Subject for Tracker {
 impl Tracker {
     async fn create(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let sn_register = ctx
@@ -428,7 +428,7 @@ impl Tracker {
 
     async fn register_gov_version_sn(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let sn_register = ctx
@@ -450,7 +450,7 @@ impl Tracker {
 
     async fn get_governance(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<GovernanceData, ActorError> {
         let governance_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
@@ -724,11 +724,10 @@ impl Actor for Tracker {
     type Response = TrackerResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Tracker", id)
-        } else {
-            info_span!("Tracker", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("Tracker", id),
+            |parent_span| info_span!(parent: parent_span, "Tracker", id),
+        )
     }
 
     async fn pre_start(

@@ -77,11 +77,10 @@ impl Actor for Query {
     type Response = QueryResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Query")
-        } else {
-            info_span!("Query")
-        }
+        parent_span.map_or_else(
+            || info_span!("Query"),
+            |parent_span| info_span!(parent: parent_span, "Query"),
+        )
     }
 }
 

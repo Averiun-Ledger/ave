@@ -111,7 +111,9 @@ impl AveSink {
     async fn current_auth_header(&self) -> Option<String> {
         let lock = self.0.token.as_ref()?;
         let token = lock.read().await;
-        Some(format!("{} {}", token.token_type, token.access_token))
+        let result = format!("{} {}", token.token_type, token.access_token);
+        drop(token);
+        Some(result)
     }
 
     async fn refresh_token(&self) -> Option<TokenResponse> {

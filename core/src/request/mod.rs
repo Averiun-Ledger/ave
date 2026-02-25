@@ -166,7 +166,7 @@ impl RequestHandler {
     }
 
     async fn queued_event(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let request_actor = ctx.reference().await?;
@@ -210,7 +210,7 @@ impl RequestHandler {
     }
 
     async fn change_approval(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: ApprovalStateRes,
     ) -> Result<(), RequestHandlerError> {
@@ -237,7 +237,7 @@ impl RequestHandler {
     }
 
     async fn get_approval(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
@@ -267,7 +267,7 @@ impl RequestHandler {
     }
 
     async fn get_all_approvals(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         state: Option<ApprovalState>,
     ) -> Result<Vec<(ApprovalReq, ApprovalState)>, ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -659,12 +659,9 @@ impl RequestHandler {
             Self::build_subject_data(ctx, request.content()).await?;
         let event_request_type = EventRequestType::from(request.content());
         let signer = request.signature().signer.clone();
-        let governance_id =
-            if let Some(governance_id) = subject_data.get_governance_id() {
-                governance_id
-            } else {
-                request.content().get_subject_id()
-            };
+        let governance_id = subject_data
+            .get_governance_id()
+            .unwrap_or_else(|| request.content().get_subject_id());
         let is_gov = subject_data.get_schema_id().is_gov();
 
         if !subject_data.get_active() {
@@ -734,7 +731,7 @@ impl RequestHandler {
     }
 
     async fn end_child(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let actor = ctx
@@ -745,7 +742,7 @@ impl RequestHandler {
 
     async fn manual_abort_request(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let actor = ctx
@@ -832,11 +829,10 @@ impl Actor for RequestHandler {
     type Response = RequestHandlerResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RequestHandler")
-        } else {
-            info_span!("RequestHandler")
-        }
+        parent_span.map_or_else(
+            || info_span!("RequestHandler"),
+            |parent_span| info_span!(parent: parent_span, "RequestHandler"),
+        )
     }
 
     async fn pre_start(
@@ -1097,13 +1093,9 @@ impl Handler<Self> for RequestHandler {
                 let event_request_type =
                     EventRequestType::from(request.content());
                 let signer = request.signature().signer.clone();
-                let governance_id = if let Some(governance_id) =
-                    subject_data.get_governance_id()
-                {
-                    governance_id
-                } else {
-                    request.content().get_subject_id()
-                };
+                let governance_id = subject_data
+                    .get_governance_id()
+                    .unwrap_or_else(|| request.content().get_subject_id());
                 let is_gov = subject_data.get_schema_id().is_gov();
 
                 if !subject_data.get_active() {

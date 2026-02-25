@@ -60,11 +60,8 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
 
-    let env_filter = if let Ok(env_filter) = EnvFilter::try_from_default_env() {
-        env_filter
-    } else {
-        EnvFilter::new(&level)
-    };
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&level));
 
     let stdout_layer = output.stdout.then(|| {
         let (stdout_nb, guard) = NonBlocking::new(io::stdout());

@@ -216,7 +216,7 @@ impl Response for WitnessesRegisterResponse {}
 impl WitnessesRegister {
     async fn get_sn(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
         gov_version: u64,
     ) -> Result<SnLimit, ActorError> {
@@ -369,19 +369,18 @@ impl WitnessesRegister {
         better_sn: Option<u64>,
     ) -> (Option<u64>, Option<u64>) {
         // el esquema específico
-        let (better_gov_version, better_sn) = if let Some(witness_data) =
-            self.witnesses.get(&(node.clone(), schema_id.clone()))
-        {
-            Self::search_in_schema(
-                witness_data,
-                parse_namespace,
-                data,
-                better_gov_version,
-                better_sn,
-            )
-        } else {
-            (better_gov_version, better_sn)
-        };
+        let (better_gov_version, better_sn) = self
+            .witnesses
+            .get(&(node.clone(), schema_id.clone()))
+            .map_or((better_gov_version, better_sn), |witness_data| {
+                Self::search_in_schema(
+                    witness_data,
+                    parse_namespace,
+                    data,
+                    better_gov_version,
+                    better_sn,
+                )
+            });
 
         // todos los esquemas
         if let Some(witness_data) =
@@ -450,7 +449,7 @@ impl WitnessesRegister {
 
     async fn search_witnesses(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         node: &PublicKey,
         data: &TransferData,
         namespace: String,
@@ -563,19 +562,11 @@ impl WitnessesRegister {
         let sn_limit = if let Some(gov_version) = better_gov_version {
             match self.get_sn(ctx, subject_id, gov_version).await? {
                 SnLimit::Sn(sn) => {
-                    if let Some(better_sn) = better_sn {
-                        SnLimit::Sn(sn.max(better_sn))
-                    } else {
-                        SnLimit::Sn(sn)
-                    }
+                    better_sn.map_or(SnLimit::Sn(sn), |better_sn| SnLimit::Sn(sn.max(better_sn)))
                 }
                 SnLimit::LastSn => SnLimit::Sn(data.sn),
                 SnLimit::NotSn => {
-                    if let Some(bs) = better_sn {
-                        SnLimit::Sn(bs)
-                    } else {
-                        SnLimit::NotSn
-                    }
+                    better_sn.map_or(SnLimit::NotSn, SnLimit::Sn)
                 }
             }
         } else if let Some(better_sn) = better_sn {
@@ -595,11 +586,10 @@ impl Actor for WitnessesRegister {
     type Response = WitnessesRegisterResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "WitnessesRegister")
-        } else {
-            info_span!("WitnessesRegister")
-        }
+        parent_span.map_or_else(
+            || info_span!("WitnessesRegister"),
+            |parent_span| info_span!(parent: parent_span, "WitnessesRegister"),
+        )
     }
 
     async fn pre_start(

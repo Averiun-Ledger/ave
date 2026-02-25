@@ -184,6 +184,7 @@ impl AuthDatabase {
         conn.execute_batch(migration_002).map_err(|e| {
             DatabaseError::Migration(format!("migration 002 failed: {}", e))
         })?;
+        drop(conn);
 
         info!(target: TARGET, "database migrations completed");
         Ok(())
@@ -231,6 +232,7 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
+        drop(conn);
 
         Ok(())
     }
@@ -312,6 +314,7 @@ impl AuthDatabase {
                 e
             ))
         })?;
+        drop(conn);
 
         info!(target: TARGET, "superadmin account created");
         Ok(())
@@ -449,7 +452,9 @@ impl AuthDatabase {
         }
 
         // Fetch and return the created user
-        Self::get_user_by_id_internal(&conn, user_id)
+        let result = Self::get_user_by_id_internal(&conn, user_id);
+        drop(conn);
+        result
     }
 
     /// Internal: Get user by ID without acquiring lock
@@ -493,19 +498,16 @@ impl AuthDatabase {
 
     /// Count superadmin users (users with the superadmin role)
     pub fn count_superadmins(&self) -> Result<i64, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(DISTINCT u.id)
-                 FROM users u
-                 INNER JOIN user_roles ur ON u.id = ur.user_id
-                 INNER JOIN roles r ON ur.role_id = r.id
-                 WHERE r.name = 'superadmin' AND u.is_deleted = 0",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let count: i64 = self.lock_conn()?.query_row(
+            "SELECT COUNT(DISTINCT u.id)
+             FROM users u
+             INNER JOIN user_roles ur ON u.id = ur.user_id
+             INNER JOIN roles r ON ur.role_id = r.id
+             WHERE r.name = 'superadmin' AND u.is_deleted = 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(count)
     }
@@ -560,6 +562,7 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
 
         // Get roles for each user
         let mut result = Vec::new();
@@ -567,6 +570,7 @@ impl AuthDatabase {
             user_info.roles = Self::get_user_roles_internal(&conn, user_id)?;
             result.push(user_info);
         }
+        drop(conn);
 
         Ok(result)
     }
@@ -620,18 +624,19 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
-        Self::get_user_by_id_internal(&conn, user_id)
+        let result = Self::get_user_by_id_internal(&conn, user_id);
+        drop(conn);
+        result
     }
 
     /// Delete user (soft delete)
     pub fn delete_user(&self, user_id: i64) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        conn.execute(
-            "UPDATE users SET is_deleted = 1 WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        self.lock_conn()?
+            .execute(
+                "UPDATE users SET is_deleted = 1 WHERE id = ?1",
+                params![user_id],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         Ok(())
     }
@@ -692,6 +697,7 @@ impl AuthDatabase {
             assigned_by,
             "Role changed",
         )?;
+        drop(conn);
 
         Ok(())
     }
@@ -717,6 +723,7 @@ impl AuthDatabase {
             None,
             "Role changed",
         )?;
+        drop(conn);
         Ok(())
     }
 
@@ -835,6 +842,7 @@ impl AuthDatabase {
             params![Self::now(), user.id],
         )
         .ok();
+        drop(conn);
 
         if user.must_change_password {
             return Err(DatabaseError::PasswordChangeRequired(
@@ -995,6 +1003,7 @@ impl AuthDatabase {
             Some(user.id), // User-initiated revocation
             "Password changed by user",
         )?;
+        drop(conn);
 
         // Refresh user
         user.must_change_password = false;
@@ -1045,7 +1054,9 @@ impl AuthDatabase {
             "Password reset by administrator",
         )?;
 
-        Self::get_user_by_id_internal(&conn, user_id)
+        let result = Self::get_user_by_id_internal(&conn, user_id);
+        drop(conn);
+        result
     }
 
     // =============================================================================

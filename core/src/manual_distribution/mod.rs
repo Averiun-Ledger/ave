@@ -49,11 +49,10 @@ impl Actor for ManualDistribution {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "ManualDistribution")
-        } else {
-            info_span!("ManualDistribution")
-        }
+        parent_span.map_or_else(
+            || info_span!("ManualDistribution"),
+            |parent_span| info_span!(parent: parent_span, "ManualDistribution"),
+        )
     }
 }
 
@@ -114,12 +113,10 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
-                let governance_id =
-                    if let Some(governance_id) = &data.get_governance_id() {
-                        governance_id.clone()
-                    } else {
-                        subject_id.clone()
-                    };
+                let governance_id = data
+                    .get_governance_id()
+                    .as_ref()
+                    .map_or_else(|| subject_id.clone(), |governance_id| governance_id.clone());
 
                 let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
                     error!(

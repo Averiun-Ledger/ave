@@ -128,7 +128,7 @@ impl Approval {
 
     async fn send_approval_to_req(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         response: bool,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -177,11 +177,10 @@ impl Actor for Approval {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Approval")
-        } else {
-            info_span!("Approval")
-        }
+        parent_span.map_or_else(
+            || info_span!("Approval"),
+            |parent_span| info_span!(parent: parent_span, "Approval"),
+        )
     }
 }
 

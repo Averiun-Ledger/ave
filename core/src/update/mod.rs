@@ -65,13 +65,7 @@ impl Update {
                 }
             }
             None => {
-                if let Some(our_sn) = self.our_sn
-                    && sn > our_sn
-                {
-                    self.better = Some((sn, sender))
-                } else {
-                    self.better = Some((sn, sender))
-                }
+                self.better = Some((sn, sender));
             }
         }
     }
@@ -113,11 +107,10 @@ impl Actor for Update {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Update", id)
-        } else {
-            info_span!("Update", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("Update", id),
+            |parent_span| info_span!(parent: parent_span, "Update", id),
+        )
     }
 }
 

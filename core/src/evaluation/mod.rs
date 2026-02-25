@@ -208,7 +208,7 @@ impl Evaluation {
 
     async fn send_evaluation_to_req(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         response: EvaluationData,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -252,11 +252,10 @@ impl Actor for Evaluation {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Evaluation")
-        } else {
-            info_span!("Evaluation")
-        }
+        parent_span.map_or_else(
+            || info_span!("Evaluation"),
+            |parent_span| info_span!(parent: parent_span, "Evaluation"),
+        )
     }
 }
 

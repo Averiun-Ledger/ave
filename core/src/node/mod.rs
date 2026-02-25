@@ -277,7 +277,7 @@ impl Node {
     }
 
     async fn build_compilation_dir(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let contracts_path = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
@@ -384,12 +384,10 @@ impl Node {
         }
 
         for (subject, data) in self.known_subjects.clone() {
-            let i_new_owner =
-                if let Some(transfer) = self.transfer_subjects.get(&subject) {
-                    transfer.new_owner == *self.our_key
-                } else {
-                    false
-                };
+            let i_new_owner = self
+                .transfer_subjects
+                .get(&subject)
+                .is_some_and(|transfer| transfer.new_owner == *self.our_key);
 
             if let SubjectData::Governance { .. } = data {
                 let governance_actor = ctx
@@ -521,11 +519,10 @@ impl Actor for Node {
     type Response = NodeResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Node")
-        } else {
-            info_span!("Node")
-        }
+        parent_span.map_or_else(
+            || info_span!("Node"),
+            |parent_span| info_span!(parent: parent_span, "Node"),
+        )
     }
 
     async fn pre_start(

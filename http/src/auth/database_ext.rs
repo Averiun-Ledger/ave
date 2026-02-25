@@ -140,7 +140,9 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let role_id = conn.last_insert_rowid();
-        Self::get_role_by_id_internal(&conn, role_id)
+        let result = Self::get_role_by_id_internal(&conn, role_id);
+        drop(conn);
+        result
     }
 
     /// Get role by ID
@@ -181,6 +183,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(roles)
     }
@@ -222,7 +226,9 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
-        Self::get_role_by_id_internal(&conn, role_id)
+        let result = Self::get_role_by_id_internal(&conn, role_id);
+        drop(conn);
+        result
     }
 
     /// Delete role (soft delete)
@@ -242,6 +248,7 @@ impl AuthDatabase {
             params![role_id],
         )
         .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        drop(conn);
 
         Ok(())
     }
@@ -334,6 +341,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(resources)
     }
@@ -363,6 +372,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(actions)
     }
@@ -411,6 +422,7 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3, ?4)",
             params![role_id, resource_id, action_id, allowed],
         ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        drop(conn);
 
         Ok(())
     }
@@ -451,6 +463,7 @@ impl AuthDatabase {
             params![role_id, resource_id, action_id],
         )
         .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        drop(conn);
 
         Ok(())
     }
@@ -487,6 +500,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(permissions)
     }
@@ -560,6 +575,7 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![user_id, resource_id, action_id, allowed, granted_by],
         ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        drop(conn);
 
         Ok(())
     }
@@ -583,6 +599,7 @@ impl AuthDatabase {
             params![user_id, resource_id, action_id],
         )
         .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        drop(conn);
 
         Ok(())
     }
@@ -654,6 +671,9 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(role_perms_stmt);
+        drop(direct_perms_stmt);
+        drop(conn);
 
         // Combine both
         permissions.extend(direct_perms);
@@ -702,6 +722,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(permissions)
     }
@@ -748,6 +770,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(permissions)
     }

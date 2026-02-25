@@ -166,11 +166,10 @@ impl Actor for SubjectRegister {
     type Response = SubjectRegisterResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "SubjectRegister")
-        } else {
-            info_span!("SubjectRegister")
-        }
+        parent_span.map_or_else(
+            || info_span!("SubjectRegister"),
+            |parent_span| info_span!(parent: parent_span, "SubjectRegister"),
+        )
     }
 
     async fn pre_start(
@@ -349,7 +348,7 @@ impl PersistentActor for SubjectRegister {
                             schema_id.to_owned(),
                             namespace.to_owned(),
                         ))
-                        .or_insert((CeilingMap::new(), HashSet::new()))
+                        .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                         .0
                         .insert(*gov_version, quantity.to_owned());
                 }
@@ -373,7 +372,7 @@ impl PersistentActor for SubjectRegister {
                         schema_id.to_owned(),
                         namespace.to_owned(),
                     ))
-                    .or_insert((CeilingMap::new(), HashSet::new()))
+                    .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                     .1
                     .insert(subject_id.to_owned());
 
@@ -397,7 +396,7 @@ impl PersistentActor for SubjectRegister {
                         schema_id.to_owned(),
                         namespace.to_owned(),
                     ))
-                    .or_insert((CeilingMap::new(), HashSet::new()))
+                    .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                     .1
                     .insert(subject_id.to_owned());
 
@@ -407,7 +406,7 @@ impl PersistentActor for SubjectRegister {
                         schema_id.to_owned(),
                         namespace.to_owned(),
                     ))
-                    .or_insert((CeilingMap::new(), HashSet::new()))
+                    .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                     .1
                     .remove(subject_id);
 

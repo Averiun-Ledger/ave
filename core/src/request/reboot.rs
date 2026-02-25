@@ -35,7 +35,7 @@ impl Reboot {
 
     async fn sleep(
         &self,
-        ctx: &mut ave_actors::ActorContext<Self>,
+        ctx: &ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.reference().await?;
         let request = RebootMessage::Update;
@@ -58,7 +58,7 @@ impl Reboot {
 
     async fn finish(
         &self,
-        ctx: &mut ave_actors::ActorContext<Self>,
+        ctx: &ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         debug!(
             request_id = %self.request_id,
@@ -117,11 +117,10 @@ impl Actor for Reboot {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Reboot")
-        } else {
-            info_span!("Reboot")
-        }
+        parent_span.map_or_else(
+            || info_span!("Reboot"),
+            |parent_span| info_span!(parent: parent_span, "Reboot"),
+        )
     }
 }
 

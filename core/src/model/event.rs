@@ -319,11 +319,7 @@ impl Protocols {
                 evaluation.evaluator_res().is_some()
             }
             Self::GovFact { approval, .. } => {
-                if let Some(approval) = approval {
-                    approval.approved
-                } else {
-                    false
-                }
+                approval.as_ref().is_some_and(|approval| approval.approved)
             }
             Self::Transfer { evaluation, .. } => {
                 evaluation.evaluator_res().is_some()

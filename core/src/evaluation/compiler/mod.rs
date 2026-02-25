@@ -143,7 +143,7 @@ impl Compiler {
     }
 
     async fn check_wasm(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, CompilerError> {
@@ -357,11 +357,10 @@ impl Actor for Compiler {
     type Response = CompilerResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Compiler", id)
-        } else {
-            info_span!("Compiler", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("Compiler", id),
+            |parent_span| info_span!(parent: parent_span, "Compiler", id),
+        )
     }
 }
 

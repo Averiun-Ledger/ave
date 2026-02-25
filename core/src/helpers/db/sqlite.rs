@@ -210,6 +210,8 @@ impl Querys for SqliteLocal {
         let next = if page < pages { Some(page + 1) } else { None };
         let paginator = Paginator { pages, next, prev };
 
+        drop(stmt);
+        drop(conn);
         Ok(PaginatorAborts {
             paginator,
             events: aborts,
@@ -505,6 +507,8 @@ impl Querys for SqliteLocal {
         let next = if page < pages { Some(page + 1) } else { None };
         let paginator = Paginator { pages, next, prev };
 
+        drop(stmt);
+        drop(conn);
         Ok(PaginatorEvents { paginator, events })
     }
 
@@ -604,6 +608,7 @@ impl Querys for SqliteLocal {
                 _ => DatabaseError::Query(e.to_string()),
             })?;
 
+        drop(conn);
         Ok(ledger)
     }
 
@@ -732,6 +737,8 @@ impl Querys for SqliteLocal {
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>()?;
 
+        drop(stmt);
+        drop(conn);
         Ok(events)
     }
 }
@@ -910,6 +917,7 @@ impl SqliteLocal {
         )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        drop(conn);
         Ok(())
     }
 
@@ -993,6 +1001,7 @@ impl SqliteLocal {
         )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        drop(conn);
         Ok(())
     }
 
@@ -1030,6 +1039,7 @@ impl SqliteLocal {
         )
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        drop(conn);
         Ok(())
     }
 }

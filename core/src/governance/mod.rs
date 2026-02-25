@@ -483,7 +483,7 @@ impl Subject for Governance {
 impl Governance {
     async fn update_schemas(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         schema_creators_eval: &BTreeMap<
             SchemaType,
             BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -541,7 +541,7 @@ impl Governance {
     }
 
     async fn down_schemas(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         old_schemas_eval: &BTreeSet<SchemaType>,
         old_schemas_val: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
@@ -797,7 +797,7 @@ impl Governance {
 
     async fn update_childs(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
             evaluator
@@ -897,12 +897,11 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let node_key = if let Some(new_owner) = &self.subject_metadata.new_owner
-        {
-            new_owner.clone()
-        } else {
-            self.subject_metadata.owner.clone()
-        };
+        let node_key = self
+            .subject_metadata
+            .new_owner
+            .as_ref()
+            .map_or_else(|| self.subject_metadata.owner.clone(), |new_owner| new_owner.clone());
 
         if self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
@@ -985,12 +984,11 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let node_key = if let Some(new_owner) = &self.subject_metadata.new_owner
-        {
-            new_owner.clone()
-        } else {
-            self.subject_metadata.owner.clone()
-        };
+        let node_key = self
+            .subject_metadata
+            .new_owner
+            .as_ref()
+            .map_or_else(|| self.subject_metadata.owner.clone(), |new_owner| new_owner.clone());
 
         let old_val = old_gov.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
@@ -1113,7 +1111,7 @@ impl Governance {
     }
 
     async fn down_not_owner(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         gov: &GovernanceData,
         our_key: Arc<PublicKey>,
     ) -> Result<(), ActorError> {
@@ -1184,7 +1182,7 @@ impl Governance {
     }
 
     async fn down_owner(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<ApprPersist>("approver").await?;
         actor.ask_stop().await?;
@@ -1235,7 +1233,7 @@ impl Governance {
     }
 
     async fn down_compilers_schemas(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         schemas: &BTreeSet<SchemaType>,
     ) -> Result<(), ActorError> {
         for schema_id in schemas.iter() {
@@ -1250,7 +1248,7 @@ impl Governance {
     }
 
     async fn compile_schemas(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         schemas: HashMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
@@ -1449,7 +1447,7 @@ impl Governance {
 
     async fn first_role_register(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
 
@@ -1489,7 +1487,7 @@ impl Governance {
 
     async fn update_gov_version(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
 
@@ -1502,7 +1500,7 @@ impl Governance {
 
     async fn update_registers_fact(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         update: RolesUpdate,
         creator_update: CreatorRoleUpdate,
     ) -> Result<(), ActorError> {
@@ -1560,7 +1558,7 @@ impl Governance {
 
     async fn update_registers_confirm(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         update: RolesUpdateConfirm,
     ) -> Result<(), ActorError> {
         let RolesUpdateConfirm {
@@ -1813,19 +1811,15 @@ impl Governance {
                             ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
                         })?;
 
-                    let rm_members =
-                        if let Some(members) = &governance_event.members {
-                            members.remove.clone()
-                        } else {
-                            None
-                        };
+                    let rm_members = governance_event
+                        .members
+                        .as_ref()
+                        .map_or_else(|| None, |members| members.remove.clone());
 
-                    let rm_schemas =
-                        if let Some(schemas) = &governance_event.schemas {
-                            schemas.remove.clone()
-                        } else {
-                            None
-                        };
+                    let rm_schemas = governance_event
+                        .schemas
+                        .as_ref()
+                        .map_or_else(|| None, |schemas| schemas.remove.clone());
 
                     let rm_roles =
                         if rm_members.is_some() || rm_schemas.is_some() {
@@ -1914,11 +1908,10 @@ impl Actor for Governance {
     type Response = GovernanceResponse;
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Governance", id)
-        } else {
-            info_span!("Governance", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("Governance", id),
+            |parent_span| info_span!(parent: parent_span, "Governance", id),
+        )
     }
 
     async fn pre_start(

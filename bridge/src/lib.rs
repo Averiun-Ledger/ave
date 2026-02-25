@@ -99,11 +99,7 @@ impl Bridge {
                 None
             };
 
-        let token = if let Some(token) = token {
-            token
-        } else {
-            CancellationToken::new()
-        };
+        let token = token.unwrap_or_default();
 
         let (api, runners) = AveApi::build(
             keys,

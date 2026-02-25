@@ -208,6 +208,7 @@ impl AuthDatabase {
 
         // Get key info
         let key_info = Self::get_api_key_info_internal(&conn, &key_id)?;
+        drop(conn);
 
         Ok((api_key, key_info))
     }
@@ -264,6 +265,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(keys)
     }
@@ -290,7 +293,9 @@ impl AuthDatabase {
                 )
             })?;
 
-        Self::get_api_key_info_internal(&conn, &key_id)
+        let result = Self::get_api_key_info_internal(&conn, &key_id);
+        drop(conn);
+        result
     }
 
     /// List all API keys (admin)
@@ -343,6 +348,8 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+        drop(conn);
 
         Ok(keys)
     }
@@ -354,11 +361,9 @@ impl AuthDatabase {
         revoked_by: Option<i64>,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
         let now = Self::now();
 
-        conn.execute(
+        self.lock_conn()?.execute(
             "UPDATE api_keys
              SET revoked = 1, revoked_at = ?1, revoked_by = ?2, revoked_reason = ?3
              WHERE id = ?4",
@@ -528,11 +533,9 @@ impl AuthDatabase {
         key_id: &str,
         ip_address: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
         let now = Self::now();
 
-        conn.execute(
+        self.lock_conn()?.execute(
             "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
             params![now, ip_address, key_id],
         ).map_err(|e| DatabaseError::Update(e.to_string()))?;
@@ -564,6 +567,7 @@ impl AuthDatabase {
                 params![now],
             )
             .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        drop(conn);
 
         Ok(deleted)
     }

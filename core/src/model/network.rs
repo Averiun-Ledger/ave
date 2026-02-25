@@ -50,11 +50,10 @@ impl Actor for RetryNetwork {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RetryNetwork")
-        } else {
-            info_span!("RetryNetwork")
-        }
+        parent_span.map_or_else(
+            || info_span!("RetryNetwork"),
+            |parent_span| info_span!(parent: parent_span, "RetryNetwork"),
+        )
     }
 }
 

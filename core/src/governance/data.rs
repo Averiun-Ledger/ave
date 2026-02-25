@@ -626,12 +626,10 @@ impl GovernanceData {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_tracker_schemas
                 .get_signers(role.clone(), namespace.clone());
-            let (mut schema_signers, schema_any) =
-                if let Some(roles) = self.roles_schema.get(schema_id) {
-                    roles.get_signers(role, namespace)
-                } else {
-                    (vec![], false)
-                };
+            let (mut schema_signers, schema_any) = self
+                .roles_schema
+                .get(schema_id)
+                .map_or_else(|| (vec![], false), |roles| roles.get_signers(role, namespace));
 
             not_gov_signers.append(&mut schema_signers);
 

@@ -119,11 +119,10 @@ impl Actor for Register {
     type Response = RegisterResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Register")
-        } else {
-            info_span!("Register")
-        }
+        parent_span.map_or_else(
+            || info_span!("Register"),
+            |parent_span| info_span!(parent: parent_span, "Register"),
+        )
     }
 
     async fn pre_start(

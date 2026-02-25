@@ -164,7 +164,7 @@ impl Validation {
 
     async fn send_validation_to_req(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         response: ValidationData,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -230,11 +230,10 @@ impl Actor for Validation {
     type Response = ();
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Validation")
-        } else {
-            info_span!("Validation")
-        }
+        parent_span.map_or_else(
+            || info_span!("Validation"),
+            |parent_span| info_span!(parent: parent_span, "Validation"),
+        )
     }
 }
 

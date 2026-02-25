@@ -64,11 +64,10 @@ impl Actor for RequestTracking {
     type Response = RequestTrackingResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RequestTracking")
-        } else {
-            info_span!("RequestTracking")
-        }
+        parent_span.map_or_else(
+            || info_span!("RequestTracking"),
+            |parent_span| info_span!(parent: parent_span, "RequestTracking"),
+        )
     }
 }
 
@@ -203,23 +202,26 @@ impl Handler<Self> for RequestTracking {
                 Ok(RequestTrackingResponse::Ok)
             }
             RequestTrackingMessage::SearchRequest(request_id) => {
-                if let Some(info) = self.cache.get(&request_id) {
-                    debug!(
-                        msg_type = "SearchRequest",
-                        request_id = %request_id,
-                        state = ?info.state,
-                        version = info.version,
-                        "Request found in cache"
-                    );
-                    Ok(RequestTrackingResponse::Info(info.clone()))
-                } else {
-                    debug!(
-                        msg_type = "SearchRequest",
-                        request_id = %request_id,
-                        "Request not found in cache"
-                    );
-                    Ok(RequestTrackingResponse::NotFound)
-                }
+                self.cache.get(&request_id).map_or_else(
+                    || {
+                        debug!(
+                            msg_type = "SearchRequest",
+                            request_id = %request_id,
+                            "Request not found in cache"
+                        );
+                        Ok(RequestTrackingResponse::NotFound)
+                    },
+                    |info| {
+                        debug!(
+                            msg_type = "SearchRequest",
+                            request_id = %request_id,
+                            state = ?info.state,
+                            version = info.version,
+                            "Request found in cache"
+                        );
+                        Ok(RequestTrackingResponse::Info(info.clone()))
+                    },
+                )
             }
         }
     }

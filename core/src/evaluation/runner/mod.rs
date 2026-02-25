@@ -47,7 +47,7 @@ pub struct Runner;
 
 impl Runner {
     async fn execute_contract(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         data: &EvaluateInfo,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
@@ -310,7 +310,7 @@ impl Runner {
     }
 
     async fn execute_fact_not_gov(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         state: &ValueWrapper,
         init_state: &ValueWrapper,
         payload: &ValueWrapper,
@@ -338,7 +338,9 @@ impl Runner {
                     name: contract_name.to_owned(),
                 });
             };
-            contract.to_vec()
+            let result = contract.to_vec();
+            drop(contracts);
+            result
         };
 
         let module = unsafe {
@@ -1041,8 +1043,7 @@ impl Runner {
             }
         }
 
-        let mut remove_members = vec![];
-        if let Some(remove) = member_event.remove.clone() {
+        let remove_members = if let Some(remove) = member_event.remove.clone() {
             if remove.is_empty() {
                 return Err(RunnerError::InvalidEvent {
                     location: "check_members",
@@ -1084,8 +1085,10 @@ impl Runner {
                 }
             }
 
-            remove_members = remove.iter().cloned().collect::<Vec<String>>();
-        }
+            remove.iter().cloned().collect::<Vec<String>>()
+        } else {
+            vec![]
+        };
 
         let members_name: HashSet<String> =
             new_members.keys().cloned().collect();
@@ -1218,11 +1221,10 @@ impl Actor for Runner {
     type Response = RunnerResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Runner")
-        } else {
-            info_span!("Runner")
-        }
+        parent_span.map_or_else(
+            || info_span!("Runner"),
+            |parent_span| info_span!(parent: parent_span, "Runner"),
+        )
     }
 }
 

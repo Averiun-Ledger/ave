@@ -1069,7 +1069,7 @@ impl RequestManager {
     }
 
     async fn get_witnesses_auth(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, RequestManagerError> {
         let path = ActorPath::from("/user/node/auth");
@@ -1096,7 +1096,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn send_reboot(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let Ok(actor) = ctx.reference().await else {
@@ -1442,7 +1442,7 @@ impl RequestManager {
 
     async fn end_request(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         let actor = ctx.get_parent::<RequestHandler>().await?;
         actor
@@ -1535,11 +1535,10 @@ impl Actor for RequestManager {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "RequestManager", id)
-        } else {
-            info_span!("RequestManager", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("RequestManager", id),
+            |parent_span| info_span!(parent: parent_span, "RequestManager", id),
+        )
     }
 
     async fn pre_start(
@@ -1577,6 +1576,9 @@ impl Actor for RequestManager {
 
 #[async_trait]
 impl Handler<Self> for RequestManager {
+    // The async state machine inlines all sub-futures and exceeds the default
+    // threshold; a proper fix would require boxing every large sub-future.
+    #[allow(clippy::large_stack_frames)]
     async fn handle_message(
         &mut self,
         _sender: ActorPath,

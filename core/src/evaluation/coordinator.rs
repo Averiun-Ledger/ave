@@ -73,11 +73,10 @@ impl Actor for EvalCoordinator {
     type Response = ();
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "EvalCoordinator", id)
-        } else {
-            info_span!("EvalCoordinator", id)
-        }
+        parent_span.map_or_else(
+            || info_span!("EvalCoordinator", id),
+            |parent_span| info_span!(parent: parent_span, "EvalCoordinator", id),
+        )
     }
 }
 

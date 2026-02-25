@@ -194,11 +194,10 @@ impl Actor for Auth {
     type Response = AuthResponse;
 
     fn get_span(_id: &str, parent_span: Option<Span>) -> tracing::Span {
-        if let Some(parent_span) = parent_span {
-            info_span!(parent: parent_span, "Auth")
-        } else {
-            info_span!("Auth")
-        }
+        parent_span.map_or_else(
+            || info_span!("Auth"),
+            |parent_span| info_span!(parent: parent_span, "Auth"),
+        )
     }
 
     async fn pre_start(
