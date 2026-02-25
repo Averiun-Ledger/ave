@@ -28,7 +28,7 @@ pub struct ManualDistribution {
 }
 
 impl ManualDistribution {
-    pub fn new(our_key: Arc<PublicKey>) -> Self {
+    pub const fn new(our_key: Arc<PublicKey>) -> Self {
         Self { our_key }
     }
 }
@@ -58,12 +58,12 @@ impl Actor for ManualDistribution {
 }
 
 #[async_trait]
-impl Handler<ManualDistribution> for ManualDistribution {
+impl Handler<Self> for ManualDistribution {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ManualDistributionMessage,
-        ctx: &mut ave_actors::ActorContext<ManualDistribution>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ManualDistributionMessage::Update(subject_id) => {
@@ -245,7 +245,7 @@ impl Handler<ManualDistribution> for ManualDistribution {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ManualDistribution>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             error = %error,

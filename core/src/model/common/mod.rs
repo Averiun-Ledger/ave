@@ -190,7 +190,7 @@ pub struct Interval {
 }
 
 impl Interval {
-    pub fn new(a: u64, b: u64) -> Self {
+    pub const fn new(a: u64, b: u64) -> Self {
         if a <= b {
             Self { lo: a, hi: b }
         } else {
@@ -198,7 +198,7 @@ impl Interval {
         }
     }
 
-    pub fn contains(&self, value: u64) -> bool {
+    pub const fn contains(&self, value: u64) -> bool {
         value >= self.lo && value <= self.hi
     }
 }
@@ -218,7 +218,7 @@ pub struct IntervalSet {
 }
 
 impl IntervalSet {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             intervals: Vec::new(),
         }
@@ -350,8 +350,8 @@ impl<T> CeilingMap<T>
 where
     T: Debug + Clone + Serialize,
 {
-    pub fn new() -> Self {
-        CeilingMap {
+    pub const fn new() -> Self {
+        Self {
             inner: BTreeMap::new(),
         }
     }

@@ -70,32 +70,32 @@ pub enum DataToSinkEvent {
 impl DataToSinkEvent {
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
-            DataToSinkEvent::Create {
+            Self::Create {
                 subject_id,
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::Fact {
+            | Self::Fact {
                 subject_id,
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::Transfer {
+            | Self::Transfer {
                 subject_id,
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::Confirm {
+            | Self::Confirm {
                 subject_id,
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::Reject {
+            | Self::Reject {
                 subject_id,
                 schema_id,
                 ..
             }
-            | DataToSinkEvent::Eol {
+            | Self::Eol {
                 subject_id,
                 schema_id,
                 ..

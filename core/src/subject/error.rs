@@ -150,12 +150,12 @@ pub enum SubjectError {
 
 impl From<String> for SubjectError {
     fn from(s: String) -> Self {
-        SubjectError::Generic(s)
+        Self::Generic(s)
     }
 }
 
 impl From<&str> for SubjectError {
     fn from(s: &str) -> Self {
-        SubjectError::Generic(s.to_string())
+        Self::Generic(s.to_string())
     }
 }

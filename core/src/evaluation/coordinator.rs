@@ -35,7 +35,7 @@ pub struct EvalCoordinator {
 }
 
 impl EvalCoordinator {
-    pub fn new(
+    pub const fn new(
         node_key: PublicKey,
         request_id: String,
         version: u64,
@@ -84,12 +84,12 @@ impl Actor for EvalCoordinator {
 impl NotPersistentActor for EvalCoordinator {}
 
 #[async_trait]
-impl Handler<EvalCoordinator> for EvalCoordinator {
+impl Handler<Self> for EvalCoordinator {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EvalCoordinatorMessage,
-        ctx: &mut ActorContext<EvalCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             EvalCoordinatorMessage::NetworkEvaluation {
@@ -290,7 +290,7 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
     async fn on_child_error(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<EvalCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             ActorError::Retry => {
@@ -338,7 +338,7 @@ impl Handler<EvalCoordinator> for EvalCoordinator {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<EvalCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.request_id,

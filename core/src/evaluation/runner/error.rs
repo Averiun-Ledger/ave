@@ -160,12 +160,12 @@ impl From<ContractError> for RunnerError {
             | ContractError::WriteOutOfBounds { .. }
             | ContractError::AllocationTooLarge { .. }
             | ContractError::TotalMemoryExceeded { .. }
-            | ContractError::AllocationOverflow => RunnerError::MemoryError {
+            | ContractError::AllocationOverflow => Self::MemoryError {
                 operation: "contract memory operation",
                 details: error.to_string(),
             },
             ContractError::LinkerError { function, details } => {
-                RunnerError::WasmError {
+                Self::WasmError {
                     operation: function,
                     details,
                 }

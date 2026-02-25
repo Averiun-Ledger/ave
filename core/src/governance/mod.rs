@@ -820,7 +820,7 @@ impl Governance {
 
     async fn build_childs(
         &self,
-        ctx: &mut ActorContext<Governance>,
+        ctx: &mut ActorContext<Self>,
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
@@ -2070,12 +2070,12 @@ impl Actor for Governance {
 }
 
 #[async_trait]
-impl Handler<Governance> for Governance {
+impl Handler<Self> for Governance {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: GovernanceMessage,
-        ctx: &mut ActorContext<Governance>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceResponse, ActorError> {
         match msg {
             GovernanceMessage::GetVersion => {
@@ -2135,7 +2135,7 @@ impl Handler<Governance> for Governance {
     async fn on_event(
         &mut self,
         event: SignedLedger,
-        ctx: &mut ActorContext<Governance>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -2167,7 +2167,7 @@ impl Handler<Governance> for Governance {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Governance>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             error = %error,

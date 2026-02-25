@@ -252,7 +252,7 @@ impl From<Infallible> for Event {
 
 impl From<control_list::Event> for Event {
     fn from(_event: control_list::Event) -> Self {
-        Event::Dummy
+        Self::Dummy
     }
 }
 
@@ -260,7 +260,7 @@ impl From<routing::Event> for Event {
     fn from(event: routing::Event) -> Self {
         match event {
             routing::Event::ClosestPeer { peer_id, info } => {
-                Event::ClosestPeer { peer_id, info }
+                Self::ClosestPeer { peer_id, info }
             }
         }
     }
@@ -273,16 +273,16 @@ impl From<identify::Event> for Event {
                 peer_id,
                 info,
                 connection_id,
-            } => Event::Identified {
+            } => Self::Identified {
                 connection_id,
                 peer_id,
                 info: Box::new(info),
             },
             identify::Event::Error { peer_id, error, .. } => {
-                Event::IdentifyError { peer_id, error }
+                Self::IdentifyError { peer_id, error }
             }
             identify::Event::Sent { .. } | identify::Event::Pushed { .. } => {
-                Event::Dummy
+                Self::Dummy
             }
         }
     }
@@ -294,14 +294,14 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
     ) -> Self {
         match event {
             request_response::Event::Message { peer, message, .. } => {
-                Event::ReqresMessage {
+                Self::ReqresMessage {
                     peer_id: peer,
                     message,
                 }
             }
             request_response::Event::ResponseSent { .. }
             | request_response::Event::InboundFailure { .. }
-            | request_response::Event::OutboundFailure { .. } => Event::Dummy,
+            | request_response::Event::OutboundFailure { .. } => Self::Dummy,
         }
     }
 }

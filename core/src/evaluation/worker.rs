@@ -62,7 +62,7 @@ pub struct EvalWorker {
 impl EvalWorker {
     async fn execute_contract(
         &self,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
         runner_data: EvaluateInfo,
         is_owner: bool,
     ) -> Result<RunnerResponse, ActorError> {
@@ -82,7 +82,7 @@ impl EvalWorker {
 
     async fn compile_contracts(
         &self,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
         ids: &[SchemaType],
         schemas: BTreeMap<SchemaType, Schema>,
     ) -> Result<Option<CompilerError>, ActorError> {
@@ -160,7 +160,7 @@ impl EvalWorker {
 
     async fn evaluate(
         &self,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
         evaluation_req: &EvaluationReq,
     ) -> Result<RunnerResult, EvaluatorError> {
         let runner_data =
@@ -191,7 +191,7 @@ impl EvalWorker {
                     "can not convert GovernanceData from properties: {}",
                     e
                 );
-                EvaluatorError::InternalError(e.to_string())
+                EvaluatorError::InternalError(e)
             })?;
 
             if let Some(error) = self.compile_contracts(ctx, &compilations, governance_data.schemas)
@@ -380,7 +380,7 @@ impl EvalWorker {
 
     async fn create_res(
         &self,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
         reboot: bool,
         evaluation_req: &Signed<EvaluationReq>,
     ) -> Result<EvaluationRes, EvaluatorError> {
@@ -479,12 +479,12 @@ impl Actor for EvalWorker {
 impl NotPersistentActor for EvalWorker {}
 
 #[async_trait]
-impl Handler<EvalWorker> for EvalWorker {
+impl Handler<Self> for EvalWorker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EvalWorkerMessage,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             EvalWorkerMessage::UpdateGovVersion { gov_version } => {
@@ -723,7 +723,7 @@ impl Handler<EvalWorker> for EvalWorker {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<EvalWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             governance_id = %self.governance_id,

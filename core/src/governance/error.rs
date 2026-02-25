@@ -32,12 +32,12 @@ pub enum GovernanceError {
 
 impl From<String> for GovernanceError {
     fn from(s: String) -> Self {
-        GovernanceError::Generic(s)
+        Self::Generic(s)
     }
 }
 
 impl From<&str> for GovernanceError {
     fn from(s: &str) -> Self {
-        GovernanceError::Generic(s.to_string())
+        Self::Generic(s.to_string())
     }
 }

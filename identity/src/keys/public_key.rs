@@ -108,7 +108,7 @@ impl PublicKey {
 
     /// Get the algorithm
     #[inline]
-    pub fn algorithm(&self) -> DSAlgorithm {
+    pub const fn algorithm(&self) -> DSAlgorithm {
         self.inner.algorithm
     }
 
@@ -182,7 +182,7 @@ impl PublicKey {
     /// Returns `true` if the key bytes are empty, which indicates
     /// this public key was created using `Default::default()`.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner.bytes.is_empty()
     }
 }

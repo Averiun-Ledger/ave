@@ -140,7 +140,7 @@ impl Api {
 
         // Create worker
         let service = Intermediary::build(
-            worker.service().sender().clone(),
+            worker.service().sender(),
             system.clone(),
             token.clone(),
         );
@@ -506,7 +506,7 @@ impl Api {
         subject_id: DigestIdentifier,
         state: ApprovalStateRes,
     ) -> Result<String, Error> {
-        if let ApprovalStateRes::Obsolete = state {
+        if state == ApprovalStateRes::Obsolete {
             warn!("Cannot set approval state to Obsolete");
             return Err(Error::InvalidApprovalState("Obsolete".to_string()));
         }

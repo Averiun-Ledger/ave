@@ -131,12 +131,12 @@ impl Bridge {
         ))
     }
 
-    pub fn token(&self) -> &CancellationToken {
+    pub const fn token(&self) -> &CancellationToken {
         &self.cancellation
     }
 
     fn bind_with_shutdown(token: CancellationToken) {
-        let cancellation_token = token.clone();
+        let cancellation_token = token;
         let mut sigterm = signal(SignalKind::terminate())
             .expect("It could not be registered SIGTERM");
 

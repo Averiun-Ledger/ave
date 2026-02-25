@@ -80,7 +80,7 @@ impl Approval {
 
     async fn create_approvers(
         &self,
-        ctx: &mut ActorContext<Approval>,
+        ctx: &mut ActorContext<Self>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         let subject_id = self.request.content().subject_id.to_string();
@@ -128,7 +128,7 @@ impl Approval {
 
     async fn send_approval_to_req(
         &self,
-        ctx: &mut ActorContext<Approval>,
+        ctx: &mut ActorContext<Self>,
         response: bool,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -186,7 +186,7 @@ impl Actor for Approval {
 }
 
 #[async_trait]
-impl Handler<Approval> for Approval {
+impl Handler<Self> for Approval {
     async fn handle_message(
         &mut self,
         __sender: ActorPath,
@@ -349,7 +349,7 @@ impl Handler<Approval> for Approval {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Approval>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.request_id,

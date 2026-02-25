@@ -104,7 +104,7 @@ impl ExternalDB {
                     path = %db_path.display(),
                     "External SQLite database built successfully"
                 );
-                Ok(ExternalDB::SqliteLocal(sqlite))
+                Ok(Self::SqliteLocal(sqlite))
             }
         }
     }
@@ -112,14 +112,14 @@ impl ExternalDB {
     pub fn get_subject(&self) -> impl Subscriber<SignedLedger> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
         }
     }
 
     pub fn get_sink_data(&self) -> impl Subscriber<SinkDataEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
         }
     }
 
@@ -128,7 +128,7 @@ impl ExternalDB {
     ) -> impl Subscriber<RequestTrackingEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
         }
     }
 }
@@ -146,7 +146,7 @@ impl Querys for ExternalDB {
     ) -> Result<PaginatorAborts, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
+            Self::SqliteLocal(sqlite_local) => {
                 sqlite_local
                     .get_aborts(
                         subject_id, request_id, sn, quantity, page, reverse,
@@ -162,7 +162,7 @@ impl Querys for ExternalDB {
     ) -> Result<SubjectDB, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
+            Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_subject_state(subject_id).await
             }
         }
@@ -175,7 +175,7 @@ impl Querys for ExternalDB {
     ) -> Result<PaginatorEvents, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
+            Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_events(subject_id, query).await
             }
         }
@@ -188,7 +188,7 @@ impl Querys for ExternalDB {
     ) -> Result<LedgerDB, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
+            Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_event_sn(subject_id, sn).await
             }
         }
@@ -203,7 +203,7 @@ impl Querys for ExternalDB {
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            ExternalDB::SqliteLocal(sqlite_local) => {
+            Self::SqliteLocal(sqlite_local) => {
                 sqlite_local
                     .get_first_or_end_events(
                         subject_id, quantity, reverse, event_type,

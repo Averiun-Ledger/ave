@@ -207,12 +207,12 @@ impl Actor for SubjectRegister {
 }
 
 #[async_trait]
-impl Handler<SubjectRegister> for SubjectRegister {
+impl Handler<Self> for SubjectRegister {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SubjectRegisterMessage,
-        ctx: &mut ave_actors::ActorContext<SubjectRegister>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {
         match msg {
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
@@ -316,7 +316,7 @@ impl Handler<SubjectRegister> for SubjectRegister {
     async fn on_event(
         &mut self,
         event: SubjectRegisterEvent,
-        ctx: &mut ActorContext<SubjectRegister>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(

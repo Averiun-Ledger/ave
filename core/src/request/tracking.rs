@@ -87,12 +87,12 @@ pub struct RequestTrackingEvent {
 impl Event for RequestTrackingEvent {}
 
 #[async_trait]
-impl Handler<RequestTracking> for RequestTracking {
+impl Handler<Self> for RequestTracking {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RequestTrackingMessage,
-        ctx: &mut ave_actors::ActorContext<RequestTracking>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestTrackingResponse, ActorError> {
         match msg {
             RequestTrackingMessage::AllRequests => {
@@ -227,7 +227,7 @@ impl Handler<RequestTracking> for RequestTracking {
     async fn on_event(
         &mut self,
         event: RequestTrackingEvent,
-        ctx: &mut ActorContext<RequestTracking>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = ctx.publish_event(event).await {
             error!(

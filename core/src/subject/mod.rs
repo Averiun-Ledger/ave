@@ -116,7 +116,7 @@ pub struct Metadata {
 
 impl From<Governance> for Metadata {
     fn from(value: Governance) -> Self {
-        Metadata {
+        Self {
             name: value.subject_metadata.name,
             description: value.subject_metadata.description,
             subject_id: value.subject_metadata.subject_id.clone(),
@@ -139,7 +139,7 @@ impl From<Governance> for Metadata {
 
 impl From<Tracker> for Metadata {
     fn from(value: Tracker) -> Self {
-        Metadata {
+        Self {
             name: value.subject_metadata.name,
             description: value.subject_metadata.description,
             subject_id: value.subject_metadata.subject_id,
@@ -656,7 +656,7 @@ where
             return Err(SubjectError::MetadataMismatch);
         }
 
-        if let SchemaType::Governance = metadata.schema_id {
+        if metadata.schema_id == SchemaType::Governance {
             serde_json::from_value::<GovernanceData>(
                 metadata.properties.0.clone(),
             )

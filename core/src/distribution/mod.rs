@@ -40,7 +40,7 @@ impl Distribution {
         distribution_type: DistributionType,
         request_id: DigestIdentifier,
     ) -> Self {
-        Distribution {
+        Self {
             request_id,
             network,
             distribution_type,
@@ -55,7 +55,7 @@ impl Distribution {
 
     async fn create_distributors(
         &self,
-        ctx: &mut ActorContext<Distribution>,
+        ctx: &mut ActorContext<Self>,
         ledger: SignedLedger,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
@@ -100,9 +100,9 @@ impl Distribution {
 
     async fn end_request(
         &self,
-        ctx: &mut ActorContext<Distribution>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if let DistributionType::Request = self.distribution_type {
+        if matches!(self.distribution_type, DistributionType::Request) {
             let req_actor = ctx.get_parent::<RequestManager>().await?;
             req_actor
                 .tell(RequestManagerMessage::FinishRequest {
@@ -148,12 +148,12 @@ impl Message for DistributionMessage {}
 impl NotPersistentActor for Distribution {}
 
 #[async_trait]
-impl Handler<Distribution> for Distribution {
+impl Handler<Self> for Distribution {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DistributionMessage,
-        ctx: &mut ActorContext<Distribution>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             DistributionMessage::Create { ledger, witnesses } => {
@@ -221,7 +221,7 @@ impl Handler<Distribution> for Distribution {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Distribution>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             subject_id = %self.subject_id,

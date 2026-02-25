@@ -144,7 +144,7 @@ impl RequestManager {
     //Revisado
     async fn build_evaluation(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         let Some(request) = self.request.clone() else {
             return Err(RequestManagerError::RequestNotSet);
@@ -191,7 +191,7 @@ impl RequestManager {
 
     // revisado
     async fn check_data_eval(
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         request: &Signed<EventRequest>,
     ) -> Result<Metadata, RequestManagerError> {
         let (subject_id, confirm) = match request.content().clone() {
@@ -216,7 +216,7 @@ impl RequestManager {
 
     async fn build_request_eval(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         metadata: &Metadata,
         request: &Signed<EventRequest>,
     ) -> Result<
@@ -338,7 +338,7 @@ impl RequestManager {
 
     async fn run_evaluation(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<EvaluationReq>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
@@ -386,7 +386,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn build_request_appro(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         eval_req: EvaluationReq,
         evaluator_res: EvaluatorResponse,
     ) -> Result<Signed<ApprovalReq>, RequestManagerError> {
@@ -409,7 +409,7 @@ impl RequestManager {
 
     async fn build_approval(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         eval_req: EvaluationReq,
         eval_res: EvaluatorResponse,
     ) -> Result<(), RequestManagerError> {
@@ -442,7 +442,7 @@ impl RequestManager {
 
     async fn run_approval(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<ApprovalReq>,
         quorum: Quorum,
         signers: HashSet<PublicKey>,
@@ -489,7 +489,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn build_validation_req(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         eval: Option<(EvaluationReq, EvaluationData)>,
         appro_data: Option<ApprovalData>,
     ) -> Result<
@@ -544,7 +544,7 @@ impl RequestManager {
 
     async fn build_validation_data(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         eval: Option<(EvaluationReq, EvaluationData)>,
         appro_data: Option<ApprovalData>,
     ) -> Result<
@@ -691,7 +691,7 @@ impl RequestManager {
 
     async fn run_validation(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<ValidationReq>,
         quorum: Quorum,
         signers: HashSet<PublicKey>,
@@ -739,7 +739,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn build_ledger(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         val_req: ValidationReq,
         val_res: ValidationData,
     ) -> Result<SignedLedger, RequestManagerError> {
@@ -799,7 +799,7 @@ impl RequestManager {
 
     async fn update_subject(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
         if ledger.content().event_request.content().is_create_event() {
@@ -821,7 +821,7 @@ impl RequestManager {
 
     async fn build_distribution(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         ledger: SignedLedger,
     ) -> Result<bool, RequestManagerError> {
         let witnesses = self
@@ -849,7 +849,7 @@ impl RequestManager {
 
     async fn build_distribution_data(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         creator: PublicKey,
     ) -> Result<Option<HashSet<PublicKey>>, RequestManagerError> {
         let Some(request) = self.request.clone() else {
@@ -906,7 +906,7 @@ impl RequestManager {
 
     async fn run_distribution(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         witnesses: HashSet<PublicKey>,
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
@@ -949,7 +949,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn init_wait(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
         let actor = ctx
@@ -966,7 +966,7 @@ impl RequestManager {
 
     async fn init_update(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
         let Some((.., network)) = self.helpers.clone() else {
@@ -1069,7 +1069,7 @@ impl RequestManager {
     }
 
     async fn get_witnesses_auth(
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<HashSet<PublicKey>, RequestManagerError> {
         let path = ActorPath::from("/user/node/auth");
@@ -1096,7 +1096,7 @@ impl RequestManager {
     ////////////////////////////////////////////////
     async fn send_reboot(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         governance_id: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let Ok(actor) = ctx.reference().await else {
@@ -1114,7 +1114,7 @@ impl RequestManager {
 
     async fn match_error(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         error: RequestManagerError,
     ) {
         match error {
@@ -1166,7 +1166,7 @@ impl RequestManager {
 
     async fn finish_request(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         info!("Ending {}", self.id);
         send_to_tracking(
@@ -1187,7 +1187,7 @@ impl RequestManager {
 
     async fn reboot(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         reboot_type: RebootType,
         governance_id: DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
@@ -1305,7 +1305,7 @@ impl RequestManager {
 
     async fn match_command(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         match self.command {
             ReqManInitMessage::Evaluate => self.build_evaluation(ctx).await,
@@ -1365,7 +1365,7 @@ impl RequestManager {
 
     async fn stops_childs(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         match self.state {
             RequestManagerState::Reboot => {
@@ -1411,7 +1411,7 @@ impl RequestManager {
 
     async fn abort_request(
         &mut self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
         error: String,
         sn: Option<u64>,
         who: PublicKey,
@@ -1442,7 +1442,7 @@ impl RequestManager {
 
     async fn end_request(
         &self,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         let actor = ctx.get_parent::<RequestHandler>().await?;
         actor
@@ -1576,12 +1576,12 @@ impl Actor for RequestManager {
 }
 
 #[async_trait]
-impl Handler<RequestManager> for RequestManager {
+impl Handler<Self> for RequestManager {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RequestManagerMessage,
-        ctx: &mut ave_actors::ActorContext<RequestManager>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             RequestManagerMessage::RebootUpdate {
@@ -1643,7 +1643,7 @@ impl Handler<RequestManager> for RequestManager {
                 reboot_type,
             } => {
                 if request_id == self.id {
-                    if let RequestManagerState::Reboot = self.state {
+                    if matches!(self.state, RequestManagerState::Reboot) {
                         debug!(
                             msg_type = "Reboot",
                             request_id = %self.id,
@@ -2309,7 +2309,7 @@ impl Handler<RequestManager> for RequestManager {
     async fn on_event(
         &mut self,
         event: RequestManagerEvent,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) {
         let event_type = match &event {
             RequestManagerEvent::Finish => "Finish",
@@ -2332,7 +2332,7 @@ impl Handler<RequestManager> for RequestManager {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<RequestManager>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.id,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
     Debug,
     Serialize,
     Deserialize,
-    PartialEq,
+    PartialEq, Eq,
     BorshDeserialize,
     BorshSerialize,
 )]

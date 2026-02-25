@@ -144,13 +144,13 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MachineProfile::Nano    => write!(f, "nano"),
-            MachineProfile::Micro   => write!(f, "micro"),
-            MachineProfile::Small   => write!(f, "small"),
-            MachineProfile::Medium  => write!(f, "medium"),
-            MachineProfile::Large   => write!(f, "large"),
-            MachineProfile::XLarge  => write!(f, "xlarge"),
-            MachineProfile::XXLarge => write!(f, "2xlarge"),
+            Self::Nano    => write!(f, "nano"),
+            Self::Micro   => write!(f, "micro"),
+            Self::Small   => write!(f, "small"),
+            Self::Medium  => write!(f, "medium"),
+            Self::Large   => write!(f, "large"),
+            Self::XLarge  => write!(f, "xlarge"),
+            Self::XXLarge => write!(f, "2xlarge"),
         }
     }
 }
@@ -272,7 +272,7 @@ pub struct AveInternalDBConfig {
 }
 
 /// Database configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveInternalDBFeatureConfig {
     /// Rocksdb database.
     #[cfg(feature = "rocksdb")]
@@ -295,7 +295,7 @@ impl Default for AveInternalDBFeatureConfig {
             path: PathBuf::from("db").join("local").join("rocksdb"),
         };
         #[cfg(feature = "sqlite")]
-        return AveInternalDBFeatureConfig::Sqlite {
+        return Self::Sqlite {
             path: PathBuf::from("db").join("local").join("sqlite"),
         };
     }
@@ -308,14 +308,14 @@ impl AveInternalDBFeatureConfig {
             path: path.to_owned(),
         };
         #[cfg(feature = "sqlite")]
-        return AveInternalDBFeatureConfig::Sqlite {
+        return Self::Sqlite {
             path: path.to_owned(),
         };
     }
 
     pub fn deserialize_db<'de, D>(
         deserializer: D,
-    ) -> Result<AveInternalDBFeatureConfig, D::Error>
+    ) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -325,7 +325,7 @@ impl AveInternalDBFeatureConfig {
             path: PathBuf::from(path),
         });
         #[cfg(feature = "sqlite")]
-        return Ok(AveInternalDBFeatureConfig::Sqlite {
+        return Ok(Self::Sqlite {
             path: PathBuf::from(path),
         });
     }
@@ -337,7 +337,7 @@ impl fmt::Display for AveInternalDBFeatureConfig {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { .. } => write!(f, "Rocksdb"),
             #[cfg(feature = "sqlite")]
-            AveInternalDBFeatureConfig::Sqlite { .. } => write!(f, "Sqlite"),
+            Self::Sqlite { .. } => write!(f, "Sqlite"),
         }
     }
 }
@@ -351,7 +351,7 @@ pub struct AveExternalDBConfig {
 }
 
 /// Database configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveExternalDBFeatureConfig {
     /// Sqlite database.
     #[cfg(feature = "ext-sqlite")]
@@ -364,7 +364,7 @@ pub enum AveExternalDBFeatureConfig {
 impl Default for AveExternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "ext-sqlite")]
-        return AveExternalDBFeatureConfig::Sqlite {
+        return Self::Sqlite {
             path: PathBuf::from("db").join("ext").join("sqlite"),
         };
     }
@@ -373,20 +373,20 @@ impl Default for AveExternalDBFeatureConfig {
 impl AveExternalDBFeatureConfig {
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "ext-sqlite")]
-        return AveExternalDBFeatureConfig::Sqlite {
+        return Self::Sqlite {
             path: path.to_owned(),
         };
     }
 
     pub fn deserialize_db<'de, D>(
         deserializer: D,
-    ) -> Result<AveExternalDBFeatureConfig, D::Error>
+    ) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
         #[cfg(feature = "ext-sqlite")]
-        return Ok(AveExternalDBFeatureConfig::Sqlite {
+        return Ok(Self::Sqlite {
             path: PathBuf::from(path),
         });
     }
@@ -431,13 +431,13 @@ pub enum LoggingRotation {
 impl Display for LoggingRotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoggingRotation::Size => write!(f, "size"),
-            LoggingRotation::Hourly => write!(f, "hourly"),
-            LoggingRotation::Daily => write!(f, "daily"),
-            LoggingRotation::Weekly => write!(f, "weekly"),
-            LoggingRotation::Monthly => write!(f, "monthly"),
-            LoggingRotation::Yearly => write!(f, "yearly"),
-            LoggingRotation::Never => write!(f, "never"),
+            Self::Size => write!(f, "size"),
+            Self::Hourly => write!(f, "hourly"),
+            Self::Daily => write!(f, "daily"),
+            Self::Weekly => write!(f, "weekly"),
+            Self::Monthly => write!(f, "monthly"),
+            Self::Yearly => write!(f, "yearly"),
+            Self::Never => write!(f, "never"),
         }
     }
 }
@@ -472,7 +472,7 @@ impl Default for LoggingConfig {
 }
 
 impl LoggingConfig {
-    pub fn logs(&self) -> bool {
+    pub const fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
 }

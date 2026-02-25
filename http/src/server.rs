@@ -62,7 +62,7 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_peer_id(
+pub async fn get_peer_id(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
@@ -82,7 +82,7 @@ pub(crate) async fn get_peer_id(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_public_key(
+pub async fn get_public_key(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<String> {
@@ -102,7 +102,7 @@ pub(crate) async fn get_public_key(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_config(
+pub async fn get_config(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Json<ConfigHttp> {
@@ -126,7 +126,7 @@ pub(crate) async fn get_config(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_network_state(
+pub async fn get_network_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<MonitorNetworkState>, HttpError> {
@@ -150,7 +150,7 @@ pub(crate) async fn get_network_state(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_requests_in_manager(
+pub async fn get_requests_in_manager(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<RequestsInManager>, HttpError> {
@@ -175,7 +175,7 @@ pub(crate) async fn get_requests_in_manager(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_requests_in_manager_subject_id(
+pub async fn get_requests_in_manager_subject_id(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -206,7 +206,7 @@ pub(crate) async fn get_requests_in_manager_subject_id(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn post_event_request(
+pub async fn post_event_request(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Json(request): Json<BridgeSignedEventRequest>,
@@ -234,7 +234,7 @@ pub(crate) async fn post_event_request(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_approval(
+pub async fn get_approval(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -260,7 +260,7 @@ pub(crate) async fn get_approval(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_approvals(
+pub async fn get_approvals(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<ApprovalQuery>,
@@ -289,7 +289,7 @@ pub(crate) async fn get_approvals(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn patch_approve(
+pub async fn patch_approve(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -317,7 +317,7 @@ pub(crate) async fn patch_approve(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn post_manual_request_abort(
+pub async fn post_manual_request_abort(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -347,7 +347,7 @@ pub(crate) async fn post_manual_request_abort(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_request_state(
+pub async fn get_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(request_id): Path<String>,
@@ -369,7 +369,7 @@ pub(crate) async fn get_request_state(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_all_request_state(
+pub async fn get_all_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<RequestInfoExtend>>, HttpError> {
@@ -393,7 +393,7 @@ pub(crate) async fn get_all_request_state(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_pending_transfers(
+pub async fn get_pending_transfers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<TransferSubject>>, HttpError> {
@@ -422,7 +422,7 @@ pub(crate) async fn get_pending_transfers(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn put_auth_subject(
+pub async fn put_auth_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -445,7 +445,7 @@ pub(crate) async fn put_auth_subject(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_all_auth_subjects(
+pub async fn get_all_auth_subjects(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<String>>, HttpError> {
@@ -471,7 +471,7 @@ pub(crate) async fn get_all_auth_subjects(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_witnesses_subject(
+pub async fn get_witnesses_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -498,7 +498,7 @@ pub(crate) async fn get_witnesses_subject(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn delete_auth_subject(
+pub async fn delete_auth_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -525,7 +525,7 @@ pub(crate) async fn delete_auth_subject(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn post_update_subject(
+pub async fn post_update_subject(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -555,7 +555,7 @@ pub(crate) async fn post_update_subject(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn post_manual_distribution(
+pub async fn post_manual_distribution(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -581,7 +581,7 @@ pub(crate) async fn post_manual_distribution(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_all_govs(
+pub async fn get_all_govs(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Query(parameters): Query<GovQuery>,
@@ -610,7 +610,7 @@ pub(crate) async fn get_all_govs(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_all_subjs(
+pub async fn get_all_subjs(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(governance_id): Path<String>,
@@ -651,7 +651,7 @@ pub(crate) async fn get_all_subjs(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_events(
+pub async fn get_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -680,7 +680,7 @@ pub(crate) async fn get_events(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_aborts(
+pub async fn get_aborts(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -720,7 +720,7 @@ pub(crate) async fn get_aborts(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_event_sn(
+pub async fn get_event_sn(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path((subject_id, sn)): Path<(String, u64)>,
@@ -749,7 +749,7 @@ pub(crate) async fn get_event_sn(
     ),
     security(("api_key" = []))
 )]
-pub(crate) async fn get_first_or_end_events(
+pub async fn get_first_or_end_events(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     Path(subject_id): Path<String>,
@@ -963,15 +963,15 @@ pub fn build_routes(
 
         // Routes that require authentication & permission checks
         let authed = Router::new()
-            .merge(main_routes.clone())
+            .merge(main_routes)
             .merge(protected_routes)
-            .layer(protected_layers.clone());
+            .layer(protected_layers);
 
         // Login remains unauthenticated but needs DB extension
         let mut app = Router::new()
             .route("/login", post(login_handler::login))
             .route("/change-password", post(login_handler::change_password))
-            .layer(ServiceBuilder::new().layer(Extension(db.clone())))
+            .layer(ServiceBuilder::new().layer(Extension(db)))
             .merge(authed);
 
         if let Some(doc_routes) = doc_routes {

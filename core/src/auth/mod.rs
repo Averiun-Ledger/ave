@@ -72,7 +72,7 @@ impl BorshDeserialize for Auth {
 
 impl Auth {
     async fn build_update_data(
-        ctx: &mut ActorContext<Auth>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(HashSet<PublicKey>, Option<u64>), ActorError> {
         let data = get_subject_data(ctx, subject_id).await?;
@@ -231,12 +231,12 @@ impl Actor for Auth {
 }
 
 #[async_trait]
-impl Handler<Auth> for Auth {
+impl Handler<Self> for Auth {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: AuthMessage,
-        ctx: &mut ave_actors::ActorContext<Auth>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<AuthResponse, ActorError> {
         match msg {
             AuthMessage::GetAuth { subject_id } => {
@@ -439,7 +439,7 @@ impl Handler<Auth> for Auth {
     async fn on_event(
         &mut self,
         event: AuthEvent,
-        ctx: &mut ActorContext<Auth>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -454,7 +454,7 @@ impl Handler<Auth> for Auth {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Auth>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             error = %error,

@@ -122,12 +122,12 @@ impl From<RequestHandlerError> for ActorError {
     fn from(err: RequestHandlerError) -> Self {
         match err {
             RequestHandlerError::HelpersNotInitialized => {
-                ActorError::FunctionalCritical {
+                Self::FunctionalCritical {
                     description: err.to_string(),
                 }
             }
             RequestHandlerError::Actor(e) => e,
-            _ => ActorError::Functional {
+            _ => Self::Functional {
                 description: err.to_string(),
             },
         }

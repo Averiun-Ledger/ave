@@ -104,7 +104,7 @@ impl Signature {
         let public_key =
             PublicKey::new(signer.algorithm(), signer.public_key_bytes())?;
 
-        Ok(Signature {
+        Ok(Self {
             signer: public_key,
             timestamp,
             content_hash,
@@ -177,12 +177,12 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
     /// * `signer` - Any signer implementing the DSA trait
     pub fn new(content: T, signer: &dyn DSA) -> Result<Self, CryptoError> {
         let signature = Signature::new(&content, signer)?;
-        Ok(Signed { content, signature })
+        Ok(Self { content, signature })
     }
 
     /// Create from existing content and signature
-    pub fn from_parts(content: T, signature: Signature) -> Self {
-        Signed { content, signature }
+    pub const fn from_parts(content: T, signature: Signature) -> Self {
+        Self { content, signature }
     }
 
     /// Verify the signature matches the content
@@ -191,11 +191,11 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
     }
 
     /// Get the signer's public key
-    pub fn signature(&self) -> &Signature {
+    pub const fn signature(&self) -> &Signature {
         &self.signature
     }
 
-    pub fn content(&self) -> &T {
+    pub const fn content(&self) -> &T {
         &self.content
     }
 }

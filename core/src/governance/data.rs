@@ -61,7 +61,7 @@ impl GovernanceData {
             witness: BTreeSet::new(),
             issuer: RoleGovIssuer {
                 any: false,
-                signers: owner_signers_gov.clone(),
+                signers: owner_signers_gov,
             },
         };
 
@@ -527,7 +527,7 @@ impl GovernanceData {
 
         match data {
             HashThisRole::Gov { role, .. } => {
-                if let RoleTypes::Witness = role {
+                if matches!(role, RoleTypes::Witness) {
                     return true;
                 }
 
@@ -594,7 +594,7 @@ impl GovernanceData {
                     }
 
                     let schema_witnesses = roles_schema
-                        .get_signers(RoleTypes::Witness, namespace.clone())
+                        .get_signers(RoleTypes::Witness, namespace)
                         .0;
 
                     if schema_witnesses.contains(&name) {
@@ -965,7 +965,7 @@ impl TryFrom<ValueWrapper> for GovernanceData {
     type Error = GovernanceError;
 
     fn try_from(value: ValueWrapper) -> Result<Self, Self::Error> {
-        let governance: GovernanceData = serde_json::from_value(value.0)
+        let governance: Self = serde_json::from_value(value.0)
             .map_err(|e| GovernanceError::ConversionFailed {
                 details: e.to_string(),
             })?;

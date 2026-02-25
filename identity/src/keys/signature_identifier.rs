@@ -46,7 +46,7 @@ impl SignatureIdentifier {
 
     /// Get the algorithm used
     #[inline]
-    pub fn algorithm(&self) -> DSAlgorithm {
+    pub const fn algorithm(&self) -> DSAlgorithm {
         self.inner.algorithm
     }
 

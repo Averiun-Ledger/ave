@@ -20,7 +20,7 @@ pub enum KeyPairAlgorithm {
 impl From<DSAlgorithm> for KeyPairAlgorithm {
     fn from(algo: DSAlgorithm) -> Self {
         match algo {
-            DSAlgorithm::Ed25519 => KeyPairAlgorithm::Ed25519,
+            DSAlgorithm::Ed25519 => Self::Ed25519,
         }
     }
 }
@@ -28,7 +28,7 @@ impl From<DSAlgorithm> for KeyPairAlgorithm {
 impl From<KeyPairAlgorithm> for DSAlgorithm {
     fn from(kp_type: KeyPairAlgorithm) -> Self {
         match kp_type {
-            KeyPairAlgorithm::Ed25519 => DSAlgorithm::Ed25519,
+            KeyPairAlgorithm::Ed25519 => Self::Ed25519,
         }
     }
 }
@@ -54,7 +54,7 @@ impl KeyPairAlgorithm {
 impl fmt::Display for KeyPairAlgorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KeyPairAlgorithm::Ed25519 => write!(f, "Ed25519"),
+            Self::Ed25519 => write!(f, "Ed25519"),
         }
     }
 }
@@ -217,9 +217,9 @@ impl KeyPair {
 
     /// Get the key pair type
     #[inline]
-    pub fn key_type(&self) -> KeyPairAlgorithm {
+    pub const fn key_type(&self) -> KeyPairAlgorithm {
         match self {
-            KeyPair::Ed25519(_) => KeyPairAlgorithm::Ed25519,
+            Self::Ed25519(_) => KeyPairAlgorithm::Ed25519,
         }
     }
 
@@ -230,7 +230,7 @@ impl KeyPair {
         message: &[u8],
     ) -> Result<SignatureIdentifier, CryptoError> {
         match self {
-            KeyPair::Ed25519(signer) => signer.sign(message),
+            Self::Ed25519(signer) => signer.sign(message),
         }
     }
 
@@ -238,7 +238,7 @@ impl KeyPair {
     #[inline]
     pub fn algorithm(&self) -> DSAlgorithm {
         match self {
-            KeyPair::Ed25519(signer) => signer.algorithm(),
+            Self::Ed25519(signer) => signer.algorithm(),
         }
     }
 
@@ -246,7 +246,7 @@ impl KeyPair {
     #[inline]
     pub fn algorithm_id(&self) -> u8 {
         match self {
-            KeyPair::Ed25519(signer) => signer.algorithm_id(),
+            Self::Ed25519(signer) => signer.algorithm_id(),
         }
     }
 
@@ -254,7 +254,7 @@ impl KeyPair {
     #[inline]
     pub fn public_key_bytes(&self) -> Vec<u8> {
         match self {
-            KeyPair::Ed25519(signer) => signer.public_key_bytes(),
+            Self::Ed25519(signer) => signer.public_key_bytes(),
         }
     }
 
@@ -269,7 +269,7 @@ impl KeyPair {
     #[inline]
     pub fn secret_key_bytes(&self) -> Result<Vec<u8>, CryptoError> {
         match self {
-            KeyPair::Ed25519(signer) => signer.secret_key_bytes(),
+            Self::Ed25519(signer) => signer.secret_key_bytes(),
         }
     }
 
@@ -350,7 +350,7 @@ impl KeyPair {
 
 impl Default for KeyPair {
     fn default() -> Self {
-        KeyPair::Ed25519(Ed25519Signer::default())
+        Self::Ed25519(Ed25519Signer::default())
     }
 }
 
@@ -378,29 +378,29 @@ impl fmt::Display for KeyPair {
 impl DSA for KeyPair {
     #[inline]
     fn algorithm_id(&self) -> u8 {
-        KeyPair::algorithm_id(self)
+        Self::algorithm_id(self)
     }
 
     #[inline]
     fn signature_length(&self) -> usize {
         match self {
-            KeyPair::Ed25519(signer) => signer.signature_length(),
+            Self::Ed25519(signer) => signer.signature_length(),
         }
     }
 
     #[inline]
     fn sign(&self, message: &[u8]) -> Result<SignatureIdentifier, CryptoError> {
-        KeyPair::sign(self, message)
+        Self::sign(self, message)
     }
 
     #[inline]
     fn algorithm(&self) -> DSAlgorithm {
-        KeyPair::algorithm(self)
+        Self::algorithm(self)
     }
 
     #[inline]
     fn public_key_bytes(&self) -> Vec<u8> {
-        KeyPair::public_key_bytes(self)
+        Self::public_key_bytes(self)
     }
 }
 

@@ -21,7 +21,7 @@ pub struct Reboot {
 }
 
 impl Reboot {
-    pub fn new(
+    pub const fn new(
         governance_id: DigestIdentifier,
         request_id: DigestIdentifier,
     ) -> Self {
@@ -35,7 +35,7 @@ impl Reboot {
 
     async fn sleep(
         &self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.reference().await?;
         let request = RebootMessage::Update;
@@ -58,7 +58,7 @@ impl Reboot {
 
     async fn finish(
         &self,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         debug!(
             request_id = %self.request_id,
@@ -126,12 +126,12 @@ impl Actor for Reboot {
 }
 
 #[async_trait]
-impl Handler<Reboot> for Reboot {
+impl Handler<Self> for Reboot {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RebootMessage,
-        ctx: &mut ave_actors::ActorContext<Reboot>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             RebootMessage::Init => {

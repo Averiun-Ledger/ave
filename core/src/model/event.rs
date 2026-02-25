@@ -53,7 +53,7 @@ pub enum ProtocolsError {
 
 impl From<ProtocolsError> for ActorError {
     fn from(error: ProtocolsError) -> Self {
-        ActorError::Functional {
+        Self::Functional {
             description: error.to_string(),
         }
     }
@@ -168,7 +168,7 @@ impl Protocols {
     ) -> (RequestEventDB, DigestIdentifier) {
         match (self, event_request) {
             (
-                Protocols::Create { validation },
+                Self::Create { validation },
                 EventRequest::Create(create),
             ) => {
                 let ValidationMetadata::Metadata(metadata) =
@@ -190,12 +190,12 @@ impl Protocols {
                 )
             }
             (
-                Protocols::TrackerFact { evaluation, .. },
+                Self::TrackerFact { evaluation, .. },
                 EventRequest::Fact(fact_request),
             ) => {
                 let evaluation_response = match evaluation.response.clone() {
                     EvaluationResponse::Ok(eval_res) => {
-                        EvalResDB::Patch(eval_res.patch.0.clone())
+                        EvalResDB::Patch(eval_res.patch.0)
                     }
                     EvaluationResponse::Error(e) => {
                         EvalResDB::Error(e.to_string())
@@ -211,7 +211,7 @@ impl Protocols {
                 )
             }
             (
-                Protocols::GovFact {
+                Self::GovFact {
                     evaluation,
                     approval,
                     ..
@@ -225,7 +225,7 @@ impl Protocols {
                     EvaluationResponse::Ok(eval_res) => {
                         if let Some(appr) = approval {
                             (
-                                EvalResDB::Patch(eval_res.patch.0.clone()),
+                                EvalResDB::Patch(eval_res.patch.0),
                                 Some(appr.approved),
                             )
                         } else {
@@ -248,7 +248,7 @@ impl Protocols {
                 )
             }
             (
-                Protocols::Transfer { evaluation, .. },
+                Self::Transfer { evaluation, .. },
                 EventRequest::Transfer(transfer_request),
             ) => {
                 let evaluation_error = match evaluation.response.clone() {
@@ -263,17 +263,17 @@ impl Protocols {
                     event_request.get_subject_id(),
                 )
             }
-            (Protocols::TrackerConfirm { .. }, EventRequest::Confirm(..)) => (
+            (Self::TrackerConfirm { .. }, EventRequest::Confirm(..)) => (
                 RequestEventDB::TrackerConfirm,
                 event_request.get_subject_id(),
             ),
             (
-                Protocols::GovConfirm { evaluation, .. },
+                Self::GovConfirm { evaluation, .. },
                 EventRequest::Confirm(confirm_request),
             ) => {
                 let evaluation_response = match evaluation.response.clone() {
                     EvaluationResponse::Ok(eval_res) => {
-                        EvalResDB::Patch(eval_res.patch.0.clone())
+                        EvalResDB::Patch(eval_res.patch.0)
                     }
                     EvaluationResponse::Error(e) => {
                         EvalResDB::Error(e.to_string())
@@ -287,10 +287,10 @@ impl Protocols {
                     event_request.get_subject_id(),
                 )
             }
-            (Protocols::Reject { .. }, EventRequest::Reject(..)) => {
+            (Self::Reject { .. }, EventRequest::Reject(..)) => {
                 (RequestEventDB::Reject, event_request.get_subject_id())
             }
-            (Protocols::EOL { .. }, EventRequest::EOL(..)) => {
+            (Self::EOL { .. }, EventRequest::EOL(..)) => {
                 (RequestEventDB::EOL, event_request.get_subject_id())
             }
             _ => unreachable!(
@@ -301,39 +301,39 @@ impl Protocols {
 
     pub fn get_validation_data(&self) -> ValidationData {
         match self {
-            Protocols::Create { validation }
-            | Protocols::TrackerFact { validation, .. }
-            | Protocols::GovFact { validation, .. }
-            | Protocols::Transfer { validation, .. }
-            | Protocols::TrackerConfirm { validation }
-            | Protocols::GovConfirm { validation, .. }
-            | Protocols::Reject { validation }
-            | Protocols::EOL { validation } => validation.clone(),
+            Self::Create { validation }
+            | Self::TrackerFact { validation, .. }
+            | Self::GovFact { validation, .. }
+            | Self::Transfer { validation, .. }
+            | Self::TrackerConfirm { validation }
+            | Self::GovConfirm { validation, .. }
+            | Self::Reject { validation }
+            | Self::EOL { validation } => validation.clone(),
         }
     }
 
     pub fn is_success(&self) -> bool {
         match self {
-            Protocols::Create { .. } => true,
-            Protocols::TrackerFact { evaluation, .. } => {
+            Self::Create { .. } => true,
+            Self::TrackerFact { evaluation, .. } => {
                 evaluation.evaluator_res().is_some()
             }
-            Protocols::GovFact { approval, .. } => {
+            Self::GovFact { approval, .. } => {
                 if let Some(approval) = approval {
                     approval.approved
                 } else {
                     false
                 }
             }
-            Protocols::Transfer { evaluation, .. } => {
+            Self::Transfer { evaluation, .. } => {
                 evaluation.evaluator_res().is_some()
             }
-            Protocols::TrackerConfirm { .. } => true,
-            Protocols::GovConfirm { evaluation, .. } => {
+            Self::TrackerConfirm { .. } => true,
+            Self::GovConfirm { evaluation, .. } => {
                 evaluation.evaluator_res().is_some()
             }
-            Protocols::Reject { .. } => true,
-            Protocols::EOL { .. } => true,
+            Self::Reject { .. } => true,
+            Self::EOL { .. } => true,
         }
     }
 

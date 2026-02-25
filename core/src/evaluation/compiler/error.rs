@@ -100,15 +100,15 @@ impl From<ContractError> for CompilerError {
     fn from(error: ContractError) -> Self {
         match error {
             ContractError::MemoryAllocationFailed { details } => {
-                CompilerError::MemoryAllocationFailed { details }
+                Self::MemoryAllocationFailed { details }
             }
             ContractError::InvalidPointer { pointer } => {
-                CompilerError::MemoryAllocationFailed {
+                Self::MemoryAllocationFailed {
                     details: format!("invalid pointer: {}", pointer),
                 }
             }
             ContractError::WriteOutOfBounds { offset, size } => {
-                CompilerError::MemoryAllocationFailed {
+                Self::MemoryAllocationFailed {
                     details: format!(
                         "write out of bounds: offset {} >= size {}",
                         offset, size
@@ -116,7 +116,7 @@ impl From<ContractError> for CompilerError {
                 }
             }
             ContractError::AllocationTooLarge { size, max } => {
-                CompilerError::MemoryAllocationFailed {
+                Self::MemoryAllocationFailed {
                     details: format!(
                         "allocation size {} exceeds maximum of {} bytes",
                         size, max
@@ -124,7 +124,7 @@ impl From<ContractError> for CompilerError {
                 }
             }
             ContractError::TotalMemoryExceeded { total, max } => {
-                CompilerError::MemoryAllocationFailed {
+                Self::MemoryAllocationFailed {
                     details: format!(
                         "total memory {} exceeds maximum of {} bytes",
                         total, max
@@ -132,12 +132,12 @@ impl From<ContractError> for CompilerError {
                 }
             }
             ContractError::AllocationOverflow => {
-                CompilerError::MemoryAllocationFailed {
+                Self::MemoryAllocationFailed {
                     details: "memory allocation would overflow".to_string(),
                 }
             }
             ContractError::LinkerError { function, details } => {
-                CompilerError::InstantiationFailed {
+                Self::InstantiationFailed {
                     details: format!(
                         "linker error [{}]: {}",
                         function, details

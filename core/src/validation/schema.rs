@@ -72,12 +72,12 @@ impl Actor for ValidationSchema {
 }
 
 #[async_trait]
-impl Handler<ValidationSchema> for ValidationSchema {
+impl Handler<Self> for ValidationSchema {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ValidationSchemaMessage,
-        ctx: &mut ActorContext<ValidationSchema>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ValidationSchemaMessage::NetworkRequest {
@@ -268,7 +268,7 @@ impl Handler<ValidationSchema> for ValidationSchema {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ValidationSchema>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             governance_id = %self.governance_id,

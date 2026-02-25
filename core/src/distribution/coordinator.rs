@@ -58,12 +58,12 @@ impl Message for DistriCoordinatorMessage {}
 impl NotPersistentActor for DistriCoordinator {}
 
 #[async_trait]
-impl Handler<DistriCoordinator> for DistriCoordinator {
+impl Handler<Self> for DistriCoordinator {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DistriCoordinatorMessage,
-        ctx: &mut ActorContext<DistriCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             DistriCoordinatorMessage::NetworkDistribution {
@@ -213,7 +213,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
     async fn on_child_error(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<DistriCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             ActorError::Retry => {
@@ -269,7 +269,7 @@ impl Handler<DistriCoordinator> for DistriCoordinator {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<DistriCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             node_key = %self.node_key,

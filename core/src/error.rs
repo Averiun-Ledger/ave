@@ -210,7 +210,7 @@ pub enum Error {
 // Conversions from subsystem errors
 impl From<crate::system::SystemError> for Error {
     fn from(err: crate::system::SystemError) -> Self {
-        Error::SystemInit(err.to_string())
+        Self::SystemInit(err.to_string())
     }
 }
 
@@ -218,18 +218,18 @@ impl From<ave_actors::ActorError> for Error {
     fn from(err: ave_actors::ActorError) -> Self {
         match err {
             ave_actors::ActorError::NotFound { path } => {
-                Error::MissingResource {
+                Self::MissingResource {
                     name: path.to_string(),
                     reason: "Actor not found".to_string(),
                 }
             }
             ave_actors::ActorError::Functional { description } => {
-                Error::ActorError(description)
+                Self::ActorError(description)
             }
             ave_actors::ActorError::FunctionalCritical { description } => {
-                Error::Internal(description)
+                Self::Internal(description)
             }
-            _ => Error::Internal(err.to_string()),
+            _ => Self::Internal(err.to_string()),
         }
     }
 }

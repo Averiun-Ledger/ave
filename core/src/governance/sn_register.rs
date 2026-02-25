@@ -138,12 +138,12 @@ impl Actor for SnRegister {
 }
 
 #[async_trait]
-impl Handler<SnRegister> for SnRegister {
+impl Handler<Self> for SnRegister {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SnRegisterMessage,
-        ctx: &mut ave_actors::ActorContext<SnRegister>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SnRegisterResponse, ActorError> {
         match msg {
             SnRegisterMessage::GetSn {
@@ -207,7 +207,7 @@ impl Handler<SnRegister> for SnRegister {
     async fn on_event(
         &mut self,
         event: SnRegisterEvent,
-        ctx: &mut ActorContext<SnRegister>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(

@@ -162,7 +162,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         let behaviour = Behaviour::new(
             &key.public(),
-            config.clone(),
+            config,
             cancel.clone(),
             limits,
         );
@@ -259,8 +259,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             addrs: vec![],
         });
 
-        let when = if let (RetryKind::Discover, RetryKind::Dial) =
-            (entry.kind, kind)
+        let when = if matches!((entry.kind, kind), (RetryKind::Discover, RetryKind::Dial))
         {
             now
         } else {
@@ -339,7 +338,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     /// Get the local peer ID.
-    pub fn local_peer_id(&self) -> PeerId {
+    pub const fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
 
@@ -1016,8 +1015,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
                     }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
-                        if let Some(Action::Discover) =
-                            self.peer_action.get(&peer_id)
+                        if matches!(self.peer_action.get(&peer_id), Some(Action::Discover))
                         {
                             self.peer_action.remove(&peer_id);
                             if let Some(info) = info {
@@ -1041,7 +1039,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 } else {
                                     self.schedule_retry(
                                         peer_id,
-                                        ScheduleType::Dial(addr.clone()),
+                                        ScheduleType::Dial(addr),
                                     );
                                 }
                             } else {
@@ -1062,7 +1060,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 peer_id: Some(peer_id),
                 ..
             } => {
-                if let Some(Action::Dial) = self.peer_action.get(&peer_id) {
+                if matches!(self.peer_action.get(&peer_id), Some(Action::Dial)) {
                     self.peer_action.remove(&peer_id);
 
                     self.swarm.behaviour_mut().add_peer_to_remove(&peer_id);
@@ -1090,7 +1088,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             } else {
                                 self.schedule_retry(
                                     peer_id,
-                                    ScheduleType::Dial(addr.clone()),
+                                    ScheduleType::Dial(addr),
                                 );
                             }
                         } else {

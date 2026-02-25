@@ -32,13 +32,13 @@ pub enum SinkTypes {
 impl Display for SinkTypes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SinkTypes::Create => write!(f, "Create"),
-            SinkTypes::Fact => write!(f, "Fact"),
-            SinkTypes::Transfer => write!(f, "Transfer"),
-            SinkTypes::Confirm => write!(f, "Confirm"),
-            SinkTypes::Reject => write!(f, "Reject"),
-            SinkTypes::EOL => write!(f, "EOL"),
-            SinkTypes::All => write!(f, "All"),
+            Self::Create => write!(f, "Create"),
+            Self::Fact => write!(f, "Fact"),
+            Self::Transfer => write!(f, "Transfer"),
+            Self::Confirm => write!(f, "Confirm"),
+            Self::Reject => write!(f, "Reject"),
+            Self::EOL => write!(f, "EOL"),
+            Self::All => write!(f, "All"),
         }
     }
 }
@@ -46,12 +46,12 @@ impl Display for SinkTypes {
 impl From<&DataToSink> for SinkTypes {
     fn from(value: &DataToSink) -> Self {
         match value.event {
-            DataToSinkEvent::Create { .. } => SinkTypes::Create,
-            DataToSinkEvent::Fact { .. } => SinkTypes::Fact,
-            DataToSinkEvent::Transfer { .. } => SinkTypes::Transfer,
-            DataToSinkEvent::Confirm { .. } => SinkTypes::Confirm,
-            DataToSinkEvent::Reject { .. } => SinkTypes::Reject,
-            DataToSinkEvent::Eol { .. } => SinkTypes::EOL,
+            DataToSinkEvent::Create { .. } => Self::Create,
+            DataToSinkEvent::Fact { .. } => Self::Fact,
+            DataToSinkEvent::Transfer { .. } => Self::Transfer,
+            DataToSinkEvent::Confirm { .. } => Self::Confirm,
+            DataToSinkEvent::Reject { .. } => Self::Reject,
+            DataToSinkEvent::Eol { .. } => Self::EOL,
         }
     }
 }
@@ -73,11 +73,11 @@ impl From<String> for SinkTypes {
 impl SinkDataMessage {
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
-            SinkDataMessage::UpdateState(metadata) => (
+            Self::UpdateState(metadata) => (
                 metadata.subject_id.to_string(),
                 metadata.schema_id.to_string(),
             ),
-            SinkDataMessage::Event { event, .. } => match &event {
+            Self::Event { event, .. } => match &event {
                 DataToSinkEvent::Create {
                     subject_id,
                     schema_id,
@@ -158,12 +158,12 @@ impl Actor for SinkData {
 }
 
 #[async_trait]
-impl Handler<SinkData> for SinkData {
+impl Handler<Self> for SinkData {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: SinkDataMessage,
-        ctx: &mut ave_actors::ActorContext<SinkData>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SinkDataResponse, ActorError> {
         let (subject_id, schema_id) = msg.get_subject_schema();
         let msg_type = match &msg {
@@ -211,7 +211,7 @@ impl Handler<SinkData> for SinkData {
     async fn on_event(
         &mut self,
         event: SinkDataEvent,
-        ctx: &mut ActorContext<SinkData>,
+        ctx: &mut ActorContext<Self>,
     ) {
         let (subject_id, schema_id) = match &event {
             SinkDataEvent::Event(data_to_sink) => {

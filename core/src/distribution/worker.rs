@@ -44,7 +44,7 @@ pub struct DistriWorker {
 impl DistriWorker {
     async fn down_tracker(
         &self,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let subject_path =
@@ -57,7 +57,7 @@ impl DistriWorker {
 
     async fn get_ledger(
         &self,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
         lo_sn: Option<u64>,
@@ -118,7 +118,7 @@ impl DistriWorker {
 
     async fn authorized_subj(
         &self,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(bool, Option<SubjectData>), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -140,7 +140,7 @@ impl DistriWorker {
 
     async fn check_auth(
         &self,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         signer: PublicKey,
         ledger: Ledger,
     ) -> Result<bool, ActorError> {
@@ -244,7 +244,7 @@ impl DistriWorker {
 
     async fn check_witness(
         &self,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         sender: PublicKey,
     ) -> Result<(u64, bool), ActorError> {
@@ -299,7 +299,7 @@ impl DistriWorker {
     }
 
     pub async fn up_tracker(
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         light: bool,
     ) -> Result<(), ActorError> {
@@ -373,12 +373,12 @@ impl Message for DistriWorkerMessage {}
 impl NotPersistentActor for DistriWorker {}
 
 #[async_trait]
-impl Handler<DistriWorker> for DistriWorker {
+impl Handler<Self> for DistriWorker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DistriWorkerMessage,
-        ctx: &mut ActorContext<DistriWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             DistriWorkerMessage::GetLastSn {

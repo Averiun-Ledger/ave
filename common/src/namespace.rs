@@ -41,8 +41,8 @@ impl Namespace {
     ///
     /// A new `Namespace`.
     ///
-    pub fn new() -> Self {
-        Namespace(Vec::new())
+    pub const fn new() -> Self {
+        Self(Vec::new())
     }
 
     pub fn check(&self) -> bool {
@@ -69,7 +69,7 @@ impl Namespace {
     ///
     /// The root name of the `Namespace`.
     ///
-    pub fn root(&self) -> Namespace {
+    pub fn root(&self) -> Self {
         if self.0.len() == 1 {
             self.clone()
         } else if !self.0.is_empty() {
@@ -111,7 +111,7 @@ impl Namespace {
     ///
     /// Returns the levels size of the name space.
     ///
-    pub fn level(&self) -> usize {
+    pub const fn level(&self) -> usize {
         self.0.len()
     }
 
@@ -141,7 +141,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is empty.
     ///
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -155,7 +155,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is an ancestor of the other name space.
     ///
-    pub fn is_ancestor_of(&self, other: &Namespace) -> bool {
+    pub fn is_ancestor_of(&self, other: &Self) -> bool {
         let me = format!("{}.", self);
         other.to_string().as_str().starts_with(me.as_str()) || self.is_empty()
     }
@@ -170,7 +170,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is an ancestor of the other name space.
     ///
-    pub fn is_ancestor_or_equal_of(&self, other: &Namespace) -> bool {
+    pub fn is_ancestor_or_equal_of(&self, other: &Self) -> bool {
         let me = format!("{}.", self);
         other.to_string().as_str().starts_with(me.as_str())
             || self.is_empty()
@@ -187,7 +187,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is a descendant of the other name space.
     ///
-    pub fn is_descendant_of(&self, other: &Namespace) -> bool {
+    pub fn is_descendant_of(&self, other: &Self) -> bool {
         let me = self.to_string();
         me.as_str().starts_with(format!("{}.", other).as_str())
     }
@@ -202,7 +202,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is a parent of the other name space.
     ///
-    pub fn is_parent_of(&self, other: &Namespace) -> bool {
+    pub fn is_parent_of(&self, other: &Self) -> bool {
         *self == other.parent()
     }
 
@@ -216,7 +216,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is a child of the other name space.
     ///
-    pub fn is_child_of(&self, other: &Namespace) -> bool {
+    pub fn is_child_of(&self, other: &Self) -> bool {
         self.parent() == *other
     }
 
@@ -226,7 +226,7 @@ impl Namespace {
     ///
     /// Returns `true` if the name space is top level.
     ///
-    pub fn is_top_level(&self) -> bool {
+    pub const fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
 }
@@ -255,7 +255,7 @@ impl std::fmt::Debug for Namespace {
 
 impl Default for Namespace {
     fn default() -> Self {
-        Namespace::new()
+        Self::new()
     }
 }
 
@@ -267,13 +267,13 @@ impl From<&str> for Namespace {
             .map(|s| s.trim().to_string())
             .collect();
 
-        Namespace(tokens)
+        Self(tokens)
     }
 }
 
 impl From<String> for Namespace {
     fn from(str: String) -> Self {
-        Namespace::from(str.as_str())
+        Self::from(str.as_str())
     }
 }
 

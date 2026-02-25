@@ -80,7 +80,7 @@ impl Intermediary {
                 let receiver = message.info.receiver.clone();
                 let receiver_actor = message.info.receiver_actor.clone();
 
-                let node_peer = Intermediary::to_peer_id(
+                let node_peer = Self::to_peer_id(
                     &message.info.receiver,
                 )
                 .map_err(|e| {

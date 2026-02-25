@@ -20,7 +20,7 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn new(db: Arc<ExternalDB>) -> Self {
+    pub const fn new(db: Arc<ExternalDB>) -> Self {
         Self { db }
     }
 }
@@ -86,12 +86,12 @@ impl Actor for Query {
 }
 
 #[async_trait]
-impl Handler<Query> for Query {
+impl Handler<Self> for Query {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: QueryMessage,
-        _ctx: &mut ave_actors::ActorContext<Query>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<QueryResponse, ActorError> {
         match msg {
             QueryMessage::GetEvents { subject_id, query } => {

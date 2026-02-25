@@ -36,19 +36,19 @@ pub enum ValidationReq {
 impl ValidationReq {
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
-            ValidationReq::Create { subject_id, .. } => subject_id.clone(),
-            ValidationReq::Event { metadata, .. } => {
+            Self::Create { subject_id, .. } => subject_id.clone(),
+            Self::Event { metadata, .. } => {
                 metadata.subject_id.clone()
             }
         }
     }
 
-    pub fn is_valid(&self) -> bool {
+    pub const fn is_valid(&self) -> bool {
         match self {
-            ValidationReq::Create { event_request, .. } => {
+            Self::Create { event_request, .. } => {
                 matches!(event_request.content(), EventRequest::Create(..))
             }
-            ValidationReq::Event { event_request, .. } => {
+            Self::Event { event_request, .. } => {
                 !matches!(event_request.content(), EventRequest::Create(..))
             }
         }
@@ -56,16 +56,16 @@ impl ValidationReq {
 
     pub fn get_signed_event_request(&self) -> Signed<EventRequest> {
         match self {
-            ValidationReq::Create { event_request, .. } => {
+            Self::Create { event_request, .. } => {
                 event_request.clone()
             }
-            ValidationReq::Event { event_request, .. } => event_request.clone(),
+            Self::Event { event_request, .. } => event_request.clone(),
         }
     }
 
     pub fn get_governance_id(&self) -> Result<DigestIdentifier, String> {
         match self {
-            ValidationReq::Create { event_request, .. } => {
+            Self::Create { event_request, .. } => {
                 if let EventRequest::Create(create) = &event_request.content() {
                     Ok(create.governance_id.clone())
                 } else {
@@ -75,29 +75,29 @@ impl ValidationReq {
                     ))
                 }
             }
-            ValidationReq::Event { metadata, .. } => {
+            Self::Event { metadata, .. } => {
                 Ok(metadata.governance_id.clone())
             }
         }
     }
 
-    pub fn get_gov_version(&self) -> u64 {
+    pub const fn get_gov_version(&self) -> u64 {
         match self {
-            ValidationReq::Create { gov_version, .. } => *gov_version,
-            ValidationReq::Event { gov_version, .. } => *gov_version,
+            Self::Create { gov_version, .. } => *gov_version,
+            Self::Event { gov_version, .. } => *gov_version,
         }
     }
 
-    pub fn get_sn(&self) -> u64 {
+    pub const fn get_sn(&self) -> u64 {
         match self {
-            ValidationReq::Create { .. } => 0,
-            ValidationReq::Event { sn, .. } => *sn,
+            Self::Create { .. } => 0,
+            Self::Event { sn, .. } => *sn,
         }
     }
 
     pub fn get_schema_id(&self) -> Result<SchemaType, String> {
         match self {
-            ValidationReq::Create { event_request, .. } => {
+            Self::Create { event_request, .. } => {
                 if let EventRequest::Create(create) = &event_request.content() {
                     Ok(create.schema_id.clone())
                 } else {
@@ -107,7 +107,7 @@ impl ValidationReq {
                     ))
                 }
             }
-            ValidationReq::Event { metadata, .. } => {
+            Self::Event { metadata, .. } => {
                 Ok(metadata.schema_id.clone())
             }
         }
@@ -115,7 +115,7 @@ impl ValidationReq {
 
     pub fn get_namespace(&self) -> Result<Namespace, String> {
         match self {
-            ValidationReq::Create { event_request, .. } => {
+            Self::Create { event_request, .. } => {
                 if let EventRequest::Create(create) = &event_request.content() {
                     Ok(create.namespace.clone())
                 } else {
@@ -125,7 +125,7 @@ impl ValidationReq {
                     ))
                 }
             }
-            ValidationReq::Event { metadata, .. } => {
+            Self::Event { metadata, .. } => {
                 Ok(metadata.namespace.clone())
             }
         }
@@ -157,11 +157,11 @@ pub enum ActualProtocols {
 impl ActualProtocols {
     pub fn is_success(&self) -> bool {
         match &self {
-            ActualProtocols::None => true,
-            ActualProtocols::Eval { eval_data } => {
+            Self::None => true,
+            Self::Eval { eval_data } => {
                 eval_data.evaluator_res().is_some()
             }
-            ActualProtocols::EvalApprove { approval_data, .. } => {
+            Self::EvalApprove { approval_data, .. } => {
                 approval_data.approved
             }
         }
@@ -173,32 +173,32 @@ impl ActualProtocols {
         event_request_type: &EventRequestType,
     ) -> bool {
         match (&self, is_gov, event_request_type) {
-            (ActualProtocols::None, true, EventRequestType::Create)
-            | (ActualProtocols::None, false, EventRequestType::Create)
-            | (ActualProtocols::Eval { .. }, false, EventRequestType::Fact)
+            (Self::None, true, EventRequestType::Create)
+            | (Self::None, false, EventRequestType::Create)
+            | (Self::Eval { .. }, false, EventRequestType::Fact)
             | (
-                ActualProtocols::Eval { .. },
+                Self::Eval { .. },
                 true,
                 EventRequestType::Transfer,
             )
             | (
-                ActualProtocols::Eval { .. },
+                Self::Eval { .. },
                 false,
                 EventRequestType::Transfer,
             )
-            | (ActualProtocols::Eval { .. }, true, EventRequestType::Confirm)
-            | (ActualProtocols::None, false, EventRequestType::Confirm)
-            | (ActualProtocols::None, true, EventRequestType::Reject)
-            | (ActualProtocols::None, false, EventRequestType::Reject)
-            | (ActualProtocols::None, true, EventRequestType::Eol)
-            | (ActualProtocols::None, false, EventRequestType::Eol) => true,
+            | (Self::Eval { .. }, true, EventRequestType::Confirm)
+            | (Self::None, false, EventRequestType::Confirm)
+            | (Self::None, true, EventRequestType::Reject)
+            | (Self::None, false, EventRequestType::Reject)
+            | (Self::None, true, EventRequestType::Eol)
+            | (Self::None, false, EventRequestType::Eol) => true,
             (
-                ActualProtocols::Eval { eval_data },
+                Self::Eval { eval_data },
                 true,
                 EventRequestType::Fact,
             ) => eval_data.evaluator_res().is_none(),
             (
-                ActualProtocols::EvalApprove { eval_data, .. },
+                Self::EvalApprove { eval_data, .. },
                 true,
                 EventRequestType::Fact,
             ) => eval_data.evaluator_res().is_some(),

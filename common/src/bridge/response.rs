@@ -174,18 +174,18 @@ pub enum RequestEventDB {
 }
 
 impl RequestEventDB {
-    pub fn get_event_type(&self) -> EventRequestType {
+    pub const fn get_event_type(&self) -> EventRequestType {
         match self {
-            RequestEventDB::Create { .. } => EventRequestType::Create,
-            RequestEventDB::TrackerFact { .. }
-            | RequestEventDB::GovernanceFact { .. } => EventRequestType::Fact,
-            RequestEventDB::Transfer { .. } => EventRequestType::Transfer,
-            RequestEventDB::TrackerConfirm
-            | RequestEventDB::GovernanceConfirm { .. } => {
+            Self::Create { .. } => EventRequestType::Create,
+            Self::TrackerFact { .. }
+            | Self::GovernanceFact { .. } => EventRequestType::Fact,
+            Self::Transfer { .. } => EventRequestType::Transfer,
+            Self::TrackerConfirm
+            | Self::GovernanceConfirm { .. } => {
                 EventRequestType::Confirm
             }
-            RequestEventDB::Reject => EventRequestType::Reject,
-            RequestEventDB::EOL => EventRequestType::Eol,
+            Self::Reject => EventRequestType::Reject,
+            Self::EOL => EventRequestType::Eol,
         }
     }
 }
@@ -307,8 +307,8 @@ pub enum RequestState {
 impl Display for RequestState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestState::Handling => write!(f, "Handling"),
-            RequestState::Abort {
+            Self::Handling => write!(f, "Handling"),
+            Self::Abort {
                 subject_id,
                 who,
                 sn,
@@ -326,8 +326,8 @@ impl Display for RequestState {
                     subject_id, who, sn_text, error
                 )
             }
-            RequestState::InQueue => write!(f, "In Queue"),
-            RequestState::Invalid {
+            Self::InQueue => write!(f, "In Queue"),
+            Self::Invalid {
                 subject_id,
                 who,
                 sn,
@@ -345,20 +345,20 @@ impl Display for RequestState {
                     subject_id, who, sn_text, error
                 )
             }
-            RequestState::Finish => write!(f, "Finish"),
-            RequestState::Reboot => write!(f, "Reboot"),
-            RequestState::RebootDiff { seconds, count } => {
+            Self::Finish => write!(f, "Finish"),
+            Self::Reboot => write!(f, "Reboot"),
+            Self::RebootDiff { seconds, count } => {
                 write!(f, "Reboot diff, try: {}, seconds: {}", count, seconds)
             }
-            RequestState::RebootTimeOut { seconds, count } => write!(
+            Self::RebootTimeOut { seconds, count } => write!(
                 f,
                 "Reboot timeout, try: {}, seconds: {}",
                 count, seconds
             ),
-            RequestState::Evaluation => write!(f, "Evaluation"),
-            RequestState::Approval => write!(f, "Approval"),
-            RequestState::Validation => write!(f, "Validation"),
-            RequestState::Distribution => write!(f, "Distribution"),
+            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Approval => write!(f, "Approval"),
+            Self::Validation => write!(f, "Validation"),
+            Self::Distribution => write!(f, "Distribution"),
         }
     }
 }

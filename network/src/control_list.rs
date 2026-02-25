@@ -74,7 +74,7 @@ impl Default for Config {
 /// Control List Settings
 impl Config {
     /// Set enable
-    pub fn with_enable(mut self, enable: bool) -> Self {
+    pub const fn with_enable(mut self, enable: bool) -> Self {
         self.enable = enable;
         self
     }
@@ -110,18 +110,18 @@ impl Config {
     }
 
     /// Set interval request
-    pub fn with_interval_request(mut self, interval: Duration) -> Self {
+    pub const fn with_interval_request(mut self, interval: Duration) -> Self {
         self.interval_request = interval;
         self
     }
 
     /// Set interval request
-    pub fn get_interval_request(&self) -> Duration {
+    pub const fn get_interval_request(&self) -> Duration {
         self.interval_request
     }
 
     /// Get enable
-    pub fn get_enable(&self) -> bool {
+    pub const fn get_enable(&self) -> bool {
         self.enable
     }
 
@@ -241,7 +241,7 @@ impl Behaviour {
                 ..Default::default()
             }
         } else {
-            Behaviour::default()
+            Self::default()
         }
     }
 
@@ -257,7 +257,7 @@ impl Behaviour {
 
         let close_peers: Vec<PeerId> =
             self.allow_peers.difference(&new_list).cloned().collect();
-        self.close_connections.extend(close_peers.clone());
+        self.close_connections.extend(close_peers);
         self.allow_peers.clone_from(&new_list);
     }
 

@@ -202,7 +202,7 @@ impl Ed25519Signer {
     }
 
     /// Get the public key
-    pub fn public_key(&self) -> VerifyingKey {
+    pub const fn public_key(&self) -> VerifyingKey {
         self.public_key
     }
 

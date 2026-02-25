@@ -181,11 +181,11 @@ pub enum ResponseSummary {
 }
 
 impl ResponseSummary {
-    pub fn is_ok(&self) -> bool {
+    pub const fn is_ok(&self) -> bool {
         match self {
-            ResponseSummary::Reboot => false,
-            ResponseSummary::Error => false,
-            ResponseSummary::Ok => true,
+            Self::Reboot => false,
+            Self::Error => false,
+            Self::Ok => true,
         }
     }
 }

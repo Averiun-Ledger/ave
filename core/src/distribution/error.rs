@@ -73,7 +73,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::UnexpectedSender
             | DistributorError::EmptyEvents
             | DistributorError::GovernanceVersionMismatch { .. } => {
-                ActorError::Functional {
+                Self::Functional {
                     description: error.to_string(),
                 }
             }
@@ -82,7 +82,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::UpTrackerFailed { .. }
             | DistributorError::UpdateLedgerFailed { .. } => {
-                ActorError::FunctionalCritical {
+                Self::FunctionalCritical {
                     description: error.to_string(),
                 }
             }

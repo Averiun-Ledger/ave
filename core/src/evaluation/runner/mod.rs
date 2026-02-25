@@ -47,7 +47,7 @@ pub struct Runner;
 
 impl Runner {
     async fn execute_contract(
-        ctx: &mut ActorContext<Runner>,
+        ctx: &mut ActorContext<Self>,
         data: &EvaluateInfo,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
@@ -283,7 +283,7 @@ impl Runner {
 
             if governance
                 .members
-                .insert(old_owner_name.clone(), old_owner_key.clone())
+                .insert(old_owner_name.clone(), old_owner_key)
                 .is_some()
             {
                 return Err(RunnerError::InvalidEvent {
@@ -310,7 +310,7 @@ impl Runner {
     }
 
     async fn execute_fact_not_gov(
-        ctx: &mut ActorContext<Runner>,
+        ctx: &mut ActorContext<Self>,
         state: &ValueWrapper,
         init_state: &ValueWrapper,
         payload: &ValueWrapper,
@@ -515,7 +515,7 @@ impl Runner {
                         location: "check_policies",
                         kind: error::InvalidEventKind::InvalidQuorum {
                             context: "governance approve policy".to_owned(),
-                            details: e.to_string(),
+                            details: e,
                         },
                     }
                 })?;
@@ -528,7 +528,7 @@ impl Runner {
                         location: "check_policies",
                         kind: error::InvalidEventKind::InvalidQuorum {
                             context: "governance evaluate policy".to_owned(),
-                            details: e.to_string(),
+                            details: e,
                         },
                     }
                 })?;
@@ -541,7 +541,7 @@ impl Runner {
                         location: "check_policies",
                         kind: error::InvalidEventKind::InvalidQuorum {
                             context: "governance validate policy".to_owned(),
-                            details: e.to_string(),
+                            details: e,
                         },
                     }
                 })?;
@@ -602,7 +602,7 @@ impl Runner {
                                     "schema {} evaluate policy",
                                     schema.schema_id
                                 ),
-                                details: e.to_string(),
+                                details: e,
                             },
                         }
                     })?;
@@ -618,7 +618,7 @@ impl Runner {
                                     "schema {} validate policy",
                                     schema.schema_id
                                 ),
-                                details: e.to_string(),
+                                details: e,
                             },
                         }
                     })?;
@@ -1229,12 +1229,12 @@ impl Actor for Runner {
 impl NotPersistentActor for Runner {}
 
 #[async_trait]
-impl Handler<Runner> for Runner {
+impl Handler<Self> for Runner {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RunnerMessage,
-        ctx: &mut ActorContext<Runner>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
             Ok((result, compilations)) => {

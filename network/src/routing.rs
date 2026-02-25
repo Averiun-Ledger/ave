@@ -148,7 +148,7 @@ impl Behaviour {
         }
     }
 
-    pub fn finish_prerouting_state(&mut self) {
+    pub const fn finish_prerouting_state(&mut self) {
         self.pre_routing = false;
     }
 
@@ -610,67 +610,67 @@ impl Default for Config {
 
 impl Config {
     /// Get DHT random walk.
-    pub fn get_dht_random_walk(&self) -> bool {
+    pub const fn get_dht_random_walk(&self) -> bool {
         self.dht_random_walk
     }
 
     /// Enables or disables random walks in the Kademlia DHT.
-    pub fn with_dht_random_walk(mut self, enable: bool) -> Self {
+    pub const fn with_dht_random_walk(mut self, enable: bool) -> Self {
         self.dht_random_walk = enable;
         self
     }
 
     /// Get discovery limits.
-    pub fn get_discovery_limit(&self) -> u64 {
+    pub const fn get_discovery_limit(&self) -> u64 {
         self.discovery_only_if_under_num
     }
 
     /// Sets the number of active connections over which we interrupt the discovery process.
-    pub fn with_discovery_limit(mut self, num: u64) -> Self {
+    pub const fn with_discovery_limit(mut self, num: u64) -> Self {
         self.discovery_only_if_under_num = num;
         self
     }
 
     /// Get allow_local_address_in_dht.
-    pub fn get_allow_private_address_in_dht(&self) -> bool {
+    pub const fn get_allow_private_address_in_dht(&self) -> bool {
         self.allow_private_address_in_dht
     }
 
     /// Whether to allow local addresses in the DHT.
-    pub fn with_allow_private_address_in_dht(mut self, allow: bool) -> Self {
+    pub const fn with_allow_private_address_in_dht(mut self, allow: bool) -> Self {
         self.allow_private_address_in_dht = allow;
         self
     }
 
     /// Get allow_dns_address_in_dht.
-    pub fn get_allow_dns_address_in_dht(&self) -> bool {
+    pub const fn get_allow_dns_address_in_dht(&self) -> bool {
         self.allow_dns_address_in_dht
     }
 
     /// Whether to allow non-global addresses in the DHT.
-    pub fn with_allow_dns_address_in_dht(mut self, allow: bool) -> Self {
+    pub const fn with_allow_dns_address_in_dht(mut self, allow: bool) -> Self {
         self.allow_dns_address_in_dht = allow;
         self
     }
 
     /// Get allow_non_globals_in_dht.
-    pub fn get_allow_loop_back_address_in_dht(&self) -> bool {
+    pub const fn get_allow_loop_back_address_in_dht(&self) -> bool {
         self.allow_loop_back_address_in_dht
     }
 
     /// Whether to allow non-global addresses in the DHT.
-    pub fn with_allow_loop_back_address_in_dht(mut self, allow: bool) -> Self {
+    pub const fn with_allow_loop_back_address_in_dht(mut self, allow: bool) -> Self {
         self.allow_loop_back_address_in_dht = allow;
         self
     }
 
     /// Get allow kademlia disjoint query paths
-    pub fn get_kademlia_disjoint_query_paths(&self) -> bool {
+    pub const fn get_kademlia_disjoint_query_paths(&self) -> bool {
         self.kademlia_disjoint_query_paths
     }
 
     /// When enabled the number of disjoint paths used equals the configured parallelism.
-    pub fn with_kademlia_disjoint_query_paths(mut self, enable: bool) -> Self {
+    pub const fn with_kademlia_disjoint_query_paths(mut self, enable: bool) -> Self {
         self.kademlia_disjoint_query_paths = enable;
         self
     }

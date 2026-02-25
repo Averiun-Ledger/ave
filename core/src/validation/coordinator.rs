@@ -35,7 +35,7 @@ pub struct ValiCoordinator {
 }
 
 impl ValiCoordinator {
-    pub fn new(
+    pub const fn new(
         node_key: PublicKey,
         request_id: String,
         version: u64,
@@ -84,12 +84,12 @@ impl Actor for ValiCoordinator {
 impl NotPersistentActor for ValiCoordinator {}
 
 #[async_trait]
-impl Handler<ValiCoordinator> for ValiCoordinator {
+impl Handler<Self> for ValiCoordinator {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ValiCoordinatorMessage,
-        ctx: &mut ActorContext<ValiCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ValiCoordinatorMessage::NetworkValidation {
@@ -286,7 +286,7 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
     async fn on_child_error(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ValiCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             ActorError::Retry => {
@@ -341,7 +341,7 @@ impl Handler<ValiCoordinator> for ValiCoordinator {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ValiCoordinator>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             node_key = %self.node_key,

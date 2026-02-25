@@ -41,7 +41,7 @@ impl Deref for ValueWrapper {
 
 impl Default for ValueWrapper {
     fn default() -> Self {
-        ValueWrapper(Value::Null)
+        Self(Value::Null)
     }
 }
 
@@ -118,7 +118,7 @@ impl BorshSerialize for ValueWrapper {
                 })?;
                 BorshSerialize::serialize(&len, writer)?;
                 for element in data {
-                    let element = ValueWrapper(element.to_owned());
+                    let element = Self(element.to_owned());
                     BorshSerialize::serialize(&element, writer)?;
                 }
                 Ok(())
@@ -139,7 +139,7 @@ impl BorshSerialize for ValueWrapper {
                 BorshSerialize::serialize(&len, writer)?;
                 for (key, value) in data {
                     BorshSerialize::serialize(&key, writer)?;
-                    let value = ValueWrapper(value.to_owned());
+                    let value = Self(value.to_owned());
                     BorshSerialize::serialize(&value, writer)?;
                 }
                 Ok(())
@@ -187,7 +187,7 @@ impl ValueWrapper {
             // Type 0: Boolean
             0 => {
                 let data: bool = BorshDeserialize::deserialize_reader(reader)?;
-                Ok(ValueWrapper(Value::Bool(data)))
+                Ok(Self(Value::Bool(data)))
             }
             // Type 1: Number (requires reading numeric sub-type)
             1 => {
@@ -204,19 +204,19 @@ impl ValueWrapper {
                                 format!("Invalid f64 Number: {}", data),
                             ));
                         };
-                        Ok(ValueWrapper(Value::Number(data_f64)))
+                        Ok(Self(Value::Number(data_f64)))
                     }
                     // Sub-type 1: i64
                     1 => {
                         let data: i64 =
                             BorshDeserialize::deserialize_reader(reader)?;
-                        Ok(ValueWrapper(Value::Number(Number::from(data))))
+                        Ok(Self(Value::Number(Number::from(data))))
                     }
                     // Sub-type 2: u64
                     2 => {
                         let data: u64 =
                             BorshDeserialize::deserialize_reader(reader)?;
-                        Ok(ValueWrapper(Value::Number(Number::from(data))))
+                        Ok(Self(Value::Number(Number::from(data))))
                     }
                     _ => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -231,7 +231,7 @@ impl ValueWrapper {
             2 => {
                 let data: String =
                     BorshDeserialize::deserialize_reader(reader)?;
-                Ok(ValueWrapper(Value::String(data)))
+                Ok(Self(Value::String(data)))
             }
             // Type 3: Array (read length, then elements)
             3 => {
@@ -249,7 +249,7 @@ impl ValueWrapper {
                 }
 
                 if len == 0 {
-                    Ok(ValueWrapper(Value::Array(Vec::new())))
+                    Ok(Self(Value::Array(Vec::new())))
                 } else {
                     let mut result = Vec::with_capacity(len as usize);
                     // Use checked arithmetic to prevent depth overflow
@@ -261,13 +261,13 @@ impl ValueWrapper {
                     })?;
                     for _ in 0..len {
                         result.push(
-                            ValueWrapper::deserialize_reader_with_depth(
+                            Self::deserialize_reader_with_depth(
                                 reader, next_depth,
                             )?
                             .0,
                         );
                     }
-                    Ok(ValueWrapper(Value::Array(result)))
+                    Ok(Self(Value::Array(result)))
                 }
             }
             // Type 4: Object (read length, then key-value pairs)
@@ -295,15 +295,15 @@ impl ValueWrapper {
                 })?;
                 for _ in 0..len {
                     let key = String::deserialize_reader(reader)?;
-                    let value = ValueWrapper::deserialize_reader_with_depth(
+                    let value = Self::deserialize_reader_with_depth(
                         reader, next_depth,
                     )?;
                     result.insert(key, value.0);
                 }
-                Ok(ValueWrapper(Value::Object(result)))
+                Ok(Self(Value::Object(result)))
             }
             // Type 5: Null
-            5 => Ok(ValueWrapper(Value::Null)),
+            5 => Ok(Self(Value::Null)),
             // Unknown type discriminator
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -317,7 +317,7 @@ impl BorshDeserialize for ValueWrapper {
     #[inline]
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         // Start deserialization with depth 0
-        ValueWrapper::deserialize_reader_with_depth(reader, 0)
+        Self::deserialize_reader_with_depth(reader, 0)
     }
 }
 

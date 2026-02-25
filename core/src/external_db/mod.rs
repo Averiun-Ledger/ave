@@ -35,12 +35,12 @@ impl Actor for DBManager {
 }
 
 #[async_trait]
-impl Handler<DBManager> for DBManager {
+impl Handler<Self> for DBManager {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DBManagerMessage,
-        ctx: &mut ave_actors::ActorContext<DBManager>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             DBManagerMessage::Error(error) => {

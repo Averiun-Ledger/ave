@@ -26,7 +26,7 @@ pub struct Updater {
 }
 
 impl Updater {
-    pub fn new(node: PublicKey, network: Arc<NetworkSender>) -> Self {
+    pub const fn new(node: PublicKey, network: Arc<NetworkSender>) -> Self {
         Self { node, network }
     }
 }
@@ -63,12 +63,12 @@ impl Actor for Updater {
 }
 
 #[async_trait]
-impl Handler<Updater> for Updater {
+impl Handler<Self> for Updater {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: UpdaterMessage,
-        ctx: &mut ActorContext<Updater>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             UpdaterMessage::NetworkLastSn {
@@ -198,7 +198,7 @@ impl Handler<Updater> for Updater {
     async fn on_child_error(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Updater>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             ActorError::Retry => {
@@ -247,7 +247,7 @@ impl Handler<Updater> for Updater {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Updater>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             node = %self.node,

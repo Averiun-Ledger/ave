@@ -143,7 +143,7 @@ impl Compiler {
     }
 
     async fn check_wasm(
-        ctx: &mut ActorContext<Compiler>,
+        ctx: &mut ActorContext<Self>,
         contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, CompilerError> {
@@ -366,12 +366,12 @@ impl Actor for Compiler {
 }
 
 #[async_trait]
-impl Handler<Compiler> for Compiler {
+impl Handler<Self> for Compiler {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: CompilerMessage,
-        ctx: &mut ActorContext<Compiler>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<CompilerResponse, ActorError> {
         match msg {
             CompilerMessage::TemporalCompile {

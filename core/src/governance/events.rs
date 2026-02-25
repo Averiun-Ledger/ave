@@ -752,7 +752,7 @@ impl GovernanceEvent {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.members.is_none()
             && self.roles.is_none()
             && self.schemas.is_none()
@@ -768,7 +768,7 @@ pub struct MemberEvent {
 }
 
 impl MemberEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.add.is_none() && self.remove.is_none()
     }
 }
@@ -788,7 +788,7 @@ pub struct RolesEvent {
 }
 
 impl RolesEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.governance.is_none()
             && self.schema.is_none()
             && self.tracker_schemas.is_none()
@@ -802,7 +802,7 @@ pub struct GovRoleEvent {
 }
 
 impl GovRoleEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.add.is_none() && self.remove.is_none()
     }
 
@@ -943,7 +943,7 @@ impl GovRoleEvent {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: approver.clone(),
+                                who: approver,
                             },
                         });
                     }
@@ -999,7 +999,7 @@ impl GovRoleEvent {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: evaluator.clone(),
+                                who: evaluator,
                             },
                         });
                     }
@@ -1055,7 +1055,7 @@ impl GovRoleEvent {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: validator.clone(),
+                                who: validator,
                             },
                         });
                     }
@@ -1111,7 +1111,7 @@ impl GovRoleEvent {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: witness.clone(),
+                                who: witness,
                             },
                         });
                     }
@@ -1168,7 +1168,7 @@ impl GovRoleEvent {
                             return Err(RunnerError::InvalidEvent {
                                 location: "GovRoleEvent::check_data",
                                 kind: error::InvalidEventKind::NotMember {
-                                    who: issuer.clone(),
+                                    who: issuer,
                                 },
                             });
                         }
@@ -1616,7 +1616,7 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: evaluator.name.clone(),
+                                who: evaluator.name,
                             },
                         });
                     }
@@ -1689,7 +1689,7 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: validator.name.clone(),
+                                who: validator.name,
                             },
                         });
                     }
@@ -1699,7 +1699,7 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "validator".to_owned(),
-                                id: validator.name.clone(),
+                                id: validator.name,
                             },
                         });
                     };
@@ -1762,7 +1762,7 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: witness.name.clone(),
+                                who: witness.name,
                             },
                         });
                     }
@@ -1772,7 +1772,7 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "witness".to_owned(),
-                                id: witness.name.clone(),
+                                id: witness.name,
                             },
                         });
                     };
@@ -1845,7 +1845,7 @@ impl SchemaIdRole {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::NotMember {
-                                who: creator.name.clone(),
+                                who: creator.name,
                             },
                         });
                     }
@@ -1868,7 +1868,7 @@ impl SchemaIdRole {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
                                 what: "creator".to_owned(),
-                                id: creator.name.clone(),
+                                id: creator.name,
                             },
                         });
                     };
@@ -1932,7 +1932,7 @@ impl SchemaIdRole {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::NotMember {
-                                    who: issuer.name.clone(),
+                                    who: issuer.name,
                                 },
                             });
                         }
@@ -1942,7 +1942,7 @@ impl SchemaIdRole {
                                 location: "SchemaIdRole::check_data",
                                 kind: error::InvalidEventKind::AlreadyExists {
                                     what: "issuer".to_owned(),
-                                    id: issuer.name.clone(),
+                                    id: issuer.name,
                                 },
                             });
                         };
@@ -2548,7 +2548,7 @@ pub struct GovRolesEvent {
 }
 
 impl GovRolesEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.approver.is_none()
             && self.evaluator.is_none()
             && self.validator.is_none()
@@ -2566,7 +2566,7 @@ pub struct TrackerSchemasRolesAddEvent {
 }
 
 impl TrackerSchemasRolesAddEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
             && self.witness.is_none()
@@ -2596,7 +2596,7 @@ pub struct SchemaRolesAddEvent {
 }
 
 impl SchemaRolesAddEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.creator.is_none()
             && self.evaluator.is_none()
             && self.validator.is_none()
@@ -2614,7 +2614,7 @@ pub struct TrackerSchemasRolesRemoveEvent {
 }
 
 impl TrackerSchemasRolesRemoveEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
             && self.witness.is_none()
@@ -2644,7 +2644,7 @@ pub struct SchemaRolesRemoveEvent {
 }
 
 impl SchemaRolesRemoveEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.creator.is_none()
             && self.evaluator.is_none()
             && self.validator.is_none()
@@ -2664,7 +2664,7 @@ pub struct TrackerSchemasRolesChangeEvent {
 }
 
 impl TrackerSchemasRolesChangeEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.evaluator.is_none()
             && self.validator.is_none()
             && self.witness.is_none()
@@ -2696,7 +2696,7 @@ pub struct SchemaRolesChangeEvent {
 }
 
 impl SchemaRolesChangeEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.creator.is_none()
             && self.evaluator.is_none()
             && self.validator.is_none()
@@ -2717,7 +2717,7 @@ pub struct RoleCreatorChange {
 }
 
 impl RoleCreatorChange {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.new_namespace.is_none()
             && self.new_quantity.is_none()
             && self.new_witnesses.is_none()
@@ -2742,7 +2742,7 @@ pub struct SchemasEvent {
 }
 
 impl SchemasEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.add.is_none() && self.remove.is_none() && self.change.is_none()
     }
 }
@@ -2776,7 +2776,7 @@ pub struct PoliciesEvent {
 }
 
 impl PoliciesEvent {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.governance.is_none() && self.schema.is_none()
     }
 }
@@ -2806,7 +2806,7 @@ pub struct GovPolicieChange {
 }
 
 impl GovPolicieChange {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.approve.is_none()
             && self.evaluate.is_none()
             && self.validate.is_none()
@@ -2820,7 +2820,7 @@ pub struct SchemaPolicieChange {
 }
 
 impl SchemaPolicieChange {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.evaluate.is_none() && self.validate.is_none()
     }
 }

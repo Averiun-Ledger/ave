@@ -279,10 +279,10 @@ impl<'de> Deserialize<'de> for CreatorQuantity {
 
         match value {
             serde_json::Value::String(s) if s == "infinity" => {
-                Ok(CreatorQuantity::Infinity)
+                Ok(Self::Infinity)
             }
             serde_json::Value::Number(n) if n.is_u64() => {
-                Ok(CreatorQuantity::Quantity(n.as_u64().ok_or_else(|| {
+                Ok(Self::Quantity(n.as_u64().ok_or_else(|| {
                     serde::de::Error::custom(
                         "Quantity must be a number or 'infinity'",
                     )
@@ -301,8 +301,8 @@ impl Serialize for CreatorQuantity {
         S: Serializer,
     {
         match self {
-            CreatorQuantity::Quantity(n) => serializer.serialize_u32(*n),
-            CreatorQuantity::Infinity => serializer.serialize_str("infinity"),
+            Self::Quantity(n) => serializer.serialize_u32(*n),
+            Self::Infinity => serializer.serialize_str("infinity"),
         }
     }
 }

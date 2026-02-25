@@ -32,7 +32,7 @@ impl Database {
             #[cfg(feature = "sqlite")]
             AveInternalDBFeatureConfig::Sqlite { path } => {
                 let manager = SqliteManager::new(path, config.durability, spec)?;
-                Ok(Database::SQLite(manager))
+                Ok(Self::SQLite(manager))
             }
         }
     }
@@ -51,7 +51,7 @@ impl DbManager<DbCollection, DbCollection> for Database {
                 Ok(DbCollection::RocksDb(store))
             }
             #[cfg(feature = "sqlite")]
-            Database::SQLite(manager) => {
+            Self::SQLite(manager) => {
                 let store = manager.create_collection(name, prefix)?;
                 Ok(DbCollection::SQLite(store))
             }
@@ -70,7 +70,7 @@ impl DbManager<DbCollection, DbCollection> for Database {
                 Ok(DbCollection::RocksDb(store))
             }
             #[cfg(feature = "sqlite")]
-            Database::SQLite(manager) => {
+            Self::SQLite(manager) => {
                 let store = manager.create_state(name, prefix)?;
                 Ok(DbCollection::SQLite(store))
             }
@@ -84,7 +84,7 @@ impl DbManager<DbCollection, DbCollection> for Database {
                 manager.stop()
             }
             #[cfg(feature = "sqlite")]
-            Database::SQLite(manager) => {
+            Self::SQLite(manager) => {
                 manager.stop()
             }
         }
@@ -104,7 +104,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::name(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::name(store),
+            Self::SQLite(store) => Collection::name(store),
         }
     }
 
@@ -113,7 +113,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::get(store, key),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::get(store, key),
+            Self::SQLite(store) => Collection::get(store, key),
         }
     }
 
@@ -122,7 +122,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::put(store, key, data),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::put(store, key, data),
+            Self::SQLite(store) => Collection::put(store, key, data),
         }
     }
 
@@ -131,7 +131,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::del(store, key),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::del(store, key),
+            Self::SQLite(store) => Collection::del(store, key),
         }
     }
 
@@ -143,7 +143,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::iter(store, reverse),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::iter(store, reverse),
+            Self::SQLite(store) => Collection::iter(store, reverse),
         }
     }
 
@@ -152,7 +152,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::purge(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::purge(store),
+            Self::SQLite(store) => Collection::purge(store),
         }
     }
     
@@ -161,7 +161,7 @@ impl Collection for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::last(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => Collection::last(store),
+            Self::SQLite(store) => Collection::last(store),
         }
     }
 }
@@ -172,7 +172,7 @@ impl State for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => State::name(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => State::name(store),
+            Self::SQLite(store) => State::name(store),
         }
     }
 
@@ -181,7 +181,7 @@ impl State for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => State::get(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => State::get(store),
+            Self::SQLite(store) => State::get(store),
         }
     }
 
@@ -190,7 +190,7 @@ impl State for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => State::put(store, data),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => State::put(store, data),
+            Self::SQLite(store) => State::put(store, data),
         }
     }
 
@@ -199,7 +199,7 @@ impl State for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => State::del(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => State::del(store),
+            Self::SQLite(store) => State::del(store),
         }
     }
 
@@ -208,7 +208,7 @@ impl State for DbCollection {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => State::purge(store),
             #[cfg(feature = "sqlite")]
-            DbCollection::SQLite(store) => State::purge(store),
+            Self::SQLite(store) => State::purge(store),
         }
     }
 }

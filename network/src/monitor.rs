@@ -71,16 +71,16 @@ impl Actor for Monitor {
 }
 
 #[async_trait]
-impl Handler<Monitor> for Monitor {
+impl Handler<Self> for Monitor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: MonitorMessage,
-        _ctx: &mut ave_actors::ActorContext<Monitor>,
+        _ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<MonitorResponse, ActorError> {
         match msg {
             MonitorMessage::Network(event) => {
-                if let NetworkEvent::StateChanged(NetworkState::Running) = event
+                if matches!(event, NetworkEvent::StateChanged(NetworkState::Running))
                 {
                     self.state = MonitorNetworkState::Running
                 }

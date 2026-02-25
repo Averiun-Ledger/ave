@@ -156,12 +156,12 @@ impl Actor for Register {
 }
 
 #[async_trait]
-impl Handler<Register> for Register {
+impl Handler<Self> for Register {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RegisterMessage,
-        ctx: &mut ave_actors::ActorContext<Register>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RegisterResponse, ActorError> {
         match msg {
             RegisterMessage::GetGovs { active } => {
@@ -202,7 +202,7 @@ impl Handler<Register> for Register {
                 active,
                 schema_id,
             } => {
-                let subjects = self.register_subj.get(&gov_id.to_string());
+                let subjects = self.register_subj.get(&gov_id);
                 if let Some(subjects) = subjects {
                     let mut subj = vec![];
                     for (subject_id, data) in subjects {
@@ -342,7 +342,7 @@ impl Handler<Register> for Register {
     async fn on_event(
         &mut self,
         event: RegisterEvent,
-        ctx: &mut ActorContext<Register>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(

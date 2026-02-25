@@ -20,7 +20,7 @@ pub struct HttpError(BridgeError);
 
 impl From<BridgeError> for HttpError {
     fn from(err: BridgeError) -> Self {
-        HttpError(err)
+        Self(err)
     }
 }
 
@@ -33,7 +33,7 @@ impl IntoResponse for HttpError {
     }
 }
 
-fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
+const fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
     match err {
         // ── Input validation → 400 ──────────────────────────────
         BridgeError::InvalidSubjectId(_)
@@ -66,7 +66,7 @@ fn status_for_bridge_error(err: &BridgeError) -> StatusCode {
     }
 }
 
-fn status_for_core_error(err: &CoreError) -> StatusCode {
+const fn status_for_core_error(err: &CoreError) -> StatusCode {
     match err {
         // ── 400 Bad Request ────────────────────────────────────
         CoreError::InvalidSignature(_)

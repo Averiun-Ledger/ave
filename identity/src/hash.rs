@@ -101,23 +101,23 @@ pub enum HashAlgorithm {
 
 impl HashAlgorithm {
     /// Get the 1-byte identifier for this algorithm
-    pub fn identifier(&self) -> u8 {
+    pub const fn identifier(&self) -> u8 {
         match self {
-            HashAlgorithm::Blake3 => BLAKE3_ID,
+            Self::Blake3 => BLAKE3_ID,
         }
     }
 
     /// Get the output length for this algorithm (excluding identifier)
-    pub fn output_length(&self) -> usize {
+    pub const fn output_length(&self) -> usize {
         match self {
-            HashAlgorithm::Blake3 => BLAKE3_OUTPUT_LENGTH,
+            Self::Blake3 => BLAKE3_OUTPUT_LENGTH,
         }
     }
 
     /// Parse algorithm from 1-byte identifier
     pub fn from_identifier(id: u8) -> Result<Self, CryptoError> {
         match id {
-            BLAKE3_ID => Ok(HashAlgorithm::Blake3),
+            BLAKE3_ID => Ok(Self::Blake3),
             _ => Err(CryptoError::UnknownAlgorithm(format!("{}", id as char))),
         }
     }
@@ -125,7 +125,7 @@ impl HashAlgorithm {
     /// Create a hasher instance for this algorithm
     pub fn hasher(&self) -> Box<dyn Hash> {
         match self {
-            HashAlgorithm::Blake3 => Box::new(Blake3Hasher),
+            Self::Blake3 => Box::new(Blake3Hasher),
         }
     }
 }
@@ -133,7 +133,7 @@ impl HashAlgorithm {
 impl fmt::Display for HashAlgorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HashAlgorithm::Blake3 => write!(f, "Blake3"),
+            Self::Blake3 => write!(f, "Blake3"),
         }
     }
 }
@@ -175,7 +175,7 @@ impl DigestIdentifier {
 
     /// Get the algorithm used
     #[inline]
-    pub fn algorithm(&self) -> HashAlgorithm {
+    pub const fn algorithm(&self) -> HashAlgorithm {
         self.inner.algorithm
     }
 
@@ -275,7 +275,7 @@ impl DigestIdentifier {
     /// Returns `true` if the hash bytes are empty, which indicates
     /// this digest was created using `Default::default()`.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner.bytes.is_empty()
     }
 }

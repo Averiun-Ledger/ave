@@ -40,7 +40,7 @@ pub struct NameCreators {
 }
 
 impl NameCreators {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.validation.is_none() && self.evaluation.is_none()
     }
 }
@@ -821,9 +821,9 @@ pub enum RoleTypes {
 impl From<ProtocolTypes> for RoleTypes {
     fn from(value: ProtocolTypes) -> Self {
         match value {
-            ProtocolTypes::Approval => RoleTypes::Approver,
-            ProtocolTypes::Evaluation => RoleTypes::Evaluator,
-            ProtocolTypes::Validation => RoleTypes::Validator,
+            ProtocolTypes::Approval => Self::Approver,
+            ProtocolTypes::Evaluation => Self::Evaluator,
+            ProtocolTypes::Validation => Self::Validator,
         }
     }
 }
@@ -844,9 +844,9 @@ impl WitnessesData {
         creator: PublicKey,
     ) -> Self {
         if schema_id.is_gov() {
-            WitnessesData::Gov
+            Self::Gov
         } else {
-            WitnessesData::Schema {
+            Self::Schema {
                 creator,
                 schema_id,
                 namespace,
@@ -877,9 +877,9 @@ pub enum HashThisRole {
 impl HashThisRole {
     pub fn get_who(&self) -> PublicKey {
         match self {
-            HashThisRole::Gov { who, .. } => who.clone(),
-            HashThisRole::Schema { who, .. } => who.clone(),
-            HashThisRole::SchemaWitness { who, .. } => who.clone(),
+            Self::Gov { who, .. } => who.clone(),
+            Self::Schema { who, .. } => who.clone(),
+            Self::SchemaWitness { who, .. } => who.clone(),
         }
     }
 }
@@ -1006,10 +1006,10 @@ pub enum CreatorQuantity {
 }
 
 impl CreatorQuantity {
-    pub fn check(&self) -> bool {
+    pub const fn check(&self) -> bool {
         match self {
-            CreatorQuantity::Quantity(quantity) => *quantity != 0,
-            CreatorQuantity::Infinity => true,
+            Self::Quantity(quantity) => *quantity != 0,
+            Self::Infinity => true,
         }
     }
 }
@@ -1023,10 +1023,10 @@ impl<'de> Deserialize<'de> for CreatorQuantity {
 
         match value {
             serde_json::Value::String(s) if s == "infinity" => {
-                Ok(CreatorQuantity::Infinity)
+                Ok(Self::Infinity)
             }
             serde_json::Value::Number(n) if n.is_u64() => {
-                Ok(CreatorQuantity::Quantity(n.as_u64().ok_or_else(|| {
+                Ok(Self::Quantity(n.as_u64().ok_or_else(|| {
                     serde::de::Error::custom(
                         "Quantity must be a number or 'infinity'",
                     )
@@ -1045,8 +1045,8 @@ impl Serialize for CreatorQuantity {
         S: Serializer,
     {
         match self {
-            CreatorQuantity::Quantity(n) => serializer.serialize_u32(*n),
-            CreatorQuantity::Infinity => serializer.serialize_str("infinity"),
+            Self::Quantity(n) => serializer.serialize_u32(*n),
+            Self::Infinity => serializer.serialize_str("infinity"),
         }
     }
 }
@@ -1068,9 +1068,9 @@ pub enum ProtocolTypes {
 impl fmt::Display for ProtocolTypes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProtocolTypes::Approval => write!(f, "Approval"),
-            ProtocolTypes::Evaluation => write!(f, "Evaluation"),
-            ProtocolTypes::Validation => write!(f, "Validation"),
+            Self::Approval => write!(f, "Approval"),
+            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Validation => write!(f, "Validation"),
         }
     }
 }
@@ -1098,7 +1098,7 @@ pub enum Quorum {
 
 impl Quorum {
     pub fn check_values(&self) -> Result<(), String> {
-        if let Quorum::Percentage(percentage) = self
+        if let Self::Percentage(percentage) = self
             && (*percentage == 0_u8 || *percentage > 100_u8)
         {
             return Err("the percentage must be between 1 and 100".to_owned());
@@ -1109,12 +1109,12 @@ impl Quorum {
 
     pub fn get_signers(&self, total_members: u32, pending: u32) -> u32 {
         let signers = match self {
-            Quorum::Fixed(fixed) => {
+            Self::Fixed(fixed) => {
                 let min = std::cmp::min(fixed, &total_members);
                 *min
             }
-            Quorum::Majority => total_members / 2 + 1,
-            Quorum::Percentage(percentage) => {
+            Self::Majority => total_members / 2 + 1,
+            Self::Percentage(percentage) => {
                 total_members * (percentage / 100) as u32
             }
         };
@@ -1124,12 +1124,12 @@ impl Quorum {
 
     pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
         match self {
-            Quorum::Fixed(fixed) => {
+            Self::Fixed(fixed) => {
                 let min = std::cmp::min(fixed, &total_members);
                 signers >= *min
             }
-            Quorum::Majority => signers > total_members / 2,
-            Quorum::Percentage(percentage) => {
+            Self::Majority => signers > total_members / 2,
+            Self::Percentage(percentage) => {
                 signers >= (total_members * (percentage / 100) as u32)
             }
         }

@@ -43,11 +43,11 @@ pub enum ReservedWords {
 impl Display for ReservedWords {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReservedWords::TrackerSchemas => write!(f, "tracker_schemas"),
-            ReservedWords::Governance => write!(f, "governance"),
-            ReservedWords::Any => write!(f, "Any"),
-            ReservedWords::Witnesses => write!(f, "Witnesses"),
-            ReservedWords::Owner => write!(f, "Owner"),
+            Self::TrackerSchemas => write!(f, "tracker_schemas"),
+            Self::Governance => write!(f, "governance"),
+            Self::Any => write!(f, "Any"),
+            Self::Witnesses => write!(f, "Witnesses"),
+            Self::Owner => write!(f, "Owner"),
         }
     }
 }
@@ -62,35 +62,35 @@ impl std::str::FromStr for SchemaType {
         }
 
         match s {
-            "governance" => Ok(SchemaType::Governance),
-            "tracker_schemas" => Ok(SchemaType::TrackerSchemas),
-            _ => Ok(SchemaType::Type(s.to_string())),
+            "governance" => Ok(Self::Governance),
+            "tracker_schemas" => Ok(Self::TrackerSchemas),
+            _ => Ok(Self::Type(s.to_string())),
         }
     }
 }
 
 impl SchemaType {
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
-            SchemaType::Governance => "governance".len(),
-            SchemaType::Type(schema_id) => schema_id.len(),
-            SchemaType::TrackerSchemas => "tracker_schemas".len(),
+            Self::Governance => "governance".len(),
+            Self::Type(schema_id) => schema_id.len(),
+            Self::TrackerSchemas => "tracker_schemas".len(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         match self {
-            SchemaType::Governance => false,
-            SchemaType::Type(schschema_id) => schschema_id.is_empty(),
-            SchemaType::TrackerSchemas => false,
+            Self::Governance => false,
+            Self::Type(schschema_id) => schschema_id.is_empty(),
+            Self::TrackerSchemas => false,
         }
     }
 
     pub fn is_valid(&self) -> bool {
         match self {
-            SchemaType::Governance => true,
-            SchemaType::TrackerSchemas => true,
-            SchemaType::Type(schema_id) => {
+            Self::Governance => true,
+            Self::TrackerSchemas => true,
+            Self::Type(schema_id) => {
                 !schema_id.is_empty()
                     && schema_id != &ReservedWords::Governance.to_string()
                     && schema_id != &ReservedWords::TrackerSchemas.to_string()
@@ -101,9 +101,9 @@ impl SchemaType {
 
     pub fn is_valid_in_request(&self) -> bool {
         match self {
-            SchemaType::Governance => true,
-            SchemaType::TrackerSchemas => false,
-            SchemaType::Type(schema_id) => {
+            Self::Governance => true,
+            Self::TrackerSchemas => false,
+            Self::Type(schema_id) => {
                 !schema_id.is_empty()
                     && schema_id != &ReservedWords::Governance.to_string()
                     && schema_id != &ReservedWords::TrackerSchemas.to_string()
@@ -116,16 +116,16 @@ impl SchemaType {
 impl Display for SchemaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchemaType::TrackerSchemas => write!(f, "tracker_schemas"),
-            SchemaType::Governance => write!(f, "governance"),
-            SchemaType::Type(schema_id) => write!(f, "{}", schema_id),
+            Self::TrackerSchemas => write!(f, "tracker_schemas"),
+            Self::Governance => write!(f, "governance"),
+            Self::Type(schema_id) => write!(f, "{}", schema_id),
         }
     }
 }
 
 impl SchemaType {
-    pub fn is_gov(&self) -> bool {
-        matches!(self, SchemaType::Governance)
+    pub const fn is_gov(&self) -> bool {
+        matches!(self, Self::Governance)
     }
 }
 
@@ -142,9 +142,9 @@ impl<'de> Deserialize<'de> for SchemaType {
         }
 
         Ok(match s.as_str() {
-            "governance" => SchemaType::Governance,
-            "tracker_schemas" => SchemaType::TrackerSchemas,
-            _ => SchemaType::Type(s),
+            "governance" => Self::Governance,
+            "tracker_schemas" => Self::TrackerSchemas,
+            _ => Self::Type(s),
         })
     }
 }
@@ -155,9 +155,9 @@ impl Serialize for SchemaType {
         S: Serializer,
     {
         match self {
-            SchemaType::TrackerSchemas => serializer.serialize_str("tracker_schemas"),
-            SchemaType::Governance => serializer.serialize_str("governance"),
-            SchemaType::Type(schema) => serializer.serialize_str(schema),
+            Self::TrackerSchemas => serializer.serialize_str("tracker_schemas"),
+            Self::Governance => serializer.serialize_str("governance"),
+            Self::Type(schema) => serializer.serialize_str(schema),
         }
     }
 }

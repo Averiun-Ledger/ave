@@ -45,7 +45,7 @@ where
 
         // If no auth database, auth is disabled - allow request
         let Some(db) = auth_db else {
-            return Ok(ApiKeyAuthNew);
+            return Ok(Self);
         };
 
         // Auth is enabled - validate API key
@@ -141,7 +141,7 @@ where
         // Store auth context in request extensions for later use
         parts.extensions.insert(Arc::new(auth_ctx));
 
-        Ok(ApiKeyAuthNew)
+        Ok(Self)
     }
 }
 
@@ -177,7 +177,7 @@ where
                 )
             })?;
 
-        Ok(AuthContextExtractor(auth_ctx))
+        Ok(Self(auth_ctx))
     }
 }
 
@@ -301,8 +301,8 @@ mod uuid {
     pub struct Uuid;
 
     impl Uuid {
-        pub fn new_v4() -> Self {
-            Uuid
+        pub const fn new_v4() -> Self {
+            Self
         }
     }
 }

@@ -84,7 +84,7 @@ impl Validation {
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
     ) -> Self {
-        Validation {
+        Self {
             our_key,
             quorum,
             init_state,
@@ -109,7 +109,7 @@ impl Validation {
 
     async fn create_validators(
         &self,
-        ctx: &mut ActorContext<Validation>,
+        ctx: &mut ActorContext<Self>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         if signer != *self.our_key {
@@ -164,7 +164,7 @@ impl Validation {
 
     async fn send_validation_to_req(
         &self,
-        ctx: &mut ActorContext<Validation>,
+        ctx: &mut ActorContext<Self>,
         response: ValidationData,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -239,12 +239,12 @@ impl Actor for Validation {
 }
 
 #[async_trait]
-impl Handler<Validation> for Validation {
+impl Handler<Self> for Validation {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ValidationMessage,
-        ctx: &mut ActorContext<Validation>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ValidationMessage::Create {
@@ -438,7 +438,7 @@ impl Handler<Validation> for Validation {
                             self.validators_response.len() as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary
+                            if matches!(summary, ResponseSummary::Reboot)
                                 && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -544,7 +544,7 @@ impl Handler<Validation> for Validation {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Validation>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.request_id,

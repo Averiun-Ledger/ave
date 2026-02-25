@@ -166,7 +166,7 @@ impl RequestHandler {
     }
 
     async fn queued_event(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let request_actor = ctx.reference().await?;
@@ -179,7 +179,7 @@ impl RequestHandler {
 
     async fn error_queue_handling(
         &mut self,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         error: String,
         subject_id: &DigestIdentifier,
         request_id: &DigestIdentifier,
@@ -206,11 +206,11 @@ impl RequestHandler {
         )
         .await?;
 
-        RequestHandler::queued_event(ctx, subject_id).await
+        Self::queued_event(ctx, subject_id).await
     }
 
     async fn change_approval(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: ApprovalStateRes,
     ) -> Result<(), RequestHandlerError> {
@@ -237,7 +237,7 @@ impl RequestHandler {
     }
 
     async fn get_approval(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
@@ -267,7 +267,7 @@ impl RequestHandler {
     }
 
     async fn get_all_approvals(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         state: Option<ApprovalState>,
     ) -> Result<Vec<(ApprovalReq, ApprovalState)>, ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -309,7 +309,7 @@ impl RequestHandler {
     }
 
     async fn check_owner_new_owner(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<(), RequestHandlerError> {
         match request {
@@ -432,7 +432,7 @@ impl RequestHandler {
     }
 
     async fn build_subject_data(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<SubjectData, RequestHandlerError> {
         let subject_data = match request {
@@ -470,7 +470,7 @@ impl RequestHandler {
     }
 
     async fn check_creation(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_data: SubjectData,
         event_request: &EventRequestType,
         signer: PublicKey,
@@ -543,7 +543,7 @@ impl RequestHandler {
 
     async fn handle_queue_request(
         &mut self,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<EventRequest>,
         request_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
@@ -624,7 +624,7 @@ impl RequestHandler {
         Ok(())
     }
 
-    fn build_req_manager_init_msg(
+    const fn build_req_manager_init_msg(
         event_request: &EventRequestType,
         is_gov: bool,
     ) -> ReqManInitMessage {
@@ -645,7 +645,7 @@ impl RequestHandler {
     }
 
     async fn check_in_queue(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         request: &Signed<EventRequest>,
         our_key: PublicKey,
     ) -> Result<bool, RequestHandlerError> {
@@ -691,7 +691,7 @@ impl RequestHandler {
 
     async fn in_queue_to_handling(
         &mut self,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<EventRequest>,
         request_id: &DigestIdentifier,
         is_gov: bool,
@@ -734,7 +734,7 @@ impl RequestHandler {
     }
 
     async fn end_child(
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let actor = ctx
@@ -745,7 +745,7 @@ impl RequestHandler {
 
     async fn manual_abort_request(
         &self,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let actor = ctx
@@ -965,12 +965,12 @@ impl Actor for RequestHandler {
 }
 
 #[async_trait]
-impl Handler<RequestHandler> for RequestHandler {
+impl Handler<Self> for RequestHandler {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RequestHandlerMessage,
-        ctx: &mut ave_actors::ActorContext<RequestHandler>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<RequestHandlerResponse, ActorError> {
         match msg {
             RequestHandlerMessage::RequestInManagerSubjectId { subject_id } => {
@@ -1299,7 +1299,7 @@ impl Handler<RequestHandler> for RequestHandler {
                 .await;
 
                 if let Err(e) =
-                    RequestHandler::queued_event(ctx, &subject_id).await
+                    Self::queued_event(ctx, &subject_id).await
                 {
                     error!(
                         msg_type = "EndHandling",
@@ -1319,7 +1319,7 @@ impl Handler<RequestHandler> for RequestHandler {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             error = %error,
@@ -1332,7 +1332,7 @@ impl Handler<RequestHandler> for RequestHandler {
     async fn on_event(
         &mut self,
         event: RequestHandlerEvent,
-        ctx: &mut ActorContext<RequestHandler>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -1358,7 +1358,7 @@ impl PersistentActor for RequestHandler {
     }
 
     fn create_initial(params: Self::InitParams) -> Self {
-        RequestHandler {
+        Self {
             our_key: params.0,
             helpers: Some(params.1),
             handling: HashMap::new(),

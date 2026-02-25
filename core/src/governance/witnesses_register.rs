@@ -636,12 +636,12 @@ impl Actor for WitnessesRegister {
 }
 
 #[async_trait]
-impl Handler<WitnessesRegister> for WitnessesRegister {
+impl Handler<Self> for WitnessesRegister {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: WitnessesRegisterMessage,
-        ctx: &mut ActorContext<WitnessesRegister>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
@@ -929,7 +929,7 @@ impl Handler<WitnessesRegister> for WitnessesRegister {
     async fn on_event(
         &mut self,
         event: WitnessesRegisterEvent,
-        ctx: &mut ActorContext<WitnessesRegister>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -1241,7 +1241,7 @@ impl PersistentActor for WitnessesRegister {
                     {
                         let entry = data
                             .old_owners
-                            .entry(new_owner.clone())
+                            .entry(new_owner)
                             .or_default();
                         entry.sn = *sn;
                         entry.interval_gov_version.insert(Interval {

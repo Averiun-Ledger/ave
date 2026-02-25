@@ -71,7 +71,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
         guards.push(guard);
 
         let mw = {
-            let nb = stdout_nb.clone();
+            let nb = stdout_nb;
             BoxMakeWriter::new(move || -> Box<dyn Write + Send + Sync> {
                 Box::new(nb.clone())
             })
@@ -120,7 +120,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
         guards.push(guard);
 
         let mw = {
-            let nb = file_nb.clone();
+            let nb = file_nb;
             BoxMakeWriter::new(move || -> Box<dyn Write + Send + Sync> {
                 Box::new(nb.clone())
             })
@@ -142,7 +142,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
 
         let tx = Arc::new(tx);
         let mw = {
-            let tx = tx.clone();
+            let tx = tx;
             BoxMakeWriter::new(move || -> Box<dyn Write + Send + Sync> {
                 Box::new(ApiEventWriter {
                     buf: Vec::with_capacity(512),

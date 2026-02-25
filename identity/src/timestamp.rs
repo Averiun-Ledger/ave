@@ -31,12 +31,12 @@ impl TimeStamp {
     }
 
     /// Create a timestamp from nanoseconds since UNIX epoch
-    pub fn from_nanos(nanos: u64) -> Self {
-        TimeStamp(nanos)
+    pub const fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
     }
 
     /// Get the timestamp as nanoseconds since UNIX epoch
-    pub fn as_nanos(&self) -> u64 {
+    pub const fn as_nanos(&self) -> u64 {
         self.0
     }
 }

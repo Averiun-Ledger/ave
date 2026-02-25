@@ -37,7 +37,7 @@ impl From<Signed<EventRequest>> for BridgeSignedEventRequest {
 
 impl From<EventRequest> for BridgeSignedEventRequest {
     fn from(value: EventRequest) -> Self {
-        let request = BridgeEventRequest::from(value.clone());
+        let request = BridgeEventRequest::from(value);
         let signature = None;
 
         Self { request, signature }
@@ -47,16 +47,16 @@ impl From<EventRequest> for BridgeSignedEventRequest {
 impl From<EventRequest> for BridgeEventRequest {
     fn from(request: EventRequest) -> Self {
         match request {
-            EventRequest::Create(req) => BridgeEventRequest::Create(req.into()),
-            EventRequest::Fact(req) => BridgeEventRequest::Fact(req.into()),
+            EventRequest::Create(req) => Self::Create(req.into()),
+            EventRequest::Fact(req) => Self::Fact(req.into()),
             EventRequest::Transfer(req) => {
-                BridgeEventRequest::Transfer(req.into())
+                Self::Transfer(req.into())
             }
-            EventRequest::EOL(req) => BridgeEventRequest::Eol(req.into()),
+            EventRequest::EOL(req) => Self::Eol(req.into()),
             EventRequest::Confirm(req) => {
-                BridgeEventRequest::Confirm(req.into())
+                Self::Confirm(req.into())
             }
-            EventRequest::Reject(req) => BridgeEventRequest::Reject(req.into()),
+            EventRequest::Reject(req) => Self::Reject(req.into()),
         }
     }
 }
@@ -67,22 +67,22 @@ impl TryFrom<BridgeEventRequest> for EventRequest {
     fn try_from(request: BridgeEventRequest) -> Result<Self, Self::Error> {
         match request {
             BridgeEventRequest::Create(req) => {
-                Ok(EventRequest::Create(req.try_into()?))
+                Ok(Self::Create(req.try_into()?))
             }
             BridgeEventRequest::Fact(req) => {
-                Ok(EventRequest::Fact(req.try_into()?))
+                Ok(Self::Fact(req.try_into()?))
             }
             BridgeEventRequest::Transfer(req) => {
-                Ok(EventRequest::Transfer(req.try_into()?))
+                Ok(Self::Transfer(req.try_into()?))
             }
             BridgeEventRequest::Eol(req) => {
-                Ok(EventRequest::EOL(req.try_into()?))
+                Ok(Self::EOL(req.try_into()?))
             }
             BridgeEventRequest::Confirm(req) => {
-                Ok(EventRequest::Confirm(req.try_into()?))
+                Ok(Self::Confirm(req.try_into()?))
             }
             BridgeEventRequest::Reject(req) => {
-                Ok(EventRequest::Reject(req.try_into()?))
+                Ok(Self::Reject(req.try_into()?))
             }
         }
     }
@@ -94,7 +94,7 @@ impl TryFrom<BridgeEventRequest> for EventRequest {
 
 impl From<CreateRequest> for BridgeCreateRequest {
     fn from(request: CreateRequest) -> Self {
-        BridgeCreateRequest {
+        Self {
             name: request.name,
             description: request.description,
             governance_id: Some(request.governance_id.to_string()),
@@ -125,7 +125,7 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
             Namespace::new()
         };
 
-        Ok(CreateRequest {
+        Ok(Self {
             name: request.name,
             description: request.description,
             governance_id,
@@ -141,7 +141,7 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
 
 impl From<FactRequest> for BridgeFactRequest {
     fn from(request: FactRequest) -> Self {
-        BridgeFactRequest {
+        Self {
             subject_id: request.subject_id.to_string(),
             payload: request.payload.0,
         }
@@ -155,7 +155,7 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
         let subject_id = DigestIdentifier::from_str(&request.subject_id)
             .map_err(|e| ConversionError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(FactRequest {
+        Ok(Self {
             subject_id,
             payload: ValueWrapper(request.payload),
         })
@@ -168,7 +168,7 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
 
 impl From<TransferRequest> for BridgeTransferRequest {
     fn from(request: TransferRequest) -> Self {
-        BridgeTransferRequest {
+        Self {
             subject_id: request.subject_id.to_string(),
             new_owner: request.new_owner.to_string(),
         }
@@ -185,7 +185,7 @@ impl TryFrom<BridgeTransferRequest> for TransferRequest {
         let new_owner = PublicKey::from_str(&request.new_owner)
             .map_err(|e| ConversionError::InvalidPublicKey(e.to_string()))?;
 
-        Ok(TransferRequest {
+        Ok(Self {
             subject_id,
             new_owner,
         })
@@ -198,7 +198,7 @@ impl TryFrom<BridgeTransferRequest> for TransferRequest {
 
 impl From<EOLRequest> for BridgeEOLRequest {
     fn from(request: EOLRequest) -> Self {
-        BridgeEOLRequest {
+        Self {
             subject_id: request.subject_id.to_string(),
         }
     }
@@ -211,7 +211,7 @@ impl TryFrom<BridgeEOLRequest> for EOLRequest {
         let subject_id = DigestIdentifier::from_str(&request.subject_id)
             .map_err(|e| ConversionError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(EOLRequest { subject_id })
+        Ok(Self { subject_id })
     }
 }
 
@@ -221,7 +221,7 @@ impl TryFrom<BridgeEOLRequest> for EOLRequest {
 
 impl From<ConfirmRequest> for BridgeConfirmRequest {
     fn from(request: ConfirmRequest) -> Self {
-        BridgeConfirmRequest {
+        Self {
             subject_id: request.subject_id.to_string(),
             name_old_owner: request.name_old_owner,
         }
@@ -235,7 +235,7 @@ impl TryFrom<BridgeConfirmRequest> for ConfirmRequest {
         let subject_id = DigestIdentifier::from_str(&request.subject_id)
             .map_err(|e| ConversionError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(ConfirmRequest {
+        Ok(Self {
             subject_id,
             name_old_owner: request.name_old_owner,
         })
@@ -248,7 +248,7 @@ impl TryFrom<BridgeConfirmRequest> for ConfirmRequest {
 
 impl From<RejectRequest> for BridgeRejectRequest {
     fn from(request: RejectRequest) -> Self {
-        BridgeRejectRequest {
+        Self {
             subject_id: request.subject_id.to_string(),
         }
     }
@@ -261,7 +261,7 @@ impl TryFrom<BridgeRejectRequest> for RejectRequest {
         let subject_id = DigestIdentifier::from_str(&request.subject_id)
             .map_err(|e| ConversionError::InvalidSubjectId(e.to_string()))?;
 
-        Ok(RejectRequest { subject_id })
+        Ok(Self { subject_id })
     }
 }
 

@@ -130,13 +130,13 @@ pub enum EvaluateData {
 }
 
 impl EvaluateData {
-    pub fn is_gov_event(&self) -> bool {
+    pub const fn is_gov_event(&self) -> bool {
         match self {
-            EvaluateData::GovFact { .. }
-            | EvaluateData::GovTransfer { .. }
-            | EvaluateData::GovConfirm { .. } => true,
-            EvaluateData::TrackerSchemasFact { .. }
-            | EvaluateData::TrackerSchemasTransfer { .. } => false,
+            Self::GovFact { .. }
+            | Self::GovTransfer { .. }
+            | Self::GovConfirm { .. } => true,
+            Self::TrackerSchemasFact { .. }
+            | Self::TrackerSchemasTransfer { .. } => false,
         }
     }
 }

@@ -70,10 +70,10 @@ impl AuthDatabase {
         let conn = self.lock_conn()?;
 
         // SECURITY FIX: Validate description for CRLF injection
-        AuthDatabase::validate_description(description)?;
+        Self::validate_description(description)?;
 
         // Check if user exists and is active
-        let user = AuthDatabase::get_user_by_id_internal(&conn, user_id)?;
+        let user = Self::get_user_by_id_internal(&conn, user_id)?;
         if !user.is_active {
             return Err(DatabaseError::PermissionDenied(
                 "User account is not active".to_string(),
@@ -188,7 +188,7 @@ impl AuthDatabase {
         let expires_at = effective_ttl.map(|ttl| now + ttl);
 
         // Generate UUID for id
-        let key_id = AuthDatabase::generate_uuid();
+        let key_id = Self::generate_uuid();
 
         // Insert API key
         conn.execute(
@@ -456,7 +456,7 @@ impl AuthDatabase {
         }
 
         // Get user
-        let user = AuthDatabase::get_user_by_id_internal(&conn, user_id)?;
+        let user = Self::get_user_by_id_internal(&conn, user_id)?;
 
         // Check if user is active
         if !user.is_active {
@@ -484,7 +484,7 @@ impl AuthDatabase {
         }
 
         // Get user roles
-        let roles = AuthDatabase::get_user_roles_internal(&conn, user_id)?;
+        let roles = Self::get_user_roles_internal(&conn, user_id)?;
 
         // Update last used timestamp
         let now = Self::now();

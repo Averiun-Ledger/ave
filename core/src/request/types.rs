@@ -42,20 +42,20 @@ pub enum RequestManagerState {
 impl Display for RequestManagerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestManagerState::Reboot => write!(f, "Reboot"),
-            RequestManagerState::Starting => write!(f, "Starting"),
-            RequestManagerState::Evaluation => write!(f, "Evaluation"),
-            RequestManagerState::Approval { .. } => {
+            Self::Reboot => write!(f, "Reboot"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Approval { .. } => {
                 write!(f, "Approval")
             }
-            RequestManagerState::Validation { .. } => write!(f, "Validation"),
-            RequestManagerState::UpdateSubject { .. } => {
+            Self::Validation { .. } => write!(f, "Validation"),
+            Self::UpdateSubject { .. } => {
                 write!(f, "UpdateSubject")
             }
-            RequestManagerState::Distribution { .. } => {
+            Self::Distribution { .. } => {
                 write!(f, "Distribution")
             }
-            RequestManagerState::End => write!(f, "End"),
+            Self::End => write!(f, "End"),
         }
     }
 }

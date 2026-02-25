@@ -88,7 +88,7 @@ impl Evaluation {
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
     ) -> Self {
-        Evaluation {
+        Self {
             our_key,
             hash,
             network,
@@ -114,7 +114,7 @@ impl Evaluation {
 
     async fn create_evaluators(
         &self,
-        ctx: &mut ActorContext<Evaluation>,
+        ctx: &mut ActorContext<Self>,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         if signer != *self.our_key {
@@ -208,7 +208,7 @@ impl Evaluation {
 
     async fn send_evaluation_to_req(
         &self,
-        ctx: &mut ActorContext<Evaluation>,
+        ctx: &mut ActorContext<Self>,
         response: EvaluationData,
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
@@ -261,12 +261,12 @@ impl Actor for Evaluation {
 }
 
 #[async_trait]
-impl Handler<Evaluation> for Evaluation {
+impl Handler<Self> for Evaluation {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EvaluationMessage,
-        ctx: &mut ActorContext<Evaluation>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             EvaluationMessage::Create {
@@ -471,7 +471,7 @@ impl Handler<Evaluation> for Evaluation {
                                 as u32,
                         ) {
                             let summary = self.check_responses();
-                            if let ResponseSummary::Reboot = summary
+                            if matches!(summary, ResponseSummary::Reboot)
                                 && let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -592,7 +592,7 @@ impl Handler<Evaluation> for Evaluation {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Evaluation>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.request_id,

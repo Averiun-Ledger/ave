@@ -17,7 +17,7 @@ pub struct NetworkSender {
 
 impl NetworkSender {
     /// Create a new `NetworkSender`.
-    pub fn new(command_sender: Sender<Command<NetworkMessage>>) -> Self {
+    pub const fn new(command_sender: Sender<Command<NetworkMessage>>) -> Self {
         Self { command_sender }
     }
 

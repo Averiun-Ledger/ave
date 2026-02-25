@@ -89,38 +89,38 @@ pub enum SubjectData {
 impl SubjectData {
     pub fn get_schema_id(&self) -> SchemaType {
         match self {
-            SubjectData::Tracker { schema_id, .. } => schema_id.clone(),
-            SubjectData::Governance { .. } => SchemaType::Governance,
+            Self::Tracker { schema_id, .. } => schema_id.clone(),
+            Self::Governance { .. } => SchemaType::Governance,
         }
     }
 
     pub fn get_governance_id(&self) -> Option<DigestIdentifier> {
         match self {
-            SubjectData::Tracker { governance_id, .. } => {
+            Self::Tracker { governance_id, .. } => {
                 Some(governance_id.clone())
             }
-            SubjectData::Governance { .. } => None,
+            Self::Governance { .. } => None,
         }
     }
 
     pub fn get_namespace(&self) -> String {
         match self {
-            SubjectData::Tracker { namespace, .. } => namespace.clone(),
-            SubjectData::Governance { .. } => String::default(),
+            Self::Tracker { namespace, .. } => namespace.clone(),
+            Self::Governance { .. } => String::default(),
         }
     }
 
-    pub fn get_active(&self) -> bool {
+    pub const fn get_active(&self) -> bool {
         match self {
-            SubjectData::Tracker { active, .. } => *active,
-            SubjectData::Governance { active } => *active,
+            Self::Tracker { active, .. } => *active,
+            Self::Governance { active } => *active,
         }
     }
 
-    pub fn eol(&mut self) {
+    pub const fn eol(&mut self) {
         match self {
-            SubjectData::Tracker { active, .. } => *active = false,
-            SubjectData::Governance { active } => *active = false,
+            Self::Tracker { active, .. } => *active = false,
+            Self::Governance { active } => *active = false,
         };
     }
 }
@@ -638,12 +638,12 @@ impl Actor for Node {
 }
 
 #[async_trait]
-impl Handler<Node> for Node {
+impl Handler<Self> for Node {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: NodeMessage,
-        ctx: &mut ave_actors::ActorContext<Node>,
+        ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
             NodeMessage::EOLSubject {
@@ -1183,7 +1183,7 @@ impl Handler<Node> for Node {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Node>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             error = %error,
@@ -1196,7 +1196,7 @@ impl Handler<Node> for Node {
     async fn on_event(
         &mut self,
         event: NodeEvent,
-        ctx: &mut ActorContext<Node>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(

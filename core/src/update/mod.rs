@@ -82,7 +82,7 @@ impl Update {
 
     async fn create_updates(
         &self,
-        ctx: &mut ActorContext<Update>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         for witness in self.witnesses.clone() {
             let updater = Updater::new(witness.clone(), self.network.clone());
@@ -124,12 +124,12 @@ impl Actor for Update {
 impl NotPersistentActor for Update {}
 
 #[async_trait]
-impl Handler<Update> for Update {
+impl Handler<Self> for Update {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: UpdateMessage,
-        ctx: &mut ActorContext<Update>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             UpdateMessage::Run => {
@@ -263,7 +263,7 @@ impl Handler<Update> for Update {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Update>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             subject_id = %self.subject_id,

@@ -248,12 +248,12 @@ impl Actor for RoleRegister {
 }
 
 #[async_trait]
-impl Handler<RoleRegister> for RoleRegister {
+impl Handler<Self> for RoleRegister {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RoleRegisterMessage,
-        ctx: &mut ActorContext<RoleRegister>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<RoleRegisterResponse, ActorError> {
         match msg {
             RoleRegisterMessage::SearchActualRoles {
@@ -590,7 +590,7 @@ impl Handler<RoleRegister> for RoleRegister {
     async fn on_event(
         &mut self,
         event: RoleRegisterEvent,
-        ctx: &mut ActorContext<RoleRegister>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             let version = match &event {

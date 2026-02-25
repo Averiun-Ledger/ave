@@ -38,7 +38,7 @@ pub struct RetryNetwork {
 }
 
 impl RetryNetwork {
-    pub fn new(network: Arc<NetworkSender>) -> Self {
+    pub const fn new(network: Arc<NetworkSender>) -> Self {
         Self { network }
     }
 }
@@ -61,12 +61,12 @@ impl Actor for RetryNetwork {
 impl NotPersistentActor for RetryNetwork {}
 
 #[async_trait]
-impl Handler<RetryNetwork> for RetryNetwork {
+impl Handler<Self> for RetryNetwork {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: NetworkMessage,
-        ctx: &mut ActorContext<RetryNetwork>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self
             .network

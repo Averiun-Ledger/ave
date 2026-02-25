@@ -450,7 +450,7 @@ impl Tracker {
 
     async fn get_governance(
         &self,
-        ctx: &mut ActorContext<Tracker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceData, ActorError> {
         let governance_path =
             ActorPath::from(format!("/user/node/{}", self.governance_id));
@@ -475,7 +475,7 @@ impl Tracker {
 
     async fn verify_new_ledger_events(
         &mut self,
-        ctx: &mut ActorContext<Tracker>,
+        ctx: &mut ActorContext<Self>,
         events: Vec<SignedLedger>,
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
@@ -811,12 +811,12 @@ impl Actor for Tracker {
 }
 
 #[async_trait]
-impl Handler<Tracker> for Tracker {
+impl Handler<Self> for Tracker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TrackerMessage,
-        ctx: &mut ActorContext<Tracker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerResponse, ActorError> {
         match msg {
             TrackerMessage::GetLedger { lo_sn, hi_sn } => {
@@ -873,7 +873,7 @@ impl Handler<Tracker> for Tracker {
     async fn on_event(
         &mut self,
         event: SignedLedger,
-        ctx: &mut ActorContext<Tracker>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
@@ -905,7 +905,7 @@ impl Handler<Tracker> for Tracker {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<Tracker>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             subject_id = %self.subject_metadata.subject_id,

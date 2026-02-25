@@ -167,8 +167,8 @@ pub enum Action {
 impl From<RetryKind> for Action {
     fn from(value: RetryKind) -> Self {
         match value {
-            RetryKind::Discover => Action::Discover,
-            RetryKind::Dial => Action::Dial,
+            RetryKind::Discover => Self::Discover,
+            RetryKind::Dial => Self::Dial,
         }
     }
 }
@@ -206,7 +206,7 @@ impl PartialOrd for Due {
 }
 
 /// Network state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkState {
     /// Start.
     Start,
@@ -408,7 +408,7 @@ where
 
 impl ReqResConfig {
     /// Create a ReqRes Confing
-    pub fn new(
+    pub const fn new(
         message_timeout: Duration,
         max_concurrent_streams: usize,
     ) -> Self {
@@ -430,24 +430,24 @@ impl Default for ReqResConfig {
 
 impl ReqResConfig {
     /// Sets the timeout for inbound and outbound requests.
-    pub fn with_message_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn with_message_timeout(mut self, timeout: Duration) -> Self {
         self.message_timeout = timeout;
         self
     }
 
     /// Sets the upper bound for the number of concurrent inbound + outbound streams.
-    pub fn with_max_concurrent_streams(mut self, num_streams: usize) -> Self {
+    pub const fn with_max_concurrent_streams(mut self, num_streams: usize) -> Self {
         self.max_concurrent_streams = num_streams;
         self
     }
 
     /// Get message timeout
-    pub fn get_message_timeout(&self) -> Duration {
+    pub const fn get_message_timeout(&self) -> Duration {
         self.message_timeout
     }
 
     /// Get max concurrent streams
-    pub fn get_max_concurrent_streams(&self) -> usize {
+    pub const fn get_max_concurrent_streams(&self) -> usize {
         self.max_concurrent_streams
     }
 }

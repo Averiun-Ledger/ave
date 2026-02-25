@@ -34,7 +34,7 @@ pub struct ApprLight {
 }
 
 impl ApprLight {
-    pub fn new(
+    pub const fn new(
         network: Arc<NetworkSender>,
         node_key: PublicKey,
         request_id: DigestIdentifier,
@@ -93,12 +93,12 @@ impl Actor for ApprLight {
 }
 
 #[async_trait]
-impl Handler<ApprLight> for ApprLight {
+impl Handler<Self> for ApprLight {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ApprLightMessage,
-        ctx: &mut ActorContext<ApprLight>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ApprLightMessage::NetworkApproval { approval_req } => {
@@ -271,7 +271,7 @@ impl Handler<ApprLight> for ApprLight {
     async fn on_child_error(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ApprLight>,
+        ctx: &mut ActorContext<Self>,
     ) {
         match error {
             ActorError::Retry => {
@@ -330,7 +330,7 @@ impl Handler<ApprLight> for ApprLight {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ApprLight>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             request_id = %self.request_id,

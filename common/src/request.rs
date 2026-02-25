@@ -38,43 +38,43 @@ impl EventRequest {
         new_owner: &Option<PublicKey>,
     ) -> bool {
         match self {
-            EventRequest::Create(..)
-            | EventRequest::Transfer(..)
-            | EventRequest::EOL(..) => signer == owner,
-            EventRequest::Confirm(..) | EventRequest::Reject(..) => {
+            Self::Create(..)
+            | Self::Transfer(..)
+            | Self::EOL(..) => signer == owner,
+            Self::Confirm(..) | Self::Reject(..) => {
                 if let Some(new_owner) = new_owner {
                     new_owner == signer
                 } else {
                     false
                 }
             }
-            EventRequest::Fact(..) => true,
+            Self::Fact(..) => true,
         }
     }
 
-    pub fn is_create_event(&self) -> bool {
-        matches!(self, EventRequest::Create(_create_request))
+    pub const fn is_create_event(&self) -> bool {
+        matches!(self, Self::Create(_create_request))
     }
-    pub fn is_fact_event(&self) -> bool {
-        matches!(self, EventRequest::Fact(_fact_request))
+    pub const fn is_fact_event(&self) -> bool {
+        matches!(self, Self::Fact(_fact_request))
     }
 
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
-            EventRequest::Create(_create_request) => {
+            Self::Create(_create_request) => {
                 DigestIdentifier::default()
             }
-            EventRequest::Fact(fact_request) => fact_request.subject_id.clone(),
-            EventRequest::Transfer(transfer_request) => {
+            Self::Fact(fact_request) => fact_request.subject_id.clone(),
+            Self::Transfer(transfer_request) => {
                 transfer_request.subject_id.clone()
             }
-            EventRequest::Confirm(confirm_request) => {
+            Self::Confirm(confirm_request) => {
                 confirm_request.subject_id.clone()
             }
-            EventRequest::Reject(reject_request) => {
+            Self::Reject(reject_request) => {
                 reject_request.subject_id.clone()
             }
-            EventRequest::EOL(eolrequest) => eolrequest.subject_id.clone(),
+            Self::EOL(eolrequest) => eolrequest.subject_id.clone(),
         }
     }
 }

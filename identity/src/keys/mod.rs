@@ -96,30 +96,30 @@ pub enum DSAlgorithm {
 
 impl DSAlgorithm {
     /// Get the 1-byte identifier for this algorithm
-    pub fn identifier(&self) -> u8 {
+    pub const fn identifier(&self) -> u8 {
         match self {
-            DSAlgorithm::Ed25519 => ED25519_ID,
+            Self::Ed25519 => ED25519_ID,
         }
     }
 
     /// Get the signature length for this algorithm (excluding identifier)
-    pub fn signature_length(&self) -> usize {
+    pub const fn signature_length(&self) -> usize {
         match self {
-            DSAlgorithm::Ed25519 => ED25519_SIGNATURE_LENGTH,
+            Self::Ed25519 => ED25519_SIGNATURE_LENGTH,
         }
     }
 
     /// Get the public key length for this algorithm
-    pub fn public_key_length(&self) -> usize {
+    pub const fn public_key_length(&self) -> usize {
         match self {
-            DSAlgorithm::Ed25519 => ED25519_PUBLIC_KEY_LENGTH,
+            Self::Ed25519 => ED25519_PUBLIC_KEY_LENGTH,
         }
     }
 
     /// Parse algorithm from 1-byte identifier
     pub fn from_identifier(id: u8) -> Result<Self, CryptoError> {
         match id {
-            ED25519_ID => Ok(DSAlgorithm::Ed25519),
+            ED25519_ID => Ok(Self::Ed25519),
             _ => Err(CryptoError::UnknownAlgorithm(format!("{}", id as char))),
         }
     }
@@ -128,7 +128,7 @@ impl DSAlgorithm {
 impl fmt::Display for DSAlgorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DSAlgorithm::Ed25519 => write!(f, "Ed25519"),
+            Self::Ed25519 => write!(f, "Ed25519"),
         }
     }
 }

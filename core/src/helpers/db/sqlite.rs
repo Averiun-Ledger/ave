@@ -797,7 +797,7 @@ impl SqliteLocal {
             "SQLite database connection established and migrations applied"
         );
 
-        Ok(SqliteLocal {
+        Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             manager,
         })

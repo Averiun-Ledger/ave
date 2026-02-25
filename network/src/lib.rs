@@ -124,13 +124,13 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MachineProfile::Nano    => write!(f, "nano"),
-            MachineProfile::Micro   => write!(f, "micro"),
-            MachineProfile::Small   => write!(f, "small"),
-            MachineProfile::Medium  => write!(f, "medium"),
-            MachineProfile::Large   => write!(f, "large"),
-            MachineProfile::XLarge  => write!(f, "xlarge"),
-            MachineProfile::XXLarge => write!(f, "2xlarge"),
+            Self::Nano    => write!(f, "nano"),
+            Self::Micro   => write!(f, "micro"),
+            Self::Small   => write!(f, "small"),
+            Self::Medium  => write!(f, "medium"),
+            Self::Large   => write!(f, "large"),
+            Self::XLarge  => write!(f, "xlarge"),
+            Self::XXLarge => write!(f, "2xlarge"),
         }
     }
 }
@@ -305,7 +305,7 @@ impl Config {
 }
 
 /// Type of a node.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq, Serialize)]
 pub enum NodeType {
     /// Bootstrap node.
     #[default]
@@ -319,9 +319,9 @@ pub enum NodeType {
 impl fmt::Display for NodeType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NodeType::Bootstrap => write!(f, "Bootstrap"),
-            NodeType::Addressable => write!(f, "Addressable"),
-            NodeType::Ephemeral => write!(f, "Ephemeral"),
+            Self::Bootstrap => write!(f, "Bootstrap"),
+            Self::Addressable => write!(f, "Addressable"),
+            Self::Ephemeral => write!(f, "Ephemeral"),
         }
     }
 }

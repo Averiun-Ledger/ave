@@ -116,12 +116,12 @@ impl From<&EventRequest> for EventRequestType {
 impl Display for EventRequestType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventRequestType::Create => write!(f, "create"),
-            EventRequestType::Fact => write!(f, "fact"),
-            EventRequestType::Transfer => write!(f, "transfer"),
-            EventRequestType::Confirm => write!(f, "confirm"),
-            EventRequestType::Reject => write!(f, "reject"),
-            EventRequestType::Eol => write!(f, "eol"),
+            Self::Create => write!(f, "create"),
+            Self::Fact => write!(f, "fact"),
+            Self::Transfer => write!(f, "transfer"),
+            Self::Confirm => write!(f, "confirm"),
+            Self::Reject => write!(f, "reject"),
+            Self::Eol => write!(f, "eol"),
         }
     }
 }
@@ -143,9 +143,9 @@ pub enum ApprovalStateRes {
 impl Display for ApprovalStateRes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let string = match self {
-            ApprovalStateRes::Accepted => "accepted".to_owned(),
-            ApprovalStateRes::Rejected => "rejected".to_owned(),
-            ApprovalStateRes::Obsolete => "obsolete".to_owned(),
+            Self::Accepted => "accepted".to_owned(),
+            Self::Rejected => "rejected".to_owned(),
+            Self::Obsolete => "obsolete".to_owned(),
         };
         write!(f, "{}", string,)
     }
@@ -181,10 +181,10 @@ pub enum ApprovalState {
 impl Display for ApprovalState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let string = match self {
-            ApprovalState::Accepted => "accepted".to_owned(),
-            ApprovalState::Rejected => "rejected".to_owned(),
-            ApprovalState::Obsolete => "obsolete".to_owned(),
-            ApprovalState::Pending => "pending".to_owned(),
+            Self::Accepted => "accepted".to_owned(),
+            Self::Rejected => "rejected".to_owned(),
+            Self::Obsolete => "obsolete".to_owned(),
+            Self::Pending => "pending".to_owned(),
         };
         write!(f, "{}", string,)
     }

@@ -109,7 +109,7 @@ pub struct InitApprPersist {
 impl ApprPersist {
     async fn check_governance(
         &self,
-        ctx: &mut ActorContext<ApprPersist>,
+        ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
         gov_version: u64,
     ) -> Result<(), ActorError> {
@@ -164,7 +164,7 @@ impl ApprPersist {
 
     async fn send_response(
         &self,
-        ctx: &mut ActorContext<ApprPersist>,
+        ctx: &mut ActorContext<Self>,
         request: Signed<ApprovalReq>,
         response: bool,
         request_id: &str,
@@ -364,12 +364,12 @@ impl Actor for ApprPersist {
 }
 
 #[async_trait]
-impl Handler<ApprPersist> for ApprPersist {
+impl Handler<Self> for ApprPersist {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ApprPersistMessage,
-        ctx: &mut ActorContext<ApprPersist>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ApprPersistResponse, ActorError> {
         match msg {
             ApprPersistMessage::GetApproval { state } => {
@@ -742,7 +742,7 @@ impl Handler<ApprPersist> for ApprPersist {
     async fn on_event(
         &mut self,
         event: ApprPersistEvent,
-        ctx: &mut ActorContext<ApprPersist>,
+        ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(error = %e, "Failed to persist event");

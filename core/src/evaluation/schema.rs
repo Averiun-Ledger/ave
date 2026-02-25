@@ -71,12 +71,12 @@ impl Actor for EvaluationSchema {
 }
 
 #[async_trait]
-impl Handler<EvaluationSchema> for EvaluationSchema {
+impl Handler<Self> for EvaluationSchema {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EvaluationSchemaMessage,
-        ctx: &mut ActorContext<EvaluationSchema>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             EvaluationSchemaMessage::NetworkRequest {
@@ -231,7 +231,7 @@ impl Handler<EvaluationSchema> for EvaluationSchema {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<EvaluationSchema>,
+        ctx: &mut ActorContext<Self>,
     ) -> ave_actors::ChildAction {
         error!(
             governance_id = %self.governance_id,

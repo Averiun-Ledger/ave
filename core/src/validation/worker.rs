@@ -530,7 +530,7 @@ impl ValiWorker {
 
     async fn check_actual_protocols(
         &self,
-        ctx: &mut ActorContext<ValiWorker>,
+        ctx: &mut ActorContext<Self>,
         metadata: &Metadata,
         actual_protocols: &ActualProtocols,
         event_type: &EventRequestType,
@@ -633,7 +633,7 @@ impl ValiWorker {
 
     async fn check_last_vali_data(
         &self,
-        ctx: &mut ActorContext<ValiWorker>,
+        ctx: &mut ActorContext<Self>,
         metadata: &Metadata,
         last_validation: &LastData,
     ) -> Result<(), ValidatorError> {
@@ -772,7 +772,7 @@ impl ValiWorker {
 
     async fn create_res(
         &self,
-        ctx: &mut ActorContext<ValiWorker>,
+        ctx: &mut ActorContext<Self>,
         reboot: bool,
         validation_req: &Signed<ValidationReq>,
     ) -> Result<ValidationRes, ValidatorError> {
@@ -990,12 +990,12 @@ impl Actor for ValiWorker {
 impl NotPersistentActor for ValiWorker {}
 
 #[async_trait]
-impl Handler<ValiWorker> for ValiWorker {
+impl Handler<Self> for ValiWorker {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ValiWorkerMessage,
-        ctx: &mut ActorContext<ValiWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
             ValiWorkerMessage::UpdateGovVersion { gov_version } => {
@@ -1006,7 +1006,7 @@ impl Handler<ValiWorker> for ValiWorker {
                     match self.create_res(ctx, false, &validation_req).await {
                         Ok(vali) => vali,
                         Err(e) => {
-                            if let ValidatorError::OutOfVersion = e {
+                            if matches!(e, ValidatorError::OutOfVersion) {
                                 ValidationRes::Reboot
                             } else {
                                 return Err(emit_fail(
@@ -1133,7 +1133,7 @@ impl Handler<ValiWorker> for ValiWorker {
                                     },
                                 )
                                 .await);
-                            } else if let ValidatorError::OutOfVersion = e {
+                            } else if matches!(e, ValidatorError::OutOfVersion) {
                                 ValidationRes::Reboot
                             } else {
                                 ValidationRes::Abort(e.to_string())
@@ -1211,7 +1211,7 @@ impl Handler<ValiWorker> for ValiWorker {
     async fn on_child_fault(
         &mut self,
         error: ActorError,
-        ctx: &mut ActorContext<ValiWorker>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
             node_key = %self.node_key,
