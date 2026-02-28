@@ -1290,9 +1290,7 @@ impl Handler<Self> for RequestHandler {
                 )
                 .await;
 
-                if let Err(e) =
-                    Self::queued_event(ctx, &subject_id).await
-                {
+                if let Err(e) = Self::queued_event(ctx, &subject_id).await {
                     error!(
                         msg_type = "EndHandling",
                         subject_id = %subject_id,

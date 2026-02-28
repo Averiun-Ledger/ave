@@ -841,17 +841,16 @@ impl ValiWorker {
                             });
                         }
 
-                        let init_state =
-                            self.init_state.as_ref().map_or_else(
-                                || {
-                                    let governance_data = GovernanceData::new(
-                                        validation_req.signature().signer.clone(),
-                                    );
+                        let init_state = self.init_state.as_ref().map_or_else(
+                            || {
+                                let governance_data = GovernanceData::new(
+                                    validation_req.signature().signer.clone(),
+                                );
 
-                                    governance_data.to_value_wrapper()
-                                },
-                                |init_state| init_state.clone(),
-                            );
+                                governance_data.to_value_wrapper()
+                            },
+                            |init_state| init_state.clone(),
+                        );
 
                         let governance_id = if create.schema_id.is_gov() {
                             subject_id.clone()
@@ -1132,7 +1131,8 @@ impl Handler<Self> for ValiWorker {
                                     },
                                 )
                                 .await);
-                            } else if matches!(e, ValidatorError::OutOfVersion) {
+                            } else if matches!(e, ValidatorError::OutOfVersion)
+                            {
                                 ValidationRes::Reboot
                             } else {
                                 ValidationRes::Abort(e.to_string())

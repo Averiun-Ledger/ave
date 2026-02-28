@@ -97,12 +97,12 @@ impl MachineProfile {
     /// Canonical RAM for this profile in megabytes.
     pub const fn ram_mb(self) -> u64 {
         match self {
-            Self::Nano    =>   512,
-            Self::Micro   =>  1_024,
-            Self::Small   =>  2_048,
-            Self::Medium  =>  4_096,
-            Self::Large   =>  8_192,
-            Self::XLarge  => 16_384,
+            Self::Nano => 512,
+            Self::Micro => 1_024,
+            Self::Small => 2_048,
+            Self::Medium => 4_096,
+            Self::Large => 8_192,
+            Self::XLarge => 16_384,
             Self::XXLarge => 32_768,
         }
     }
@@ -110,12 +110,12 @@ impl MachineProfile {
     /// vCPU count for this profile.
     pub const fn cpu_cores(self) -> usize {
         match self {
-            Self::Nano    => 2,
-            Self::Micro   => 2,
-            Self::Small   => 2,
-            Self::Medium  => 2,
-            Self::Large   => 2,
-            Self::XLarge  => 4,
+            Self::Nano => 2,
+            Self::Micro => 2,
+            Self::Small => 2,
+            Self::Medium => 2,
+            Self::Large => 2,
+            Self::XLarge => 4,
             Self::XXLarge => 8,
         }
     }
@@ -124,12 +124,12 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Nano    => write!(f, "nano"),
-            Self::Micro   => write!(f, "micro"),
-            Self::Small   => write!(f, "small"),
-            Self::Medium  => write!(f, "medium"),
-            Self::Large   => write!(f, "large"),
-            Self::XLarge  => write!(f, "xlarge"),
+            Self::Nano => write!(f, "nano"),
+            Self::Micro => write!(f, "micro"),
+            Self::Small => write!(f, "small"),
+            Self::Medium => write!(f, "medium"),
+            Self::Large => write!(f, "large"),
+            Self::XLarge => write!(f, "xlarge"),
             Self::XXLarge => write!(f, "2xlarge"),
         }
     }
@@ -171,13 +171,12 @@ pub(crate) fn detect_ram_mb() -> u64 {
     {
         if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
             for line in meminfo.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") 
-                    && let Some(kb_str) = rest.split_whitespace().next() 
-                        && let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb / 1024;
-                        }
-                    
-                
+                if let Some(rest) = line.strip_prefix("MemTotal:")
+                    && let Some(kb_str) = rest.split_whitespace().next()
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    return kb / 1024;
+                }
             }
         }
     }
@@ -219,28 +218,29 @@ pub enum MemoryLimitsConfig {
     Disabled,
     /// Reject new connections when process memory exceeds `value` fraction of total RAM.
     /// Must be in the range 0.0–1.0 (e.g. `0.8` means 80% of system RAM).
-    Percentage { 
+    Percentage {
         /// Range into 0.0–1.0
-        value: f64 
+        value: f64,
     },
     /// Reject new connections when process memory exceeds `value` megabytes.
-    Mb { 
+    Mb {
         /// `value` in megabytes
-        value: usize
+        value: usize,
     },
 }
 
 impl MemoryLimitsConfig {
     /// Returns an error string if the configuration values are out of range.
     pub fn validate(&self) -> Result<(), String> {
-        if let Self::Percentage { value } = self 
-            && (*value <= 0.0 || *value > 1.0) {
-                return Err(format!(
-                    "network.memory_limits percentage must be in range (0.0, 1.0], got {}",
-                    value
-                ));
-            }
-        
+        if let Self::Percentage { value } = self
+            && (*value <= 0.0 || *value > 1.0)
+        {
+            return Err(format!(
+                "network.memory_limits percentage must be in range (0.0, 1.0], got {}",
+                value
+            ));
+        }
+
         Ok(())
     }
 }

@@ -2,9 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     evaluation::{
-        compiler::{CompilerResponse, error::CompilerError}, request::EvaluateData, response::{
+        compiler::{CompilerResponse, error::CompilerError},
+        request::EvaluateData,
+        response::{
             EvalRunnerError, EvaluatorError, EvaluatorResponse as EvalRes,
-        }, runner::types::EvaluateInfo
+        },
+        runner::types::EvaluateInfo,
     },
     governance::{data::GovernanceData, model::Schema},
     helpers::network::{NetworkMessage, service::NetworkSender},
@@ -118,7 +121,7 @@ impl EvalWorker {
                 .await?;
 
             if let CompilerResponse::Error(e) = response {
-                compiler.ask_stop().await?;        
+                compiler.ask_stop().await?;
                 return Ok(Some(e));
             }
         }
@@ -194,11 +197,13 @@ impl EvalWorker {
                 EvaluatorError::InternalError(e)
             })?;
 
-            if let Some(error) = self.compile_contracts(ctx, &compilations, governance_data.schemas)
+            if let Some(error) = self
+                .compile_contracts(ctx, &compilations, governance_data.schemas)
                 .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))? {
-                    return Err(EvaluatorError::from(error));
-                };
+                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?
+            {
+                return Err(EvaluatorError::from(error));
+            };
         }
 
         Ok(result)

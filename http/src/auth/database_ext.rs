@@ -282,10 +282,7 @@ impl AuthDatabase {
         .optional()
         .map_err(|e| DatabaseError::Query(e.to_string()))?
         .ok_or_else(|| {
-            DatabaseError::NotFound(format!(
-                "Resource '{}' not found",
-                name
-            ))
+            DatabaseError::NotFound(format!("Resource '{}' not found", name))
         })
     }
 

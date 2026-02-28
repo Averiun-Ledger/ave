@@ -79,8 +79,10 @@ impl Handler<Self> for Monitor {
     ) -> Result<MonitorResponse, ActorError> {
         match msg {
             MonitorMessage::Network(event) => {
-                if matches!(event, NetworkEvent::StateChanged(NetworkState::Running))
-                {
+                if matches!(
+                    event,
+                    NetworkEvent::StateChanged(NetworkState::Running)
+                ) {
                     self.state = MonitorNetworkState::Running
                 }
                 Ok(MonitorResponse::Ok)

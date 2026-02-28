@@ -30,11 +30,9 @@ async fn test_limits_in_subjects() {
     let owner_governance = &nodes[0].api;
     let emit_events = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![emit_events],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![emit_events])
+            .await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -826,11 +824,9 @@ async fn test_subject_transfer_event_1() {
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![future_owner],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![future_owner])
+            .await;
 
     // add member to governance
     let json = json!({
@@ -1809,8 +1805,7 @@ async fn test_dynamic_witnesses_1() {
     let witness = &nodes[2].api;
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![creator], )
-            .await;
+        create_and_authorize_governance(owner_governance, vec![creator]).await;
 
     // add member to governance
     let json = json!({
@@ -2837,7 +2832,7 @@ async fn test_no_subject_evaluator() {
     let owner_governance = &nodes[0].api;
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![],).await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     // add member to governance
     let json = json!({

@@ -1,12 +1,6 @@
 pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ave_actors::{ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef};
-use ave_common::identity::hash_borsh;
-use serde::{Deserialize, Serialize};
-use tokio::{sync::RwLock, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
-use tracing::error;
 use crate::{
     config::{Config, SinkAuth},
     db::Database,
@@ -14,6 +8,14 @@ use crate::{
     helpers::{db::ExternalDB, sink::AveSink},
     model::common::contract::WasmRuntime,
 };
+use ave_actors::{
+    ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef,
+};
+use ave_common::identity::hash_borsh;
+use serde::{Deserialize, Serialize};
+use tokio::{sync::RwLock, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::error;
 
 pub mod error;
 
@@ -50,7 +52,9 @@ pub async fn system(
     // Build engine + limits together; actors fetch both via a single helper access.
     let wasm_runtime = WasmRuntime::new(config.spec.clone())
         .map_err(|e| SystemError::EngineCreation(e.to_string()))?;
-    system.add_helper("wasm_runtime", Arc::new(wasm_runtime)).await;
+    system
+        .add_helper("wasm_runtime", Arc::new(wasm_runtime))
+        .await;
 
     let contracts: HashMap<String, Vec<u8>> = HashMap::new();
     system
@@ -128,7 +132,10 @@ pub mod tests {
     use tempfile::TempDir;
     use test_log::test;
 
-    use crate::config::{AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig, AveInternalDBFeatureConfig};
+    use crate::config::{
+        AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
+        AveInternalDBFeatureConfig,
+    };
 
     use super::*;
 
@@ -186,7 +193,7 @@ pub mod tests {
             always_accept: false,
             tracking_size: 100,
             is_service: true,
-            spec: None
+            spec: None,
         };
 
         let (sys, handlers) = system(

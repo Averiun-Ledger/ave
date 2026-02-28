@@ -6,8 +6,8 @@ use crate::{
     control_list::{self, build_control_lists_updaters},
     routing::{self},
     utils::{
-        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL,
-        ROUTING_PROTOCOL, USER_AGENT,
+        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
+        USER_AGENT,
     },
 };
 
@@ -73,10 +73,12 @@ impl Behaviour {
                 limits.reqres_request_timeout,
             ));
 
-        let codec =
-            request_response::cbor::codec::Codec::<ReqResMessage, ReqResMessage>::default()
-                .set_request_size_maximum(1024 * 1024)       // 1 MiB
-                .set_response_size_maximum(10 * 1024 * 1024); // 10 MiB
+        let codec = request_response::cbor::codec::Codec::<
+            ReqResMessage,
+            ReqResMessage,
+        >::default()
+        .set_request_size_maximum(1024 * 1024) // 1 MiB
+        .set_response_size_maximum(10 * 1024 * 1024); // 10 MiB
 
         let req_res = request_response::Behaviour::with_codec(
             codec,
@@ -104,20 +106,23 @@ impl Behaviour {
             );
 
         #[cfg(feature = "test")]
-        let mem_limits = Toggle::from(None::<memory_connection_limits::Behaviour>);
+        let mem_limits =
+            Toggle::from(None::<memory_connection_limits::Behaviour>);
 
         #[cfg(not(feature = "test"))]
         let mem_limits = match &config.memory_limits {
             MemoryLimitsConfig::Disabled => Toggle::from(None),
             MemoryLimitsConfig::Percentage { value } => Toggle::from(Some(
-                memory_connection_limits::Behaviour::with_max_percentage(*value),
+                memory_connection_limits::Behaviour::with_max_percentage(
+                    *value,
+                ),
             )),
             MemoryLimitsConfig::Mb { value } => Toggle::from(Some(
-                memory_connection_limits::Behaviour::with_max_bytes(value * 1024 * 1024),
+                memory_connection_limits::Behaviour::with_max_bytes(
+                    value * 1024 * 1024,
+                ),
             )),
         };
-        
-
 
         let identify_config = identify::Config::new(
             IDENTIFY_PROTOCOL.to_owned(),
@@ -608,8 +613,8 @@ mod tests {
         random_walk: bool,
         node_type: NodeType,
     ) -> Config {
-        let config = crate::routing::Config::default()
-            .with_dht_random_walk(random_walk);
+        let config =
+            crate::routing::Config::default().with_dht_random_walk(random_walk);
 
         Config {
             boot_nodes,

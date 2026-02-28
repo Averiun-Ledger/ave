@@ -70,14 +70,17 @@ impl WasmLimits {
     pub fn build(ram_mb: u64, cpu_cores: usize) -> Self {
         // WASM linear memory per instance: floor 4 MB, cap 32 MB.
         let memory_size = ((ram_mb / 512) as usize)
-            .saturating_mul(4 * 1024 * 1024).clamp(4 * 1024 * 1024, 32 * 1024 * 1024);
+            .saturating_mul(4 * 1024 * 1024)
+            .clamp(4 * 1024 * 1024, 32 * 1024 * 1024);
 
         // Host I/O total per call: floor 3 MB, cap 24 MB.
         let max_total_memory = ((ram_mb / 512) as usize)
-             .saturating_mul(3 * 1024 * 1024).clamp(3 * 1024 * 1024, 24 * 1024 * 1024);
+            .saturating_mul(3 * 1024 * 1024)
+            .clamp(3 * 1024 * 1024, 24 * 1024 * 1024);
 
         // Single alloc cap ≈ ⅓ of I/O budget: floor 1 MB, cap 8 MB.
-        let max_single_alloc = (max_total_memory / 3).clamp(1024 * 1024, 8 * 1024 * 1024);
+        let max_single_alloc =
+            (max_total_memory / 3).clamp(1024 * 1024, 8 * 1024 * 1024);
 
         // Function table: 256 entries per core, floor 512, cap 2 048.
         let max_table_elements = (256 * cpu_cores.max(2)).min(2_048);
@@ -367,9 +370,14 @@ pub fn generate_linker(
             |caller: Caller<'_, MemoryManager>,
              index: i32|
              -> Result<u32, WasmError> {
-                let ptr = usize::try_from(index)
-                    .map_err(|_| ContractError::InvalidPointer { pointer: 0 })?;
-                caller.data().read_byte(ptr).map(|b| b as u32).map_err(WasmError::from)
+                let ptr = usize::try_from(index).map_err(|_| {
+                    ContractError::InvalidPointer { pointer: 0 }
+                })?;
+                caller
+                    .data()
+                    .read_byte(ptr)
+                    .map(|b| b as u32)
+                    .map_err(WasmError::from)
             },
         )
         .map_err(|e| ContractError::LinkerError {

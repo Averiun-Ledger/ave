@@ -167,10 +167,7 @@ impl Protocols {
         event_request: &EventRequest,
     ) -> (RequestEventDB, DigestIdentifier) {
         match (self, event_request) {
-            (
-                Self::Create { validation },
-                EventRequest::Create(create),
-            ) => {
+            (Self::Create { validation }, EventRequest::Create(create)) => {
                 let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 else {

@@ -131,11 +131,9 @@ impl From<ContractError> for CompilerError {
                     ),
                 }
             }
-            ContractError::AllocationOverflow => {
-                Self::MemoryAllocationFailed {
-                    details: "memory allocation would overflow".to_string(),
-                }
-            }
+            ContractError::AllocationOverflow => Self::MemoryAllocationFailed {
+                details: "memory allocation would overflow".to_string(),
+            },
             ContractError::LinkerError { function, details } => {
                 Self::InstantiationFailed {
                     details: format!(

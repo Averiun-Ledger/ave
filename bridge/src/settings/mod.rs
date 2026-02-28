@@ -37,15 +37,10 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
 
 /// Validate network configuration
 fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
-    config
-        .node
-        .network
-        .memory_limits
-        .validate()
-        .map_err(|e| {
-            error!(error = %e, "Invalid network configuration");
-            BridgeError::ConfigBuild(e)
-        })
+    config.node.network.memory_limits.validate().map_err(|e| {
+        error!(error = %e, "Invalid network configuration");
+        BridgeError::ConfigBuild(e)
+    })
 }
 
 /// Validate HTTPS configuration consistency
@@ -83,7 +78,8 @@ mod tests {
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use ave_core::{
         config::{
-            AveExternalDBFeatureConfig, AveInternalDBFeatureConfig, LoggingOutput, LoggingRotation, MachineSpec, SinkServer
+            AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
+            LoggingOutput, LoggingRotation, MachineSpec, SinkServer,
         },
         subject::sinkdata::SinkTypes,
     };
@@ -559,7 +555,7 @@ http:
             node.internal_db.db,
             AveInternalDBFeatureConfig::build(&PathBuf::from("/data/ave.db"))
         );
-        
+
         assert!(node.internal_db.durability);
         match &node.spec {
             Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
@@ -572,7 +568,7 @@ http:
             node.external_db.db,
             AveExternalDBFeatureConfig::build(&PathBuf::from("/data/ext.db"))
         );
-		assert!(node.external_db.durability);
+        assert!(node.external_db.durability);
 
         assert_eq!(node.network.node_type, NodeType::Addressable);
         assert_eq!(
@@ -729,8 +725,14 @@ http:
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
         assert_eq!(config.node.contracts_path, PathBuf::new());
-        assert_eq!(config.node.internal_db.db, AveInternalDBFeatureConfig::default());
-        assert_eq!(config.node.external_db.db, AveExternalDBFeatureConfig::default());
+        assert_eq!(
+            config.node.internal_db.db,
+            AveInternalDBFeatureConfig::default()
+        );
+        assert_eq!(
+            config.node.external_db.db,
+            AveExternalDBFeatureConfig::default()
+        );
         assert_eq!(config.node.tracking_size, 100);
         assert!(!config.node.is_service);
         assert_eq!(config.node.network.node_type, NodeType::Bootstrap);

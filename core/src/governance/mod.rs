@@ -897,11 +897,10 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let node_key = self
-            .subject_metadata
-            .new_owner
-            .as_ref()
-            .map_or_else(|| self.subject_metadata.owner.clone(), |new_owner| new_owner.clone());
+        let node_key = self.subject_metadata.new_owner.as_ref().map_or_else(
+            || self.subject_metadata.owner.clone(),
+            |new_owner| new_owner.clone(),
+        );
 
         if self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
@@ -984,11 +983,10 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let node_key = self
-            .subject_metadata
-            .new_owner
-            .as_ref()
-            .map_or_else(|| self.subject_metadata.owner.clone(), |new_owner| new_owner.clone());
+        let node_key = self.subject_metadata.new_owner.as_ref().map_or_else(
+            || self.subject_metadata.owner.clone(),
+            |new_owner| new_owner.clone(),
+        );
 
         let old_val = old_gov.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
@@ -1181,9 +1179,7 @@ impl Governance {
         Ok(())
     }
 
-    async fn down_owner(
-        ctx: &ActorContext<Self>,
-    ) -> Result<(), ActorError> {
+    async fn down_owner(ctx: &ActorContext<Self>) -> Result<(), ActorError> {
         let actor = ctx.get_child::<ApprPersist>("approver").await?;
         actor.ask_stop().await?;
 
@@ -1210,7 +1206,8 @@ impl Governance {
         for (id, schema) in schemas {
             let actor_name = format!("{}_compiler", id);
 
-            let compiler = ctx.create_child(&actor_name, Compiler::new(*hash)).await?;
+            let compiler =
+                ctx.create_child(&actor_name, Compiler::new(*hash)).await?;
 
             let Schema {
                 contract,

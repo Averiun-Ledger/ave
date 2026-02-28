@@ -16,15 +16,16 @@ use ave_common::{
         TransferSubject,
     },
 };
+pub use ave_core::config::{MachineSpec, resolve_spec};
 pub use ave_core::{
     Api as AveApi,
     auth::AuthWitness,
     config::Config as AveConfig,
     config::{
-        LoggingConfig, LoggingOutput, LoggingRotation, SinkConfig, SinkServer, AveExternalDBConfig, AveInternalDBConfig
+        AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
+        LoggingRotation, SinkConfig, SinkServer,
     },
     error::Error,
-
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
@@ -32,7 +33,6 @@ pub use network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
     RoutingConfig, RoutingNode,
 };
-pub use ave_core::config::{MachineSpec, resolve_spec};
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinHandle,

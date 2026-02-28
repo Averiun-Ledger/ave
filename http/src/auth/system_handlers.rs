@@ -226,19 +226,21 @@ pub async fn update_system_config(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "config_updated",
-        endpoint: Some(&format!("/admin/config/{}", key)),
-        http_method: Some("PUT"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "config_updated",
+            endpoint: Some(&format!("/admin/config/{}", key)),
+            http_method: Some("PUT"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 

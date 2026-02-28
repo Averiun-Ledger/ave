@@ -11,10 +11,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[cfg(feature = "openapi")]
-use utoipa::{IntoParams, ToSchema};
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
+#[cfg(feature = "openapi")]
+use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

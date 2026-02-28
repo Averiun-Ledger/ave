@@ -2,11 +2,17 @@
 //!
 
 use crate::{
-    Command, CommandHelper, Config, Error, Event as NetworkEvent, MachineSpec, Monitor, MonitorMessage, NodeType, ResolvedSpec, behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage}, resolve_spec, service::NetworkService, transport::build_transport, utils::{
+    Command, CommandHelper, Config, Error, Event as NetworkEvent, MachineSpec,
+    Monitor, MonitorMessage, NodeType, ResolvedSpec,
+    behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage},
+    resolve_spec,
+    service::NetworkService,
+    transport::build_transport,
+    utils::{
         Action, Due, IDENTIFY_PROTOCOL, LimitsConfig, MessagesHelper,
         NetworkState, REQRES_PROTOCOL, RetryKind, RetryState, ScheduleType,
         convert_addresses, convert_boot_nodes, peer_id_to_ed25519_pubkey_bytes,
-    }
+    },
 };
 
 use std::{
@@ -17,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use ave_actors::{ActorRef};
+use ave_actors::ActorRef;
 use ave_common::identity::KeyPair;
 
 use libp2p::{
@@ -75,7 +81,6 @@ impl PendingQueue {
         self.messages.is_empty()
     }
 }
-
 
 /// Main network worker. Must be polled in order for the network to advance.
 ///
@@ -148,7 +153,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         config: Config,
         monitor: Option<ActorRef<Monitor>>,
         cancel: CancellationToken,
-        machine_spec: Option<MachineSpec>
+        machine_spec: Option<MachineSpec>,
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
@@ -156,16 +161,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         let key = match keys {
             KeyPair::Ed25519(ed25519_signer) => {
-                let sk_bytes =
-                    ed25519_signer.secret_key_bytes().map_err(|e| {
-                        Error::KeyExtraction(e.to_string())
-                    })?;
+                let sk_bytes = ed25519_signer
+                    .secret_key_bytes()
+                    .map_err(|e| Error::KeyExtraction(e.to_string()))?;
 
-                let sk = ed25519::SecretKey::try_from_bytes(sk_bytes).map_err(
-                    |e| {
-                        Error::KeyExtraction(e.to_string())
-                    },
-                )?;
+                let sk = ed25519::SecretKey::try_from_bytes(sk_bytes)
+                    .map_err(|e| Error::KeyExtraction(e.to_string()))?;
 
                 let kp = ed25519::Keypair::from(sk);
                 Keypair::from(kp)
@@ -193,12 +194,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
 
-        let behaviour = Behaviour::new(
-            &key.public(),
-            config,
-            cancel.clone(),
-            limits,
-        );
+        let behaviour =
+            Behaviour::new(&key.public(), config, cancel.clone(), limits);
 
         // Create the swarm.
         let mut swarm = Swarm::new(
@@ -233,7 +230,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             // Listen on the external addresses.
             for addr in addresses.iter() {
                 info!(target: TARGET, addr = %addr, "listening on address");
-                swarm.listen_on(addr.clone()).map_err(|e| Error::Listen(format!("{addr}: {e}")))?;
+                swarm
+                    .listen_on(addr.clone())
+                    .map_err(|e| Error::Listen(format!("{addr}: {e}")))?;
             }
         }
 
@@ -291,8 +290,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             addrs: vec![],
         });
 
-        let when = if matches!((entry.kind, kind), (RetryKind::Discover, RetryKind::Dial))
-        {
+        let when = if matches!(
+            (entry.kind, kind),
+            (RetryKind::Discover, RetryKind::Dial)
+        ) {
             now
         } else {
             if entry.attempts >= 8 {
@@ -310,7 +311,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
             // jitter 80–120% determinista por peer (sin RNG externo)
             // Fold all bytes to avoid the fixed multihash prefix dominating.
-            let hash = peer.to_bytes().iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+            let hash = peer
+                .to_bytes()
+                .iter()
+                .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
             let j = 80 + (hash % 41);
             delay = delay * j / 100;
 
@@ -407,9 +411,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         self.add_pending_outbound_message(peer, message);
 
         if self.swarm.behaviour_mut().is_known_peer(&peer) {
-            if let Some(Action::Identified(..)) =
-                self.peer_action.get(&peer)
-            {
+            if let Some(Action::Identified(..)) = self.peer_action.get(&peer) {
                 self.send_pending_outbound_messages(peer);
             } else {
                 self.schedule_retry(peer, ScheduleType::Dial(vec![]));
@@ -452,9 +454,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
         if let Some(mut queue) = self.pending_outbound_messages.remove(&peer) {
             for message in queue.drain() {
-                self.swarm
-                    .behaviour_mut()
-                    .send_message(&peer, message);
+                self.swarm.behaviour_mut().send_message(&peer, message);
             }
         }
 
@@ -544,10 +544,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                         .build(),
                                 ) {
                                     let (add_to_retry, new_addresses) =
-                                        Self::init_dial_error_manager(
-                                            e,
-                                            peer,
-                                        );
+                                        Self::init_dial_error_manager(e, peer);
                                     self.boot_nodes.remove(&peer);
                                     if add_to_retry {
                                         if new_addresses.is_empty() {
@@ -1055,7 +1052,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 self.pending_inbound_messages.remove(&peer_id)
                             {
                                 self.message_to_helper(
-                                    MessagesHelper::Vec(queue.drain().collect()),
+                                    MessagesHelper::Vec(
+                                        queue.drain().collect(),
+                                    ),
                                     &peer_id,
                                 )
                                 .await;
@@ -1110,7 +1109,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             )
                             .await;
                         } else {
-                            let queue = self.pending_inbound_messages
+                            let queue = self
+                                .pending_inbound_messages
                                 .entry(peer_id)
                                 .or_default();
                             if queue.push(message_data) {
@@ -1124,8 +1124,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
                     }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
-                        if matches!(self.peer_action.get(&peer_id), Some(Action::Discover))
-                        {
+                        if matches!(
+                            self.peer_action.get(&peer_id),
+                            Some(Action::Discover)
+                        ) {
                             self.peer_action.remove(&peer_id);
                             if let Some(info) = info {
                                 let addr = info
@@ -1169,7 +1171,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 peer_id: Some(peer_id),
                 ..
             } => {
-                if matches!(self.peer_action.get(&peer_id), Some(Action::Dial)) {
+                if matches!(self.peer_action.get(&peer_id), Some(Action::Dial))
+                {
                     self.peer_action.remove(&peer_id);
 
                     self.swarm.behaviour_mut().add_peer_to_remove(&peer_id);
@@ -1228,7 +1231,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                         self.retry_by_peer.remove(&peer_id);
 
-                        if self.pending_outbound_messages.get(&peer_id).is_some_and(|q| !q.is_empty()) {
+                        if self
+                            .pending_outbound_messages
+                            .get(&peer_id)
+                            .is_some_and(|q| !q.is_empty())
+                        {
                             self.schedule_retry(
                                 peer_id,
                                 ScheduleType::Dial(vec![]),
@@ -1243,8 +1250,15 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         self.response_channels.remove(&peer_id);
                         self.peer_identify.remove(&peer_id);
 
-                        if self.pending_outbound_messages.get(&peer_id).is_some_and(|q| !q.is_empty()) {
-                            self.schedule_retry(peer_id, ScheduleType::Discover);
+                        if self
+                            .pending_outbound_messages
+                            .get(&peer_id)
+                            .is_some_and(|q| !q.is_empty())
+                        {
+                            self.schedule_retry(
+                                peer_id,
+                                ScheduleType::Discover,
+                            );
                         }
                     }
                 }

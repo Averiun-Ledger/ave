@@ -837,7 +837,10 @@ where
             if (hi_sn - actual_sn) > 99 {
                 Ok((get_n_events(ctx, actual_sn, 99).await?, false))
             } else {
-                Ok((get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?, true))
+                Ok((
+                    get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
+                    true,
+                ))
             }
         } else if hi_sn > 99 {
             Ok((get_n_events(ctx, 0, 99).await?, false))

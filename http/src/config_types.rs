@@ -3,10 +3,11 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    AveExternalDBConfig, AveInternalDBConfig, HttpConfig, SelfSignedCertConfig, auth::{
+    AveExternalDBConfig, AveInternalDBConfig, HttpConfig, SelfSignedCertConfig,
+    auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
-    }
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -42,8 +43,12 @@ pub enum MachineSpecHttp {
 impl From<ave_bridge::MachineSpec> for MachineSpecHttp {
     fn from(value: ave_bridge::MachineSpec) -> Self {
         match value {
-            ave_bridge::MachineSpec::Profile(machine_profile) => Self::Profile(machine_profile.to_string()),
-            ave_bridge::MachineSpec::Custom { ram_mb, cpu_cores } => Self::Custom { ram_mb, cpu_cores },
+            ave_bridge::MachineSpec::Profile(machine_profile) => {
+                Self::Profile(machine_profile.to_string())
+            }
+            ave_bridge::MachineSpec::Custom { ram_mb, cpu_cores } => {
+                Self::Custom { ram_mb, cpu_cores }
+            }
         }
     }
 }
@@ -281,7 +286,7 @@ pub struct AveConfigHttp {
     /// Is a service node
     pub is_service: bool,
 
-    pub spec: Option<MachineSpecHttp>
+    pub spec: Option<MachineSpecHttp>,
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -296,7 +301,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
-            spec: value.spec.map(MachineSpecHttp::from)
+            spec: value.spec.map(MachineSpecHttp::from),
         }
     }
 }
@@ -304,7 +309,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct AveStoreConfigHttp {
     pub db: String,
-    pub durability: bool
+    pub durability: bool,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -312,22 +317,26 @@ pub struct AveActorsStoreConfigHttp {
     pub ram_mb: Option<u64>,
     pub cpu_cores: Option<usize>,
     pub profile: Option<String>,
-    pub durability: bool
+    pub durability: bool,
 }
 
 impl From<AveInternalDBConfig> for AveStoreConfigHttp {
     fn from(value: AveInternalDBConfig) -> Self {
-        Self { db: value.db.to_string(), durability: value.durability}
+        Self {
+            db: value.db.to_string(),
+            durability: value.durability,
+        }
     }
 }
 
 impl From<AveExternalDBConfig> for AveStoreConfigHttp {
     fn from(value: AveExternalDBConfig) -> Self {
-        Self { db: value.db.to_string(), durability: value.durability}
+        Self {
+            db: value.db.to_string(),
+            durability: value.durability,
+        }
     }
 }
-
-
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 pub struct NetworkConfigHttp {

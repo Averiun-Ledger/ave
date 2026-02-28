@@ -78,8 +78,6 @@ pub enum MachineSpec {
     },
 }
 
-
-
 /// Predefined instance profiles with fixed vCPU and RAM.
 /// They only exist to provide convenient default values — the actual
 /// wasmtime tuning is derived from the resolved `ram_mb` and `cpu_cores`.
@@ -117,12 +115,12 @@ impl MachineProfile {
     /// Canonical RAM for this profile in megabytes.
     pub const fn ram_mb(self) -> u64 {
         match self {
-            Self::Nano    =>   512,
-            Self::Micro   =>  1_024,
-            Self::Small   =>  2_048,
-            Self::Medium  =>  4_096,
-            Self::Large   =>  8_192,
-            Self::XLarge  => 16_384,
+            Self::Nano => 512,
+            Self::Micro => 1_024,
+            Self::Small => 2_048,
+            Self::Medium => 4_096,
+            Self::Large => 8_192,
+            Self::XLarge => 16_384,
             Self::XXLarge => 32_768,
         }
     }
@@ -130,12 +128,12 @@ impl MachineProfile {
     /// vCPU count for this profile.
     pub const fn cpu_cores(self) -> usize {
         match self {
-            Self::Nano    => 2,
-            Self::Micro   => 2,
-            Self::Small   => 2,
-            Self::Medium  => 2,
-            Self::Large   => 2,
-            Self::XLarge  => 4,
+            Self::Nano => 2,
+            Self::Micro => 2,
+            Self::Small => 2,
+            Self::Medium => 2,
+            Self::Large => 2,
+            Self::XLarge => 4,
             Self::XXLarge => 8,
         }
     }
@@ -144,12 +142,12 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Nano    => write!(f, "nano"),
-            Self::Micro   => write!(f, "micro"),
-            Self::Small   => write!(f, "small"),
-            Self::Medium  => write!(f, "medium"),
-            Self::Large   => write!(f, "large"),
-            Self::XLarge  => write!(f, "xlarge"),
+            Self::Nano => write!(f, "nano"),
+            Self::Micro => write!(f, "micro"),
+            Self::Small => write!(f, "small"),
+            Self::Medium => write!(f, "medium"),
+            Self::Large => write!(f, "large"),
+            Self::XLarge => write!(f, "xlarge"),
             Self::XXLarge => write!(f, "2xlarge"),
         }
     }
@@ -192,13 +190,12 @@ pub(crate) fn detect_ram_mb() -> u64 {
     {
         if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
             for line in meminfo.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") 
-                    && let Some(kb_str) = rest.split_whitespace().next() 
-                        && let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb / 1024;
-                        }
-                    
-                
+                if let Some(rest) = line.strip_prefix("MemTotal:")
+                    && let Some(kb_str) = rest.split_whitespace().next()
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    return kb / 1024;
+                }
             }
         }
     }
@@ -216,12 +213,12 @@ pub(crate) fn detect_cpu_cores() -> usize {
 impl From<MachineProfile> for network::MachineProfile {
     fn from(p: MachineProfile) -> Self {
         match p {
-            MachineProfile::Nano    => Self::Nano,
-            MachineProfile::Micro   => Self::Micro,
-            MachineProfile::Small   => Self::Small,
-            MachineProfile::Medium  => Self::Medium,
-            MachineProfile::Large   => Self::Large,
-            MachineProfile::XLarge  => Self::XLarge,
+            MachineProfile::Nano => Self::Nano,
+            MachineProfile::Micro => Self::Micro,
+            MachineProfile::Small => Self::Small,
+            MachineProfile::Medium => Self::Medium,
+            MachineProfile::Large => Self::Large,
+            MachineProfile::XLarge => Self::XLarge,
             MachineProfile::XXLarge => Self::XXLarge,
         }
     }
@@ -241,12 +238,12 @@ impl From<MachineSpec> for network::MachineSpec {
 impl From<MachineProfile> for ave_actors::MachineProfile {
     fn from(p: MachineProfile) -> Self {
         match p {
-            MachineProfile::Nano    => Self::Nano,
-            MachineProfile::Micro   => Self::Micro,
-            MachineProfile::Small   => Self::Small,
-            MachineProfile::Medium  => Self::Medium,
-            MachineProfile::Large   => Self::Large,
-            MachineProfile::XLarge  => Self::XLarge,
+            MachineProfile::Nano => Self::Nano,
+            MachineProfile::Micro => Self::Micro,
+            MachineProfile::Small => Self::Small,
+            MachineProfile::Medium => Self::Medium,
+            MachineProfile::Large => Self::Large,
+            MachineProfile::XLarge => Self::XLarge,
             MachineProfile::XXLarge => Self::XXLarge,
         }
     }
@@ -268,7 +265,7 @@ impl From<MachineSpec> for ave_actors::MachineSpec {
 pub struct AveInternalDBConfig {
     #[serde(deserialize_with = "AveInternalDBFeatureConfig::deserialize_db")]
     pub db: AveInternalDBFeatureConfig,
-    pub durability: bool
+    pub durability: bool,
 }
 
 /// Database configuration.
@@ -313,9 +310,7 @@ impl AveInternalDBFeatureConfig {
         };
     }
 
-    pub fn deserialize_db<'de, D>(
-        deserializer: D,
-    ) -> Result<Self, D::Error>
+    pub fn deserialize_db<'de, D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -347,7 +342,7 @@ impl fmt::Display for AveInternalDBFeatureConfig {
 pub struct AveExternalDBConfig {
     #[serde(deserialize_with = "AveExternalDBFeatureConfig::deserialize_db")]
     pub db: AveExternalDBFeatureConfig,
-    pub durability: bool
+    pub durability: bool,
 }
 
 /// Database configuration.
@@ -378,9 +373,7 @@ impl AveExternalDBFeatureConfig {
         };
     }
 
-    pub fn deserialize_db<'de, D>(
-        deserializer: D,
-    ) -> Result<Self, D::Error>
+    pub fn deserialize_db<'de, D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {

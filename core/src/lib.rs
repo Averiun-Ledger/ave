@@ -42,7 +42,9 @@ use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use network::{MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker};
+use network::{
+    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
+};
 
 use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};

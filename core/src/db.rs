@@ -22,16 +22,21 @@ pub enum Database {
 }
 
 impl Database {
-    pub fn open(config: &AveInternalDBConfig, spec: Option<MachineSpec>) -> Result<Self, StoreError> {
+    pub fn open(
+        config: &AveInternalDBConfig,
+        spec: Option<MachineSpec>,
+    ) -> Result<Self, StoreError> {
         match &config.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
-                let manager = RocksDbManager::new(path, config.durability, spec)?;
+                let manager =
+                    RocksDbManager::new(path, config.durability, spec)?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
             AveInternalDBFeatureConfig::Sqlite { path } => {
-                let manager = SqliteManager::new(path, config.durability, spec)?;
+                let manager =
+                    SqliteManager::new(path, config.durability, spec)?;
                 Ok(Self::SQLite(manager))
             }
         }
@@ -76,17 +81,13 @@ impl DbManager<DbCollection, DbCollection> for Database {
             }
         }
     }
-    
+
     fn stop(self) -> Result<(), StoreError> {
-                match self {
+        match self {
             #[cfg(feature = "rocksdb")]
-            Database::RocksDb(manager) => {
-                manager.stop()
-            }
+            Database::RocksDb(manager) => manager.stop(),
             #[cfg(feature = "sqlite")]
-            Self::SQLite(manager) => {
-                manager.stop()
-            }
+            Self::SQLite(manager) => manager.stop(),
         }
     }
 }
@@ -155,7 +156,7 @@ impl Collection for DbCollection {
             Self::SQLite(store) => Collection::purge(store),
         }
     }
-    
+
     fn last(&self) -> Option<(String, Vec<u8>)> {
         match self {
             #[cfg(feature = "rocksdb")]

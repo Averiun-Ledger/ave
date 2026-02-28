@@ -26,7 +26,6 @@ pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
     #[error(
@@ -103,7 +102,8 @@ impl LimitsConfig {
         let bytes_per_conn: u64 = 50 * 1024; // ~50 KB per established connection
 
         // Total connections: floor 50, cap 9 000 (file-descriptor & kernel limits)
-        let max_total = ((budget_bytes / bytes_per_conn) as u32).clamp(50, 9_000);
+        let max_total =
+            ((budget_bytes / bytes_per_conn) as u32).clamp(50, 9_000);
 
         // 80 % incoming (nodes are mostly servers), 20 % outgoing
         let max_incoming = (max_total * 80 / 100).clamp(30, 8_000);
@@ -125,7 +125,7 @@ impl LimitsConfig {
 
         // Yamux per-connection stream limit: must cover the worst case where a
         // single peer saturates the full ReqRes budget, plus routing/kad overhead.
-        let yamux_streams =(reqres_streams + 64).clamp(256, 8_192);
+        let yamux_streams = (reqres_streams + 64).clamp(256, 8_192);
 
         // ── TCP listen backlog (kernel-managed) ──────────────────────────────────
         // Sized for SYN bursts: 1/8 of max_incoming, floor 128, cap 8 192.
@@ -442,7 +442,10 @@ impl ReqResConfig {
     }
 
     /// Sets the upper bound for the number of concurrent inbound + outbound streams.
-    pub const fn with_max_concurrent_streams(mut self, num_streams: usize) -> Self {
+    pub const fn with_max_concurrent_streams(
+        mut self,
+        num_streams: usize,
+    ) -> Self {
         self.max_concurrent_streams = num_streams;
         self
     }

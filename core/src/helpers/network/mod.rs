@@ -48,7 +48,7 @@ pub enum ActorMessage {
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,
-        receiver_actor: String
+        receiver_actor: String,
     },
     AuthLastSn {
         sn: u64,

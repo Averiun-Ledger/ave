@@ -296,8 +296,7 @@ impl WitnessesRegister {
                     && gov_version <= range.hi
                 {
                     // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
-                    better_gov_version =
-                        better_gov_version.max(Some(range.hi));
+                    better_gov_version = better_gov_version.max(Some(range.hi));
                 }
             }
         }
@@ -340,8 +339,9 @@ impl WitnessesRegister {
         };
 
         // todos los esquemas
-        if let Some(witness_data) =
-            self.witnesses.get(&(node.clone(), SchemaType::TrackerSchemas))
+        if let Some(witness_data) = self
+            .witnesses
+            .get(&(node.clone(), SchemaType::TrackerSchemas))
         {
             return Self::search_in_schema_actual(
                 witness_data,
@@ -383,8 +383,9 @@ impl WitnessesRegister {
             });
 
         // todos los esquemas
-        if let Some(witness_data) =
-            self.witnesses.get(&(node.clone(), SchemaType::TrackerSchemas))
+        if let Some(witness_data) = self
+            .witnesses
+            .get(&(node.clone(), SchemaType::TrackerSchemas))
         {
             return Self::search_in_schema(
                 witness_data,
@@ -561,13 +562,12 @@ impl WitnessesRegister {
 
         let sn_limit = if let Some(gov_version) = better_gov_version {
             match self.get_sn(ctx, subject_id, gov_version).await? {
-                SnLimit::Sn(sn) => {
-                    better_sn.map_or(SnLimit::Sn(sn), |better_sn| SnLimit::Sn(sn.max(better_sn)))
-                }
+                SnLimit::Sn(sn) => better_sn
+                    .map_or(SnLimit::Sn(sn), |better_sn| {
+                        SnLimit::Sn(sn.max(better_sn))
+                    }),
                 SnLimit::LastSn => SnLimit::Sn(data.sn),
-                SnLimit::NotSn => {
-                    better_sn.map_or(SnLimit::NotSn, SnLimit::Sn)
-                }
+                SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
             }
         } else if let Some(better_sn) = better_sn {
             SnLimit::Sn(better_sn)
@@ -1056,14 +1056,14 @@ impl PersistentActor for WitnessesRegister {
                         for (witness_type, (interval, last)) in
                             creator_witnesses.iter_mut()
                         {
-                            if !witnesses.contains(witness_type) 
-                                && let Some(lo) = last.take() {
-                                    interval.insert(Interval {
-                                        lo,
-                                        hi: *version - 1,
-                                    });
-                                }
-                            
+                            if !witnesses.contains(witness_type)
+                                && let Some(lo) = last.take()
+                            {
+                                interval.insert(Interval {
+                                    lo,
+                                    hi: *version - 1,
+                                });
+                            }
                         }
                         // Añadir o reactivar testigos en la nueva lista
                         for witness in witnesses.iter() {
@@ -1243,10 +1243,8 @@ impl PersistentActor for WitnessesRegister {
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
                     {
-                        let entry = data
-                            .old_owners
-                            .entry(new_owner)
-                            .or_default();
+                        let entry =
+                            data.old_owners.entry(new_owner).or_default();
                         entry.sn = *sn;
                         entry.interval_gov_version.insert(Interval {
                             lo: new_owner_gov_version,

@@ -630,10 +630,12 @@ pub mod tests {
         node::Node,
         query::{Query, QueryMessage, QueryResponse},
         request::{
-            RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse, tracking::{
+            RequestData, RequestHandler, RequestHandlerMessage,
+            RequestHandlerResponse,
+            tracking::{
                 RequestTracking, RequestTrackingMessage,
                 RequestTrackingResponse,
-            }
+            },
         },
         tracker::{Tracker, TrackerMessage, TrackerResponse},
         validation::tests::create_gov,
@@ -725,7 +727,14 @@ pub mod tests {
             payload: payload.clone(),
         });
 
-        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {
@@ -888,8 +897,15 @@ pub mod tests {
             payload: payload.clone(),
         });
 
-        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
-        
+        let _request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
             .await
@@ -1020,7 +1036,14 @@ pub mod tests {
             })),
         });
 
-        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
@@ -1049,7 +1072,14 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            transfer_request.clone(),
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -1203,7 +1233,14 @@ pub mod tests {
             })),
         });
 
-        let _request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let RequestHandlerResponse::Response(res) = request_actor
             .ask(RequestHandlerMessage::ChangeApprovalState {
@@ -1232,7 +1269,14 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(transfer_request, &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            transfer_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let GovernanceResponse::Metadata(metadata) = subject_actor
             .ask(GovernanceMessage::GetMetadata)
@@ -1432,7 +1476,14 @@ pub mod tests {
             })),
         });
 
-        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
             .ask(RequestHandlerMessage::GetApproval {
@@ -1583,7 +1634,14 @@ pub mod tests {
             namespace: Namespace::new(),
         });
 
-        let request_data = emit_request(create_request, &node_actor, &request_actor, &tracking, true).await;
+        let request_data = emit_request(
+            create_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let subject_actor: ActorRef<Tracker> = system
             .get_actor(&ActorPath::from(format!(
@@ -1730,7 +1788,14 @@ pub mod tests {
             payload: ValueWrapper(payload.clone()),
         });
 
-        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
@@ -1849,7 +1914,14 @@ pub mod tests {
             payload: ValueWrapper(payload.clone()),
         });
 
-        let request_data = emit_request(fact_request, &node_actor, &request_actor, &tracking, true).await;
+        let request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
@@ -1969,7 +2041,14 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            transfer_request.clone(),
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)
@@ -2114,7 +2193,14 @@ pub mod tests {
             .unwrap(),
         });
 
-        let _request_data = emit_request(transfer_request.clone(), &node_actor, &request_actor, &tracking, true).await;
+        let _request_data = emit_request(
+            transfer_request.clone(),
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
 
         let TrackerResponse::Metadata(metadata) = subject_actor
             .ask(TrackerMessage::GetMetadata)

@@ -113,10 +113,11 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
-                let governance_id = data
-                    .get_governance_id()
-                    .as_ref()
-                    .map_or_else(|| subject_id.clone(), |governance_id| governance_id.clone());
+                let governance_id =
+                    data.get_governance_id().as_ref().map_or_else(
+                        || subject_id.clone(),
+                        |governance_id| governance_id.clone(),
+                    );
 
                 let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
                     error!(

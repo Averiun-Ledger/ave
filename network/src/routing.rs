@@ -23,15 +23,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    NodeType,
-    utils::{
-        LimitsConfig, 
-    },
-};
+use crate::{NodeType, utils::LimitsConfig};
 
 #[cfg(not(feature = "test"))]
-use crate::utils::{is_global, is_loop_back, is_private, is_dns, is_tcp};
+use crate::utils::{is_dns, is_global, is_loop_back, is_private, is_tcp};
 
 /// The discovery behaviour.
 pub struct Behaviour {
@@ -633,7 +628,10 @@ impl Config {
     }
 
     /// Whether to allow local addresses in the DHT.
-    pub const fn with_allow_private_address_in_dht(mut self, allow: bool) -> Self {
+    pub const fn with_allow_private_address_in_dht(
+        mut self,
+        allow: bool,
+    ) -> Self {
         self.allow_private_address_in_dht = allow;
         self
     }
@@ -655,7 +653,10 @@ impl Config {
     }
 
     /// Whether to allow non-global addresses in the DHT.
-    pub const fn with_allow_loop_back_address_in_dht(mut self, allow: bool) -> Self {
+    pub const fn with_allow_loop_back_address_in_dht(
+        mut self,
+        allow: bool,
+    ) -> Self {
         self.allow_loop_back_address_in_dht = allow;
         self
     }
@@ -666,7 +667,10 @@ impl Config {
     }
 
     /// When enabled the number of disjoint paths used equals the configured parallelism.
-    pub const fn with_kademlia_disjoint_query_paths(mut self, enable: bool) -> Self {
+    pub const fn with_kademlia_disjoint_query_paths(
+        mut self,
+        enable: bool,
+    ) -> Self {
         self.kademlia_disjoint_query_paths = enable;
         self
     }

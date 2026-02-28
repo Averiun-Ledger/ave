@@ -37,9 +37,7 @@ impl ValidationReq {
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
             Self::Create { subject_id, .. } => subject_id.clone(),
-            Self::Event { metadata, .. } => {
-                metadata.subject_id.clone()
-            }
+            Self::Event { metadata, .. } => metadata.subject_id.clone(),
         }
     }
 
@@ -56,9 +54,7 @@ impl ValidationReq {
 
     pub fn get_signed_event_request(&self) -> Signed<EventRequest> {
         match self {
-            Self::Create { event_request, .. } => {
-                event_request.clone()
-            }
+            Self::Create { event_request, .. } => event_request.clone(),
             Self::Event { event_request, .. } => event_request.clone(),
         }
     }
@@ -75,9 +71,7 @@ impl ValidationReq {
                     ))
                 }
             }
-            Self::Event { metadata, .. } => {
-                Ok(metadata.governance_id.clone())
-            }
+            Self::Event { metadata, .. } => Ok(metadata.governance_id.clone()),
         }
     }
 
@@ -107,9 +101,7 @@ impl ValidationReq {
                     ))
                 }
             }
-            Self::Event { metadata, .. } => {
-                Ok(metadata.schema_id.clone())
-            }
+            Self::Event { metadata, .. } => Ok(metadata.schema_id.clone()),
         }
     }
 
@@ -125,9 +117,7 @@ impl ValidationReq {
                     ))
                 }
             }
-            Self::Event { metadata, .. } => {
-                Ok(metadata.namespace.clone())
-            }
+            Self::Event { metadata, .. } => Ok(metadata.namespace.clone()),
         }
     }
 }
@@ -158,12 +148,8 @@ impl ActualProtocols {
     pub fn is_success(&self) -> bool {
         match &self {
             Self::None => true,
-            Self::Eval { eval_data } => {
-                eval_data.evaluator_res().is_some()
-            }
-            Self::EvalApprove { approval_data, .. } => {
-                approval_data.approved
-            }
+            Self::Eval { eval_data } => eval_data.evaluator_res().is_some(),
+            Self::EvalApprove { approval_data, .. } => approval_data.approved,
         }
     }
 
@@ -176,27 +162,17 @@ impl ActualProtocols {
             (Self::None, true, EventRequestType::Create)
             | (Self::None, false, EventRequestType::Create)
             | (Self::Eval { .. }, false, EventRequestType::Fact)
-            | (
-                Self::Eval { .. },
-                true,
-                EventRequestType::Transfer,
-            )
-            | (
-                Self::Eval { .. },
-                false,
-                EventRequestType::Transfer,
-            )
+            | (Self::Eval { .. }, true, EventRequestType::Transfer)
+            | (Self::Eval { .. }, false, EventRequestType::Transfer)
             | (Self::Eval { .. }, true, EventRequestType::Confirm)
             | (Self::None, false, EventRequestType::Confirm)
             | (Self::None, true, EventRequestType::Reject)
             | (Self::None, false, EventRequestType::Reject)
             | (Self::None, true, EventRequestType::Eol)
             | (Self::None, false, EventRequestType::Eol) => true,
-            (
-                Self::Eval { eval_data },
-                true,
-                EventRequestType::Fact,
-            ) => eval_data.evaluator_res().is_none(),
+            (Self::Eval { eval_data }, true, EventRequestType::Fact) => {
+                eval_data.evaluator_res().is_none()
+            }
             (
                 Self::EvalApprove { eval_data, .. },
                 true,

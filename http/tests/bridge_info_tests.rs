@@ -1761,7 +1761,8 @@ async fn test_system_info_deserialization() {
     }
     #[cfg(feature = "rocksdb")]
     {
-        assert_eq!(config.node.internal_db.db, "Rocksdb");MA
+        assert_eq!(config.node.internal_db.db, "Rocksdb");
+        MA
     }
     assert_eq!(config.node.external_db.db, "Sqlite");
     assert_eq!(config.node.hash_algorithm, "Blake3");
@@ -1780,10 +1781,7 @@ async fn test_system_info_deserialization() {
     assert!(config.node.network.external_addresses.is_empty());
     assert!(config.node.network.boot_nodes.is_empty());
     assert!(config.node.network.routing.dht_random_walk);
-    assert_eq!(
-        config.node.network.routing.discovery_only_if_under_num,
-        25
-    );
+    assert_eq!(config.node.network.routing.discovery_only_if_under_num, 25);
     assert!(!config.node.network.routing.allow_private_address_in_dht);
     assert!(!config.node.network.routing.allow_dns_address_in_dht);
     assert!(!config.node.network.routing.allow_loop_back_address_in_dht);

@@ -35,7 +35,7 @@ pub struct NodeData {
     pub handler: Vec<JoinHandle<()>>,
     pub token: CancellationToken,
     pub keys: KeyPair,
-    pub listen_address: String
+    pub listen_address: String,
 }
 
 pub async fn create_node(
@@ -101,7 +101,7 @@ pub async fn create_node(
             handler: runners,
             token,
             keys,
-            listen_address: listen_address.to_owned()
+            listen_address: listen_address.to_owned(),
         },
         vec_dirs,
     )

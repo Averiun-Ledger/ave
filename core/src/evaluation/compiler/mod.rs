@@ -24,7 +24,8 @@ use tracing::{Span, debug, error, info_span};
 use wasmtime::{ExternType, Module, Store};
 
 use crate::model::common::contract::{
-    MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
+    MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime,
+    generate_linker,
 };
 
 pub mod error;
@@ -147,10 +148,14 @@ impl Compiler {
         contract_path: &Path,
         state: ValueWrapper,
     ) -> Result<Vec<u8>, CompilerError> {
-        let Some(wasm_runtime) =
-            ctx.system().get_helper::<Arc<WasmRuntime>>("wasm_runtime").await
+        let Some(wasm_runtime) = ctx
+            .system()
+            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+            .await
         else {
-            return Err(CompilerError::MissingHelper { name: "wasm_runtime" });
+            return Err(CompilerError::MissingHelper {
+                name: "wasm_runtime",
+            });
         };
         // Read compile contract
         let wasm_path = contract_path
@@ -166,22 +171,23 @@ impl Compiler {
         })?;
 
         // Precompilation
-        let contract_bytes = wasm_runtime.engine.precompile_module(&file).map_err(|e| {
-            CompilerError::WasmPrecompileFailed {
+        let contract_bytes = wasm_runtime
+            .engine
+            .precompile_module(&file)
+            .map_err(|e| CompilerError::WasmPrecompileFailed {
                 details: e.to_string(),
-            }
-        })?;
+            })?;
 
         drop(file);
 
         // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
         // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
         let module = unsafe {
-            Module::deserialize(&wasm_runtime.engine, &contract_bytes).map_err(|e| {
-                CompilerError::WasmDeserializationFailed {
+            Module::deserialize(&wasm_runtime.engine, &contract_bytes).map_err(
+                |e| CompilerError::WasmDeserializationFailed {
                     details: e.to_string(),
-                }
-            })?
+                },
+            )?
         };
 
         // Obtain imports
@@ -338,7 +344,6 @@ pub enum CompilerMessage {
 }
 
 impl Message for CompilerMessage {}
-
 
 #[derive(Debug, Clone)]
 pub enum CompilerResponse {

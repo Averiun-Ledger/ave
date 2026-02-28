@@ -44,7 +44,10 @@ async fn create_test_db_with_rate_limit(
         },
     };
 
-    (AuthDatabase::new(config, "AdminPass123!", None).unwrap(), dir)
+    (
+        AuthDatabase::new(config, "AdminPass123!", None).unwrap(),
+        dir,
+    )
 }
 
 // =============================================================================

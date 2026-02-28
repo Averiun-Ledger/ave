@@ -49,13 +49,9 @@ impl From<EventRequest> for BridgeEventRequest {
         match request {
             EventRequest::Create(req) => Self::Create(req.into()),
             EventRequest::Fact(req) => Self::Fact(req.into()),
-            EventRequest::Transfer(req) => {
-                Self::Transfer(req.into())
-            }
+            EventRequest::Transfer(req) => Self::Transfer(req.into()),
             EventRequest::EOL(req) => Self::Eol(req.into()),
-            EventRequest::Confirm(req) => {
-                Self::Confirm(req.into())
-            }
+            EventRequest::Confirm(req) => Self::Confirm(req.into()),
             EventRequest::Reject(req) => Self::Reject(req.into()),
         }
     }
@@ -69,15 +65,11 @@ impl TryFrom<BridgeEventRequest> for EventRequest {
             BridgeEventRequest::Create(req) => {
                 Ok(Self::Create(req.try_into()?))
             }
-            BridgeEventRequest::Fact(req) => {
-                Ok(Self::Fact(req.try_into()?))
-            }
+            BridgeEventRequest::Fact(req) => Ok(Self::Fact(req.try_into()?)),
             BridgeEventRequest::Transfer(req) => {
                 Ok(Self::Transfer(req.try_into()?))
             }
-            BridgeEventRequest::Eol(req) => {
-                Ok(Self::EOL(req.try_into()?))
-            }
+            BridgeEventRequest::Eol(req) => Ok(Self::EOL(req.try_into()?)),
             BridgeEventRequest::Confirm(req) => {
                 Ok(Self::Confirm(req.try_into()?))
             }
@@ -119,7 +111,9 @@ impl TryFrom<BridgeCreateRequest> for CreateRequest {
         let schema_id = SchemaType::from_str(&request.schema_id)
             .map_err(ConversionError::InvalidSchemaId)?;
 
-        let namespace = request.namespace.map_or_else(Namespace::new, Namespace::from);
+        let namespace = request
+            .namespace
+            .map_or_else(Namespace::new, Namespace::from);
 
         Ok(Self {
             name: request.name,

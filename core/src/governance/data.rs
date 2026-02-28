@@ -6,8 +6,8 @@ use crate::governance::{
     error::GovernanceError,
     model::{
         HashThisRole, PolicyGov, PolicySchema, ProtocolTypes, Quorum,
-        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesTrackerSchemas, RolesGov,
-        RolesSchema, Schema, WitnessesData,
+        RoleGovIssuer, RoleSchemaIssuer, RoleTypes, RolesGov, RolesSchema,
+        RolesTrackerSchemas, Schema, WitnessesData,
     },
 };
 
@@ -209,12 +209,18 @@ impl GovernanceData {
             for evaluators in self.roles_tracker_schemas.evaluator.iter() {
                 if evaluators.name == ReservedWords::Owner.to_string() {
                     remove_evaluators
-                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            old_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(evaluators.namespace.clone());
                 } else if evaluators.name == old_name {
                     remove_evaluators
-                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            new_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(evaluators.namespace.clone());
                 }
@@ -222,12 +228,18 @@ impl GovernanceData {
             for validators in self.roles_tracker_schemas.validator.iter() {
                 if validators.name == ReservedWords::Owner.to_string() {
                     remove_validators
-                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            old_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(validators.namespace.clone());
                 } else if validators.name == old_name {
                     remove_validators
-                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            new_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(validators.namespace.clone());
                 }
@@ -235,12 +247,18 @@ impl GovernanceData {
             for witness in self.roles_tracker_schemas.witness.iter() {
                 if witness.name == ReservedWords::Owner.to_string() {
                     remove_witnesses
-                        .entry((SchemaType::TrackerSchemas, old_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            old_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(witness.namespace.clone());
                 } else if witness.name == old_name {
                     remove_witnesses
-                        .entry((SchemaType::TrackerSchemas, new_owner_key.clone()))
+                        .entry((
+                            SchemaType::TrackerSchemas,
+                            new_owner_key.clone(),
+                        ))
                         .or_default()
                         .push(witness.namespace.clone());
                 }
@@ -457,7 +475,8 @@ impl GovernanceData {
 
     pub fn remove_member_role(&mut self, remove_members: &Vec<MemberName>) {
         self.roles_gov.remove_member_role(remove_members);
-        self.roles_tracker_schemas.remove_member_role(remove_members);
+        self.roles_tracker_schemas
+            .remove_member_role(remove_members);
 
         for (_, roles) in self.roles_schema.iter_mut() {
             roles.remove_member_role(remove_members);
@@ -626,10 +645,11 @@ impl GovernanceData {
             let (mut not_gov_signers, not_gov_any) = self
                 .roles_tracker_schemas
                 .get_signers(role.clone(), namespace.clone());
-            let (mut schema_signers, schema_any) = self
-                .roles_schema
-                .get(schema_id)
-                .map_or_else(|| (vec![], false), |roles| roles.get_signers(role, namespace));
+            let (mut schema_signers, schema_any) =
+                self.roles_schema.get(schema_id).map_or_else(
+                    || (vec![], false),
+                    |roles| roles.get_signers(role, namespace),
+                );
 
             not_gov_signers.append(&mut schema_signers);
 
@@ -807,7 +827,9 @@ impl GovernanceData {
             return map;
         };
 
-        let vec = self.roles_tracker_schemas.role_namespace(role.clone(), &name);
+        let vec = self
+            .roles_tracker_schemas
+            .role_namespace(role.clone(), &name);
 
         if !vec.is_empty() {
             map.insert(SchemaType::TrackerSchemas, vec);
@@ -963,9 +985,11 @@ impl TryFrom<ValueWrapper> for GovernanceData {
     type Error = GovernanceError;
 
     fn try_from(value: ValueWrapper) -> Result<Self, Self::Error> {
-        let governance: Self = serde_json::from_value(value.0)
-            .map_err(|e| GovernanceError::ConversionFailed {
-                details: e.to_string(),
+        let governance: Self =
+            serde_json::from_value(value.0).map_err(|e| {
+                GovernanceError::ConversionFailed {
+                    details: e.to_string(),
+                }
             })?;
         Ok(governance)
     }

@@ -95,19 +95,21 @@ pub async fn create_api_key_for_user(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "api_key_created",
-        endpoint: Some(&format!("/admin/api-keys/user/{}", user_id)),
-        http_method: Some("POST"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "api_key_created",
+            endpoint: Some(&format!("/admin/api-keys/user/{}", user_id)),
+            http_method: Some("POST"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 
@@ -268,22 +270,24 @@ pub async fn revoke_api_key(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "api_key_revoked",
-        endpoint: Some(&format!("/admin/api-keys/{}", id)),
-        http_method: Some("DELETE"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(
-            &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-                .unwrap_or_default(),
-        ),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "api_key_revoked",
+            endpoint: Some(&format!("/admin/api-keys/{}", id)),
+            http_method: Some("DELETE"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(
+                &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+                    .unwrap_or_default(),
+            ),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 
@@ -370,19 +374,21 @@ pub async fn rotate_api_key(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "api_key_rotated",
-        endpoint: Some(&format!("/admin/api-keys/{}/rotate", id)),
-        http_method: Some("POST"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "api_key_rotated",
+            endpoint: Some(&format!("/admin/api-keys/{}/rotate", id)),
+            http_method: Some("POST"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 
@@ -447,19 +453,21 @@ pub async fn create_my_api_key(
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "api_key_created",
-        endpoint: Some("/me/api-keys"),
-        http_method: Some("POST"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "api_key_created",
+            endpoint: Some("/me/api-keys"),
+            http_method: Some("POST"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 
@@ -585,22 +593,24 @@ pub async fn revoke_my_api_key(
         .map_err(db_error_to_response)?;
 
     // Audit log
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(auth_ctx.user_id),
-        api_key_id: Some(&auth_ctx.api_key_id),
-        action_type: "api_key_revoked",
-        endpoint: Some(&format!("/me/api-keys/{}", name)),
-        http_method: Some("DELETE"),
-        ip_address: auth_ctx.ip_address.as_deref(),
-        user_agent: None,
-        request_id: None,
-        details: Some(
-            &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-                .unwrap_or_default(),
-        ),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(auth_ctx.user_id),
+            api_key_id: Some(&auth_ctx.api_key_id),
+            action_type: "api_key_revoked",
+            endpoint: Some(&format!("/me/api-keys/{}", name)),
+            http_method: Some("DELETE"),
+            ip_address: auth_ctx.ip_address.as_deref(),
+            user_agent: None,
+            request_id: None,
+            details: Some(
+                &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+                    .unwrap_or_default(),
+            ),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write audit log");
     }
 

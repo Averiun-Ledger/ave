@@ -30,7 +30,9 @@ use crate::{
         },
         model::{HashThisRole, RoleTypes, Schema},
     },
-    model::common::contract::{MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker},
+    model::common::contract::{
+        MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
+    },
 };
 
 type AddRemoveChangeSchema = (
@@ -317,10 +319,14 @@ impl Runner {
         contract_name: &str,
         is_owner: bool,
     ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
-        let Some(wasm_runtime) =
-            ctx.system().get_helper::<Arc<WasmRuntime>>("wasm_runtime").await
+        let Some(wasm_runtime) = ctx
+            .system()
+            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+            .await
         else {
-            return Err(RunnerError::MissingHelper { name: "wasm_runtime" });
+            return Err(RunnerError::MissingHelper {
+                name: "wasm_runtime",
+            });
         };
 
         let Some(contracts) = ctx
@@ -344,16 +350,21 @@ impl Runner {
         };
 
         let module = unsafe {
-            Module::deserialize(&wasm_runtime.engine, contract).map_err(|e| {
-                RunnerError::WasmError {
+            Module::deserialize(&wasm_runtime.engine, contract).map_err(
+                |e| RunnerError::WasmError {
                     operation: "deserialize module",
                     details: e.to_string(),
-                }
-            })?
+                },
+            )?
         };
 
         let (context, state_ptr, init_state_ptr, event_ptr) =
-            Self::generate_context(state, init_state, payload, &wasm_runtime.limits)?;
+            Self::generate_context(
+                state,
+                init_state,
+                payload,
+                &wasm_runtime.limits,
+            )?;
 
         let mut store = Store::new(&wasm_runtime.engine, context);
 

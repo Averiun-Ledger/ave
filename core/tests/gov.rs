@@ -23,21 +23,11 @@ use test_log::test;
 // El el init state es invalido, se aborata la request
 async fn test_invalid_init_state() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![],
-        vec![],
-        true,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
     let node = &nodes[0].api;
-    
 
-    let governance_id = create_and_authorize_governance(
-        node,
-        vec![],
-    )
-    .await;
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -83,21 +73,11 @@ async fn test_invalid_init_state() {
 // El contrato es invalido, se aborata la request
 async fn test_invalid_contract() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![],
-        vec![],
-        true,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
     let node = &nodes[0].api;
-    
 
-    let governance_id = create_and_authorize_governance(
-        node,
-        vec![],
-    )
-    .await;
+    let governance_id = create_and_authorize_governance(node, vec![]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -422,7 +402,6 @@ async fn test_basic_use_case_1b_1e_1a() {
         .await
         .unwrap();
 
-
     let state = get_subject(ephimeral, governance_id.clone(), Some(1))
         .await
         .unwrap();
@@ -449,7 +428,7 @@ async fn test_many_schema_in_one_governance() {
     let owner_governance = &nodes[0].api;
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![],).await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     let json = json!({
         "schemas": {
@@ -517,11 +496,9 @@ async fn test_transfer_event_governance_1() {
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![future_owner],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![future_owner])
+            .await;
     // add member to governance
     let json = json!({
         "members": {
@@ -622,11 +599,9 @@ async fn test_transfer_event_governance_2() {
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner_governance,
-        vec![future_owner],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![future_owner])
+            .await;
 
     // Auth governance in old owner, in future he will be a normal member and need auth governance for receive a ledger copy.
     owner_governance
@@ -766,8 +741,7 @@ async fn test_governance_fail_approve() {
         create_nodes_and_connections(vec![vec![]], vec![], vec![], false).await;
     let node1 = &nodes[0].api;
 
-    let governance_id =
-        create_and_authorize_governance(node1, vec![], ).await;
+    let governance_id = create_and_authorize_governance(node1, vec![]).await;
 
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -839,11 +813,9 @@ async fn test_governance_manual_many_approvers() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = json!({
         "policies": {
@@ -1008,11 +980,9 @@ async fn test_governance_auto_many_approvers() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = json!({
         "policies": {
@@ -1147,11 +1117,9 @@ async fn test_governance_not_quorum_many_approvers() {
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
 
-    let governance_id = create_and_authorize_governance(
-        owner,
-        vec![approver_1, approver_2],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(owner, vec![approver_1, approver_2])
+            .await;
 
     let json = json!({
         "policies": {
@@ -1499,8 +1467,7 @@ async fn test_delete_schema() {
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
     let node1 = &nodes[0].api;
 
-    let governance_id =
-        create_and_authorize_governance(node1, vec![],).await;
+    let governance_id = create_and_authorize_governance(node1, vec![]).await;
 
     let json = json!({
         "schemas": {
@@ -1646,8 +1613,7 @@ async fn test_change_schema() {
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
     let node1 = &nodes[0].api;
 
-    let governance_id =
-        create_and_authorize_governance(node1, vec![]).await;
+    let governance_id = create_and_authorize_governance(node1, vec![]).await;
 
     let json = json!({
         "schemas": {
@@ -1727,7 +1693,9 @@ async fn test_change_schema() {
         .await
         .unwrap();
 
-    let state = get_subject(node1, subject_id.clone(), Some(1)).await.unwrap();
+    let state = get_subject(node1, subject_id.clone(), Some(1))
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -1770,7 +1738,9 @@ async fn test_change_schema() {
     emit_fact(node1, subject_id.clone(), json, true)
         .await
         .unwrap();
-    let state = get_subject(node1, subject_id.clone(), Some(2)).await.unwrap();
+    let state = get_subject(node1, subject_id.clone(), Some(2))
+        .await
+        .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -1800,7 +1770,7 @@ async fn test_gov_no_all_validators() {
     let owner_governance = &nodes[0].api;
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], ).await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     let offline_controller =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
@@ -1895,7 +1865,7 @@ async fn test_gov_no_all_evaluators() {
     let owner_governance = &nodes[0].api;
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![], ).await;
+        create_and_authorize_governance(owner_governance, vec![]).await;
 
     let offline_controller =
         KeyPair::Ed25519(Ed25519Signer::generate().unwrap())

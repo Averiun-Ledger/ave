@@ -96,9 +96,7 @@ impl SubjectData {
 
     pub fn get_governance_id(&self) -> Option<DigestIdentifier> {
         match self {
-            Self::Tracker { governance_id, .. } => {
-                Some(governance_id.clone())
-            }
+            Self::Tracker { governance_id, .. } => Some(governance_id.clone()),
             Self::Governance { .. } => None,
         }
     }

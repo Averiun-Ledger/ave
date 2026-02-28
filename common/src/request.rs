@@ -38,9 +38,9 @@ impl EventRequest {
         new_owner: &Option<PublicKey>,
     ) -> bool {
         match self {
-            Self::Create(..)
-            | Self::Transfer(..)
-            | Self::EOL(..) => signer == owner,
+            Self::Create(..) | Self::Transfer(..) | Self::EOL(..) => {
+                signer == owner
+            }
             Self::Confirm(..) | Self::Reject(..) => {
                 new_owner.as_ref() == Some(signer)
             }
@@ -57,9 +57,7 @@ impl EventRequest {
 
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
-            Self::Create(_create_request) => {
-                DigestIdentifier::default()
-            }
+            Self::Create(_create_request) => DigestIdentifier::default(),
             Self::Fact(fact_request) => fact_request.subject_id.clone(),
             Self::Transfer(transfer_request) => {
                 transfer_request.subject_id.clone()
@@ -67,9 +65,7 @@ impl EventRequest {
             Self::Confirm(confirm_request) => {
                 confirm_request.subject_id.clone()
             }
-            Self::Reject(reject_request) => {
-                reject_request.subject_id.clone()
-            }
+            Self::Reject(reject_request) => reject_request.subject_id.clone(),
             Self::EOL(eolrequest) => eolrequest.subject_id.clone(),
         }
     }

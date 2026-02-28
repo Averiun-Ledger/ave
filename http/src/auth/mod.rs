@@ -25,7 +25,9 @@ pub mod system_handlers;
 
 use std::{sync::Arc, time::Duration};
 
-use ave_bridge::{MachineSpec, auth::AuthConfig, settings::command::build_auth_password};
+use ave_bridge::{
+    MachineSpec, auth::AuthConfig, settings::command::build_auth_password,
+};
 // Re-exports for convenience
 pub use database::AuthDatabase;
 use tokio::time::interval;

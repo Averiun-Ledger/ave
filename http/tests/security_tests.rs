@@ -812,8 +812,7 @@ async fn test_double_revoke_api_key() {
     let result = db.revoke_api_key(&key_info.id, None, None);
     // Either succeeds or fails with NotFound
     assert!(
-        result.is_ok()
-            || matches!(result, Err(DatabaseError::NotFound(_)))
+        result.is_ok() || matches!(result, Err(DatabaseError::NotFound(_)))
     );
 }
 

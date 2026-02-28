@@ -282,10 +282,7 @@ impl AuthDatabase {
             params![superadmin, password_hash],
         )
         .map_err(|e| {
-            DatabaseError::Insert(format!(
-                "Failed to create superadmin: {}",
-                e
-            ))
+            DatabaseError::Insert(format!("Failed to create superadmin: {}", e))
         })?;
 
         let user_id = conn.last_insert_rowid();
@@ -425,10 +422,7 @@ impl AuthDatabase {
 
         // Hash password
         let password_hash = hash_password(password).map_err(|e| {
-            DatabaseError::Crypto(format!(
-                "Failed to hash password: {}",
-                e
-            ))
+            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
         })?;
 
         // Insert user
@@ -498,16 +492,18 @@ impl AuthDatabase {
 
     /// Count superadmin users (users with the superadmin role)
     pub fn count_superadmins(&self) -> Result<i64, DatabaseError> {
-        let count: i64 = self.lock_conn()?.query_row(
-            "SELECT COUNT(DISTINCT u.id)
+        let count: i64 = self
+            .lock_conn()?
+            .query_row(
+                "SELECT COUNT(DISTINCT u.id)
              FROM users u
              INNER JOIN user_roles ur ON u.id = ur.user_id
              INNER JOIN roles r ON ur.role_id = r.id
              WHERE r.name = 'superadmin' AND u.is_deleted = 0",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(count)
     }
@@ -592,10 +588,7 @@ impl AuthDatabase {
             validate_password(pwd).map_err(DatabaseError::Validation)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {
-                DatabaseError::Crypto(format!(
-                    "Failed to hash password: {}",
-                    e
-                ))
+                DatabaseError::Crypto(format!("Failed to hash password: {}", e))
             })?;
 
             conn.execute(
@@ -968,8 +961,7 @@ impl AuthDatabase {
         }
 
         // Validate new password
-        validate_password(new_password)
-            .map_err(DatabaseError::Validation)?;
+        validate_password(new_password).map_err(DatabaseError::Validation)?;
 
         // Prevent setting the same password
         if current_password == new_password {
@@ -980,10 +972,7 @@ impl AuthDatabase {
         }
 
         let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::Crypto(format!(
-                "Failed to hash password: {}",
-                e
-            ))
+            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
         })?;
 
         conn.execute(
@@ -1021,14 +1010,10 @@ impl AuthDatabase {
         new_password: &str,
     ) -> Result<User, DatabaseError> {
         // Validate password
-        validate_password(new_password)
-            .map_err(DatabaseError::Validation)?;
+        validate_password(new_password).map_err(DatabaseError::Validation)?;
 
         let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::Crypto(format!(
-                "Failed to hash password: {}",
-                e
-            ))
+            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
         })?;
 
         let conn = self.lock_conn()?;

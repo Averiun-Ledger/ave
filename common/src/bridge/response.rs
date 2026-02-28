@@ -177,11 +177,11 @@ impl RequestEventDB {
     pub const fn get_event_type(&self) -> EventRequestType {
         match self {
             Self::Create { .. } => EventRequestType::Create,
-            Self::TrackerFact { .. }
-            | Self::GovernanceFact { .. } => EventRequestType::Fact,
+            Self::TrackerFact { .. } | Self::GovernanceFact { .. } => {
+                EventRequestType::Fact
+            }
             Self::Transfer { .. } => EventRequestType::Transfer,
-            Self::TrackerConfirm
-            | Self::GovernanceConfirm { .. } => {
+            Self::TrackerConfirm | Self::GovernanceConfirm { .. } => {
                 EventRequestType::Confirm
             }
             Self::Reject => EventRequestType::Reject,
@@ -314,7 +314,9 @@ impl Display for RequestState {
                 sn,
                 error,
             } => {
-                let sn_text = sn.as_ref().map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
+                let sn_text = sn
+                    .as_ref()
+                    .map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
 
                 write!(
                     f,
@@ -329,7 +331,9 @@ impl Display for RequestState {
                 sn,
                 error,
             } => {
-                let sn_text = sn.as_ref().map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
+                let sn_text = sn
+                    .as_ref()
+                    .map_or_else(|| "None".to_string(), |sn| format!("{sn}"));
 
                 write!(
                     f,

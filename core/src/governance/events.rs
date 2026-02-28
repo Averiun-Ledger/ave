@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::model::{
-    CreatorQuantity, RoleCreator, RolesTrackerSchemas, RolesGov, RolesSchema,
+    CreatorQuantity, RoleCreator, RolesGov, RolesSchema, RolesTrackerSchemas,
 };
 
 pub type MemberName = String;

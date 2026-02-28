@@ -1,20 +1,18 @@
 mod common;
 
-use ave_common::{
-    identity::{PublicKey},
-};
-use ave_core::{auth::AuthWitness};
+use ave_common::identity::PublicKey;
+use ave_core::auth::AuthWitness;
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
     create_subject, emit_confirm, emit_fact, emit_reject, emit_transfer,
     get_subject,
 };
 
-use futures::{future::join_all};
+use futures::future::join_all;
 use network::{NodeType, RoutingNode};
 use serde_json::json;
-use std::{str::FromStr, sync::atomic::Ordering};
 use std::time::Duration;
+use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;
 
 use crate::common::{PORT_COUNTER, create_node, node_running};
@@ -216,15 +214,22 @@ async fn test_not_access() {
 
 #[test(tokio::test)]
 async fn test_basic_access() {
-    let (mut nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![vec![0], vec![0]], vec![], true)
-            .await;
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0]],
+        vec![],
+        true,
+    )
+    .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![witness_alice, &witness_bob]).await;
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![witness_alice, &witness_bob],
+    )
+    .await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -372,50 +377,72 @@ async fn test_basic_access() {
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
-    let peers = vec![ RoutingNode {
+    let peers = vec![RoutingNode {
         peer_id: owner.peer_id().to_string(),
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(NodeType::Addressable, &listen_address, peers, true, Some(nodes[1].keys.clone())).await;
+    let (node_new_alice, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(nodes[1].keys.clone()),
+    )
+    .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
 
-    assert!(new_alice.get_subject_state(governance_id.clone()).await.is_err());
+    assert!(
+        new_alice
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
 
     new_alice
         .auth_subject(
             governance_id.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_alice.update_subject(governance_id.clone()).await.unwrap();
+    new_alice
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(1)).await.unwrap();
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
 
     // T04: N == actual_owner → acceso hasta data.sn
     //
     // Setup: owner_node crea un subject y emite facts (sn avanza)
     // Verificación: owner_node.get_subject_state(subject_id).sn == data.sn
-    assert!(new_alice.get_subject_state(subject_id_2.clone()).await.is_err());
+    assert!(
+        new_alice
+            .get_subject_state(subject_id_2.clone())
+            .await
+            .is_err()
+    );
     new_alice
         .auth_subject(
             subject_id_2.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_alice.update_subject(subject_id_2.clone()).await.unwrap();
+    new_alice
+        .update_subject(subject_id_2.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(1)).await.unwrap();
-
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(1))
+        .await
+        .unwrap();
 
     // T05: Transfer pendiente, N == new_owner → acceso hasta data.sn
     //
@@ -423,20 +450,28 @@ async fn test_basic_access() {
     //   owner emite transfer a new_owner_node (sin confirmar todavía)
     // Verificación:
     //   new_owner_node.auth_subject → recibe hasta data.sn actual
-    assert!(witness_bob.get_subject_state(subject_id_2.clone()).await.is_err());
+    assert!(
+        witness_bob
+            .get_subject_state(subject_id_2.clone())
+            .await
+            .is_err()
+    );
     witness_bob
         .auth_subject(
             subject_id_1.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_bob.update_subject(subject_id_1.clone()).await.unwrap();
+    witness_bob
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
 
     // T06: Transfer pendiente, N == actual_owner → sigue con acceso hasta data.sn
     //
@@ -444,20 +479,28 @@ async fn test_basic_access() {
     //   owner emite transfer (pendiente), owner sigue siendo actual_owner
     // Verificación:
     //   owner.get_subject_state(subject_id).sn == data.sn
-    assert!(new_alice.get_subject_state(subject_id_1.clone()).await.is_err());
+    assert!(
+        new_alice
+            .get_subject_state(subject_id_1.clone())
+            .await
+            .is_err()
+    );
     new_alice
         .auth_subject(
             subject_id_1.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_alice.update_subject(subject_id_1.clone()).await.unwrap();
+    new_alice
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&new_alice, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,16 +508,23 @@ async fn test_basic_access() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_transfers() {
-    let (mut nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![vec![0], vec![0], vec![0]], vec![], true)
-            .await;
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+    )
+    .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
     let witness_charlie = nodes[3].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![witness_alice, &witness_bob, &witness_charlie]).await;
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -601,7 +651,6 @@ async fn test_basic_transfers() {
     .await
     .unwrap();
 
-    
     let (subject_id_3, ..) = create_subject(
         witness_alice,
         governance_id.clone(),
@@ -630,7 +679,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-        let json = json!({
+    let json = json!({
         "ModOne": {
             "data": 110,
         }
@@ -638,7 +687,6 @@ async fn test_basic_transfers() {
     emit_fact(witness_alice, subject_id_3.clone(), json, true)
         .await
         .unwrap();
-
 
     emit_transfer(
         witness_alice,
@@ -652,25 +700,30 @@ async fn test_basic_transfers() {
     witness_bob
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_bob.update_subject(subject_id_3.clone()).await.unwrap();
+    witness_bob
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
 
-
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+        .await
+        .unwrap();
 
     emit_confirm(&witness_bob, subject_id_3.clone(), None, true)
         .await
         .unwrap();
 
-    
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(3)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(3)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(3))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(3))
+        .await
+        .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -681,24 +734,31 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(4)).await.unwrap();
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(4))
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(2))
+        .await
+        .unwrap();
 
     witness_alice
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_alice.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(3)).await.unwrap();
-
+    witness_alice
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(3))
+        .await
+        .unwrap();
 
     emit_transfer(
         &witness_bob,
@@ -712,25 +772,30 @@ async fn test_basic_transfers() {
     witness_charlie
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_charlie.update_subject(subject_id_3.clone()).await.unwrap();
+    witness_charlie
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
 
-
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(5)).await.unwrap();
+    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(5))
+        .await
+        .unwrap();
 
     emit_confirm(&witness_charlie, subject_id_3.clone(), None, true)
         .await
         .unwrap();
 
-    
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(6)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(6)).await.unwrap();
+    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(6))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(6))
+        .await
+        .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -741,23 +806,31 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-
-    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(7)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_3.clone(), Some(7)).await.unwrap();
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5)).await.unwrap();
+    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(7))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(7))
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(5))
+        .await
+        .unwrap();
 
     witness_bob
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_bob.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6)).await.unwrap();
+    witness_bob
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6))
+        .await
+        .unwrap();
 
     // T07: A→B confirm. N=A (old owner) sin testigos → acceso hasta old_data.sn
     //
@@ -782,25 +855,30 @@ async fn test_basic_transfers() {
     witness_bob
         .auth_subject(
             subject_id_1.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_bob.update_subject(subject_id_1.clone()).await.unwrap();
+    witness_bob
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
 
-
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
 
     emit_confirm(&witness_bob, subject_id_1.clone(), None, true)
         .await
         .unwrap();
 
-    
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(3)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(3)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(3))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(3))
+        .await
+        .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -811,24 +889,31 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
 
-
-    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_1.clone(), Some(4)).await.unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
 
     witness_alice
         .auth_subject(
             subject_id_1.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_alice.update_subject(subject_id_1.clone()).await.unwrap();
-    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(3)).await.unwrap();
-
+    witness_alice
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(3))
+        .await
+        .unwrap();
 
     // T08: A→B reject. N=B (propuesto rechazado) sin testigos → acceso hasta old_data.sn
     //
@@ -852,17 +937,19 @@ async fn test_basic_transfers() {
     witness_bob
         .auth_subject(
             subject_id_2.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_bob.update_subject(subject_id_2.clone()).await.unwrap();
+    witness_bob
+        .update_subject(subject_id_2.clone())
+        .await
+        .unwrap();
 
-
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+        .await
+        .unwrap();
 
     emit_reject(&witness_bob, subject_id_2.clone(), true)
         .await
@@ -871,18 +958,25 @@ async fn test_basic_transfers() {
     witness_alice
         .auth_subject(
             subject_id_2.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    witness_alice.update_subject(subject_id_2.clone()).await.unwrap();
+    witness_alice
+        .update_subject(subject_id_2.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3)).await.unwrap();
-    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(3)).await.unwrap();
-    let _state = get_subject(&owner, subject_id_2.clone(), Some(3)).await.unwrap();
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(3))
+        .await
+        .unwrap();
+    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(3))
+        .await
+        .unwrap();
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(3))
+        .await
+        .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -898,45 +992,62 @@ async fn test_basic_transfers() {
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
-    let peers = vec![ RoutingNode {
+    let peers = vec![RoutingNode {
         peer_id: owner.peer_id().to_string(),
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(NodeType::Addressable, &listen_address, peers, true, Some(nodes[2].keys.clone())).await;
+    let (node_new_bob, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(nodes[2].keys.clone()),
+    )
+    .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
 
-    assert!(new_bob.get_subject_state(governance_id.clone()).await.is_err());
+    assert!(
+        new_bob
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
 
     new_bob
         .auth_subject(
             governance_id.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(1)).await.unwrap();
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
 
-    assert!(new_bob.get_subject_state(subject_id_2.clone()).await.is_err());
+    assert!(
+        new_bob
+            .get_subject_state(subject_id_2.clone())
+            .await
+            .is_err()
+    );
     new_bob
         .auth_subject(
             subject_id_2.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
     new_bob.update_subject(subject_id_2.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(3)).await.unwrap();
+    let _state = get_subject(&new_bob, subject_id_2.clone(), Some(3))
+        .await
+        .unwrap();
 
     // T09: A→B→C (dos confirms). N=A sin testigos → acceso hasta old_data_A.sn
     //
@@ -954,12 +1065,19 @@ async fn test_basic_transfers() {
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
-    let peers = vec![ RoutingNode {
+    let peers = vec![RoutingNode {
         peer_id: owner.peer_id().to_string(),
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(NodeType::Addressable, &listen_address, peers, true, Some(nodes[1].keys.clone())).await;
+    let (node_new_alice, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(nodes[1].keys.clone()),
+    )
+    .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
 
@@ -968,89 +1086,128 @@ async fn test_basic_transfers() {
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
-    let peers = vec![ RoutingNode {
+    let peers = vec![RoutingNode {
         peer_id: owner.peer_id().to_string(),
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(NodeType::Addressable, &listen_address, peers, true, Some(nodes[3].keys.clone())).await;
+    let (node_new_charlie, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(nodes[3].keys.clone()),
+    )
+    .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
 
-    assert!(new_alice.get_subject_state(governance_id.clone()).await.is_err());
+    assert!(
         new_alice
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+    new_alice
         .auth_subject(
             governance_id.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_alice.update_subject(governance_id.clone()).await.unwrap();
+    new_alice
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(1)).await.unwrap();
-    assert!(new_alice.get_subject_state(subject_id_3.clone()).await.is_err());
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+    assert!(
+        new_alice
+            .get_subject_state(subject_id_3.clone())
+            .await
+            .is_err()
+    );
     new_alice
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_alice.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(3)).await.unwrap();
+    new_alice
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_alice, subject_id_3.clone(), Some(3))
+        .await
+        .unwrap();
 
-
-    assert!(new_bob.get_subject_state(subject_id_3.clone()).await.is_err());
+    assert!(
+        new_bob
+            .get_subject_state(subject_id_3.clone())
+            .await
+            .is_err()
+    );
     new_bob
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
     new_bob.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&new_bob, subject_id_3.clone(), Some(6)).await.unwrap();
+    let _state = get_subject(&new_bob, subject_id_3.clone(), Some(6))
+        .await
+        .unwrap();
 
-
-    assert!(new_charlie.get_subject_state(governance_id.clone()).await.is_err());
+    assert!(
         new_charlie
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+    new_charlie
         .auth_subject(
             governance_id.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_charlie.update_subject(governance_id.clone()).await.unwrap();
+    new_charlie
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
 
-    let _state = get_subject(&new_charlie, governance_id.clone(), Some(1)).await.unwrap();
-    assert!(new_charlie.get_subject_state(subject_id_3.clone()).await.is_err());
+    let _state = get_subject(&new_charlie, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_3.clone())
+            .await
+            .is_err()
+    );
     new_charlie
         .auth_subject(
             subject_id_3.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
 
-    new_charlie.update_subject(subject_id_3.clone()).await.unwrap();
-    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(7)).await.unwrap();
-
-
-
+    new_charlie
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(7))
+        .await
+        .unwrap();
 }
 
 /*

@@ -52,23 +52,21 @@ impl EvaluationReq {
             (
                 EventRequest::Fact(fact_request),
                 EvaluateData::TrackerSchemasFact { contract, state },
-            ) => {
-                init_state.as_ref().map_or_else(
-                    || {
-                        Err(EvaluatorError::InternalError(
-                            "Init state must be some".to_owned(),
-                        ))
-                    },
-                    |init_state| {
-                        Ok(EvaluateInfo::TrackerSchemasFact {
-                            contract: contract.clone(),
-                            init_state: init_state.clone(),
-                            state: state.clone(),
-                            payload: fact_request.payload.clone(),
-                        })
-                    },
-                )
-            }
+            ) => init_state.as_ref().map_or_else(
+                || {
+                    Err(EvaluatorError::InternalError(
+                        "Init state must be some".to_owned(),
+                    ))
+                },
+                |init_state| {
+                    Ok(EvaluateInfo::TrackerSchemasFact {
+                        contract: contract.clone(),
+                        init_state: init_state.clone(),
+                        state: state.clone(),
+                        payload: fact_request.payload.clone(),
+                    })
+                },
+            ),
             (
                 EventRequest::Transfer(transfer_request),
                 EvaluateData::GovTransfer { state },

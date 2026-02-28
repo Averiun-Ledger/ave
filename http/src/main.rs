@@ -257,7 +257,8 @@ async fn main() {
         ));
 
     let auth_db: Option<Arc<AuthDatabase>> =
-        build_auth(&config.auth, &args.auth_password, config.node.spec.clone()).await;
+        build_auth(&config.auth, &args.auth_password, config.node.spec.clone())
+            .await;
 
     let mut key_password = args.key_password;
     if key_password.is_empty() {

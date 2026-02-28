@@ -80,18 +80,16 @@ impl Intermediary {
                 let receiver = message.info.receiver.clone();
                 let receiver_actor = message.info.receiver_actor.clone();
 
-                let node_peer = Self::to_peer_id(
-                    &message.info.receiver,
-                )
-                .map_err(|e| {
-                    error!(
-                        receiver = %receiver,
-                        receiver_actor = %receiver_actor,
-                        error = %e,
-                        "Failed to convert public key to peer ID"
-                    );
-                    e
-                })?;
+                let node_peer = Self::to_peer_id(&message.info.receiver)
+                    .map_err(|e| {
+                        error!(
+                            receiver = %receiver,
+                            receiver_actor = %receiver_actor,
+                            error = %e,
+                            "Failed to convert public key to peer ID"
+                        );
+                        e
+                    })?;
 
                 let network_message =
                     rmp_serde::to_vec(&message).map_err(|error| {

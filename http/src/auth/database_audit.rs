@@ -292,7 +292,9 @@ impl AuthDatabase {
 
         let cutoff_timestamp = Self::now() - (retention_days as i64 * 86400);
 
-        let deleted = self.lock_conn()?.execute(
+        let deleted = self
+            .lock_conn()?
+            .execute(
                 "DELETE FROM audit_logs WHERE timestamp < ?1",
                 params![cutoff_timestamp],
             )
@@ -590,11 +592,13 @@ impl AuthDatabase {
         let cutoff =
             Self::now() - self.config.rate_limit.cleanup_interval_seconds;
 
-        let deleted = self.lock_conn()?.execute(
-            "DELETE FROM rate_limits WHERE window_start < ?1",
-            params![cutoff],
-        )
-        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        let deleted = self
+            .lock_conn()?
+            .execute(
+                "DELETE FROM rate_limits WHERE window_start < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
         Ok(deleted)
     }

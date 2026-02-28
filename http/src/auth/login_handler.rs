@@ -150,22 +150,24 @@ pub async fn login(
     };
 
     // Log successful login
-    if let Err(e) = db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-        user_id: Some(user.id),
-        api_key_id: Some(&key_info.id),
-        action_type: "login_success",
-        endpoint: Some("/login"),
-        http_method: Some("POST"),
-        ip_address: ip_address.as_deref(),
-        user_agent: user_agent.as_deref(),
-        request_id: None,
-        details: Some(&format!(
-            "User {} logged in successfully",
-            user.username
-        )),
-        success: true,
-        error_message: None,
-    }) {
+    if let Err(e) =
+        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
+            user_id: Some(user.id),
+            api_key_id: Some(&key_info.id),
+            action_type: "login_success",
+            endpoint: Some("/login"),
+            http_method: Some("POST"),
+            ip_address: ip_address.as_deref(),
+            user_agent: user_agent.as_deref(),
+            request_id: None,
+            details: Some(&format!(
+                "User {} logged in successfully",
+                user.username
+            )),
+            success: true,
+            error_message: None,
+        })
+    {
         warn!(target: TARGET, error = %e, "failed to write login audit log");
     }
 
