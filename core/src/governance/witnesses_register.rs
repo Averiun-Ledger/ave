@@ -1052,6 +1052,20 @@ impl PersistentActor for WitnessesRegister {
                             schema_id.clone(),
                         ))
                     {
+                        // Cerrar testigos que ya no están en la nueva lista
+                        for (witness_type, (interval, last)) in
+                            creator_witnesses.iter_mut()
+                        {
+                            if !witnesses.contains(witness_type) 
+                                && let Some(lo) = last.take() {
+                                    interval.insert(Interval {
+                                        lo,
+                                        hi: *version - 1,
+                                    });
+                                }
+                            
+                        }
+                        // Añadir o reactivar testigos en la nueva lista
                         for witness in witnesses.iter() {
                             if let Some((.., last)) =
                                 creator_witnesses.get_mut(witness)

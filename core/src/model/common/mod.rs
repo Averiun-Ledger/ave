@@ -122,7 +122,7 @@ where
     ));
 
     let actor: ActorRef<SubjectRegister> =
-        ctx.system().get_actor(&actor_path).await?;
+        ctx.system().get_actor(&actor_path).await.map_err(|_| ActorError::Functional { description: "Governance has not been found".to_string() })?;
 
     let _response = actor
         .ask(SubjectRegisterMessage::Check {

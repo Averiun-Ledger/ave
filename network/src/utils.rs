@@ -26,6 +26,7 @@ pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
     #[error(
@@ -139,7 +140,7 @@ impl LimitsConfig {
             tcp_listen_backlog: tcp_backlog,
             tcp_nodelay: true,
             reqres_max_concurrent_streams: reqres_streams,
-            reqres_request_timeout: 15,
+            reqres_request_timeout: 30,
             identify_cache,
             kademlia_query_timeout: 25,
             conn_limmits_max_pending_incoming: Some(pending_incoming),
@@ -350,6 +351,7 @@ fn multiaddr(addr: &str) -> Option<Multiaddr> {
 // NB: Currently all DNS names are allowed and no check for TLD suffixes is done
 // because the set of valid domains is highly dynamic and would require frequent
 // updates, for example by utilising publicsuffix.org or IANA.
+#[cfg(not(feature = "test"))]
 pub fn is_global(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         Protocol::Ip4(ip) => IpNetwork::from(ip).is_global(),
@@ -358,6 +360,7 @@ pub fn is_global(addr: &Multiaddr) -> bool {
     })
 }
 
+#[cfg(not(feature = "test"))]
 pub fn is_private(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         Protocol::Ip4(ip) => ip.is_private(),
@@ -366,6 +369,7 @@ pub fn is_private(addr: &Multiaddr) -> bool {
     })
 }
 
+#[cfg(not(feature = "test"))]
 pub fn is_loop_back(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         Protocol::Ip4(ip) => ip.is_loopback(),
@@ -374,6 +378,7 @@ pub fn is_loop_back(addr: &Multiaddr) -> bool {
     })
 }
 
+#[cfg(not(feature = "test"))]
 pub fn is_dns(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| {
         matches!(p, Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))
@@ -381,6 +386,7 @@ pub fn is_dns(addr: &Multiaddr) -> bool {
 }
 
 /// Chech if the given `Multiaddr` is a memory address.
+/// #[cfg(not(feature = "test"))]
 pub fn is_tcp(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| matches!(p, Protocol::Tcp(_)))
 }

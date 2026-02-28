@@ -152,7 +152,7 @@ pub fn build_control_lists_updaters(
     if config.enable {
         debug!(target: TARGET, "control list enabled");
 
-        let (sender, receiver) = mpsc::channel(1000);
+        let (sender, receiver) = mpsc::channel(8);
         let interval = config.interval_request;
         let service_allow = config.service_allow_list.clone();
         let service_block = config.service_block_list.clone();

@@ -26,9 +26,12 @@ use std::{
 use crate::{
     NodeType,
     utils::{
-        LimitsConfig, is_dns, is_global, is_loop_back, is_private, is_tcp,
+        LimitsConfig, 
     },
 };
+
+#[cfg(not(feature = "test"))]
+use crate::utils::{is_global, is_loop_back, is_private, is_dns, is_tcp};
 
 /// The discovery behaviour.
 pub struct Behaviour {
@@ -592,7 +595,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             dht_random_walk: true,
-            discovery_only_if_under_num: u64::MAX,
+            discovery_only_if_under_num: 25,
             allow_private_address_in_dht: Default::default(),
             allow_dns_address_in_dht: Default::default(),
             allow_loop_back_address_in_dht: Default::default(),

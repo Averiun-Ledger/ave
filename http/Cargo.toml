@@ -23,7 +23,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 file-rotate = {  workspace = true }
 
-futures = { version = "0.3.32", default-features = false }
+futures = { workspace = true }
 
 reqwest = {  workspace = true }
 rustls = { version = "0.23.36", features = ["ring"] }

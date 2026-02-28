@@ -45,7 +45,7 @@ impl Intermediary {
         system: SystemRef,
         token: CancellationToken,
     ) -> Arc<NetworkSender> {
-        let (command_sender, mut command_receiver) = mpsc::channel(10000);
+        let (command_sender, mut command_receiver) = mpsc::channel(2048);
 
         tokio::spawn(async move {
             loop {

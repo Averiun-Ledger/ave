@@ -835,9 +835,9 @@ where
         if let Some(lo_sn) = lo_sn {
             let actual_sn = lo_sn + 1;
             if (hi_sn - actual_sn) > 99 {
-                Ok((get_n_events(ctx, lo_sn + 1, 99).await?, false))
+                Ok((get_n_events(ctx, actual_sn, 99).await?, false))
             } else {
-                Ok((get_n_events(ctx, actual_sn, hi_sn).await?, true))
+                Ok((get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?, true))
             }
         } else if hi_sn > 99 {
             Ok((get_n_events(ctx, 0, 99).await?, false))

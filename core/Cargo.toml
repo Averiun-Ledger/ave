@@ -25,7 +25,7 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs", "p
 tracing = { workspace = true }
 network = { package = "ave-network", path = "../network" }
 rmp-serde = { workspace = true }
-wasmtime = {version = "41.0.3"}
+wasmtime = {version = "42.0.1"}
 rusqlite = { workspace = true, optional = true }
 base64 = { workspace = true }
 tokio-util = { workspace = true }
@@ -40,6 +40,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 network = { package = "ave-network", path = "../network", features = ["test"]}
 ave-core = { path = ".", features = ["test"], default-features = false}
+futures = { workspace = true }
 
 [features]
 default = ["sqlite", "ext-sqlite"]

@@ -124,11 +124,11 @@ impl Handler<Self> for ValiCoordinator {
 
                 #[cfg(feature = "test")]
                 let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(5)),
+                    FixedIntervalStrategy::new(1, Duration::from_secs(10)),
                 );
                 #[cfg(not(feature = "test"))]
                 let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(3, Duration::from_secs(15)),
+                    FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
                 let retry_actor = RetryActor::new(target, message, strategy);

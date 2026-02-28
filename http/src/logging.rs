@@ -133,7 +133,7 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
     let mut api_url_final: Option<String> = None;
 
     let api_layer = (output.api && api_url.is_some()).then(|| {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(10_000);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(512);
         api_rx = Some(rx);
         api_url_final = api_url.clone();
 

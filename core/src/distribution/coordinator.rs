@@ -93,7 +93,7 @@ impl Handler<Self> for DistriCoordinator {
                 );
                 #[cfg(not(feature = "test"))]
                 let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(2, Duration::from_secs(15)),
+                    FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
                 let retry_actor = RetryActor::new(target, message, strategy);

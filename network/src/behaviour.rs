@@ -2,14 +2,17 @@
 //!
 
 use crate::{
-    Config, Error, MemoryLimitsConfig, NodeType,
+    Config, Error, NodeType,
     control_list::{self, build_control_lists_updaters},
     routing::{self},
     utils::{
-        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
-        USER_AGENT,
+        IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL,
+        ROUTING_PROTOCOL, USER_AGENT,
     },
 };
+
+#[cfg(not(feature = "test"))]
+use crate::MemoryLimitsConfig;
 
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol,
@@ -70,7 +73,13 @@ impl Behaviour {
                 limits.reqres_request_timeout,
             ));
 
-        let req_res = request_response::cbor::Behaviour::new(
+        let codec =
+            request_response::cbor::codec::Codec::<ReqResMessage, ReqResMessage>::default()
+                .set_request_size_maximum(1024 * 1024)       // 1 MiB
+                .set_response_size_maximum(10 * 1024 * 1024); // 10 MiB
+
+        let req_res = request_response::Behaviour::with_codec(
+            codec,
             iter::once((stream_reqres, ProtocolSupport::Full)),
             config_req_res,
         );
@@ -132,7 +141,12 @@ impl Behaviour {
             identify: identify::Behaviour::new(identify_config),
             routing: routing::Behaviour::new(
                 PeerId::from_public_key(public_key),
-                config.routing,
+                config.routing.with_discovery_limit(
+                    limits
+                        .conn_limmits_max_established_total
+                        .map(|t| (t as u64 * 15 / 100).max(25))
+                        .unwrap_or(25),
+                ),
                 stream_routing,
                 config.node_type,
                 limits,
@@ -595,7 +609,6 @@ mod tests {
         node_type: NodeType,
     ) -> Config {
         let config = crate::routing::Config::default()
-            .with_discovery_limit(50)
             .with_dht_random_walk(random_walk);
 
         Config {

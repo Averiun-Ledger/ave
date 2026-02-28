@@ -30,7 +30,7 @@ async fn test_invalid_init_state() {
         true,
     )
     .await;
-    let node = &nodes[0];
+    let node = &nodes[0].api;
     
 
     let governance_id = create_and_authorize_governance(
@@ -90,7 +90,7 @@ async fn test_invalid_contract() {
         true,
     )
     .await;
-    let node = &nodes[0];
+    let node = &nodes[0].api;
     
 
     let governance_id = create_and_authorize_governance(
@@ -134,7 +134,6 @@ async fn test_invalid_contract() {
     assert_eq!(state.creator, node.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 0);
-    println!("{}", state.properties);
     assert_eq!(
         state.properties,
         json!({"members":{"Owner":node.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"schemas":{},"version":0})
@@ -152,8 +151,8 @@ async fn test_governance_and_subject_copy_with_approve() {
         false,
     )
     .await;
-    let node1 = &nodes[0];
-    let node2 = &nodes[1];
+    let node1 = &nodes[0].api;
+    let node2 = &nodes[1].api;
 
     let governance_id =
         create_and_authorize_governance(node1, vec![node2]).await;
@@ -343,9 +342,9 @@ async fn test_basic_use_case_1b_1e_1a() {
         true,
     )
     .await;
-    let bootstrap = &nodes[0];
-    let addressable = &nodes[1];
-    let ephimeral = &nodes[2];
+    let bootstrap = &nodes[0].api;
+    let addressable = &nodes[1].api;
+    let ephimeral = &nodes[2].api;
 
     let governance_id = create_and_authorize_governance(
         addressable,
@@ -447,7 +446,7 @@ async fn test_basic_use_case_1b_1e_1a() {
 async fn test_many_schema_in_one_governance() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
-    let owner_governance = &nodes[0];
+    let owner_governance = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![],).await;
@@ -515,8 +514,8 @@ async fn test_transfer_event_governance_1() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
             .await;
-    let future_owner = &nodes[0];
-    let owner_governance = &nodes[1];
+    let future_owner = &nodes[0].api;
+    let owner_governance = &nodes[1].api;
 
     let governance_id = create_and_authorize_governance(
         owner_governance,
@@ -620,8 +619,8 @@ async fn test_transfer_event_governance_2() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
             .await;
-    let future_owner = &nodes[0];
-    let owner_governance = &nodes[1];
+    let future_owner = &nodes[0].api;
+    let owner_governance = &nodes[1].api;
 
     let governance_id = create_and_authorize_governance(
         owner_governance,
@@ -765,7 +764,7 @@ async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], false).await;
-    let node1 = &nodes[0];
+    let node1 = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(node1, vec![], ).await;
@@ -836,9 +835,9 @@ async fn test_governance_manual_many_approvers() {
         false,
     )
     .await;
-    let owner = &nodes[0];
-    let approver_1 = &nodes[1];
-    let approver_2 = &nodes[2];
+    let owner = &nodes[0].api;
+    let approver_1 = &nodes[1].api;
+    let approver_2 = &nodes[2].api;
 
     let governance_id = create_and_authorize_governance(
         owner,
@@ -1005,9 +1004,9 @@ async fn test_governance_auto_many_approvers() {
         true,
     )
     .await;
-    let owner = &nodes[0];
-    let approver_1 = &nodes[1];
-    let approver_2 = &nodes[2];
+    let owner = &nodes[0].api;
+    let approver_1 = &nodes[1].api;
+    let approver_2 = &nodes[2].api;
 
     let governance_id = create_and_authorize_governance(
         owner,
@@ -1144,9 +1143,9 @@ async fn test_governance_not_quorum_many_approvers() {
         false,
     )
     .await;
-    let owner = &nodes[0];
-    let approver_1 = &nodes[1];
-    let approver_2 = &nodes[2];
+    let owner = &nodes[0].api;
+    let approver_1 = &nodes[1].api;
+    let approver_2 = &nodes[2].api;
 
     let governance_id = create_and_authorize_governance(
         owner,
@@ -1308,8 +1307,8 @@ async fn test_change_roles_gov() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
             .await;
-    let eval_node = &nodes[0];
-    let owner_governance = &nodes[1];
+    let eval_node = &nodes[0].api;
+    let owner_governance = &nodes[1].api;
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![eval_node])
@@ -1498,7 +1497,7 @@ async fn test_change_roles_gov() {
 async fn test_delete_schema() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
-    let node1 = &nodes[0];
+    let node1 = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(node1, vec![],).await;
@@ -1645,7 +1644,7 @@ async fn test_delete_schema() {
 async fn test_change_schema() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
-    let node1 = &nodes[0];
+    let node1 = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(node1, vec![]).await;
@@ -1798,7 +1797,7 @@ async fn test_gov_no_all_validators() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
-    let owner_governance = &nodes[0];
+    let owner_governance = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![], ).await;
@@ -1893,7 +1892,7 @@ async fn test_gov_no_all_evaluators() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
-    let owner_governance = &nodes[0];
+    let owner_governance = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![], ).await;
@@ -1989,7 +1988,7 @@ async fn test_gov_fail_no_all_evaluators() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
 
-    let owner_governance = &nodes[0];
+    let owner_governance = &nodes[0].api;
 
     let governance_id =
         create_and_authorize_governance(owner_governance, vec![]).await;

@@ -13,11 +13,13 @@ use ave_common::{
 };
 use ave_core::{
     Api,
-    config::{AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig, AveInternalDBFeatureConfig, Config, SinkAuth},
+    config::{
+        AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
+        AveInternalDBFeatureConfig, Config, SinkAuth,
+    },
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use std::{
-    path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicU16, Ordering},
     time::Duration,
@@ -26,40 +28,34 @@ use tempfile::TempDir;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
+pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
+
+pub struct NodeData {
+    pub api: Api,
+    pub handler: Vec<JoinHandle<()>>,
+    pub token: CancellationToken,
+    pub keys: KeyPair,
+    pub listen_address: String
+}
 
 pub async fn create_node(
     node_type: network::NodeType,
     listen_address: &str,
     peers: Vec<RoutingNode>,
     always_accept: bool,
-    paths: Option<(PathBuf, PathBuf)>,
-) -> (
-    Api,
-    PathBuf,
-    PathBuf,
-    CancellationToken,
-    Vec<JoinHandle<()>>,
-    Vec<TempDir>,
-) {
-    let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    keys: Option<KeyPair>,
+) -> (NodeData, Vec<TempDir>) {
+    let keys =
+        keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let (local_db, ext_db) = if let Some((local_db, ext_db)) = paths {
-        (local_db, ext_db)
-    } else {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let local_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
+    let local_db = dir.path().to_path_buf();
+    vec_dirs.push(dir);
 
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let ext_db = dir.path().to_path_buf();
-        vec_dirs.push(dir);
-
-        (local_db, ext_db)
-    };
+    let dir = tempfile::tempdir().expect("Can not create temporal directory");
+    let ext_db = dir.path().to_path_buf();
+    vec_dirs.push(dir);
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -77,28 +73,38 @@ pub async fn create_node(
         is_service: true,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
-        internal_db: AveInternalDBConfig {db: AveInternalDBFeatureConfig::build(&local_db), ..Default::default()},
-        external_db: AveExternalDBConfig {db: AveExternalDBFeatureConfig::build(&ext_db), ..Default::default()},
+        internal_db: AveInternalDBConfig {
+            db: AveInternalDBFeatureConfig::build(&local_db),
+            ..Default::default()
+        },
+        external_db: AveExternalDBConfig {
+            db: AveExternalDBFeatureConfig::build(&ext_db),
+            ..Default::default()
+        },
         network: network_config,
         contracts_path,
         always_accept,
         tracking_size: 100,
-        spec: None
+        spec: None,
     };
 
     let token = CancellationToken::new();
 
-    let (api, runners) = Api::build(
-        keys,
-        config,
-        SinkAuth::default(),
-        "ave",
-        &token,
-    )
-    .await
-    .unwrap();
+    let (api, runners) =
+        Api::build(keys.clone(), config, SinkAuth::default(), "ave", &token)
+            .await
+            .unwrap();
 
-    (api, local_db, ext_db, token.clone(), runners, vec_dirs)
+    (
+        NodeData {
+            api,
+            handler: runners,
+            token,
+            keys,
+            listen_address: listen_address.to_owned()
+        },
+        vec_dirs,
+    )
 }
 
 pub async fn create_nodes_and_connections(
@@ -106,8 +112,8 @@ pub async fn create_nodes_and_connections(
     addressable: Vec<Vec<usize>>,
     ephemeral: Vec<Vec<usize>>,
     always_accept: bool,
-) -> (Vec<Api>, Vec<TempDir>) {
-    let mut nodes: Vec<Api> = Vec::new();
+) -> (Vec<NodeData>, Vec<TempDir>) {
+    let mut nodes: Vec<NodeData> = Vec::new();
     let mut dirs = vec![];
 
     let mut bootstrap_address = vec![];
@@ -122,7 +128,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().to_string(),
+                peer_id: nodes[peer_idx].api.peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
@@ -137,7 +143,7 @@ pub async fn create_nodes_and_connections(
         .await;
         dirs.append(&mut vec_dirs);
 
-        node_running(&node).await.unwrap();
+        node_running(&node.api).await.unwrap();
         nodes.push(node);
     }
 
@@ -150,7 +156,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().to_string(),
+                peer_id: nodes[peer_idx].api.peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
@@ -165,7 +171,7 @@ pub async fn create_nodes_and_connections(
         .await;
         dirs.append(&mut vec_dirs);
 
-        node_running(&node).await.unwrap();
+        node_running(&node.api).await.unwrap();
         nodes.push(node);
     }
 
@@ -176,7 +182,7 @@ pub async fn create_nodes_and_connections(
         let peers = connections
             .iter()
             .map(|&peer_idx| RoutingNode {
-                peer_id: nodes[peer_idx].peer_id().to_string(),
+                peer_id: nodes[peer_idx].api.peer_id().to_string(),
                 address: vec![bootstrap_address[peer_idx].clone()],
             })
             .collect();
@@ -191,7 +197,7 @@ pub async fn create_nodes_and_connections(
         .await;
         dirs.append(&mut vec_dirs);
 
-        node_running(&node).await.unwrap();
+        node_running(&node.api).await.unwrap();
         nodes.push(node);
     }
 

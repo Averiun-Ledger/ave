@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{Span, debug, error, info_span, warn};
+use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
@@ -397,37 +397,31 @@ impl Handler<Self> for Auth {
                     };
 
                     let updater = Update::new(data);
-                    let child = match ctx
-                        .create_child(&subject_id.to_string(), updater)
-                        .await
+                    if let Ok(child) =
+                        ctx.create_child(&subject_id.to_string(), updater).await
                     {
-                        Ok(child) => child,
-                        Err(e) => {
+                        if let Err(e) = child.tell(UpdateMessage::Run).await {
                             error!(
                                 msg_type = "Update",
                                 subject_id = %subject_id,
                                 error = %e,
-                                "Failed to create update child actor"
+                                "Failed to send Run message to update actor"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
-                    };
 
-                    if let Err(e) = child.tell(UpdateMessage::Run).await {
-                        error!(
+                        debug!(
                             msg_type = "Update",
                             subject_id = %subject_id,
-                            error = %e,
-                            "Failed to send Run message to update actor"
+                            "Update process initiated with multiple witnesses"
                         );
-                        return Err(emit_fail(ctx, e).await);
-                    }
-
-                    debug!(
-                        msg_type = "Update",
-                        subject_id = %subject_id,
-                        "Update process initiated with multiple witnesses"
-                    );
+                    } else {
+                        info!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            "An update is already in progress."
+                        );
+                    };
                 }
             }
         };

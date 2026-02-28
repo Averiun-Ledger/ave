@@ -31,7 +31,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio::{
     sync::mpsc,
-    time::{Instant, Sleep, sleep_until},
+    time::{Instant, Sleep, sleep, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -40,6 +40,41 @@ use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 
 const TARGET: &str = "ave::network::worker";
+
+/// Maximum number of outbound messages queued per peer while disconnected.
+/// When this limit is reached the oldest message is evicted to make room.
+const MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
+
+/// Bounded queue of outbound messages for a single peer.
+///
+/// Keeps the 100 most recent messages; when full the oldest is evicted.
+#[derive(Default)]
+struct PendingQueue {
+    messages: VecDeque<Bytes>,
+}
+
+impl PendingQueue {
+    /// Enqueue a message. If the count limit is reached the oldest is evicted
+    /// and `true` is returned; otherwise `false`.
+    fn push(&mut self, message: Bytes) -> bool {
+        let evicted = if self.messages.len() >= MAX_PENDING_MESSAGES_PER_PEER {
+            self.messages.pop_front();
+            true
+        } else {
+            false
+        };
+        self.messages.push_back(message);
+        evicted
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = Bytes> + '_ {
+        self.messages.drain(..)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
 
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -83,12 +118,10 @@ where
     /// nodes with which it has not been possible to establish a connection by keepAliveTimeout in pre-routing.
     retry_boot_nodes: HashMap<PeerId, Vec<Multiaddr>>,
 
-    retrys: u8,
+    /// Pending outbound messages to the peer (bounded by count and bytes).
+    pending_outbound_messages: HashMap<PeerId, PendingQueue>,
 
-    /// Pendings outbound messages to the peer
-    pending_outbound_messages: HashMap<PeerId, VecDeque<Bytes>>,
-
-    pending_inbound_messages: HashMap<PeerId, VecDeque<Bytes>>,
+    pending_inbound_messages: HashMap<PeerId, PendingQueue>,
 
     /// Ephemeral responses.
     response_channels:
@@ -119,7 +152,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
-        let (command_sender, command_receiver) = mpsc::channel(100000);
+        let (command_sender, command_receiver) = mpsc::channel(512);
 
         let key = match keys {
             KeyPair::Ed25519(ed25519_signer) => {
@@ -173,10 +206,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             behaviour,
             local_peer_id,
             swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_secs(60))
+                .with_idle_connection_timeout(Duration::from_secs(90))
                 .with_max_negotiating_inbound_streams(32)
                 .with_notify_handler_buffer_size(
-                    NonZeroUsize::new(16).expect("16 > 0"),
+                    NonZeroUsize::new(32).expect("32 > 0"),
                 )
                 .with_per_connection_event_buffer_size(16)
                 .with_dial_concurrency_factor(
@@ -218,7 +251,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             service,
             swarm,
             state: NetworkState::Start,
-            retrys: 0,
             command_receiver,
             helper_sender: None,
             monitor,
@@ -250,7 +282,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         let now = Instant::now();
         let base = Duration::from_millis(250);
-        let cap = Duration::from_secs(4);
+        let cap = Duration::from_secs(30);
 
         let entry = self.retry_by_peer.entry(peer).or_insert(RetryState {
             attempts: 0,
@@ -263,19 +295,23 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         {
             now
         } else {
-            if entry.attempts >= 4 {
+            if entry.attempts >= 8 {
                 self.clear_pending_messages(&peer);
                 return;
             }
 
-            let exp = 1u32 << entry.attempts.min(5); // 1,2,4,8,16
-            let mut delay = base * exp; // 0,250 seconds until 4s
+            // Exponential backoff: 250ms * 2^attempt, capped at 30s
+            // attempts 0-7 → ~250ms, 500ms, 1s, 2s, 4s, 8s, 16s, 30s
+            let exp = 1u32 << entry.attempts.min(7);
+            let mut delay = base * exp;
             if delay > cap {
                 delay = cap;
             }
 
             // jitter 80–120% determinista por peer (sin RNG externo)
-            let j = 80 + (peer.to_bytes()[0] as u32 % 41);
+            // Fold all bytes to avoid the fixed multihash prefix dominating.
+            let hash = peer.to_bytes().iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+            let j = 80 + (hash % 41);
             delay = delay * j / 100;
 
             now + delay
@@ -362,7 +398,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         return Ok(());
                     }
                     Err(e) => {
-                        warn!(target: TARGET, peer_id = %peer, error = %e, "failed to send response: channel may already be consumed");
+                        debug!(target: TARGET, peer_id = %peer, error = %e, "failed to send response: channel may already be consumed");
                     }
                 }
             }
@@ -386,10 +422,18 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     /// Add pending message to peer.
+    ///
+    /// If the count limit is reached the oldest message is evicted to make room.
     fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
-        let pending_messages: &mut VecDeque<Bytes> =
-            self.pending_outbound_messages.entry(peer).or_default();
-        pending_messages.push_back(message);
+        let queue = self.pending_outbound_messages.entry(peer).or_default();
+        if queue.push(message) {
+            warn!(
+                target: TARGET,
+                peer_id = %peer,
+                max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                "outbound queue count limit reached; oldest message evicted",
+            );
+        }
     }
 
     /// Add ephemeral response.
@@ -406,11 +450,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     /// Send pending messages to peer.
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
-        if let Some(messages) = self.pending_outbound_messages.remove(&peer) {
-            for message in messages.iter() {
+        if let Some(mut queue) = self.pending_outbound_messages.remove(&peer) {
+            for message in queue.drain() {
                 self.swarm
                     .behaviour_mut()
-                    .send_message(&peer, message.clone());
+                    .send_message(&peer, message);
             }
         }
 
@@ -469,6 +513,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         } else {
             self.change_state(NetworkState::Dial).await;
 
+            let mut retrys: u8 = 0;
+
+            // Per-round deadline: if any boot node's TCP connects but Identify never
+            // completes (NAT half-open, overloaded peer, protocol stall…), this timer
+            // moves the remaining nodes to retry_boot_nodes so the retry logic handles
+            // them instead of waiting up to idle_connection_timeout (90 s) per round.
+            let dialing_round_timeout = sleep(Duration::from_secs(0));
+            tokio::pin!(dialing_round_timeout);
+            let mut dialing_timeout_active = false;
+
             loop {
                 match self.state {
                     NetworkState::Dial => {
@@ -493,7 +547,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                         Self::init_dial_error_manager(
                                             e,
                                             peer,
-                                            self.retrys,
                                         );
                                     self.boot_nodes.remove(&peer);
                                     if add_to_retry {
@@ -509,6 +562,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             }
                             if !self.boot_nodes.is_empty() {
                                 self.change_state(NetworkState::Dialing).await;
+                                dialing_round_timeout.as_mut().reset(
+                                    Instant::now() + Duration::from_secs(15),
+                                );
+                                dialing_timeout_active = true;
                             } else {
                                 warn!(target: TARGET, "all bootstrap dials failed");
                                 self.change_state(NetworkState::Disconnected)
@@ -521,11 +578,27 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         if self.boot_nodes.is_empty()
                             && self.successful_dials == 0
                             && !self.retry_boot_nodes.is_empty()
-                            && self.retrys < 3
+                            && retrys < 3
                         {
-                            debug!(target: TARGET, attempt = self.retrys, "retrying bootstrap dials");
+                            retrys += 1;
+                            let wait = Duration::from_secs(1u64 << retrys); // retrys=1→2s, retrys=2→4s
+                            debug!(target: TARGET, attempt = retrys, wait_secs = wait.as_secs(), "retrying bootstrap dials");
 
-                            self.retrys += 1;
+                            let backoff = sleep(wait);
+                            tokio::pin!(backoff);
+                            loop {
+                                tokio::select! {
+                                    _ = &mut backoff => break,
+                                    event = self.swarm.select_next_some() => {
+                                        self.handle_connection_events(event).await;
+                                    }
+                                    _ = self.cancel.cancelled() => {
+                                        return Err(Error::Cancelled);
+                                    }
+                                }
+                            }
+
+                            dialing_timeout_active = false;
                             self.boot_nodes.clone_from(&self.retry_boot_nodes);
                             self.retry_boot_nodes.clear();
                             self.change_state(NetworkState::Dial).await;
@@ -556,6 +629,18 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         _ = self.cancel.cancelled() => {
                             return Err(Error::Cancelled);
                         }
+                        _ = &mut dialing_round_timeout, if dialing_timeout_active => {
+                            warn!(
+                                target: TARGET,
+                                remaining = self.boot_nodes.len(),
+                                "bootstrap round timed out waiting for Identify; \
+                                 moving remaining peers to retry queue"
+                            );
+                            for (peer, addrs) in self.boot_nodes.drain() {
+                                self.retry_boot_nodes.insert(peer, addrs);
+                            }
+                            dialing_timeout_active = false;
+                        }
                     }
                 }
             }
@@ -565,7 +650,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn init_dial_error_manager(
         e: DialError,
         peer: PeerId,
-        retrys: u8,
     ) -> (bool, Vec<Multiaddr>) {
         match e {
             DialError::LocalPeerId { .. } => {
@@ -581,12 +665,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 debug!(target: TARGET, peer_id = %peer, cause = %cause, "dial denied by behaviour");
             }
             DialError::Aborted => {
-                if retrys == 0 {
-                    debug!(target: TARGET, peer_id = %peer, "dial aborted, will retry");
-                    return (true, vec![]);
-                } else {
-                    warn!(target: TARGET, peer_id = %peer, attempt = retrys, "dial aborted");
-                }
+                debug!(target: TARGET, peer_id = %peer, "dial aborted, will retry");
+                return (true, vec![]);
             }
             DialError::WrongPeerId { obtained, .. } => {
                 warn!(target: TARGET, expected = %peer, obtained = %obtained, "dial failed: peer identity mismatch");
@@ -632,6 +712,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         match e {
             DialError::LocalPeerId { .. } | DialError::WrongPeerId { .. } => {
                 self.retry_by_peer.remove(peer_id);
+                self.clear_pending_messages(peer_id);
                 self.swarm
                     .behaviour_mut()
                     .clean_hard_peer_to_remove(peer_id);
@@ -689,7 +770,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 ..
             } => {
                 let (add_to_retry, new_addresses) =
-                    Self::init_dial_error_manager(error, peer_id, self.retrys);
+                    Self::init_dial_error_manager(error, peer_id);
 
                 if let Some(addresses) = self.boot_nodes.remove(&peer_id)
                     && add_to_retry
@@ -730,15 +811,34 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     }
 
                     if any_address_is_valid {
-                        self.successful_dials += 1;
+                        if self.boot_nodes.remove(&peer_id).is_some() {
+                            self.successful_dials += 1;
+                        }
                         self.peer_identify.insert(peer_id);
-                        self.boot_nodes.remove(&peer_id);
                     } else {
                         warn!(target: TARGET, peer_id = %peer_id, "bootstrap peer has no valid addresses");
 
                         self.swarm
                             .behaviour_mut()
                             .close_connections(&peer_id, Some(connection_id));
+                    }
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::IdentifyError {
+                peer_id,
+                error,
+            }) => {
+                match error {
+                    swarm::StreamUpgradeError::Timeout => {
+                        // Recoverable: wait for ConnectionClosed to remove from boot_nodes.
+                    }
+                    _ => {
+                        // Hard failure: Identify will never complete; move to retry immediately
+                        // instead of waiting for the per-round timeout.
+                        debug!(target: TARGET, peer_id = %peer_id, error = %error, "identify hard failure during bootstrap; queuing for retry");
+                        if let Some(addrs) = self.boot_nodes.remove(&peer_id) {
+                            self.retry_boot_nodes.insert(peer_id, addrs);
+                        }
                     }
                 }
             }
@@ -917,11 +1017,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             &info.protocols,
                         ) {
                             warn!(
-                                TARGET,
-                                "Invalid protocols, peer-id: {}, protocols: {:?}, protocol-version: {}",
-                                peer_id,
-                                info.protocols,
-                                info.protocol_version
+                                target: TARGET,
+                                peer_id = %peer_id,
+                                protocol_version = %info.protocol_version,
+                                protocols = ?info.protocols,
+                                "peer uses incompatible protocols; closing connection"
                             );
 
                             self.clear_pending_messages(&peer_id);
@@ -951,11 +1051,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                             self.peer_identify.insert(peer_id);
 
-                            if let Some(messages) =
+                            if let Some(mut queue) =
                                 self.pending_inbound_messages.remove(&peer_id)
                             {
                                 self.message_to_helper(
-                                    MessagesHelper::Vec(messages),
+                                    MessagesHelper::Vec(queue.drain().collect()),
                                     &peer_id,
                                 )
                                 .await;
@@ -1010,10 +1110,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             )
                             .await;
                         } else {
-                            self.pending_inbound_messages
+                            let queue = self.pending_inbound_messages
                                 .entry(peer_id)
-                                .or_default()
-                                .push_back(message_data);
+                                .or_default();
+                            if queue.push(message_data) {
+                                warn!(
+                                    target: TARGET,
+                                    peer_id = %peer_id,
+                                    max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                                    "inbound queue count limit reached; oldest message evicted",
+                                );
+                            }
                         }
                     }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
@@ -1105,37 +1212,40 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 connection_id,
+                num_established,
                 ..
             } => {
-                if let Some(Action::Identified(id)) =
-                    self.peer_action.get(&peer_id)
-                    && connection_id == *id
-                {
-                    self.peer_action.remove(&peer_id);
+                if num_established == 0 {
+                    if let Some(Action::Identified(id)) =
+                        self.peer_action.get(&peer_id)
+                        && connection_id == *id
+                    {
+                        self.peer_action.remove(&peer_id);
 
-                    self.peer_identify.remove(&peer_id);
-                    self.pending_inbound_messages.remove(&peer_id);
-                    self.response_channels.remove(&peer_id);
+                        self.peer_identify.remove(&peer_id);
+                        self.pending_inbound_messages.remove(&peer_id);
+                        self.response_channels.remove(&peer_id);
 
-                    self.retry_by_peer.remove(&peer_id);
+                        self.retry_by_peer.remove(&peer_id);
 
-                    if self.pending_outbound_messages.contains_key(&peer_id) {
-                        self.schedule_retry(
-                            peer_id,
-                            ScheduleType::Dial(vec![]),
-                        );
-                    }
-                } else if let Some(Action::Dial | Action::Discover) =
-                    self.peer_action.get(&peer_id)
-                {
-                    self.peer_action.remove(&peer_id);
-                    self.retry_by_peer.remove(&peer_id);
-                    self.pending_inbound_messages.remove(&peer_id);
-                    self.response_channels.remove(&peer_id);
-                    self.peer_identify.remove(&peer_id);
+                        if self.pending_outbound_messages.get(&peer_id).is_some_and(|q| !q.is_empty()) {
+                            self.schedule_retry(
+                                peer_id,
+                                ScheduleType::Dial(vec![]),
+                            );
+                        }
+                    } else if let Some(Action::Dial | Action::Discover) =
+                        self.peer_action.get(&peer_id)
+                    {
+                        self.peer_action.remove(&peer_id);
+                        self.retry_by_peer.remove(&peer_id);
+                        self.pending_inbound_messages.remove(&peer_id);
+                        self.response_channels.remove(&peer_id);
+                        self.peer_identify.remove(&peer_id);
 
-                    if self.pending_outbound_messages.contains_key(&peer_id) {
-                        self.schedule_retry(peer_id, ScheduleType::Discover);
+                        if self.pending_outbound_messages.get(&peer_id).is_some_and(|q| !q.is_empty()) {
+                            self.schedule_retry(peer_id, ScheduleType::Discover);
+                        }
                     }
                 }
             }
@@ -1151,8 +1261,20 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             SwarmEvent::ListenerError { error, .. } => {
                 error!(target: TARGET, error = %error, "listener error");
             }
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                num_established,
+                ..
+            } => {
+                if num_established.get() > 1 {
+                    debug!(target: TARGET, peer_id = %peer_id, "duplicate connection detected; closing excess");
+                    self.swarm
+                        .behaviour_mut()
+                        .close_connections(&peer_id, Some(connection_id));
+                }
+            }
             SwarmEvent::IncomingConnection { .. }
-            | SwarmEvent::ConnectionEstablished { .. }
             | SwarmEvent::ListenerClosed { .. }
             | SwarmEvent::Dialing { .. }
             | SwarmEvent::NewExternalAddrCandidate { .. }
