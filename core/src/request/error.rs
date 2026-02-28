@@ -136,6 +136,8 @@ impl From<RequestHandlerError> for ActorError {
 
 #[derive(Debug, Error, Clone)]
 pub enum RequestManagerError {
+   #[error("the subject could not be created; the maximum limit has been reached.")]
+    CheckLimit,
     // Internal state errors
     #[error("request is not set")]
     RequestNotSet,

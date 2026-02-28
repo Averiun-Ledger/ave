@@ -60,9 +60,13 @@ struct PendingQueue {
 }
 
 impl PendingQueue {
-    /// Enqueue a message. If the count limit is reached the oldest is evicted
-    /// and `true` is returned; otherwise `false`.
+    /// Enqueue a message. Duplicates (byte-identical messages already in the
+    /// queue) are silently dropped. If the count limit is reached the oldest
+    /// is evicted and `true` is returned; otherwise `false`.
     fn push(&mut self, message: Bytes) -> bool {
+        if self.messages.contains(&message) {
+            return false;
+        }
         let evicted = if self.messages.len() >= MAX_PENDING_MESSAGES_PER_PEER {
             self.messages.pop_front();
             true
@@ -351,8 +355,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
 
             self.retry_queue.pop();
+            // Match the exact instant to reject stale Due entries. Multiple Due
+            // entries for the same peer can accumulate (e.g. Discover → Dial
+            // transition pushes a second entry without removing the first).
+            // Comparing `when` (from the popped Due) against `retry_by_peer[peer].when`
+            // ensures only the current scheduling cycle fires.
             if let Some(retry) = self.retry_by_peer.get(&peer).cloned()
-                && retry.when <= now
+                && retry.when == when
             {
                 self.retry_by_peer
                     .entry(peer)
@@ -872,9 +881,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         loop {
             tokio::select! {
                 command = self.command_receiver.recv() => {
-                    // Handle commands.
-                    if let Some(command) = command {
-                        self.handle_command(command).await;
+                    match command {
+                        Some(command) => self.handle_command(command).await,
+                        None => break,
                     }
                 }
                 event = self.swarm.select_next_some() => {
@@ -1074,7 +1083,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             swarm::StreamUpgradeError::Apply(..)
                             | swarm::StreamUpgradeError::NegotiationFailed
                             | swarm::StreamUpgradeError::Io(..) => {
-                                self.clear_pending_messages(&peer_id);
+                                // Do not call clear_pending_messages here — it removes
+                                // peer_action, which ConnectionClosed needs to trigger
+                                // its cleanup path. Clean only the state that
+                                // ConnectionClosed won't reach.
+                                self.pending_outbound_messages.remove(&peer_id);
+                                self.retry_by_peer.remove(&peer_id);
+                                self.response_channels.remove(&peer_id);
+                                self.pending_inbound_messages.remove(&peer_id);
                             }
                         }
 

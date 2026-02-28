@@ -803,7 +803,13 @@ impl RequestManager {
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
         if ledger.content().event_request.content().is_create_event() {
-            create_subject(ctx, ledger.clone()).await?;
+            if let Err(e) = create_subject(ctx, ledger.clone()).await {
+                if let ActorError::Functional { .. } = e {
+                    return Err(RequestManagerError::CheckLimit);
+                } else {
+                    return Err(RequestManagerError::ActorError(e));
+                }
+            };
         } else {
             update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await?;
         }
@@ -1133,11 +1139,12 @@ impl RequestManager {
                     emit_fail(ctx, e).await;
                 }
             }
-            RequestManagerError::Governance(e) => {
+            RequestManagerError::CheckLimit
+            | RequestManagerError::Governance( .. ) => {
                 if let Err(e) = self
                     .abort_request(
                         ctx,
-                        e.to_string(),
+                        error.to_string(),
                         None,
                         (*self.our_key).clone(),
                     )

@@ -1762,7 +1762,6 @@ async fn test_system_info_deserialization() {
     #[cfg(feature = "rocksdb")]
     {
         assert_eq!(config.node.internal_db.db, "Rocksdb");
-        MA
     }
     assert_eq!(config.node.external_db.db, "Sqlite");
     assert_eq!(config.node.hash_algorithm, "Blake3");
