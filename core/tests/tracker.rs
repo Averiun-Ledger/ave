@@ -17,7 +17,7 @@ use common::{
 use serde_json::json;
 use test_log::test;
 
-use crate::common::{get_abort_request, wait_request_state};
+use crate::common::{get_abort_request, wait_request, wait_request_state};
 
 #[test(tokio::test)]
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY
@@ -3496,4 +3496,335 @@ async fn test_subj_no_all_evaluators() {
             "one": 1, "three": 0, "two": 0
         })
     );
+}
+
+#[test(tokio::test)]
+// Creator infinity, falla porque no hay validadores, luego se completan todas las creaciones.
+async fn test_infinty_creations() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+
+    let owner_governance = &nodes[0].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![]).await;
+
+    // add member to governance
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+
+                        "add": {
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        },
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // create subject
+    let (subject_id_1, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_2, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_3, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_4, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_5, request_id) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_request_state(
+        owner_governance,
+        request_id.clone(),
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                        }
+
+                }
+            ]
+        },
+    });
+
+    
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(owner_governance, subject_id_1.clone(), Some(0))
+        .await
+        .unwrap();
+
+    let _state = get_subject(owner_governance, subject_id_2.clone(), Some(0))
+        .await
+        .unwrap();
+
+    let _state = get_subject(owner_governance, subject_id_3.clone(), Some(0))
+        .await
+        .unwrap();
+
+    let _state = get_subject(owner_governance, subject_id_4.clone(), Some(0))
+        .await
+        .unwrap();
+
+    let _state = get_subject(owner_governance, subject_id_5.clone(), Some(0))
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// Creator Quantity 2, falla porque no hay validadores, luego se completa 2 creaciones.
+async fn test_quantity_creations() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+
+    let owner_governance = &nodes[0].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![]).await;
+
+    // add member to governance
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+
+                        "add": {
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": 2
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        },
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // create subject
+    let (subject_id_1, request_id_1) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_2, request_id_2) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_3, request_id_3) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_4, request_id_4) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id_5, request_id_5) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        false,
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_request_state(
+        owner_governance,
+        request_id_5.clone(),
+        Some(RequestState::RebootTimeOut {
+            seconds: 0,
+            count: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                        }
+
+                }
+            ]
+        },
+    });
+
+    
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    wait_request(owner_governance, request_id_1).await.unwrap();
+    wait_request(owner_governance, request_id_2).await.unwrap();
+    wait_request(owner_governance, request_id_3).await.unwrap();
+    wait_request(owner_governance, request_id_4).await.unwrap();
+    wait_request(owner_governance, request_id_5).await.unwrap();
+
+    let mut error = 0;
+    if owner_governance.get_subject_state(subject_id_1).await.is_err() {
+        error += 1;
+    }
+    if owner_governance.get_subject_state(subject_id_2).await.is_err() {
+        error += 1;
+    }
+    if owner_governance.get_subject_state(subject_id_3).await.is_err() {
+        error += 1;
+    }
+    if owner_governance.get_subject_state(subject_id_4).await.is_err() {
+        error += 1;
+    }
+    if owner_governance.get_subject_state(subject_id_5).await.is_err() {
+        error += 1;
+    }
+
+    assert_eq!(error, 3);
 }

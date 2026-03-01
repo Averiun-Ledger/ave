@@ -260,8 +260,17 @@ impl Runner {
 
         governance.update_name_role(new_owner_member);
 
-        if let Some(mut old_owner_name) = old_owner_name {
-            old_owner_name = old_owner_name.trim().to_owned();
+        if let Some(old_owner_name) = old_owner_name {
+            if old_owner_name != old_owner_name.trim() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "execute_confirm_gov",
+                    kind: error::InvalidEventKind::InvalidValue {
+                        field: "new name for old owner".to_owned(),
+                        reason: "cannot have leading or trailing whitespace"
+                            .to_owned(),
+                    },
+                });
+            }
 
             if old_owner_name.is_empty() {
                 return Err(RunnerError::InvalidEvent {
@@ -279,6 +288,19 @@ impl Runner {
                         field: "old owner new name".to_owned(),
                         actual: old_owner_name.len(),
                         max: 100,
+                    },
+                });
+            }
+
+            if old_owner_name == ReservedWords::Any.to_string()
+                || old_owner_name == ReservedWords::Witnesses.to_string()
+                || old_owner_name == ReservedWords::Owner.to_string()
+            {
+                return Err(RunnerError::InvalidEvent {
+                    location: "execute_confirm_gov",
+                    kind: error::InvalidEventKind::ReservedWord {
+                        field: "old owner new name".to_owned(),
+                        value: old_owner_name,
                     },
                 });
             }
@@ -456,7 +478,7 @@ impl Runner {
 
         let add_change_schemas = if let Some(schema_event) = event.schemas {
             let (add_schemas, remove_schemas, change_schemas) =
-                Self::check_schemas(&schema_event, &mut governance)?;
+                Self::apply_schemas(&schema_event, &mut governance)?;
             governance.remove_schema(remove_schemas);
             governance.add_schema(add_schemas.clone());
 
@@ -532,6 +554,14 @@ impl Runner {
                         },
                     }
                 })?;
+                if approve == new_policies.approve {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::SameValue {
+                            what: "governance approve policy".to_owned(),
+                        },
+                    });
+                }
                 new_policies.approve = approve;
             }
 
@@ -545,6 +575,14 @@ impl Runner {
                         },
                     }
                 })?;
+                if evaluate == new_policies.evaluate {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::SameValue {
+                            what: "governance evaluate policy".to_owned(),
+                        },
+                    });
+                }
                 new_policies.evaluate = evaluate;
             }
 
@@ -558,6 +596,14 @@ impl Runner {
                         },
                     }
                 })?;
+                if validate == new_policies.validate {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::SameValue {
+                            what: "governance validate policy".to_owned(),
+                        },
+                    });
+                }
                 new_policies.validate = validate;
             }
 
@@ -575,8 +621,19 @@ impl Runner {
             }
 
             let mut new_policies = governance.policies_schema.clone();
+            let mut seen_schema_ids: HashSet<SchemaType> = HashSet::new();
 
             for schema in schemas {
+                if !seen_schema_ids.insert(schema.schema_id.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::Duplicate {
+                            what: "schema".to_owned(),
+                            id: schema.schema_id.to_string(),
+                        },
+                    });
+                }
+
                 if schema.is_empty() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -619,6 +676,17 @@ impl Runner {
                             },
                         }
                     })?;
+                    if evaluate == policies_schema.evaluate {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_policies",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "schema {} evaluate policy",
+                                    schema.schema_id
+                                ),
+                            },
+                        });
+                    }
                     policies_schema.evaluate = evaluate;
                 }
 
@@ -635,6 +703,17 @@ impl Runner {
                             },
                         }
                     })?;
+                    if validate == policies_schema.validate {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_policies",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "schema {} validate policy",
+                                    schema.schema_id
+                                ),
+                            },
+                        });
+                    }
                     policies_schema.validate = validate;
                 }
             }
@@ -686,8 +765,19 @@ impl Runner {
             }
 
             let mut new_roles = governance.roles_schema.clone();
+            let mut seen_schema_ids: HashSet<SchemaType> = HashSet::new();
 
             for schema in schemas {
+                if !seen_schema_ids.insert(schema.schema_id.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_roles",
+                        kind: error::InvalidEventKind::Duplicate {
+                            what: "schema".to_owned(),
+                            id: schema.schema_id.to_string(),
+                        },
+                    });
+                }
+
                 if schema.is_empty() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_roles",
@@ -718,6 +808,15 @@ impl Runner {
         }
 
         if let Some(tracker_schemas) = roles_event.tracker_schemas {
+            if tracker_schemas.is_empty() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "check_roles",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "TrackerSchemasRoleEvent".to_owned(),
+                    },
+                });
+            }
+
             let new_roles = governance.roles_tracker_schemas.clone();
 
             let new_roles = tracker_schemas.check_data(
@@ -732,7 +831,7 @@ impl Runner {
         Ok(())
     }
 
-    fn check_schemas(
+    fn apply_schemas(
         schema_event: &SchemasEvent,
         governance: &mut GovernanceData,
     ) -> Result<AddRemoveChangeSchema, RunnerError> {
@@ -743,6 +842,38 @@ impl Runner {
                     what: "SchemasEvent".to_owned(),
                 },
             });
+        }
+
+        if let (Some(add), Some(remove)) = (&schema_event.add, &schema_event.remove) {
+            let add_ids: HashSet<&SchemaType> = add.iter().map(|s| &s.id).collect();
+            for r in remove {
+                if add_ids.contains(r) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::CannotModify {
+                            what: r.to_string(),
+                            reason: "cannot add and remove the same schema in the same event"
+                                .to_owned(),
+                        },
+                    });
+                }
+            }
+        }
+
+        if let (Some(add), Some(change)) = (&schema_event.add, &schema_event.change) {
+            let add_ids: HashSet<&SchemaType> = add.iter().map(|s| &s.id).collect();
+            for c in change {
+                if add_ids.contains(&c.actual_id) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::CannotModify {
+                            what: c.actual_id.to_string(),
+                            reason: "cannot add and change the same schema in the same event"
+                                .to_owned(),
+                        },
+                    });
+                }
+            }
         }
 
         let mut remove_schemas = HashSet::new();
@@ -767,6 +898,18 @@ impl Runner {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::Empty {
                             what: "schema id".to_owned(),
+                        },
+                    });
+                }
+
+                let id_str = new_schema.id.to_string();
+                if id_str != id_str.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "schema id".to_owned(),
+                            reason: "cannot have leading or trailing whitespace"
+                                .to_owned(),
                         },
                     });
                 }
@@ -862,7 +1005,7 @@ impl Runner {
                 });
             }
 
-            for remove_schema in remove.clone() {
+            for remove_schema in &remove {
                 if !remove_schema.is_valid() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_schemas",
@@ -872,7 +1015,7 @@ impl Runner {
                     });
                 }
 
-                if new_schemas.remove(&remove_schema).is_none() {
+                if new_schemas.remove(remove_schema).is_none() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::CannotRemove {
@@ -896,7 +1039,19 @@ impl Runner {
                 });
             }
 
+            let mut seen_change_ids: HashSet<SchemaType> = HashSet::new();
+
             for change_schema in change {
+                if !seen_change_ids.insert(change_schema.actual_id.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::Duplicate {
+                            what: "schema in change".to_owned(),
+                            id: change_schema.actual_id.to_string(),
+                        },
+                    });
+                }
+
                 if change_schema.is_empty() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_schemas",
@@ -947,10 +1102,34 @@ impl Runner {
                         });
                     }
 
+                    if new_contract == schema_data.contract {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_schemas",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "contract for schema {}",
+                                    change_schema.actual_id
+                                ),
+                            },
+                        });
+                    }
+
                     schema_data.contract = new_contract;
                 }
 
                 if let Some(init_value) = change_schema.new_initial_value {
+                    if init_value == schema_data.initial_value.0 {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_schemas",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "initial_value for schema {}",
+                                    change_schema.actual_id
+                                ),
+                            },
+                        });
+                    }
+
                     schema_data.initial_value = ValueWrapper(init_value);
                 }
 
@@ -975,6 +1154,24 @@ impl Runner {
             });
         }
 
+        if let (Some(add), Some(remove)) =
+            (&member_event.add, &member_event.remove)
+        {
+            let add_names: HashSet<String> =
+                add.iter().map(|m| m.name.trim().to_owned()).collect();
+            for r in remove {
+                if add_names.contains(r.as_str()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_members",
+                        kind: error::InvalidEventKind::CannotModify {
+                            what: r.clone(),
+                            reason: "cannot add and remove the same member in the same event".to_owned(),
+                        },
+                    });
+                }
+            }
+        }
+
         let mut new_members = governance.members.clone();
 
         if let Some(add) = member_event.add.clone() {
@@ -987,8 +1184,17 @@ impl Runner {
                 });
             }
 
-            for mut new_member in add {
-                new_member.name = new_member.name.trim().to_owned();
+            for new_member in add {
+                if new_member.name != new_member.name.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_members",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "member name".to_owned(),
+                            reason: "cannot have leading or trailing whitespace"
+                                .to_owned(),
+                        },
+                    });
+                }
 
                 if new_member.name.is_empty() {
                     return Err(RunnerError::InvalidEvent {
@@ -1030,6 +1236,16 @@ impl Runner {
                     });
                 }
 
+                if new_member.name == ReservedWords::Owner.to_string() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_members",
+                        kind: error::InvalidEventKind::ReservedWord {
+                            field: "member name".to_owned(),
+                            value: ReservedWords::Owner.to_string(),
+                        },
+                    });
+                }
+
                 if new_member.key.is_empty() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_members",
@@ -1065,12 +1281,12 @@ impl Runner {
             }
 
             for remove_member in remove.clone() {
-                if remove_member == ReservedWords::Owner.to_string() {
+                if remove_member != remove_member.trim() {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_members",
-                        kind: error::InvalidEventKind::CannotRemove {
-                            what: ReservedWords::Owner.to_string(),
-                            reason: "governance owner cannot be removed"
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "member name to remove".to_owned(),
+                            reason: "cannot have leading or trailing whitespace"
                                 .to_owned(),
                         },
                     });
@@ -1081,6 +1297,17 @@ impl Runner {
                         location: "check_members",
                         kind: error::InvalidEventKind::Empty {
                             what: "member name to remove".to_owned(),
+                        },
+                    });
+                }
+
+                if remove_member == ReservedWords::Owner.to_string() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_members",
+                        kind: error::InvalidEventKind::CannotRemove {
+                            what: ReservedWords::Owner.to_string(),
+                            reason: "governance owner cannot be removed"
+                                .to_owned(),
                         },
                     });
                 }

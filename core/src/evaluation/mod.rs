@@ -949,7 +949,7 @@ pub mod tests {
         };
 
         assert_eq!(
-            "runner error: invalid event: [check_members] invalid event: member 'Owner' already exists",
+            "runner error: invalid event: [check_members] invalid event: member name cannot be 'Owner' (reserved word)",
             e
         );
         assert!(approval_success.is_none());

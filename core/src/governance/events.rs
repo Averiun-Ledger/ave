@@ -818,7 +818,7 @@ impl GovRoleEvent {
         let mut check_and_register = |role_type: &str,
                                       name: &str|
          -> Result<(), RunnerError> {
-            let key = (role_type.to_string(), name.to_string());
+            let key = (role_type.to_string(), name.trim().to_string());
             if !seen_roles.insert(key) {
                 return Err(RunnerError::InvalidEvent {
                     location: "GovRoleEvent::check_data",
@@ -826,7 +826,7 @@ impl GovRoleEvent {
                         field: format!("{} role operation", role_type),
                         reason: format!(
                             "Role {} appears multiple times in the same event. Only one operation per role is allowed",
-                            name
+                            name.trim()
                         ),
                     },
                 });
@@ -916,8 +916,16 @@ impl GovRoleEvent {
                     });
                 }
 
-                for mut approver in approvers {
-                    approver = approver.trim().to_owned();
+                for approver in approvers {
+                    if approver != approver.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "approver name".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if approver.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -972,8 +980,16 @@ impl GovRoleEvent {
                     });
                 }
 
-                for mut evaluator in evaluators {
-                    evaluator = evaluator.trim().to_owned();
+                for evaluator in evaluators {
+                    if evaluator != evaluator.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "evaluator name".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if evaluator.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1028,8 +1044,16 @@ impl GovRoleEvent {
                     });
                 }
 
-                for mut validator in validators {
-                    validator = validator.trim().to_owned();
+                for validator in validators {
+                    if validator != validator.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "validator name".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if validator.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1084,8 +1108,16 @@ impl GovRoleEvent {
                     });
                 }
 
-                for mut witness in witnesses {
-                    witness = witness.trim().to_owned();
+                for witness in witnesses {
+                    if witness != witness.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "witness name".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if witness.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1140,8 +1172,16 @@ impl GovRoleEvent {
                     });
                 }
 
-                for mut issuer in issuers {
-                    issuer = issuer.trim().to_owned();
+                for issuer in issuers {
+                    if issuer != issuer.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "issuer name".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if issuer.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1183,6 +1223,15 @@ impl GovRoleEvent {
                             });
                         };
                     } else {
+                        if new_roles.issuer.any {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "GovRoleEvent::check_data",
+                                kind: error::InvalidEventKind::AlreadyExists {
+                                    what: "governance issuer 'Any'".to_owned(),
+                                    id: ReservedWords::Any.to_string(),
+                                },
+                            });
+                        }
                         new_roles.issuer.any = true;
                     }
                 }
@@ -1212,6 +1261,15 @@ impl GovRoleEvent {
                 }
 
                 for approver in approvers {
+                    if approver != approver.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "approver name to remove".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if !new_roles.approver.remove(&approver) {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
@@ -1237,6 +1295,15 @@ impl GovRoleEvent {
                 }
 
                 for evaluator in evaluators {
+                    if evaluator != evaluator.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "evaluator name to remove".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if !new_roles.evaluator.remove(&evaluator) {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
@@ -1261,6 +1328,15 @@ impl GovRoleEvent {
                     });
                 }
                 for validator in validators {
+                    if validator != validator.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "validator name to remove".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if !new_roles.validator.remove(&validator) {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
@@ -1285,6 +1361,15 @@ impl GovRoleEvent {
                     });
                 }
                 for witness in witnesses {
+                    if witness != witness.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "witness name to remove".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if !new_roles.witness.remove(&witness) {
                         return Err(RunnerError::InvalidEvent {
                             location: "GovRoleEvent::check_data",
@@ -1309,6 +1394,15 @@ impl GovRoleEvent {
                     });
                 }
                 for issuer in issuers {
+                    if issuer != issuer.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "GovRoleEvent::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: "issuer name to remove".to_owned(),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if issuer != ReservedWords::Any.to_string() {
                         if !new_roles.issuer.signers.remove(&issuer) {
                             return Err(RunnerError::InvalidEvent {
@@ -1321,6 +1415,15 @@ impl GovRoleEvent {
                             });
                         };
                     } else {
+                        if !new_roles.issuer.any {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "GovRoleEvent::check_data",
+                                kind: error::InvalidEventKind::CannotRemove {
+                                    what: "governance issuer 'Any'".to_owned(),
+                                    reason: "issuer 'Any' is not set".to_owned(),
+                                },
+                            });
+                        }
                         new_roles.issuer.any = false;
                     }
                 }
@@ -1347,6 +1450,10 @@ pub struct TrackerSchemasRoleEvent {
 }
 
 impl TrackerSchemasRoleEvent {
+    pub const fn is_empty(&self) -> bool {
+        self.add.is_none() && self.remove.is_none() && self.change.is_none()
+    }
+
     pub fn check_data(
         &self,
         governance: &GovernanceData,
@@ -1397,7 +1504,7 @@ impl SchemaIdRole {
          -> Result<(), RunnerError> {
             let key = (
                 role_type.to_string(),
-                name.to_string(),
+                name.trim().to_string(),
                 namespace.to_string(),
             );
             if !seen_roles.insert(key) {
@@ -1407,7 +1514,7 @@ impl SchemaIdRole {
                         field: format!("{} role operation", role_type),
                         reason: format!(
                             "Role ({}, {}) appears multiple times in the same event. Only one operation per role is allowed",
-                            name, namespace
+                            name.trim(), namespace
                         ),
                     },
                 });
@@ -1570,8 +1677,19 @@ impl SchemaIdRole {
                     });
                 }
 
-                for mut evaluator in evaluators {
-                    evaluator.name = evaluator.name.trim().to_owned();
+                for evaluator in evaluators {
+                    if evaluator.name != evaluator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!(
+                                    "evaluator name in schema {}",
+                                    schema_id
+                                ),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if evaluator.name.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1643,8 +1761,19 @@ impl SchemaIdRole {
                     });
                 }
 
-                for mut validator in validators {
-                    validator.name = validator.name.trim().to_owned();
+                for validator in validators {
+                    if validator.name != validator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!(
+                                    "validator name in schema {}",
+                                    schema_id
+                                ),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if validator.name.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1716,8 +1845,19 @@ impl SchemaIdRole {
                     });
                 }
 
-                for mut witness in witnesses {
-                    witness.name = witness.name.trim().to_owned();
+                for witness in witnesses {
+                    if witness.name != witness.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!(
+                                    "witness name in schema {}",
+                                    schema_id
+                                ),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if witness.name.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1789,8 +1929,19 @@ impl SchemaIdRole {
                     });
                 }
 
-                for mut creator in creators {
-                    creator.name = creator.name.trim().to_owned();
+                for creator in creators {
+                    if creator.name != creator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!(
+                                    "creator name in schema {}",
+                                    schema_id
+                                ),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if creator.name.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1851,15 +2002,24 @@ impl SchemaIdRole {
                     }
 
                     for witness in creator.witnesses.iter() {
-                        if witness != &ReservedWords::Witnesses.to_string()
-                            && !members.contains(witness)
-                        {
-                            return Err(RunnerError::InvalidEvent {
-                                location: "SchemaIdRole::check_data",
-                                kind: error::InvalidEventKind::NotMember {
-                                    who: witness.clone(),
-                                },
-                            });
+                        if witness != &ReservedWords::Witnesses.to_string() {
+                            if witness != witness.trim() {
+                                return Err(RunnerError::InvalidEvent {
+                                    location: "SchemaIdRole::check_data",
+                                    kind: error::InvalidEventKind::InvalidValue {
+                                        field: format!("creator witness name in schema {}", schema_id),
+                                        reason: "cannot have leading or trailing whitespace".to_owned(),
+                                    },
+                                });
+                            }
+                            if !members.contains(witness) {
+                                return Err(RunnerError::InvalidEvent {
+                                    location: "SchemaIdRole::check_data",
+                                    kind: error::InvalidEventKind::NotMember {
+                                        who: witness.clone(),
+                                    },
+                                });
+                            }
                         }
                     }
 
@@ -1885,8 +2045,19 @@ impl SchemaIdRole {
                     });
                 }
 
-                for mut issuer in issuers {
-                    issuer.name = issuer.name.trim().to_owned();
+                for issuer in issuers {
+                    if issuer.name != issuer.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!(
+                                    "issuer name in schema {}",
+                                    schema_id
+                                ),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
 
                     if issuer.name.is_empty() {
                         return Err(RunnerError::InvalidEvent {
@@ -1957,6 +2128,16 @@ impl SchemaIdRole {
                             });
                         }
 
+                        if roles_schema.issuer.any {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::AlreadyExists {
+                                    what: format!("issuer 'Any' in schema {}", schema_id),
+                                    id: ReservedWords::Any.to_string(),
+                                },
+                            });
+                        }
+
                         roles_schema.issuer.any = true;
                     }
                 }
@@ -1984,6 +2165,24 @@ impl SchemaIdRole {
                 }
 
                 for evaluator in evaluators {
+                    if evaluator.name != evaluator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator name to remove in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !evaluator.namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator namespace to remove in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !roles_schema.evaluator.remove(&evaluator) {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2012,6 +2211,24 @@ impl SchemaIdRole {
                 }
 
                 for validator in validators {
+                    if validator.name != validator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator name to remove in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !validator.namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator namespace to remove in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !roles_schema.validator.remove(&validator) {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2040,6 +2257,24 @@ impl SchemaIdRole {
                 }
 
                 for witness in witnesses {
+                    if witness.name != witness.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness name to remove in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !witness.namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness namespace to remove in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !roles_schema.witness.remove(&witness) {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2066,6 +2301,24 @@ impl SchemaIdRole {
                 }
 
                 for creator in creators {
+                    if creator.name != creator.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator name to remove in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !creator.namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator namespace to remove in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !roles_schema.creator.remove(&RoleCreator::create(
                         &creator.name,
                         creator.namespace.clone(),
@@ -2095,7 +2348,25 @@ impl SchemaIdRole {
                 }
 
                 for issuer in issuers {
+                    if issuer.name != issuer.name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("issuer name to remove in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if issuer.name != ReservedWords::Any.to_string() {
+                        if !issuer.namespace.check() {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("issuer namespace to remove in schema {}", schema_id),
+                                    reason: "invalid namespace".to_owned(),
+                                },
+                            });
+                        }
                         if !roles_schema.issuer.signers.remove(&issuer) {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
@@ -2117,6 +2388,15 @@ impl SchemaIdRole {
                                 kind: error::InvalidEventKind::InvalidValue {
                                     field: "issuer 'Any' namespace in remove".to_owned(),
                                     reason: "namespace must be empty for 'Any' issuer".to_owned(),
+                                },
+                            });
+                        }
+                        if !roles_schema.issuer.any {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::CannotRemove {
+                                    what: "issuer 'Any'".to_owned(),
+                                    reason: "issuer 'Any' is not set".to_owned(),
                                 },
                             });
                         }
@@ -2147,6 +2427,24 @@ impl SchemaIdRole {
                 }
 
                 for evaluator in evaluators {
+                    if evaluator.actual_name != evaluator.actual_name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator actual name in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !evaluator.actual_namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("evaluator actual namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !evaluator.new_namespace.check() {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2158,6 +2456,18 @@ impl SchemaIdRole {
                                     schema_id
                                 ),
                                 reason: "invalid new namespace".to_owned(),
+                            },
+                        });
+                    }
+
+                    if evaluator.new_namespace == evaluator.actual_namespace {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "evaluator {} namespace in schema {}",
+                                    evaluator.actual_name, schema_id
+                                ),
                             },
                         });
                     }
@@ -2211,6 +2521,24 @@ impl SchemaIdRole {
                 }
 
                 for validator in validators {
+                    if validator.actual_name != validator.actual_name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator actual name in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !validator.actual_namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("validator actual namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !validator.new_namespace.check() {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2222,6 +2550,18 @@ impl SchemaIdRole {
                                     schema_id
                                 ),
                                 reason: "invalid new namespace".to_owned(),
+                            },
+                        });
+                    }
+
+                    if validator.new_namespace == validator.actual_namespace {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "validator {} namespace in schema {}",
+                                    validator.actual_name, schema_id
+                                ),
                             },
                         });
                     }
@@ -2275,6 +2615,24 @@ impl SchemaIdRole {
                 }
 
                 for witness in witnesses {
+                    if witness.actual_name != witness.actual_name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness actual name in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !witness.actual_namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("witness actual namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if !witness.new_namespace.check() {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2286,6 +2644,18 @@ impl SchemaIdRole {
                                     schema_id
                                 ),
                                 reason: "invalid new namespace".to_owned(),
+                            },
+                        });
+                    }
+
+                    if witness.new_namespace == witness.actual_namespace {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "witness {} namespace in schema {}",
+                                    witness.actual_name, schema_id
+                                ),
                             },
                         });
                     }
@@ -2339,6 +2709,24 @@ impl SchemaIdRole {
                 }
 
                 for creator in creators {
+                    if creator.actual_name != creator.actual_name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator actual name in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
+                    if !creator.actual_namespace.check() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("creator actual namespace in schema {}", schema_id),
+                                reason: "invalid namespace".to_owned(),
+                            },
+                        });
+                    }
                     if creator.is_empty() {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
@@ -2386,6 +2774,17 @@ impl SchemaIdRole {
                                 },
                             });
                         }
+                        if new_namespace == creator.actual_namespace {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::SameValue {
+                                    what: format!(
+                                        "creator {} namespace in schema {}",
+                                        creator.actual_name, schema_id
+                                    ),
+                                },
+                            });
+                        }
                         new_namespace
                     } else {
                         old_creator.namespace
@@ -2400,6 +2799,17 @@ impl SchemaIdRole {
                                 kind: error::InvalidEventKind::InvalidValue {
                                     field: "creator quantity".to_owned(),
                                     reason: "cannot be 0".to_owned(),
+                                },
+                            });
+                        }
+                        if quantity == old_creator.quantity {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::SameValue {
+                                    what: format!(
+                                        "creator {} quantity in schema {}",
+                                        creator.actual_name, schema_id
+                                    ),
                                 },
                             });
                         }
@@ -2419,18 +2829,38 @@ impl SchemaIdRole {
                         }
 
                         for witness in witnesses.iter() {
-                            if witness != &ReservedWords::Witnesses.to_string()
-                                && !members.contains(witness)
-                            {
-                                return Err(RunnerError::InvalidEvent {
-                                    location: "SchemaIdRole::check_data",
-                                    kind: error::InvalidEventKind::NotMember {
-                                        who: witness.clone(),
-                                    },
-                                });
+                            if witness != &ReservedWords::Witnesses.to_string() {
+                                if witness != witness.trim() {
+                                    return Err(RunnerError::InvalidEvent {
+                                        location: "SchemaIdRole::check_data",
+                                        kind: error::InvalidEventKind::InvalidValue {
+                                            field: format!("creator new witness name in schema {}", schema_id),
+                                            reason: "cannot have leading or trailing whitespace".to_owned(),
+                                        },
+                                    });
+                                }
+                                if !members.contains(witness) {
+                                    return Err(RunnerError::InvalidEvent {
+                                        location: "SchemaIdRole::check_data",
+                                        kind: error::InvalidEventKind::NotMember {
+                                            who: witness.clone(),
+                                        },
+                                    });
+                                }
                             }
                         }
 
+                        if witnesses == old_creator.witnesses {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::SameValue {
+                                    what: format!(
+                                        "creator {} witnesses in schema {}",
+                                        creator.actual_name, schema_id
+                                    ),
+                                },
+                            });
+                        }
                         witnesses
                     } else {
                         old_creator.witnesses
@@ -2469,7 +2899,25 @@ impl SchemaIdRole {
                 }
 
                 for issuer in issuers {
+                    if issuer.actual_name != issuer.actual_name.trim() {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "SchemaIdRole::check_data",
+                            kind: error::InvalidEventKind::InvalidValue {
+                                field: format!("issuer actual name in schema {}", schema_id),
+                                reason: "cannot have leading or trailing whitespace".to_owned(),
+                            },
+                        });
+                    }
                     if issuer.actual_name != ReservedWords::Any.to_string() {
+                        if !issuer.actual_namespace.check() {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::InvalidValue {
+                                    field: format!("issuer actual namespace in schema {}", schema_id),
+                                    reason: "invalid namespace".to_owned(),
+                                },
+                            });
+                        }
                         if !issuer.new_namespace.check() {
                             return Err(RunnerError::InvalidEvent {
                                 location: "SchemaIdRole::check_data",
@@ -2481,6 +2929,18 @@ impl SchemaIdRole {
                                         schema_id
                                     ),
                                     reason: "invalid new namespace".to_owned(),
+                                },
+                            });
+                        }
+
+                        if issuer.new_namespace == issuer.actual_namespace {
+                            return Err(RunnerError::InvalidEvent {
+                                location: "SchemaIdRole::check_data",
+                                kind: error::InvalidEventKind::SameValue {
+                                    what: format!(
+                                        "issuer {} namespace in schema {}",
+                                        issuer.actual_name, schema_id
+                                    ),
                                 },
                             });
                         }
