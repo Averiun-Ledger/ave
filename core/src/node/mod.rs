@@ -587,7 +587,7 @@ impl Actor for Node {
         }
 
         if let Err(e) = ctx
-            .create_child("auth", Auth::initial(network.clone()))
+            .create_child("auth", Auth::initial((network.clone(), self.our_key.clone())))
             .await
         {
             error!(

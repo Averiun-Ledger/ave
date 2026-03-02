@@ -434,10 +434,134 @@ async fn test_explicit_witness() {
         .unwrap();
 }
 
-/*
 // ─────────────────────────────────────────────────────────────────────────────
-// BLOQUE 7 — Pure witness de un old owner B
+// BLOQUE 7 — Acceso via testigos de owners históricos
 // ─────────────────────────────────────────────────────────────────────────────
+#[test(tokio::test)]
+async fn test_explicit_witness_2() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                    "witnesses": ["Charlie", "Witnesses"],
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
 
 // T20: A→B confirm. N testigo explícito activo de B, actual_lo <= B.interval.hi
 //      → acceso hasta old_data_B.sn
@@ -453,11 +577,99 @@ async fn test_explicit_witness() {
 //
 // Verificación:
 //   witness_node.auth_subject → recibe hasta sn=5 (old_data_B.sn)
-#[test(tokio::test)]
-async fn t20_active_witness_of_old_owner_actual_lo_lte_range_hi() {
-    todo!("implementar T20")
-}
 
+    let (subject_id_1, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test1",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_1.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_1.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_1.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+
+    emit_fact(&witness_bob, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+    
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(2))
+        .await
+        .unwrap();
+
+    witness_charlie
+        .auth_subject(
+            subject_id_1.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_charlie
+        .update_subject(subject_id_1.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_charlie, subject_id_1.clone(), Some(3))
+        .await
+        .unwrap();
+    
 // T21: N testigo activo de B, pero actual_lo > B.interval.hi
 //      (N se convirtió en testigo DESPUÉS de que B dejara de ser owner) → sin acceso
 //
@@ -469,10 +681,131 @@ async fn t20_active_witness_of_old_owner_actual_lo_lte_range_hi() {
 //
 // Verificación:
 //   witness_node.auth_subject → sin acceso
-#[test(tokio::test)]
-async fn t21_active_witness_of_old_owner_actual_lo_gt_range_hi_no_access() {
-    todo!("implementar T21")
-}
+let (subject_id_2, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test2",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_2.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_2.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_2.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_2.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_2.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+
+    emit_fact(&witness_bob, subject_id_2.clone(), json, true)
+        .await
+        .unwrap();
+    
+    let _state = get_subject(&witness_bob, subject_id_2.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_2.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_2.clone(), Some(2))
+        .await
+        .unwrap();
+
+    assert!(
+        witness_charlie
+            .get_subject_state(subject_id_2.clone())
+            .await
+            .is_err()
+    );
+
+    let json = json!({
+        "roles": {
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": ["Test2"],
+                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                }
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+
+    witness_charlie
+        .auth_subject(
+            subject_id_2.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_charlie
+        .update_subject(subject_id_2.clone())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(
+        witness_charlie
+            .get_subject_state(subject_id_2.clone())
+            .await
+            .is_err()
+    );
 
 // T22: N testigo explícito de B (cerrado), intervalo SOLAPA con rango de B
 //      → acceso hasta sn_at_max_covered
@@ -487,11 +820,174 @@ async fn t21_active_witness_of_old_owner_actual_lo_gt_range_hi_no_access() {
 //
 // Verificación:
 //   witness_node.auth_subject → recibe hasta sn_at_gov_v4
-#[test(tokio::test)]
-async fn t22_closed_witness_of_old_owner_interval_overlaps_access_until_max_covered()
- {
-    todo!("implementar T22")
-}
+let (subject_id_3, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test2",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_3.clone(), json, true)
+        .await
+        .unwrap();
+
+        let json = json!({
+        "roles": {
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": ["Test2"],
+                                    "new_witnesses": ["Witnesses"]
+                                }
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_3.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_3.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_3.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+
+    emit_fact(&witness_bob, subject_id_3.clone(), json, true)
+        .await
+        .unwrap();
+    
+    let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_3.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_3.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(1))
+        .await
+        .unwrap();
+
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (mut node_new_charlie, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(nodes[3].keys.clone()),
+    )
+    .await;
+    let new_charlie = node_new_charlie.api.clone();
+    node_running(&new_charlie).await.unwrap();
+
+    assert!(
+        new_charlie
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_charlie
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_charlie, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_3.clone())
+            .await
+            .is_err()
+    );
+    new_charlie
+        .auth_subject(
+            subject_id_3.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie
+        .update_subject(subject_id_3.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1))
+        .await
+        .unwrap();
+
 
 // T23: N testigo explícito de B (cerrado), intervalo NO solapa → sin acceso
 //
@@ -504,72 +1000,446 @@ async fn t22_closed_witness_of_old_owner_interval_overlaps_access_until_max_cove
 //
 // Verificación:
 //   witness_node.auth_subject → sin acceso
-#[test(tokio::test)]
-async fn t23_closed_witness_of_old_owner_no_overlap_no_access() {
-    todo!("implementar T23")
-}
 
-// T24: B tiene Witnesses, N testigo general activo, actual_lo <= B.interval.hi
-//      → acceso hasta old_data_B.sn
+
+let (subject_id_4, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test2",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_4.clone(), json, true)
+        .await
+        .unwrap();
+
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_4.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_4.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_4.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_4.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+
+    emit_fact(&witness_bob, subject_id_4.clone(), json, true)
+        .await
+        .unwrap();
+    
+    let _state = get_subject(&witness_bob, subject_id_4.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_4.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_4.clone(), Some(2))
+        .await
+        .unwrap();
+
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_4.clone())
+            .await
+            .is_err()
+    );
+
+        new_charlie
+        .auth_subject(
+            subject_id_4.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie
+        .update_subject(subject_id_4.clone())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_4.clone())
+            .await
+            .is_err()
+    );
+
+// T26: Alice crea subject en Test2 (gov_v=3, B=Alice)
+//      Bob confirma (Alice.interval=[3,3])
+//      gov_v=4: Charlie añadido como testigo general del schema "Example"
+//               actual_lo=4 > Alice.interval.hi=3 → sin acceso
+//
+// Verificación:
+//   new_charlie.auth_subject → sin acceso
+
+        let json = json!({
+        "roles": {
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": ["Test2"],
+                                    "new_witnesses": ["Owner"]
+                                },
+                                {
+                                    "actual_name": "Bob",
+                                    "actual_namespace": ["Test2"],
+                                    "new_witnesses": ["Owner"]
+                                }
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id_5, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test2",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_5.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_5.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_5.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_5.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_5.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+    emit_fact(&witness_bob, subject_id_5.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_5.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_5.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_5.clone(), Some(2))
+        .await
+        .unwrap();
+
+    // gov_v sube a 4: añadir Charlie como testigo general del schema
+    // actual_lo = 4 > Alice.interval.hi = 3 → sin acceso
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "witness": [
+                            {
+                                "name": "Charlie",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_5.clone())
+            .await
+            .is_err()
+    );
+
+    new_charlie
+        .auth_subject(
+            subject_id_5.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie
+        .update_subject(subject_id_5.clone())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(
+        new_charlie
+            .get_subject_state(subject_id_5.clone())
+            .await
+            .is_err()
+    );
+
+// T24: Alice crea subject en Test2 (gov_v=4, B=Alice)
+//      Charlie ya es testigo general del schema desde gov_v=4 (actual_lo=4)
+//      Bob confirma (Alice.interval=[4,4])
+//      actual_lo=4 <= Alice.interval.hi=4 → acceso hasta old_data_Alice.sn
 //
 // Igual que T20 pero usando testigo general (rol de schema) en lugar de explícito de B
-#[test(tokio::test)]
-async fn t24_active_general_witness_of_old_owner_actual_lo_lte_range_hi() {
-    todo!("implementar T24")
+
+        let json = json!({
+        "roles": {
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": ["Test2"],
+                                    "new_witnesses": ["Witnesses"]
+                                },
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id_6, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "Test2",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&witness_alice, subject_id_6.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &witness_alice,
+        subject_id_6.clone(),
+        PublicKey::from_str(&witness_bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness_bob
+        .auth_subject(
+            subject_id_6.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    witness_bob
+        .update_subject(subject_id_6.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(2))
+        .await
+        .unwrap();
+
+    emit_confirm(&witness_bob, subject_id_6.clone(), None, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 200,
+        }
+    });
+    emit_fact(&witness_bob, subject_id_6.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_6.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_6.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_6.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_charlie, subject_id_6.clone(), Some(2))
+        .await
+        .unwrap();
+
+    node_new_charlie.token.cancel();
+    join_all(node_new_charlie.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_charlie_2, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        Some(node_new_charlie.keys.clone()),
+    )
+    .await;
+    let new_charlie_2 = node_new_charlie_2.api;
+    node_running(&new_charlie_2).await.unwrap();
+
+
+ assert!(
+        new_charlie_2
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_charlie_2
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie_2
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_charlie_2, governance_id.clone(), Some(6))
+        .await
+        .unwrap();
+
+    assert!(
+        new_charlie_2
+            .get_subject_state(subject_id_6.clone())
+            .await
+            .is_err()
+    );
+    new_charlie_2
+        .auth_subject(
+            subject_id_6.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_charlie_2
+        .update_subject(subject_id_6.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_charlie_2, subject_id_6.clone(), Some(3))
+        .await
+        .unwrap();
 }
 
-// T25: B tiene Witnesses, N testigo activo vía TrackerSchemas, actual_lo <= B.interval.hi
-//      → acceso hasta old_data_B.sn
-#[test(tokio::test)]
-async fn t25_active_tracker_schemas_witness_of_old_owner_access() {
-    todo!("implementar T25")
-}
-
-// T26: B tiene Witnesses, N testigo general activo, actual_lo > B.interval.hi → sin acceso
-#[test(tokio::test)]
-async fn t26_active_general_witness_actual_lo_gt_range_hi_no_access() {
-    todo!("implementar T26")
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BLOQUE 8 — Caso clave del fix: actual_lo < range.lo (fue testigo antes de que B fuera owner)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// T27: N testigo explícito de B desde gov_v=3, B owner en intervalo [gov_v5, gov_v10]
-//      actual_lo=3 < 5=range.lo → la condición actual_lo <= range.hi (3<=10) es TRUE
-//      → acceso hasta old_data_B.sn
-//
-// Secuencia:
-//   gov_v3: witness_node añadido como testigo de B (actual_lo=gov_v3)
-//   gov_v5: B crea subject (gov_version=gov_v5)
-//   sn avanza hasta sn=7
-//   gov_v10: B transfiere a C, C confirma (old_data_B.sn=7, B.interval=[gov_v5, gov_v10])
-//            actual_lo=3 <= 10=range.hi → TRUE → old_data_B.sn=7
-//   C emite facts (sn=10)
-//
-// Verificación:
-//   witness_node.auth_subject → recibe hasta sn=7 (old_data_B.sn), no hasta sn=10
-#[test(tokio::test)]
-async fn t27_witness_since_before_old_owner_tenure_has_access() {
-    todo!("implementar T27")
-}
-
-// T28: N testigo activo de A (current owner) desde gov_v=2, A owner desde gov_v=5
-//      → actual_lo.is_some() → retorno inmediato End(data.sn)
-//
-// Secuencia:
-//   gov_v2: witness_node añadido como testigo de owner_node (actual_lo=gov_v2)
-//   gov_v5: owner_node crea subject (gov_version=gov_v5)
-//           actual_lo=2 < 5=owner_gov_version pero actual_lo.is_some() → retorno inmediato
-//   owner emite facts (sn=5)
-//
-// Verificación:
-//   witness_node.auth_subject → recibe hasta sn=5 (data.sn)
-#[test(tokio::test)]
-async fn t28_active_witness_since_before_current_owner_tenure_full_access() {
-    todo!("implementar T28")
-}
-
+/*
 // ─────────────────────────────────────────────────────────────────────────────
 // BLOQUE 9 — Caso clave del fix: range.hi en lugar de owner_gov_version
 // ─────────────────────────────────────────────────────────────────────────────
@@ -681,12 +1551,6 @@ async fn t37_witness_of_both_old_and_current_owner_max_access() {
     todo!("implementar T37")
 }
 
-// T38: N es old_owner + testigo activo de A(actual) → acceso hasta data.sn (máximo posible)
-#[test(tokio::test)]
-async fn t38_old_owner_plus_active_witness_of_current_owner() {
-    todo!("implementar T38")
-}
-
 // T39: better_gov_version produce SnLimit::LastSn en SnRegister → resultado = data.sn
 //
 // Esto ocurre cuando gov_version > último gov_version registrado en SnRegister.
@@ -769,26 +1633,6 @@ async fn t44_chain_transfer_witness_only_of_middle_owner() {
     todo!("implementar T44")
 }
 
-// T45: N testigo de A, intervalo cerrado [gov_v3,gov_v7], owner_gov_version=gov_v5.
-//      Eventos emitidos hasta gov_v7. sn_at_gov_v7 > sn_at_gov_v5.
-//      → acceso hasta sn_at_gov_v7 (verifica fix range.hi en contexto extremo)
-//
-// Mismo que T29 pero con más facts intermedios para ampliar la diferencia entre
-// sn_at_gov_v5 y sn_at_gov_v7 y hacer el test más robusto.
-#[test(tokio::test)]
-async fn t45_range_hi_fix_with_many_intermediate_events() {
-    todo!("implementar T45")
-}
-
-// T46: N testigo activo de B desde gov_v=3. B owner en [gov_v5, gov_v10].
-//      actual_lo=3 < 5=range.lo. B ya no es owner.
-//      → acceso hasta old_data_B.sn (verifica fix actual_lo <= range.hi en contexto extremo)
-//
-// Mismo que T27 pero B tuvo más facts → sn más alto para verificar que no se pierde acceso.
-#[test(tokio::test)]
-async fn t46_actual_lo_before_range_lo_old_owner_access() {
-    todo!("implementar T46")
-}
 
 // T47: A→B reject. B en old_owners. N testigo activo de B con actual_lo <= B.interval.hi
 //      → acceso hasta old_data_B.sn

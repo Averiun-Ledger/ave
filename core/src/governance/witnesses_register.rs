@@ -430,17 +430,31 @@ impl WitnessesRegister {
             }
         }
 
-        if witnesses_creator.contains_key(&WitnessesType::Witnesses) {
-            return self
-                .search_schemas_actual(
-                    node,
-                    schema_id,
-                    parse_namespace,
-                    owner_gov_version,
-                    sn,
-                    better_gov_version,
-                )
-                .await;
+        // Solo delegar a los testigos de schema si el rol Witnesses estaba activo
+        // cuando el owner empezó a serlo (actual_lo activo, o intervalo cerrado que llega
+        // hasta owner_gov_version). Si el intervalo cerró antes de que el owner empezase,
+        // contains_key sería true pero no debe triggear search_schemas_actual.
+        if let Some((interval, actual_lo)) =
+            witnesses_creator.get(&WitnessesType::Witnesses)
+        {
+            let witnesses_active = actual_lo.is_some()
+                || interval
+                    .iter()
+                    .last()
+                    .is_some_and(|range| owner_gov_version <= range.hi);
+
+            if witnesses_active {
+                return self
+                    .search_schemas_actual(
+                        node,
+                        schema_id,
+                        parse_namespace,
+                        owner_gov_version,
+                        sn,
+                        better_gov_version,
+                    )
+                    .await;
+            }
         }
 
         ActualSearch::Continue {

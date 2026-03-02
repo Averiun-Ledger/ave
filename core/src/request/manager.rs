@@ -983,7 +983,7 @@ impl RequestManager {
 
         let governance_data = get_gov(ctx, governance_id).await?;
 
-        let witnesses = {
+        let mut witnesses = {
             let gov_witnesses =
                 governance_data.get_witnesses(WitnessesData::Gov)?;
 
@@ -997,6 +997,8 @@ impl RequestManager {
                 .cloned()
                 .collect::<HashSet<PublicKey>>()
         };
+
+        witnesses.remove(&self.our_key);
 
         if witnesses.is_empty() {
             if let Ok(actor) = ctx.reference().await {

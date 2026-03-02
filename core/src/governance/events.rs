@@ -2012,6 +2012,15 @@ impl SchemaIdRole {
                                     },
                                 });
                             }
+                            if witness == &creator.name {
+                                return Err(RunnerError::InvalidEvent {
+                                    location: "SchemaIdRole::check_data",
+                                    kind: error::InvalidEventKind::InvalidValue {
+                                        field: format!("creator {} witnesses in schema {}", creator.name, schema_id),
+                                        reason: "a creator cannot be listed as their own witness".to_owned(),
+                                    },
+                                });
+                            }
                             if !members.contains(witness) {
                                 return Err(RunnerError::InvalidEvent {
                                     location: "SchemaIdRole::check_data",
@@ -2836,6 +2845,15 @@ impl SchemaIdRole {
                                         kind: error::InvalidEventKind::InvalidValue {
                                             field: format!("creator new witness name in schema {}", schema_id),
                                             reason: "cannot have leading or trailing whitespace".to_owned(),
+                                        },
+                                    });
+                                }
+                                if witness == &creator.actual_name {
+                                    return Err(RunnerError::InvalidEvent {
+                                        location: "SchemaIdRole::check_data",
+                                        kind: error::InvalidEventKind::InvalidValue {
+                                            field: format!("creator {} new witnesses in schema {}", creator.actual_name, schema_id),
+                                            reason: "a creator cannot be listed as their own witness".to_owned(),
                                         },
                                     });
                                 }

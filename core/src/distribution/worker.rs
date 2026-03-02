@@ -143,7 +143,7 @@ impl DistriWorker {
         ctx: &mut ActorContext<Self>,
         signer: PublicKey,
         ledger: Ledger,
-    ) -> Result<bool, ActorError> {
+    ) -> Result<(bool, bool), ActorError> {
         let subject_id = ledger.get_subject_id();
         // Si está auth o si soy el dueño del sujeto.
         let (auth, subject_data) =
@@ -239,7 +239,7 @@ impl DistriWorker {
             }
         }
 
-        Ok(is_gov)
+        Ok((is_gov, subject_data.is_some()))
     }
 
     async fn check_witness(
@@ -572,7 +572,7 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger.content().get_subject_id();
                 let sn = ledger.content().sn;
 
-                let is_gov = match self
+                let (is_gov, ..) = match self
                     .check_auth(ctx, sender.clone(), ledger.content().clone())
                     .await
                 {
@@ -835,7 +835,7 @@ impl Handler<Self> for DistriWorker {
                 let ledger_count = ledger.len();
                 let first_sn = ledger[0].content().sn;
 
-                let is_gov = match self
+                let (is_gov, is_register) = match self
                     .check_auth(
                         ctx,
                         sender.clone(),
@@ -843,7 +843,7 @@ impl Handler<Self> for DistriWorker {
                     )
                     .await
                 {
-                    Ok(is_gov) => is_gov,
+                    Ok(data) => data,
                     Err(e) => {
                         if let ActorError::Functional { .. } = e {
                             warn!(
@@ -874,6 +874,7 @@ impl Handler<Self> for DistriWorker {
                     .event_request
                     .content()
                     .is_create_event()
+                    && !is_register
                 {
                     if let Err(e) = create_subject(ctx, ledger[0].clone()).await
                     {
@@ -899,6 +900,17 @@ impl Handler<Self> for DistriWorker {
                     let event = ledger.remove(0);
                     (event.signature().signer == *self.our_key, false)
                 } else {
+                    // TODO en un futuro mejorar esto
+                    if ledger[0]
+                        .content()
+                        .event_request
+                        .content()
+                        .is_create_event()
+                        && is_register
+                    {
+                        let _event = ledger.remove(0);
+                    }
+
                     let (i_owner, i_new_owner) =
                         match i_owner_new_owner(ctx, &subject_id).await {
                             Ok(res) => res,

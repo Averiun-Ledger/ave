@@ -33,6 +33,9 @@ use crate::{
 pub struct Auth {
     #[serde(skip)]
     network: Option<Arc<NetworkSender>>,
+    
+    #[serde(skip)]
+    our_key: Arc<PublicKey>,
 
     auth: HashMap<DigestIdentifier, HashSet<PublicKey>>,
 }
@@ -65,8 +68,9 @@ impl BorshDeserialize for Auth {
         // Deserialize the persisted fields
         let auth = HashMap::<DigestIdentifier, HashSet<PublicKey>>::deserialize_reader(reader)?;
         let network = None;
+        let our_key = Arc::new(PublicKey::default());
 
-        Ok(Self { network, auth })
+        Ok(Self { network, auth, our_key })
     }
 }
 
@@ -331,11 +335,14 @@ impl Handler<Self> for Auth {
                     let auth_witnesses =
                         self.auth.get(&subject_id).cloned().unwrap_or_default();
 
-                    (
-                        witnesses
+                    let mut witnesses = witnesses
                             .union(&auth_witnesses)
                             .cloned()
-                            .collect::<HashSet<PublicKey>>(),
+                            .collect::<HashSet<PublicKey>>();
+                    witnesses.remove(&self.our_key);
+
+                    (
+                        witnesses,
                         actual_sn,
                     )
                 };
@@ -461,7 +468,7 @@ impl Handler<Self> for Auth {
 #[async_trait]
 impl PersistentActor for Auth {
     type Persistence = LightPersistence;
-    type InitParams = Arc<NetworkSender>;
+    type InitParams = (Arc<NetworkSender>, Arc<PublicKey>);
 
     fn update(&mut self, state: Self) {
         self.auth = state.auth;
@@ -469,8 +476,9 @@ impl PersistentActor for Auth {
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
-            network: Some(params),
+            network: Some(params.0),
             auth: HashMap::new(),
+            our_key: params.1
         }
     }
 
