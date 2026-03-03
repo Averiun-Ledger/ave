@@ -1,6 +1,7 @@
 mod common;
 
-use ave_common::identity::PublicKey;
+use ave_common::identity::keys::Ed25519Signer;
+use ave_common::identity::{KeyPair, PublicKey};
 use ave_core::auth::AuthWitness;
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
@@ -1368,6 +1369,24 @@ async fn test_basic_explicit_witness() {
     // Verificación:
     //   witness_node.auth_subject → recibe hasta sn_at_gov_v7, no más allá
 
+    let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Fake1",
+                    "key": keys.public_key()
+                },
+            ]
+        },
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
     let json = json!({
         "roles": {
             "schema":
@@ -1457,7 +1476,7 @@ async fn test_basic_explicit_witness() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(2))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(3))
         .await
         .unwrap();
 
@@ -1477,6 +1496,8 @@ async fn test_basic_explicit_witness() {
 
     new_bob.update_subject(subject_id_1.clone()).await.unwrap();
 
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
     let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1))
         .await
         .unwrap();
@@ -1491,6 +1512,24 @@ async fn test_basic_explicit_witness() {
     //
     // Verificación:
     //   witness_node.auth_subject → sin acceso
+
+    let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Fake2",
+                    "key": keys.public_key()
+                },
+            ]
+        },
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
 
     let (subject_id_2, ..) = create_subject(
         &witness_alice,
@@ -1519,7 +1558,7 @@ async fn test_basic_explicit_witness() {
         .await
         .unwrap();
 
-    new_bob.update_subject(subject_id_1.clone()).await.unwrap();
+    new_bob.update_subject(subject_id_2.clone()).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -1740,6 +1779,24 @@ async fn test_basic_implicit_witness() {
     //      → sn_at_gov_v7
     //
     // Igual que T11 pero usando testigo general (rol de schema) en lugar de explícito
+    let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Fake1",
+                    "key": keys.public_key()
+                },
+            ]
+        },
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
     let json = json!({
         "roles": {
             "tracker_schemas": {
@@ -1818,7 +1875,7 @@ async fn test_basic_implicit_witness() {
 
     new_bob.update_subject(governance_id.clone()).await.unwrap();
 
-    let _state = get_subject(&new_bob, governance_id.clone(), Some(2))
+    let _state = get_subject(&new_bob, governance_id.clone(), Some(3))
         .await
         .unwrap();
 
@@ -1842,7 +1899,45 @@ async fn test_basic_implicit_witness() {
         .await
         .unwrap();
 
+    assert!(
+        new_bob
+            .get_subject_state(subject_id_1.clone())
+            .await
+            .is_err()
+    );
+    new_bob
+        .auth_subject(
+            subject_id_1.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_bob.update_subject(subject_id_1.clone()).await.unwrap();
+
+    let _state = get_subject(&new_bob, subject_id_1.clone(), Some(1))
+        .await
+        .unwrap();
+
     // T16: A tiene Witnesses, N testigo general cerrado NO cubre owner_gov_version → sin acceso
+    let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Fake2",
+                    "key": keys.public_key()
+                },
+            ]
+        },
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
     let (subject_id_3, ..) = create_subject(
         &witness_alice,
         governance_id.clone(),

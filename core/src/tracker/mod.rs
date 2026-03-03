@@ -600,8 +600,10 @@ impl Tracker {
                 }
             };
 
+            let event_gov_version = event.content().gov_version;
+
             if last_event_is_ok {
-                if last_gov_version != event.content().gov_version {
+                if last_gov_version != event_gov_version {
                     self.register_gov_version_sn(ctx, last_gov_version).await?;
                 }
 
@@ -680,7 +682,13 @@ impl Tracker {
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
 
-            // Acutalizar último evento.
+            // Registrar la gov_version del evento con el sn ya actualizado.
+            // Necesario cuando varios eventos comparten la misma gov_version:
+            // la transición (línea anterior) solo captura el sn antes del primer
+            // evento del nuevo gov_version, pero no el sn final de ese tramo.
+            self.register_gov_version_sn(ctx, event_gov_version).await?;
+
+            // Actualizar último evento.
             last_ledger = event.clone();
         }
 

@@ -257,6 +257,13 @@ where
             return Err(SubjectError::SubjectInactive);
         }
 
+        if new_ledger_event.content().sn != subject_metadata.sn + 1 {
+            return Err(SubjectError::InvalidSequenceNumber {
+                expected: subject_metadata.sn + 1,
+                actual: new_ledger_event.content().sn,
+            });
+        }
+
         if new_ledger_event.verify().is_err() {
             return Err(SubjectError::SignatureVerificationFailed {
                 context: "new ledger event signature verification failed"
@@ -281,13 +288,6 @@ where
             return Err(SubjectError::SignatureVerificationFailed {
                 context: "event request signature verification failed"
                     .to_string(),
-            });
-        }
-
-        if new_ledger_event.content().sn != subject_metadata.sn + 1 {
-            return Err(SubjectError::InvalidSequenceNumber {
-                expected: subject_metadata.sn + 1,
-                actual: new_ledger_event.content().sn,
             });
         }
 
