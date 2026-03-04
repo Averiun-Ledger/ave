@@ -14,6 +14,17 @@ use serde::{Deserialize, Serialize};
 /// Actor in charge of monitoring the network, allows communication between the actor system and the network.
 pub struct Monitor {
     state: MonitorNetworkState,
+    busy: bool,
+    busy_causes: Vec<String>,
+}
+
+/// Snapshot of network busy status.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkBusyStatus {
+    /// True when network worker still has pending activity.
+    pub busy: bool,
+    /// Reasons why network worker is considered busy.
+    pub causes: Vec<String>,
 }
 
 impl Monitor {
@@ -21,6 +32,8 @@ impl Monitor {
     pub fn new() -> Self {
         Self {
             state: MonitorNetworkState::default(),
+            busy: false,
+            busy_causes: Vec::new(),
         }
     }
 }
@@ -38,6 +51,8 @@ pub enum MonitorMessage {
     Network(NetworkEvent),
     /// Network state
     State,
+    /// Combined network busy status snapshot
+    BusyStatus,
 }
 
 impl Message for MonitorMessage {}
@@ -49,6 +64,8 @@ impl NotPersistentActor for Monitor {}
 pub enum MonitorResponse {
     /// Network state
     State(MonitorNetworkState),
+    /// Combined network busy status
+    BusyStatus(NetworkBusyStatus),
     /// Defaulto message
     Ok,
 }
@@ -79,16 +96,42 @@ impl Handler<Self> for Monitor {
     ) -> Result<MonitorResponse, ActorError> {
         match msg {
             MonitorMessage::Network(event) => {
-                if matches!(
-                    event,
-                    NetworkEvent::StateChanged(NetworkState::Running)
-                ) {
-                    self.state = MonitorNetworkState::Running
+                match event {
+                    NetworkEvent::StateChanged(state) => {
+                        self.state = match state {
+                            NetworkState::Running => {
+                                MonitorNetworkState::Running
+                            }
+                            NetworkState::Disconnected => {
+                                MonitorNetworkState::Down
+                            }
+                            NetworkState::Start
+                            | NetworkState::Dial
+                            | NetworkState::Dialing => {
+                                MonitorNetworkState::Connecting
+                            }
+                        };
+                    }
+                    NetworkEvent::BusyChanged(busy) => {
+                        self.busy = busy;
+                    }
+                    NetworkEvent::BusyCausesChanged(causes) => {
+                        self.busy_causes = causes;
+                    }
+                    NetworkEvent::Error(..) => {
+                        self.state = MonitorNetworkState::Down;
+                    }
                 }
                 Ok(MonitorResponse::Ok)
             }
             MonitorMessage::State => {
                 Ok(MonitorResponse::State(self.state.clone()))
+            }
+            MonitorMessage::BusyStatus => {
+                Ok(MonitorResponse::BusyStatus(NetworkBusyStatus {
+                    busy: self.busy,
+                    causes: self.busy_causes.clone(),
+                }))
             }
         }
     }

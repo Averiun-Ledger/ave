@@ -43,7 +43,8 @@ use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use network::{
-    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
+    MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkBusyStatus,
+    NetworkWorker,
 };
 
 use node::register::{Register, RegisterMessage, RegisterResponse};
@@ -295,6 +296,31 @@ impl Api {
                 Err(Error::UnexpectedResponse {
                     actor: "network_monitor".to_string(),
                     expected: "State".to_string(),
+                    received: "other".to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn get_network_busy_status(
+        &self,
+    ) -> Result<NetworkBusyStatus, Error> {
+        let response = self
+            .monitor
+            .ask(MonitorMessage::BusyStatus)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Unable to retrieve network busy status");
+                Error::NetworkState(e.to_string())
+            })?;
+
+        match response {
+            MonitorResponse::BusyStatus(status) => Ok(status),
+            _ => {
+                warn!("Unexpected response from network monitor");
+                Err(Error::UnexpectedResponse {
+                    actor: "network_monitor".to_string(),
+                    expected: "BusyStatus".to_string(),
                     received: "other".to_string(),
                 })
             }

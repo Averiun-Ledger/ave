@@ -31,7 +31,7 @@ use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
 pub use network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
-    RoutingConfig, RoutingNode,
+    NetworkBusyStatus, RoutingConfig, RoutingNode,
 };
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -166,6 +166,12 @@ impl Bridge {
         &self,
     ) -> Result<MonitorNetworkState, BridgeError> {
         Ok(self.api.get_network_state().await?)
+    }
+
+    pub async fn get_network_busy_status(
+        &self,
+    ) -> Result<NetworkBusyStatus, BridgeError> {
+        Ok(self.api.get_network_busy_status().await?)
     }
 
     ///////// Request

@@ -38,12 +38,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use serde::Serialize;
 use serde_qs::axum::QsQuery;
 use tower::ServiceBuilder;
 
 use crate::doc::ApiDoc;
 use axum::http::Method;
-use utoipa::OpenApi;
+use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 ///////// General
@@ -112,6 +113,14 @@ pub async fn get_config(
 ///////// Network
 ////////////////////////////
 
+#[derive(Serialize, ToSchema)]
+pub struct NetworkBusyResponse {
+    /// True when the network worker still has pending network activity.
+    pub busy: bool,
+    /// Reasons that explain why the worker is currently busy.
+    pub causes: Vec<String>,
+}
+
 /// Get network state
 ///
 /// Returns the current state of the P2P network connections.
@@ -131,6 +140,33 @@ pub async fn get_network_state(
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<MonitorNetworkState>, HttpError> {
     Ok(Json(bridge.get_network_state().await?))
+}
+
+/// Get network busy flag
+///
+/// Returns whether the network worker is currently processing or retrying
+/// network activity and the reasons. Useful for deciding if the node can be
+/// safely stopped.
+#[utoipa::path(
+    get,
+    path = "/network-busy",
+    operation_id = "getNetworkBusy",
+    tag = "Node",
+    responses(
+        (status = 200, description = "Network busy status and causes", body = NetworkBusyResponse),
+        (status = 502, description = "Network error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_network_busy(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+) -> Result<Json<NetworkBusyResponse>, HttpError> {
+    let status = bridge.get_network_busy_status().await?;
+    Ok(Json(NetworkBusyResponse {
+        busy: status.busy,
+        causes: status.causes,
+    }))
 }
 
 ///////// Request
@@ -806,6 +842,7 @@ pub fn build_routes(
         .route("/public-key", get(get_public_key))
         .route("/config", get(get_config))
         .route("/network-state", get(get_network_state))
+        .route("/network-busy", get(get_network_busy))
         .route("/requests-in-manager", get(get_requests_in_manager))
         .route(
             "/requests-in-manager/{subject_id}",
@@ -1173,6 +1210,7 @@ pub fn permission_for(
         (&Method::GET, "/peer-id") => Some(("node_system", "get")),
         (&Method::GET, "/config") => Some(("node_system", "get")),
         (&Method::GET, "/network-state") => Some(("node_system", "get")),
+        (&Method::GET, "/network-busy") => Some(("node_system", "get")),
 
         _ => None,
     }

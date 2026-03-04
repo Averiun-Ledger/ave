@@ -127,12 +127,33 @@ Comandos:
 - `cargo test -p ave-network --lib`
 - `cargo clippy -p ave-network --lib`
 - `cargo clippy`
+- `cargo check -p ave-network -p ave-core -p ave-bridge -p ave-http`
 
 Resultado:
 
 - compilación OK,
 - tests de `ave-network` OK (13/13),
-- clippy OK sin warnings en el estado actual.
+- clippy OK sin warnings en el estado actual,
+- integración `network -> core -> bridge -> http` OK.
+
+## Endpoint operativo para apagado
+
+Se añade endpoint:
+
+- `GET /network-busy`
+
+Respuesta:
+
+- JSON con:
+  - `busy`: `true` si el worker de red sigue con actividad (diales/discover/retries/colas), `false` si no hay actividad pendiente.
+  - `causes`: lista de causas actuales (por ejemplo:
+    `bootstrap_dialing`, `pending_outbound_messages`, `retry_queue`, etc.).
+
+Uso recomendado para apagar nodo:
+
+1. consultar `GET /network-busy`,
+2. revisar `causes` cuando `busy == true`,
+3. apagar solo cuando `busy == false`.
 
 ## Riesgos y seguimiento
 

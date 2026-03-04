@@ -149,6 +149,9 @@ where
     retry_timer: Option<Pin<Box<Sleep>>>,
 
     peer_action: HashMap<PeerId, Action>,
+
+    reported_network_busy: bool,
+    reported_network_busy_causes: Vec<String>,
 }
 
 impl<T: Debug + Serialize> NetworkWorker<T> {
@@ -271,6 +274,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             retry_queue: BinaryHeap::new(),
             retry_timer: None,
             peer_action: HashMap::new(),
+            reported_network_busy: false,
+            reported_network_busy_causes: Vec::new(),
         })
     }
 
@@ -481,6 +486,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         trace!(target: TARGET, state = ?state, "state changed");
         self.state = state.clone();
         self.send_event(NetworkEvent::StateChanged(state)).await;
+        self.emit_network_busy_if_changed().await;
     }
 
     /// Send event
@@ -491,6 +497,62 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         {
             error!(target: TARGET, error = %e, "failed to forward event to monitor");
             self.cancel.cancel();
+        }
+    }
+
+    fn network_busy_causes(&self) -> Vec<String> {
+        let mut causes = Vec::new();
+
+        if matches!(self.state, NetworkState::Dial | NetworkState::Dialing) {
+            causes.push("bootstrap_dialing".to_owned());
+        }
+        if !self.boot_nodes.is_empty() {
+            causes.push("bootstrap_candidates_pending".to_owned());
+        }
+        if !self.retry_boot_nodes.is_empty() {
+            causes.push("bootstrap_retry_pending".to_owned());
+        }
+        if !self.pending_outbound_messages.is_empty() {
+            causes.push("pending_outbound_messages".to_owned());
+        }
+        if !self.pending_inbound_messages.is_empty() {
+            causes.push("pending_inbound_messages".to_owned());
+        }
+        if !self.response_channels.is_empty() {
+            causes.push("pending_response_channels".to_owned());
+        }
+        if !self.retry_by_peer.is_empty() {
+            causes.push("peer_retry_state".to_owned());
+        }
+        if !self.retry_queue.is_empty() {
+            causes.push("retry_queue".to_owned());
+        }
+        if self.retry_timer.is_some() {
+            causes.push("retry_timer_armed".to_owned());
+        }
+        if self
+            .peer_action
+            .values()
+            .any(|action| matches!(action, Action::Dial | Action::Discover))
+        {
+            causes.push("peer_actions_pending".to_owned());
+        }
+
+        causes
+    }
+
+    async fn emit_network_busy_if_changed(&mut self) {
+        let causes = self.network_busy_causes();
+        let busy = !causes.is_empty();
+
+        if busy != self.reported_network_busy {
+            self.reported_network_busy = busy;
+            self.send_event(NetworkEvent::BusyChanged(busy)).await;
+        }
+
+        if causes != self.reported_network_busy_causes {
+            self.reported_network_busy_causes = causes.clone();
+            self.send_event(NetworkEvent::BusyCausesChanged(causes)).await;
         }
     }
 
@@ -505,8 +567,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             return;
         }
 
-        self.send_event(NetworkEvent::StateChanged(NetworkState::Running))
-            .await;
+        self.change_state(NetworkState::Running).await;
 
         // Finish pre routing state, activating random walk (if node is a bootstrap).
         self.swarm.behaviour_mut().finish_prerouting_state();
@@ -904,13 +965,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             tokio::select! {
                 command = self.command_receiver.recv() => {
                     match command {
-                        Some(command) => self.handle_command(command).await,
+                        Some(command) => {
+                            self.handle_command(command).await;
+                            self.emit_network_busy_if_changed().await;
+                        }
                         None => break,
                     }
                 }
                 event = self.swarm.select_next_some() => {
                     // Handle events.
                     self.handle_event(event).await;
+                    self.emit_network_busy_if_changed().await;
                 }
                 _ = async {
                     if let Some(t) = &mut self.retry_timer {
@@ -995,6 +1060,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             }
                         };
                     }
+                    self.emit_network_busy_if_changed().await;
                 },
                 _ = self.cancel.cancelled() => {
                     break;

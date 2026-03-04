@@ -344,6 +344,12 @@ pub enum Event {
     /// Network state changed.
     StateChanged(utils::NetworkState),
 
+    /// Network worker activity changed.
+    BusyChanged(bool),
+
+    /// Network worker busy causes changed.
+    BusyCausesChanged(Vec<String>),
+
     /// Network error.
     Error(Error),
 }

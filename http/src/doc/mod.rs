@@ -97,6 +97,7 @@ impl Modify for SecurityAddon {
         server::get_public_key,
         server::get_config,
         server::get_network_state,
+        server::get_network_busy,
 
         // ── Request ─────────────────────────────────────────────
         server::get_requests_in_manager,
