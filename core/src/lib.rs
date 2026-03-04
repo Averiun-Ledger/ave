@@ -52,6 +52,7 @@ use query::{Query, QueryMessage, QueryResponse};
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
 };
+use prometheus_client::registry::Registry;
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +102,7 @@ impl Api {
         keys: KeyPair,
         config: AveBaseConfig,
         sink_auth: SinkAuth,
+        registry: &mut Registry,
         password: &str,
         token: &CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {

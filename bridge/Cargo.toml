@@ -17,6 +17,7 @@ ave_core = { package = "ave-core", path = "../core", default-features = false}
 network = { package = "ave-network", path = "../network" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal", "process"] }
+prometheus-client = { workspace = true}
 tokio-util = { workspace = true }
 ave-common = { workspace = true }
 pkcs8 = { workspace = true, features = ["encryption"] }
@@ -24,15 +25,17 @@ config = { workspace = true }
 clap = { version = "4.5.60", features = ["derive"] }
 tracing = { workspace = true }
 getrandom = { workspace = true }
+axum = { workspace = true , optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 ave-actors = { workspace = true, features = ["sqlite"] }
 
 [features]
-default = ["sqlite", "ext-sqlite"]
+default = ["prometheus", "sqlite", "ext-sqlite"]
 rocksdb = ["ave_core/rocksdb"]
 sqlite = ["ave_core/sqlite"]
 ext-sqlite = ["ave_core/ext-sqlite"]
+prometheus = ["axum"]
 openapi = ["ave-common/openapi"]
 test = ["network/test", "ave_core/test"]

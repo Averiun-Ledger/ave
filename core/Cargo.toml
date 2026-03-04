@@ -33,6 +33,7 @@ reqwest = { workspace = true }
 rand = { workspace = true }
 bytes = { workspace = true }
 lru = { workspace = true }
+prometheus-client = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true }

@@ -11,6 +11,8 @@ pub struct Config {
     pub node: AveConfig,
     /// Path for encrypted keys.
     pub keys_path: PathBuf,
+    /// TcpListener from prometheus axum server.
+    pub prometheus: String,
     /// Logging parameters.
     pub logging: LoggingConfig,
     /// Sink parameters.
@@ -26,6 +28,7 @@ impl Default for Config {
         Self {
             node: Default::default(),
             keys_path: PathBuf::from("keys"),
+            prometheus: "0.0.0.0:3050".to_owned(),
             logging: Default::default(),
             sink: Default::default(),
             auth: Default::default(),

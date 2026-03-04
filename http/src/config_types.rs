@@ -19,6 +19,8 @@ pub struct ConfigHttp {
     pub node: AveConfigHttp,
     /// Path to cryptographic keys
     pub keys_path: String,
+    /// Prometheus metrics endpoint
+    pub prometheus: String,
     /// Logging configuration
     pub logging: LoggingHttp,
     /// Event sink configuration
@@ -58,6 +60,7 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
         Self {
             node: AveConfigHttp::from(value.node),
             keys_path: value.keys_path.to_string_lossy().to_string(),
+            prometheus: value.prometheus,
             logging: LoggingHttp::from(value.logging),
             sink: SinkConfigHttp::from(value.sink),
             auth: AuthConfigHttp::from(value.auth),

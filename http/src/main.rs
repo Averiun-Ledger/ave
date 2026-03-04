@@ -4,11 +4,12 @@ use auth::AuthDatabase;
 use ave_bridge::{
     Bridge,
     clap::Parser,
+    config::Config as BridgeConfig,
     settings::{
         build_config,
         command::{
-            Args, build_config_path, build_key_password, build_sink_api_key,
-            build_sink_password,
+            Args, build_auth_password, build_config_path, build_key_password,
+            build_sink_api_key, build_sink_password,
         },
     },
 };
@@ -65,6 +66,458 @@ struct Ports {
 
 const TARGET: &str = "ave::http";
 
+struct ResolvedSecret {
+    value: String,
+    source: &'static str,
+}
+
+impl ResolvedSecret {
+    fn is_set(&self) -> bool {
+        !self.value.is_empty()
+    }
+}
+
+struct StartupSecrets {
+    auth_password: ResolvedSecret,
+    key_password: ResolvedSecret,
+    sink_password: ResolvedSecret,
+    sink_api_key: ResolvedSecret,
+}
+
+fn resolve_secret(
+    cli_value: String,
+    env_provider: fn() -> String,
+) -> ResolvedSecret {
+    if !cli_value.is_empty() {
+        ResolvedSecret {
+            value: cli_value,
+            source: "cli",
+        }
+    } else {
+        let env_value = env_provider();
+        if !env_value.is_empty() {
+            ResolvedSecret {
+                value: env_value,
+                source: "env",
+            }
+        } else {
+            ResolvedSecret {
+                value: String::new(),
+                source: "default",
+            }
+        }
+    }
+}
+
+fn log_effective_configuration(
+    config_path: &str,
+    config: &BridgeConfig,
+    secrets: &StartupSecrets,
+) {
+    info!(target: TARGET, "--- configuration ---");
+    info!(target: TARGET, "[runtime]");
+    if config_path.is_empty() {
+        info!(target: TARGET, "  config    : default (built-in)");
+    } else {
+        info!(target: TARGET, "  config    : {}", config_path);
+    }
+
+    info!(target: TARGET, "[secrets]");
+    info!(
+        target: TARGET,
+        "  auth pass : {} ({})",
+        secrets.auth_password.source,
+        if secrets.auth_password.is_set() {
+            "set"
+        } else {
+            "missing"
+        }
+    );
+    info!(
+        target: TARGET,
+        "  key pass  : {} ({})",
+        secrets.key_password.source,
+        if secrets.key_password.is_set() {
+            "set"
+        } else {
+            "missing"
+        }
+    );
+    info!(
+        target: TARGET,
+        "  sink pass : {} ({})",
+        secrets.sink_password.source,
+        if secrets.sink_password.is_set() {
+            "set"
+        } else {
+            "missing"
+        }
+    );
+    info!(
+        target: TARGET,
+        "  sink apikey: {} ({})",
+        secrets.sink_api_key.source,
+        if secrets.sink_api_key.is_set() {
+            "set"
+        } else {
+            "missing"
+        }
+    );
+
+    info!(target: TARGET, "[http]");
+    info!(target: TARGET, "  address   : {}", config.http.http_address);
+    if let Some(ref https) = config.http.https_address {
+        info!(target: TARGET, "  https     : {}", https);
+        if let Some(ref cert) = config.http.https_cert_path {
+            info!(target: TARGET, "  cert      : {}", cert.display());
+        }
+        if let Some(ref key) = config.http.https_private_key_path {
+            info!(target: TARGET, "  cert key  : {}", key.display());
+        }
+    } else {
+        info!(target: TARGET, "  https     : disabled");
+    }
+    if config.http.self_signed_cert.enabled {
+        info!(
+            target: TARGET,
+            "  self-signed: enabled (cn: {})",
+            config.http.self_signed_cert.common_name
+        );
+        info!(
+            target: TARGET,
+            "  self-signed san: {}",
+            config.http.self_signed_cert.san.join(", ")
+        );
+        info!(
+            target: TARGET,
+            "  self-signed ttl: {}d | renew before: {}d | check: {}s",
+            config.http.self_signed_cert.validity_days,
+            config.http.self_signed_cert.renew_before_days,
+            config.http.self_signed_cert.check_interval_secs
+        );
+    } else {
+        info!(target: TARGET, "  self-signed: disabled");
+    }
+    info!(target: TARGET, "  docs      : {}", config.http.enable_doc);
+    if config.http.cors.enabled {
+        if config.http.cors.allow_any_origin {
+            info!(
+                target: TARGET,
+                "  cors      : enabled (any origin - WARNING)"
+            );
+        } else {
+            info!(
+                target: TARGET,
+                "  cors      : enabled ({} origins)",
+                config.http.cors.allowed_origins.len()
+            );
+            for origin in &config.http.cors.allowed_origins {
+                info!(target: TARGET, "  cors orig : {}", origin);
+            }
+        }
+        info!(
+            target: TARGET,
+            "  cors creds: {}",
+            config.http.cors.allow_credentials
+        );
+    } else {
+        info!(target: TARGET, "  cors      : disabled");
+    }
+
+    info!(target: TARGET, "[network]");
+    info!(target: TARGET, "  type      : {}", config.node.network.node_type);
+    if config.node.network.listen_addresses.is_empty() {
+        info!(target: TARGET, "  listen    : none");
+    } else {
+        for addr in &config.node.network.listen_addresses {
+            info!(target: TARGET, "  listen    : {}", addr);
+        }
+    }
+    if config.node.network.external_addresses.is_empty() {
+        info!(target: TARGET, "  external  : none");
+    } else {
+        for addr in &config.node.network.external_addresses {
+            info!(target: TARGET, "  external  : {}", addr);
+        }
+    }
+    if config.node.network.boot_nodes.is_empty() {
+        info!(target: TARGET, "  boot nodes: 0");
+    } else {
+        info!(
+            target: TARGET,
+            "  boot nodes: {}",
+            config.node.network.boot_nodes.len()
+        );
+        for boot in &config.node.network.boot_nodes {
+            info!(
+                target: TARGET,
+                "  boot node : {} ({} addr)",
+                boot.peer_id,
+                boot.address.len()
+            );
+            for addr in &boot.address {
+                info!(target: TARGET, "    addr    : {}", addr);
+            }
+        }
+    }
+    info!(
+        target: TARGET,
+        "  mem limits: {}",
+        config.node.network.memory_limits
+    );
+    info!(
+        target: TARGET,
+        "  dht walk  : {}",
+        config.node.network.routing.get_dht_random_walk()
+    );
+    info!(
+        target: TARGET,
+        "  discover< : {}",
+        config.node.network.routing.get_discovery_limit()
+    );
+    info!(
+        target: TARGET,
+        "  dht private: {}",
+        config.node.network.routing.get_allow_private_address_in_dht()
+    );
+    info!(
+        target: TARGET,
+        "  dht dns   : {}",
+        config.node.network.routing.get_allow_dns_address_in_dht()
+    );
+    info!(
+        target: TARGET,
+        "  dht loopbk: {}",
+        config.node.network.routing.get_allow_loop_back_address_in_dht()
+    );
+    info!(
+        target: TARGET,
+        "  dht disjnt: {}",
+        config
+            .node
+            .network
+            .routing
+            .get_kademlia_disjoint_query_paths()
+    );
+    let control = &config.node.network.control_list;
+    let allow_list = control.get_allow_list();
+    let block_list = control.get_block_list();
+    let allow_services = control.get_service_allow_list();
+    let block_services = control.get_service_block_list();
+    info!(
+        target: TARGET,
+        "  control-list enabled: {}",
+        control.get_enable()
+    );
+    info!(
+        target: TARGET,
+        "  control-list interval: {}s",
+        control.get_interval_request().as_secs()
+    );
+    info!(
+        target: TARGET,
+        "  control-list allow peers: {}",
+        allow_list.len()
+    );
+    info!(
+        target: TARGET,
+        "  control-list blocked peers: {}",
+        block_list.len()
+    );
+    info!(
+        target: TARGET,
+        "  control-list allow services: {}",
+        allow_services.len()
+    );
+    info!(
+        target: TARGET,
+        "  control-list block services: {}",
+        block_services.len()
+    );
+    for peer in &allow_list {
+        info!(target: TARGET, "    allow peer: {}", peer);
+    }
+    for peer in &block_list {
+        info!(target: TARGET, "    blocked peer: {}", peer);
+    }
+    for service in &allow_services {
+        info!(target: TARGET, "    allow service: {}", service);
+    }
+    for service in &block_services {
+        info!(target: TARGET, "    block service: {}", service);
+    }
+
+    info!(target: TARGET, "[node]");
+    info!(target: TARGET, "  prometheus      : {}", config.prometheus);
+    info!(target: TARGET, "  keys      : {}", config.keys_path.display());
+    info!(target: TARGET, "  db        : {:?}", config.node.internal_db.db);
+    info!(
+        target: TARGET,
+        "  db durable: {}",
+        config.node.internal_db.durability
+    );
+    info!(target: TARGET, "  ext db    : {:?}", config.node.external_db.db);
+    info!(
+        target: TARGET,
+        "  ext durable: {}",
+        config.node.external_db.durability
+    );
+    info!(
+        target: TARGET,
+        "  keypair   : {:?}",
+        config.node.keypair_algorithm
+    );
+    info!(target: TARGET, "  hash      : {:?}", config.node.hash_algorithm);
+    info!(
+        target: TARGET,
+        "  contracts : {}",
+        config.node.contracts_path.display()
+    );
+    info!(target: TARGET, "  tracking  : {}", config.node.tracking_size);
+    match &config.node.spec {
+        Some(spec) => info!(target: TARGET, "  wasm spec : {:?}", spec),
+        None => info!(target: TARGET, "  wasm spec : auto"),
+    }
+    info!(target: TARGET, "  always acc: {}", config.node.always_accept);
+    info!(target: TARGET, "  service   : {}", config.node.is_service);
+
+    info!(target: TARGET, "[auth]");
+    info!(target: TARGET, "  enabled   : {}", config.auth.enable);
+    info!(
+        target: TARGET,
+        "  database  : {}",
+        config.auth.database_path.display()
+    );
+    info!(target: TARGET, "  durability: {}", config.auth.durability);
+    let has_superadmin = !config.auth.superadmin.trim().is_empty();
+    info!(
+        target: TARGET,
+        "  superadmin: {}",
+        if has_superadmin {
+            "configured (redacted)"
+        } else {
+            "not configured"
+        }
+    );
+    info!(
+        target: TARGET,
+        "  key ttl   : {}s | max {} per user",
+        config.auth.api_key.default_ttl_seconds,
+        config.auth.api_key.max_keys_per_user
+    );
+    info!(
+        target: TARGET,
+        "  lockout   : {} attempts -> {}s",
+        config.auth.lockout.max_attempts,
+        config.auth.lockout.duration_seconds
+    );
+    if config.auth.rate_limit.enable {
+        info!(
+            target: TARGET,
+            "  ratelimit : {} req / {}s window",
+            config.auth.rate_limit.max_requests,
+            config.auth.rate_limit.window_seconds
+        );
+        info!(
+            target: TARGET,
+            "  rl by key : {} | by ip: {} | cleanup: {}s",
+            config.auth.rate_limit.limit_by_key,
+            config.auth.rate_limit.limit_by_ip,
+            config.auth.rate_limit.cleanup_interval_seconds
+        );
+        info!(
+            target: TARGET,
+            "  rl sensitv: {} endpoint(s)",
+            config.auth.rate_limit.sensitive_endpoints.len()
+        );
+        for endpoint in &config.auth.rate_limit.sensitive_endpoints {
+            match endpoint.window_seconds {
+                Some(window) => info!(
+                    target: TARGET,
+                    "    - {} => {} req / {}s",
+                    endpoint.endpoint,
+                    endpoint.max_requests,
+                    window
+                ),
+                None => info!(
+                    target: TARGET,
+                    "    - {} => {} req / default window",
+                    endpoint.endpoint,
+                    endpoint.max_requests
+                ),
+            }
+        }
+    } else {
+        info!(target: TARGET, "  ratelimit : disabled");
+    }
+    info!(
+        target: TARGET,
+        "  session   : audit={} retention={}d max={}",
+        config.auth.session.audit_enable,
+        config.auth.session.audit_retention_days,
+        config.auth.session.audit_max_entries
+    );
+
+    info!(target: TARGET, "[logging]");
+    info!(target: TARGET, "  level     : {}", config.logging.level);
+    info!(target: TARGET, "  stdout    : {}", config.logging.output.stdout);
+    info!(target: TARGET, "  file      : {}", config.logging.output.file);
+    info!(target: TARGET, "  api       : {}", config.logging.output.api);
+    if config.logging.output.file {
+        info!(
+            target: TARGET,
+            "  file path : {}",
+            config.logging.file_path.display()
+        );
+        info!(
+            target: TARGET,
+            "  rotation  : {} | max size: {} | max files: {}",
+            config.logging.rotation,
+            config.logging.max_size,
+            config.logging.max_files
+        );
+    }
+    if config.logging.output.api {
+        match &config.logging.api_url {
+            Some(api_url) => info!(target: TARGET, "  api url   : {}", api_url),
+            None => info!(target: TARGET, "  api url   : missing"),
+        }
+    }
+
+    info!(target: TARGET, "[sink]");
+    if config.sink.auth.is_empty() {
+        info!(target: TARGET, "  auth url  : none");
+    } else {
+        info!(target: TARGET, "  auth url  : {}", config.sink.auth);
+    }
+    if config.sink.username.is_empty() {
+        info!(target: TARGET, "  username  : none");
+    } else {
+        info!(target: TARGET, "  username  : {}", config.sink.username);
+    }
+    info!(target: TARGET, "  schemas   : {}", config.sink.sinks.len());
+    for (schema, servers) in &config.sink.sinks {
+        info!(
+            target: TARGET,
+            "  schema '{}': {} server(s)",
+            schema,
+            servers.len()
+        );
+        for s in servers {
+            info!(
+                target: TARGET,
+                "    - {} | {} | auth: {} | events: {:?}",
+                s.server,
+                s.url,
+                s.auth,
+                s.events
+            );
+        }
+    }
+
+    info!(target: TARGET, "--- end ---");
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -80,88 +533,17 @@ async fn main() {
     });
 
     let _log_handle = logging::init_logging(&config.logging).await;
+    let secrets = StartupSecrets {
+        auth_password: resolve_secret(args.auth_password, build_auth_password),
+        key_password: resolve_secret(args.key_password, build_key_password),
+        sink_password: resolve_secret(
+            args.sink_password,
+            build_sink_password,
+        ),
+        sink_api_key: resolve_secret(args.sink_api_key, build_sink_api_key),
+    };
 
-    // Log effective configuration so misconfiguration is visible at startup
-    info!(target: TARGET, "--- configuration ---");
-
-    info!(target: TARGET, "[http]");
-    info!(target: TARGET, "  address   : {}", config.http.http_address);
-    if let Some(ref https) = config.http.https_address {
-        info!(target: TARGET, "  https     : {}", https);
-        if let Some(ref cert) = config.http.https_cert_path {
-            info!(target: TARGET, "  cert      : {}", cert.display());
-        }
-        if config.http.self_signed_cert.enabled {
-            info!(target: TARGET, "  self-signed: enabled ({})", config.http.self_signed_cert.common_name);
-        }
-    } else {
-        info!(target: TARGET, "  https     : disabled");
-    }
-    info!(target: TARGET, "  docs      : {}", config.http.enable_doc);
-    if config.http.cors.enabled {
-        if config.http.cors.allow_any_origin {
-            info!(target: TARGET, "  cors      : enabled (any origin - WARNING)");
-        } else {
-            info!(target: TARGET, "  cors      : enabled ({} origins)", config.http.cors.allowed_origins.len());
-        }
-    } else {
-        info!(target: TARGET, "  cors      : disabled");
-    }
-
-    info!(target: TARGET, "[network]");
-    info!(target: TARGET, "  type      : {}", config.node.network.node_type);
-    if config.node.network.listen_addresses.is_empty() {
-        info!(target: TARGET, "  listen    : none");
-    } else {
-        for addr in &config.node.network.listen_addresses {
-            info!(target: TARGET, "  listen    : {}", addr);
-        }
-    }
-    for addr in &config.node.network.external_addresses {
-        info!(target: TARGET, "  external  : {}", addr);
-    }
-    info!(target: TARGET, "  boot nodes: {}", config.node.network.boot_nodes.len());
-    info!(target: TARGET, "  mem limits: {}", config.node.network.memory_limits);
-
-    info!(target: TARGET, "[node]");
-    info!(target: TARGET, "  keys      : {}", config.keys_path.display());
-    info!(target: TARGET, "  db        : {:?}", config.node.internal_db.db);
-    info!(target: TARGET, "  keypair   : {:?}", config.node.keypair_algorithm);
-    info!(target: TARGET, "  always acc: {}", config.node.always_accept);
-    info!(target: TARGET, "  service   : {}", config.node.is_service);
-
-    info!(target: TARGET, "[auth]");
-    info!(target: TARGET, "  enabled   : {}", config.auth.enable);
-    if config.auth.enable {
-        info!(target: TARGET, "  database  : {}", config.auth.database_path.display());
-        info!(target: TARGET, "  superadmin: {}", config.auth.superadmin);
-        info!(target: TARGET, "  key ttl   : {}s | max {} per user", config.auth.api_key.default_ttl_seconds, config.auth.api_key.max_keys_per_user);
-        info!(target: TARGET, "  lockout   : {} attempts -> {}s", config.auth.lockout.max_attempts, config.auth.lockout.duration_seconds);
-        if config.auth.rate_limit.enable {
-            info!(target: TARGET, "  ratelimit : {} req / {}s window", config.auth.rate_limit.max_requests, config.auth.rate_limit.window_seconds);
-        } else {
-            info!(target: TARGET, "  ratelimit : disabled");
-        }
-    }
-
-    info!(target: TARGET, "[logging]");
-    info!(target: TARGET, "  level     : {}", config.logging.level);
-    info!(target: TARGET, "  stdout    : {}", config.logging.output.stdout);
-    if config.logging.output.file {
-        info!(target: TARGET, "  file      : {} | rotation: {} | max files: {}", config.logging.file_path.display(), config.logging.rotation, config.logging.max_files);
-    }
-
-    if !config.sink.sinks.is_empty() {
-        info!(target: TARGET, "[sink]");
-        for (schema, servers) in &config.sink.sinks {
-            info!(target: TARGET, "  schema '{}': {} server(s)", schema, servers.len());
-            for s in servers {
-                info!(target: TARGET, "    - {} (auth: {})", s.url, s.auth);
-            }
-        }
-    }
-
-    info!(target: TARGET, "--- end ---");
+    log_effective_configuration(&config_path, &config, &secrets);
 
     let listener_http =
         tokio::net::TcpListener::bind(&config.http.http_address)
@@ -257,29 +639,18 @@ async fn main() {
         ));
 
     let auth_db: Option<Arc<AuthDatabase>> =
-        build_auth(&config.auth, &args.auth_password, config.node.spec.clone())
+        build_auth(
+            &config.auth,
+            &secrets.auth_password.value,
+            config.node.spec.clone(),
+        )
             .await;
-
-    let mut key_password = args.key_password;
-    if key_password.is_empty() {
-        key_password = build_key_password();
-    }
-
-    let mut sink_password = args.sink_password;
-    if sink_password.is_empty() {
-        sink_password = build_sink_password();
-    }
-
-    let mut sink_api_key = args.sink_api_key;
-    if sink_api_key.is_empty() {
-        sink_api_key = build_sink_api_key();
-    }
 
     let (bridge, runners) = Bridge::build(
         &config,
-        &key_password,
-        &sink_password,
-        &sink_api_key,
+        &secrets.key_password.value,
+        &secrets.sink_password.value,
+        &secrets.sink_api_key.value,
         None,
     )
     .await

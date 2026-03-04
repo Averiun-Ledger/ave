@@ -72,6 +72,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::ActualSnBiggerThanWitness { .. }
             | DistributorError::UnexpectedSender
             | DistributorError::EmptyEvents
+            | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. } => {
                 Self::Functional {
                     description: error.to_string(),
@@ -79,7 +80,6 @@ impl From<DistributorError> for ActorError {
             }
             DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
-            | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::UpTrackerFailed { .. }
             | DistributorError::UpdateLedgerFailed { .. } => {
                 Self::FunctionalCritical {

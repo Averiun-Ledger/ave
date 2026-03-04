@@ -19,6 +19,7 @@ use ave_core::{
     },
 };
 use network::{Config as NetworkConfig, RoutingNode};
+use prometheus_client::registry::Registry;
 use std::{
     str::FromStr,
     sync::atomic::{AtomicU16, Ordering},
@@ -93,11 +94,18 @@ pub async fn create_node(
     };
 
     let token = CancellationToken::new();
+    let mut registry = Registry::default();
 
-    let (api, runners) =
-        Api::build(keys.clone(), config, SinkAuth::default(), "ave", &token)
-            .await
-            .unwrap();
+    let (api, runners) = Api::build(
+        keys.clone(),
+        config,
+        SinkAuth::default(),
+        &mut registry,
+        "ave",
+        &token,
+    )
+    .await
+    .unwrap();
 
     (
         NodeData {
