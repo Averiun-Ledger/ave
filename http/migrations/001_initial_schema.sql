@@ -247,7 +247,8 @@ INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
     ('node_system', 'Node information endpoints', 1),
     ('node_subject', 'Ledger subject and governance endpoints', 1),
     ('node_request', 'Ledger request submission endpoints', 1),
-    ('user_api_key', 'User self-service API key endpoints', 1);
+    ('user_api_key', 'User self-service API key endpoints', 1),
+    ('node_management', 'Node configuration and metrics endpoints', 1);
 
 -- =============================================================================
 -- INSERT SYSTEM ACTIONS
@@ -348,6 +349,29 @@ END;
 -- - SERIALIZABLE transaction isolation mode
 -- - A database-level config table with trigger reading from it
 -- - Row-level locking (though SQLite uses database-level locks)
+
+-- =============================================================================
+-- TRIGGER: AUTO-GRANT SUPERADMIN ON NEW RESOURCES
+-- =============================================================================
+-- Whenever a new resource is inserted, superadmin automatically gets 'all'
+-- permission on it. This ensures future migrations that add resources never
+-- need to remember to update superadmin permissions manually.
+-- Note: the WHERE clause guards against firing during initial setup before
+-- roles/actions tables are populated.
+CREATE TRIGGER IF NOT EXISTS grant_superadmin_on_new_resource
+AFTER INSERT ON resources
+BEGIN
+    INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed, is_system)
+    SELECT
+        r.id,
+        NEW.id,
+        a.id,
+        1,
+        1
+    FROM roles r, actions a
+    WHERE r.name = 'superadmin'
+      AND a.name = 'all';
+END;
 
 -- =============================================================================
 -- END OF MIGRATION

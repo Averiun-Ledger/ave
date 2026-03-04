@@ -84,6 +84,16 @@ SELECT
 FROM resources r
 WHERE r.name IN ('node_subject', 'node_system', 'user', 'user_api_key', 'node_request');
 
+INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed, is_system)
+SELECT
+    (SELECT id FROM roles WHERE name = 'manager'),
+    r.id,
+    (SELECT id FROM actions WHERE name = 'get'),
+    1,
+    1
+FROM resources r
+WHERE r.name = 'node_management';
+
 
 -- =============================================================================
 -- DATA ROLE PERMISSIONS

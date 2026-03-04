@@ -798,6 +798,9 @@ pub fn build_routes(
     doc: bool,
     bridge: Bridge,
     auth_db: Option<Arc<AuthDatabase>>,
+    #[cfg(feature = "prometheus")] registry: std::sync::Arc<
+        prometheus_client::registry::Registry,
+    >,
 ) -> Router {
     let bridge = Arc::new(bridge);
 
@@ -964,8 +967,10 @@ pub fn build_routes(
         // Routes that require authentication & permission checks
         let authed = Router::new()
             .merge(main_routes)
-            .merge(protected_routes)
-            .layer(protected_layers);
+            .merge(protected_routes);
+        #[cfg(feature = "prometheus")]
+        let authed = authed.merge(ave_bridge::prometheus::build_routes(registry));
+        let authed = authed.layer(protected_layers);
 
         // Login remains unauthenticated but needs DB extension
         let mut app = Router::new()
@@ -980,7 +985,10 @@ pub fn build_routes(
 
         app
     } else {
-        let mut app = main_routes;
+        let app = main_routes;
+        #[cfg(feature = "prometheus")]
+        let app = app.merge(ave_bridge::prometheus::build_routes(registry));
+        let mut app = app;
         if let Some(doc_routes) = doc_routes {
             app = app.merge(doc_routes);
         }
@@ -1003,6 +1011,60 @@ async fn audit_layer(
     let db = req.extensions().get::<Arc<AuthDatabase>>().cloned();
 
     audit_log_middleware(auth_ctx, db, req, next).await
+}
+
+/// Resources recognized by the permission system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resource {
+    User,
+    NodeSystem,
+    NodeSubject,
+    NodeRequest,
+    UserApiKey,
+    NodeManagement,
+}
+
+impl Resource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::NodeSystem => "node_system",
+            Self::NodeSubject => "node_subject",
+            Self::NodeRequest => "node_request",
+            Self::UserApiKey => "user_api_key",
+            Self::NodeManagement => "node_management",
+        }
+    }
+}
+
+/// Actions recognized by the permission system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Action {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Post => "post",
+            Self::Put => "put",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Result of looking up a route's permission requirement.
+pub enum PermissionResult {
+    /// Route uses inline handler-level checks (admin routes). Allow through.
+    AllowAny,
+    /// Route requires the caller to hold the given resource + action.
+    Require(Resource, Action),
 }
 
 pub async fn permission_layer(
@@ -1058,124 +1120,129 @@ pub async fn permission_layer(
             .into_response();
     }
 
-    // /config is superadmin-only
-    if req.uri().path() == "/config" && !auth_ctx.is_superadmin() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Only superadmin can access node configuration".into(),
-            }),
-        )
-            .into_response();
-    }
-
-    if let Some((resource, action)) =
-        permission_for(req.method(), req.uri().path())
-        && let Err(resp) = check_permission(&auth_ctx, resource, action)
-    {
-        return resp.into_response();
+    match permission_for(req.method(), req.uri().path()) {
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Access denied".into(),
+                }),
+            )
+                .into_response();
+        }
+        Some(PermissionResult::AllowAny) => {}
+        Some(PermissionResult::Require(resource, action)) => {
+            if let Err(resp) =
+                check_permission(&auth_ctx, resource.as_str(), action.as_str())
+            {
+                return resp.into_response();
+            }
+        }
     }
 
     next.run(req).await
 }
 
+/// Maps an HTTP method + path to the permission required to access it.
+///
+/// Returns:
+/// - `Some(AllowAny)` — any authenticated user may proceed (admin routes use inline checks).
+/// - `Some(Require(r, a))` — caller must hold permission `r:a`.
+/// - `None` — route not recognized; access is **denied**.
 pub fn permission_for(
     method: &Method,
     path: &str,
-) -> Option<(&'static str, &'static str)> {
-    // Admin routes already perform explicit checks
-    if path.starts_with("/admin/") || path == "/login" {
-        return None;
+) -> Option<PermissionResult> {
+    use Action::*;
+    use PermissionResult::*;
+    use Resource::*;
+
+    // Admin routes perform their own inline permission checks inside each handler.
+    if path.starts_with("/admin/") {
+        return Some(AllowAny);
     }
 
-    match (method, path) {
+    let (resource, action) = match (method, path) {
         // Event requests
-        (&Method::POST, "/request") => Some(("node_request", "post")),
-        (&Method::GET, "/request") => Some(("node_request", "get")),
-        (&Method::GET, p) if p.starts_with("/request/") => {
-            Some(("node_request", "get"))
-        }
+        (&Method::POST, "/request") => (NodeRequest, Post),
+        (&Method::GET, "/request") => (NodeRequest, Get),
+        (&Method::GET, p) if p.starts_with("/request/") => (NodeRequest, Get),
 
         // Requests in manager
-        (&Method::GET, "/requests-in-manager") => Some(("node_request", "get")),
+        (&Method::GET, "/requests-in-manager") => (NodeRequest, Get),
         (&Method::GET, p) if p.starts_with("/requests-in-manager/") => {
-            Some(("node_request", "get"))
+            (NodeRequest, Get)
         }
 
         // Approvals
-        (&Method::GET, "/approval") => Some(("node_subject", "get")),
-        (&Method::GET, p) if p.starts_with("/approval/") => {
-            Some(("node_subject", "get"))
-        }
+        (&Method::GET, "/approval") => (NodeSubject, Get),
+        (&Method::GET, p) if p.starts_with("/approval/") => (NodeSubject, Get),
         (&Method::PATCH, p) if p.starts_with("/approval/") => {
-            Some(("node_subject", "patch"))
+            (NodeSubject, Patch)
         }
 
         // Request abort
         (&Method::POST, p) if p.starts_with("/request-abort/") => {
-            Some(("node_subject", "post"))
+            (NodeSubject, Post)
         }
 
         // Ledger subject queries
         (&Method::GET, p) if p.starts_with("/events-first-last/") => {
-            Some(("node_subject", "get"))
+            (NodeSubject, Get)
         }
-        (&Method::GET, p) if p.starts_with("/events/") => {
-            Some(("node_subject", "get"))
-        }
-        (&Method::GET, p) if p.starts_with("/aborts/") => {
-            Some(("node_subject", "get"))
-        }
+        (&Method::GET, p) if p.starts_with("/events/") => (NodeSubject, Get),
+        (&Method::GET, p) if p.starts_with("/aborts/") => (NodeSubject, Get),
 
         // Authorization / witnesses
-        (&Method::GET, "/auth") => Some(("node_subject", "get")),
-        (&Method::GET, p) if p.starts_with("/auth/") => {
-            Some(("node_subject", "get"))
-        }
-        (&Method::PUT, p) if p.starts_with("/auth/") => {
-            Some(("node_subject", "put"))
-        }
+        (&Method::GET, "/auth") => (NodeSubject, Get),
+        (&Method::GET, p) if p.starts_with("/auth/") => (NodeSubject, Get),
+        (&Method::PUT, p) if p.starts_with("/auth/") => (NodeSubject, Put),
         (&Method::DELETE, p) if p.starts_with("/auth/") => {
-            Some(("node_subject", "delete"))
+            (NodeSubject, Delete)
         }
 
         // Updates / distribution
-        (&Method::POST, p) if p.starts_with("/update/") => {
-            Some(("node_subject", "post"))
-        }
+        (&Method::POST, p) if p.starts_with("/update/") => (NodeSubject, Post),
         (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
-            Some(("node_subject", "post"))
+            (NodeSubject, Post)
         }
 
-        // Self API keys panel (management key required)
-        (&Method::GET, "/me/api-keys") => Some(("user_api_key", "get")),
-        (&Method::POST, "/me/api-keys") => Some(("user_api_key", "post")),
+        // User self-service
+        (&Method::GET, "/me") => (User, Get),
+        (&Method::GET, "/me/permissions") => (User, Get),
+        (&Method::GET, "/me/permissions/detailed") => (User, Get),
+
+        // Self API keys (management key required)
+        (&Method::GET, "/me/api-keys") => (UserApiKey, Get),
+        (&Method::POST, "/me/api-keys") => (UserApiKey, Post),
         (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
-            Some(("user_api_key", "delete"))
+            (UserApiKey, Delete)
         }
 
         // Ledger info
-        (&Method::GET, p) if p.starts_with("/state/") => {
-            Some(("node_subject", "get"))
-        }
+        (&Method::GET, p) if p.starts_with("/state/") => (NodeSubject, Get),
 
         // Register - governances and subjects
-        (&Method::GET, "/subjects") => Some(("node_subject", "get")),
-        (&Method::GET, p) if p.starts_with("/subjects/") => {
-            Some(("node_subject", "get"))
-        }
+        (&Method::GET, "/subjects") => (NodeSubject, Get),
+        (&Method::GET, p) if p.starts_with("/subjects/") => (NodeSubject, Get),
 
         // Transfers
-        (&Method::GET, "/pending-transfers") => Some(("node_subject", "get")),
+        (&Method::GET, "/pending-transfers") => (NodeSubject, Get),
 
         // Node/system info
-        (&Method::GET, "/public-key") => Some(("node_system", "get")),
-        (&Method::GET, "/peer-id") => Some(("node_system", "get")),
-        (&Method::GET, "/config") => Some(("node_system", "get")),
-        (&Method::GET, "/network-state") => Some(("node_system", "get")),
+        (&Method::GET, "/public-key") => (NodeSystem, Get),
+        (&Method::GET, "/peer-id") => (NodeSystem, Get),
+        (&Method::GET, "/network-state") => (NodeSystem, Get),
 
-        _ => None,
-    }
+        // Node management (manager + superadmin only)
+        (&Method::GET, "/config") => (NodeManagement, Get),
+        (&Method::GET, "/metrics") => (NodeManagement, Get),
+
+        // Unknown route → deny
+        _ => return None,
+    };
+
+    Some(Require(resource, action))
 }
 
 #[cfg(test)]

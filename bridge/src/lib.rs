@@ -57,8 +57,6 @@ pub use ave_common;
 
 #[cfg(feature = "prometheus")]
 pub mod prometheus;
-#[cfg(feature = "prometheus")]
-use prometheus::run_prometheus;
 
 use crate::conversions::{
     core_approval_req_to_common, core_tranfer_subject_to_common,
@@ -78,6 +76,8 @@ pub struct Bridge {
     api: AveApi,
     config: Config,
     cancellation: CancellationToken,
+    #[cfg(feature = "prometheus")]
+    registry: std::sync::Arc<prometheus_client::registry::Registry>,
 }
 
 impl Bridge {
@@ -109,7 +109,7 @@ impl Bridge {
 
         let token = token.unwrap_or_default();
 
-        let (api, mut runners) = AveApi::build(
+        let (api, runners) = AveApi::build(
             keys,
             settings.node.clone(),
             SinkAuth {
@@ -127,19 +127,15 @@ impl Bridge {
         Self::bind_with_shutdown(token.clone());
 
         #[cfg(feature = "prometheus")]
-        {
-            runners.push(run_prometheus(
-                registry,
-                &settings.prometheus,
-                token.clone(),
-            ));
-        }
+        let registry = std::sync::Arc::new(registry);
 
         Ok((
             Self {
                 api,
                 config: settings.clone(),
                 cancellation: token,
+                #[cfg(feature = "prometheus")]
+                registry,
             },
             runners,
         ))
@@ -147,6 +143,13 @@ impl Bridge {
 
     pub const fn token(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    #[cfg(feature = "prometheus")]
+    pub fn registry(
+        &self,
+    ) -> std::sync::Arc<prometheus_client::registry::Registry> {
+        self.registry.clone()
     }
 
     fn bind_with_shutdown(token: CancellationToken) {

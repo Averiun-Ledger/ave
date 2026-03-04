@@ -345,7 +345,7 @@ async fn test_node_endpoints(
         ("GET", "/public-key", None),
         ("GET", "/peer-id", None),
         ("GET", "/network-state", None),
-        // Admin-System (admin_system) - /config requires admin_system:get
+        // Node-Management (node_management) - /config requires node_management:get
         ("GET", "/config", None),
         // Node-Subject (node_subject) - reads
         (
@@ -968,10 +968,10 @@ async fn test_admin_role_endpoints_access() {
     )
     .await;
     test_admin_system_endpoints(&client, &base_url, test_mgmt_key, true).await;
-    // /config is superadmin-only, admin should NOT have access
+    // admin does NOT have node_management:get, so /config is blocked
     test_node_endpoints(&client, &base_url, test_mgmt_key, false, &[]).await; // Should NOT have any node access
 
-    // Test with service key - service keys strip admin_system permissions,
+    // Test with service key - service keys strip node management permissions,
     // so /config is NOT accessible even for admin service keys
     test_user_endpoints(&client, &base_url, test_service_key, true, false)
         .await;
@@ -1156,7 +1156,7 @@ async fn test_sender_role_endpoints_access() {
         ("GET", "/public-key", true),
         ("GET", "/peer-id", true),
         ("GET", "/network-state", true),
-        // /config requires admin_system:get - sender does NOT have it
+        // /config requires node_management:get - sender does NOT have it
     ];
 
     // Test with management key - limited Node access
@@ -1310,11 +1310,10 @@ async fn test_manager_role_endpoints_access() {
     // - Node-System (all actions)
     // But NOT to Node-Keys or Admin-* resources
 
-    // Manager has node_request:all, node_subject:all, node_system:all
-    // but NOT admin_system:get, so /config is blocked
-    let manager_overrides: &[(&str, &str, bool)] = &[("GET", "/config", false)];
+    // Manager has node_request:all, node_subject:all, node_system:all, node_management:get
+    let manager_overrides: &[(&str, &str, bool)] = &[];
 
-    // Test with management key - full Node access except /config
+    // Test with management key - full Node access including /config
     test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;
     test_node_endpoints(
         &client,
@@ -1471,7 +1470,7 @@ async fn test_data_role_endpoints_access() {
         ("GET", "/public-key", true),
         ("GET", "/peer-id", true),
         ("GET", "/network-state", true),
-        // /config requires admin_system:get - data does NOT have it
+        // /config requires node_management:get - data does NOT have it
         // node_subject:get
         (
             "GET",

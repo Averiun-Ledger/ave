@@ -348,7 +348,6 @@ fn log_effective_configuration(
     }
 
     info!(target: TARGET, "[node]");
-    info!(target: TARGET, "  prometheus      : {}", config.prometheus);
     info!(target: TARGET, "  keys      : {}", config.keys_path.display());
     info!(target: TARGET, "  db        : {:?}", config.node.internal_db.db);
     info!(
@@ -655,6 +654,9 @@ async fn main() {
     })
     .expect("Can not build Bridge");
 
+    #[cfg(feature = "prometheus")]
+    let registry = bridge.registry();
+
     if let Some(https_address) = config.http.https_address {
         let https_address = https_address
             .parse::<SocketAddr>()
@@ -749,6 +751,8 @@ async fn main() {
                     config.http.enable_doc,
                     bridge,
                     auth_db,
+                    #[cfg(feature = "prometheus")]
+                    registry,
                 ))
                 .layer(security_headers.clone())
                 .layer(cors)
@@ -759,7 +763,13 @@ async fn main() {
     } else {
         axum::serve(
             listener_http,
-            tower_trace(build_routes(config.http.enable_doc, bridge, auth_db))
+            tower_trace(build_routes(
+            config.http.enable_doc,
+            bridge,
+            auth_db,
+            #[cfg(feature = "prometheus")]
+            registry,
+        ))
                 .layer(security_headers)
                 .layer(cors)
                 .into_make_service_with_connect_info::<SocketAddr>(),
