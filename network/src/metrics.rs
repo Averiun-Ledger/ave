@@ -114,172 +114,172 @@ impl NetworkMetrics {
 
     fn register_into(&self, registry: &mut Registry) {
         registry.register(
-            "network_dial_attempts_bootstrap_total",
+            "network_dial_attempts_bootstrap",
             "Total bootstrap dial attempts.",
             self.dial_attempts_bootstrap_total.clone(),
         );
         registry.register(
-            "network_dial_attempts_runtime_total",
+            "network_dial_attempts_runtime",
             "Total runtime dial attempts.",
             self.dial_attempts_runtime_total.clone(),
         );
         registry.register(
-            "network_dial_failures_total",
+            "network_dial_failures",
             "Total dial failures.",
             self.dial_failures_total.clone(),
         );
         registry.register(
-            "network_dial_failures_local_peer_id_total",
+            "network_dial_failures_local_peer_id",
             "Dial failures because the target peer id matches local peer id.",
             self.dial_failures_local_peer_id_total.clone(),
         );
         registry.register(
-            "network_dial_failures_no_addresses_total",
+            "network_dial_failures_no_addresses",
             "Dial failures because there are no addresses to dial.",
             self.dial_failures_no_addresses_total.clone(),
         );
         registry.register(
-            "network_dial_failures_peer_condition_total",
+            "network_dial_failures_peer_condition",
             "Dial failures because dial peer conditions were not met.",
             self.dial_failures_peer_condition_total.clone(),
         );
         registry.register(
-            "network_dial_failures_denied_total",
+            "network_dial_failures_denied",
             "Dial failures denied by behaviour.",
             self.dial_failures_denied_total.clone(),
         );
         registry.register(
-            "network_dial_failures_aborted_total",
+            "network_dial_failures_aborted",
             "Dial failures due to aborted dial attempts.",
             self.dial_failures_aborted_total.clone(),
         );
         registry.register(
-            "network_dial_failures_wrong_peer_id_total",
+            "network_dial_failures_wrong_peer_id",
             "Dial failures due to remote peer id mismatch.",
             self.dial_failures_wrong_peer_id_total.clone(),
         );
         registry.register(
-            "network_dial_failures_transport_total",
+            "network_dial_failures_transport",
             "Dial failures produced by transport errors.",
             self.dial_failures_transport_total.clone(),
         );
         registry.register(
-            "network_messages_dropped_outbound_queue_limit_total",
+            "network_messages_dropped_outbound_queue_limit",
             "Outbound messages evicted due to queue limits.",
             self.dropped_outbound_queue_limit_total.clone(),
         );
         registry.register(
-            "network_messages_dropped_inbound_queue_limit_total",
+            "network_messages_dropped_inbound_queue_limit",
             "Inbound messages evicted due to queue limits.",
             self.dropped_inbound_queue_limit_total.clone(),
         );
         registry.register(
-            "network_messages_dropped_max_retries_total",
+            "network_messages_dropped_max_retries",
             "Messages dropped after exhausting retries.",
             self.dropped_max_retries_total.clone(),
         );
         registry.register(
-            "network_reqres_requests_received_total",
+            "network_reqres_requests_received",
             "Total request-response request messages received.",
             self.reqres_requests_received_total.clone(),
         );
         registry.register(
-            "network_reqres_responses_received_total",
+            "network_reqres_responses_received",
             "Total request-response response messages received.",
             self.reqres_responses_received_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_total",
+            "network_reqres_failures",
             "Total request-response failures.",
             self.reqres_failures_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_inbound_total",
+            "network_reqres_failures_inbound",
             "Total inbound request-response failures.",
             self.reqres_failures_inbound_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_outbound_total",
+            "network_reqres_failures_outbound",
             "Total outbound request-response failures.",
             self.reqres_failures_outbound_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_timeout_total",
+            "network_reqres_failures_timeout",
             "Request-response failures caused by timeout.",
             self.reqres_failures_timeout_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_io_total",
+            "network_reqres_failures_io",
             "Request-response failures caused by IO errors.",
             self.reqres_failures_io_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_negotiation_total",
+            "network_reqres_failures_negotiation",
             "Request-response failures caused by protocol negotiation mismatch.",
             self.reqres_failures_negotiation_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_connection_closed_total",
+            "network_reqres_failures_connection_closed",
             "Request-response failures caused by connection closure.",
             self.reqres_failures_connection_closed_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_response_omission_total",
+            "network_reqres_failures_response_omission",
             "Request-response failures caused by missing responses.",
             self.reqres_failures_response_omission_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_dial_total",
+            "network_reqres_failures_dial",
             "Request-response failures caused by dial failures.",
             self.reqres_failures_dial_total.clone(),
         );
         registry.register(
-            "network_reqres_failures_other_total",
+            "network_reqres_failures_other",
             "Request-response failures caused by unknown errors.",
             self.reqres_failures_other_total.clone(),
         );
         registry.register(
-            "network_identify_errors_total",
+            "network_identify_errors",
             "Total identify protocol errors.",
             self.identify_errors_total.clone(),
         );
         registry.register(
-            "network_identify_errors_timeout_total",
+            "network_identify_errors_timeout",
             "Identify errors caused by timeout.",
             self.identify_errors_timeout_total.clone(),
         );
         registry.register(
-            "network_identify_errors_io_total",
+            "network_identify_errors_io",
             "Identify errors caused by IO failures.",
             self.identify_errors_io_total.clone(),
         );
         registry.register(
-            "network_identify_errors_negotiation_total",
+            "network_identify_errors_negotiation",
             "Identify errors caused by protocol negotiation mismatch.",
             self.identify_errors_negotiation_total.clone(),
         );
         registry.register(
-            "network_identify_errors_other_total",
+            "network_identify_errors_other",
             "Identify errors caused by unknown failures.",
             self.identify_errors_other_total.clone(),
         );
         registry.register(
-            "network_control_list_denied_total",
+            "network_control_list_denied",
             "Total denied connections by control list.",
             self.control_list_denied_total.clone(),
         );
         registry.register(
-            "network_control_list_denied_not_allowed_total",
+            "network_control_list_denied_not_allowed",
             "Denied connections because peer is not in allow list.",
             self.control_list_denied_not_allowed_total.clone(),
         );
         registry.register(
-            "network_control_list_denied_blocked_total",
+            "network_control_list_denied_blocked",
             "Denied connections because peer is blocked.",
             self.control_list_denied_blocked_total.clone(),
         );
         registry.register(
-            "network_state_transitions_total",
+            "network_state_transitions",
             "Total network state transitions.",
             self.state_transitions_total.clone(),
         );
