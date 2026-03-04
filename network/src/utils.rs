@@ -1,4 +1,4 @@
-use crate::{Error, routing::RoutingNode};
+use crate::{Error, NodeType, routing::RoutingNode};
 use bytes::Bytes;
 use ip_network::IpNetwork;
 use libp2p::{
@@ -25,6 +25,32 @@ pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
 pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
+pub const USER_AGENT_NODE_TYPE_KEY: &str = "node";
+pub const USER_AGENT_NODE_TYPE_BOOTSTRAP: &str = "bootstrap";
+pub const USER_AGENT_NODE_TYPE_ADDRESSABLE: &str = "addressable";
+pub const USER_AGENT_NODE_TYPE_EPHEMERAL: &str = "ephemeral";
+
+pub fn build_user_agent(node_type: &NodeType) -> String {
+    let node_type_value = match node_type {
+        NodeType::Bootstrap => USER_AGENT_NODE_TYPE_BOOTSTRAP,
+        NodeType::Addressable => USER_AGENT_NODE_TYPE_ADDRESSABLE,
+        NodeType::Ephemeral => USER_AGENT_NODE_TYPE_EPHEMERAL,
+    };
+
+    format!("{USER_AGENT};{USER_AGENT_NODE_TYPE_KEY}={node_type_value}")
+}
+
+pub fn is_ephemeral_agent_version(agent_version: &str) -> bool {
+    let marker = format!(
+        "{}={}",
+        USER_AGENT_NODE_TYPE_KEY, USER_AGENT_NODE_TYPE_EPHEMERAL
+    );
+
+    agent_version
+        .split(';')
+        .map(str::trim)
+        .any(|part| part == marker.as_str())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {

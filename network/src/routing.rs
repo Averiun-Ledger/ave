@@ -18,7 +18,8 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    fmt,
     task::{Poll, Waker},
     time::Duration,
 };
@@ -60,6 +61,12 @@ pub struct Behaviour {
     close_connections: VecDeque<(PeerId, Option<ConnectionId>)>,
 
     peer_to_remove: HashMap<PeerId, u8>,
+
+    /// Peers detected as ephemeral/non-dialable.
+    non_dialable_peers: HashSet<PeerId>,
+
+    /// One-shot allow-list for explicit outbound dials (e.g. wakeup by message).
+    allow_next_dial_to_peer: HashSet<PeerId>,
 }
 
 impl Behaviour {
@@ -131,6 +138,8 @@ impl Behaviour {
             pre_routing: true,
             waker: None,
             peer_to_remove: HashMap::new(),
+            non_dialable_peers: HashSet::new(),
+            allow_next_dial_to_peer: HashSet::new(),
         }
     }
 
@@ -176,6 +185,23 @@ impl Behaviour {
 
     pub fn clean_peer_to_remove(&mut self, peer_id: &PeerId) {
         self.peer_to_remove.remove(peer_id);
+    }
+
+    /// Mark a peer as non-dialable (e.g. ephemeral peer without listen addrs).
+    pub fn mark_peer_non_dialable(&mut self, peer_id: &PeerId) {
+        self.non_dialable_peers.insert(*peer_id);
+    }
+
+    /// Mark a peer as dialable again.
+    pub fn mark_peer_dialable(&mut self, peer_id: &PeerId) {
+        self.non_dialable_peers.remove(peer_id);
+        self.allow_next_dial_to_peer.remove(peer_id);
+    }
+
+    /// Allow the next outbound dial to this peer even if it is non-dialable.
+    /// The permission is consumed on first use.
+    pub fn allow_next_outbound_dial(&mut self, peer_id: &PeerId) {
+        self.allow_next_dial_to_peer.insert(*peer_id);
     }
 
     /// Add a self-reported address of a remote peer to the k-buckets of the DHT
@@ -230,6 +256,8 @@ impl Behaviour {
 
     /// Remove node from the DHT.
     pub fn remove_node(&mut self, peer_id: &PeerId) {
+        self.non_dialable_peers.remove(peer_id);
+        self.allow_next_dial_to_peer.remove(peer_id);
         self.kademlia.remove_peer(peer_id);
     }
 }
@@ -243,6 +271,20 @@ pub enum Event {
         info: Option<PeerInfo>,
     },
 }
+
+/// A dial to this peer was rejected because it is marked as non-dialable.
+#[derive(Debug)]
+pub struct NonDialablePeer {
+    peer: PeerId,
+}
+
+impl fmt::Display for NonDialablePeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "peer {} is marked as non-dialable", self.peer)
+    }
+}
+
+impl std::error::Error for NonDialablePeer {}
 
 impl NetworkBehaviour for Behaviour {
     type ConnectionHandler =
@@ -535,6 +577,15 @@ impl NetworkBehaviour for Behaviour {
         addresses: &[Multiaddr],
         effective_role: libp2p::core::Endpoint,
     ) -> Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
+        if let Some(peer_id) = maybe_peer
+            && self.non_dialable_peers.contains(&peer_id)
+            && !self.allow_next_dial_to_peer.remove(&peer_id)
+        {
+            return Err(ConnectionDenied::new(NonDialablePeer {
+                peer: peer_id,
+            }));
+        }
+
         let addresses = self.kademlia.handle_pending_outbound_connection(
             connection_id,
             maybe_peer,
@@ -558,8 +609,10 @@ impl NetworkBehaviour for Behaviour {
         } else if filter_addresses.is_empty()
             && let Some(peer_id) = maybe_peer
         {
+            // Keep peer metadata even if this outbound attempt currently has
+            // no usable addresses. The peer may be temporarily asleep or behind
+            // a proxy/NAT and become reachable later.
             self.peer_to_remove.remove(&peer_id);
-            self.kademlia.remove_peer(&peer_id);
         }
 
         Ok(filter_addresses)

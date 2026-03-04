@@ -7,7 +7,7 @@ use crate::{
     routing::{self},
     utils::{
         IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
-        USER_AGENT,
+        build_user_agent,
     },
 };
 
@@ -128,7 +128,7 @@ impl Behaviour {
             IDENTIFY_PROTOCOL.to_owned(),
             public_key.clone(),
         )
-        .with_agent_version(USER_AGENT.to_string())
+        .with_agent_version(build_user_agent(&config.node_type))
         .with_cache_size(limits.identify_cache);
 
         let identify_config = if config.node_type == NodeType::Ephemeral {
@@ -171,8 +171,16 @@ impl Behaviour {
         self.routing.remove_node(peer_id);
     }
 
-    pub fn add_peer_to_remove(&mut self, peer_id: &PeerId) {
-        self.routing.add_peer_to_remove(peer_id);
+    pub fn mark_peer_non_dialable(&mut self, peer_id: &PeerId) {
+        self.routing.mark_peer_non_dialable(peer_id);
+    }
+
+    pub fn mark_peer_dialable(&mut self, peer_id: &PeerId) {
+        self.routing.mark_peer_dialable(peer_id);
+    }
+
+    pub fn allow_next_outbound_dial(&mut self, peer_id: &PeerId) {
+        self.routing.allow_next_outbound_dial(peer_id);
     }
 
     /// Discover closets peers.
