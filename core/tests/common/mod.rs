@@ -32,9 +32,13 @@ pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 
 pub struct NodeData {
     pub api: Api,
+    #[allow(dead_code)]
     pub handler: Vec<JoinHandle<()>>,
+    #[allow(dead_code)]
     pub token: CancellationToken,
+    #[allow(dead_code)]
     pub keys: KeyPair,
+    #[allow(dead_code)]
     pub listen_address: String,
 }
 
