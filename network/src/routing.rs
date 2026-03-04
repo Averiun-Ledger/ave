@@ -21,13 +21,19 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt,
     task::{Poll, Waker},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{NodeType, utils::LimitsConfig};
 
 #[cfg(not(feature = "test"))]
 use crate::utils::{is_dns, is_global, is_loop_back, is_private, is_tcp};
+
+/// Keep ephemeral/non-dialable peers for at most 14 days since last refresh.
+const EPHEMERAL_PEER_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Periodic cleanup cadence for expired ephemeral peers.
+const EPHEMERAL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// The discovery behaviour.
 pub struct Behaviour {
@@ -63,10 +69,13 @@ pub struct Behaviour {
     peer_to_remove: HashMap<PeerId, u8>,
 
     /// Peers detected as ephemeral/non-dialable.
-    non_dialable_peers: HashSet<PeerId>,
+    non_dialable_peers: HashMap<PeerId, Instant>,
 
     /// One-shot allow-list for explicit outbound dials (e.g. wakeup by message).
     allow_next_dial_to_peer: HashSet<PeerId>,
+
+    /// Timer used to periodically cleanup expired ephemeral peers.
+    next_ephemeral_cleanup: Delay,
 }
 
 impl Behaviour {
@@ -138,8 +147,9 @@ impl Behaviour {
             pre_routing: true,
             waker: None,
             peer_to_remove: HashMap::new(),
-            non_dialable_peers: HashSet::new(),
+            non_dialable_peers: HashMap::new(),
             allow_next_dial_to_peer: HashSet::new(),
+            next_ephemeral_cleanup: Delay::new(EPHEMERAL_CLEANUP_INTERVAL),
         }
     }
 
@@ -189,7 +199,7 @@ impl Behaviour {
 
     /// Mark a peer as non-dialable (e.g. ephemeral peer without listen addrs).
     pub fn mark_peer_non_dialable(&mut self, peer_id: &PeerId) {
-        self.non_dialable_peers.insert(*peer_id);
+        self.non_dialable_peers.insert(*peer_id, Instant::now());
     }
 
     /// Mark a peer as dialable again.
@@ -259,6 +269,23 @@ impl Behaviour {
         self.non_dialable_peers.remove(peer_id);
         self.allow_next_dial_to_peer.remove(peer_id);
         self.kademlia.remove_peer(peer_id);
+    }
+
+    fn cleanup_expired_ephemeral_peers(&mut self) {
+        let now = Instant::now();
+        let expired = self
+            .non_dialable_peers
+            .iter()
+            .filter_map(|(peer_id, seen_at)| {
+                (now.duration_since(*seen_at) >= EPHEMERAL_PEER_TTL)
+                    .then_some(*peer_id)
+            })
+            .collect::<Vec<_>>();
+
+        for peer_id in expired {
+            self.remove_node(&peer_id);
+            self.clean_peer_to_remove(&peer_id);
+        }
     }
 }
 
@@ -388,6 +415,12 @@ impl NetworkBehaviour for Behaviour {
                     connection: CloseConnection::All,
                 });
             }
+        }
+
+        if self.next_ephemeral_cleanup.poll_unpin(cx).is_ready() {
+            self.cleanup_expired_ephemeral_peers();
+            self.next_ephemeral_cleanup =
+                Delay::new(EPHEMERAL_CLEANUP_INTERVAL);
         }
 
         while let Poll::Ready(ev) = self.kademlia.poll(cx) {
@@ -578,7 +611,7 @@ impl NetworkBehaviour for Behaviour {
         effective_role: libp2p::core::Endpoint,
     ) -> Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
         if let Some(peer_id) = maybe_peer
-            && self.non_dialable_peers.contains(&peer_id)
+            && self.non_dialable_peers.contains_key(&peer_id)
             && !self.allow_next_dial_to_peer.remove(&peer_id)
         {
             return Err(ConnectionDenied::new(NonDialablePeer {
