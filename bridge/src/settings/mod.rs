@@ -118,6 +118,9 @@ boot_nodes = [
     { peer_id = "12D3KooWNode1", address = ["/ip4/1.1.1.1/tcp/1000"] },
     { peer_id = "12D3KooWNode2", address = ["/ip4/2.2.2.2/tcp/2000"] }
 ]
+max_app_message_bytes = 2097152
+max_pending_outbound_bytes_per_peer = 16777216
+max_pending_inbound_bytes_per_peer = 8388608
 
 [node.network.routing]
 dht_random_walk = false
@@ -162,6 +165,7 @@ primary = [
 enable = true
 database_path = "/var/db/auth.db"
 superadmin = "admin:supersecret"
+durability = true
 
 [auth.api_key]
 default_ttl_seconds = 3600
@@ -179,6 +183,11 @@ limit_by_key = false
 limit_by_ip = true
 cleanup_interval_seconds = 1800
 
+[[auth.rate_limit.sensitive_endpoints]]
+endpoint = "/login"
+max_requests = 5
+window_seconds = 30
+
 [auth.session]
 audit_enable = false
 audit_retention_days = 30
@@ -190,6 +199,12 @@ https_address = "127.0.0.1:4443"
 https_cert_path = "/certs/cert.pem"
 https_private_key_path = "/certs/key.pem"
 enable_doc = true
+
+[http.cors]
+enabled = false
+allow_any_origin = false
+allowed_origins = ["https://app.example.com"]
+allow_credentials = true
 
 [http.self_signed_cert]
 enabled = true
@@ -233,6 +248,9 @@ node:
       - peer_id: 12D3KooWNode2
         address:
           - /ip4/2.2.2.2/tcp/2000
+    max_app_message_bytes: 2097152
+    max_pending_outbound_bytes_per_peer: 16777216
+    max_pending_inbound_bytes_per_peer: 8388608
     routing:
       dht_random_walk: false
       discovery_only_if_under_num: 25
@@ -278,6 +296,7 @@ auth:
   enable: true
   database_path: /var/db/auth.db
   superadmin: admin:supersecret
+  durability: true
   api_key:
     default_ttl_seconds: 3600
     max_keys_per_user: 20
@@ -291,6 +310,10 @@ auth:
     limit_by_key: false
     limit_by_ip: true
     cleanup_interval_seconds: 1800
+    sensitive_endpoints:
+      - endpoint: /login
+        max_requests: 5
+        window_seconds: 30
   session:
     audit_enable: false
     audit_retention_days: 30
@@ -301,6 +324,12 @@ http:
   https_cert_path: /certs/cert.pem
   https_private_key_path: /certs/key.pem
   enable_doc: true
+  cors:
+    enabled: false
+    allow_any_origin: false
+    allowed_origins:
+      - https://app.example.com
+    allow_credentials: true
   self_signed_cert:
     enabled: true
     common_name: localhost
@@ -355,6 +384,9 @@ http:
           "address": ["/ip4/2.2.2.2/tcp/2000"]
         }
       ],
+      "max_app_message_bytes": 2097152,
+      "max_pending_outbound_bytes_per_peer": 16777216,
+      "max_pending_inbound_bytes_per_peer": 8388608,
       "routing": {
         "dht_random_walk": false,
         "discovery_only_if_under_num": 25,
@@ -414,6 +446,7 @@ http:
     "enable": true,
     "database_path": "/var/db/auth.db",
     "superadmin": "admin:supersecret",
+    "durability": true,
     "api_key": {
       "default_ttl_seconds": 3600,
       "max_keys_per_user": 20
@@ -428,7 +461,10 @@ http:
       "max_requests": 50,
       "limit_by_key": false,
       "limit_by_ip": true,
-      "cleanup_interval_seconds": 1800
+      "cleanup_interval_seconds": 1800,
+      "sensitive_endpoints": [
+        { "endpoint": "/login", "max_requests": 5, "window_seconds": 30 }
+      ]
     },
     "session": {
       "audit_enable": false,
@@ -442,6 +478,12 @@ http:
     "https_cert_path": "/certs/cert.pem",
     "https_private_key_path": "/certs/key.pem",
     "enable_doc": true,
+    "cors": {
+      "enabled": false,
+      "allow_any_origin": false,
+      "allowed_origins": ["https://app.example.com"],
+      "allow_credentials": true
+    },
     "self_signed_cert": {
       "enabled": true,
       "common_name": "localhost",
@@ -635,6 +677,9 @@ http:
             node.network.memory_limits,
             MemoryLimitsConfig::Percentage { value: 0.8 }
         );
+        assert_eq!(node.network.max_app_message_bytes, 2097152);
+        assert_eq!(node.network.max_pending_outbound_bytes_per_peer, 16777216);
+        assert_eq!(node.network.max_pending_inbound_bytes_per_peer, 8388608);
         let logging = &config.logging;
         assert_eq!(
             logging.output,
@@ -678,6 +723,7 @@ http:
 
         let auth = &config.auth;
         assert!(auth.enable);
+        assert!(auth.durability);
         assert_eq!(auth.database_path, PathBuf::from("/var/db/auth.db"));
         assert_eq!(auth.superadmin, "admin:supersecret");
         assert_eq!(auth.api_key.default_ttl_seconds, 3600);
@@ -690,6 +736,13 @@ http:
         assert!(!auth.rate_limit.limit_by_key);
         assert!(auth.rate_limit.limit_by_ip);
         assert_eq!(auth.rate_limit.cleanup_interval_seconds, 1800);
+        assert_eq!(auth.rate_limit.sensitive_endpoints.len(), 1);
+        assert_eq!(auth.rate_limit.sensitive_endpoints[0].endpoint, "/login");
+        assert_eq!(auth.rate_limit.sensitive_endpoints[0].max_requests, 5);
+        assert_eq!(
+            auth.rate_limit.sensitive_endpoints[0].window_seconds,
+            Some(30)
+        );
         assert!(!auth.session.audit_enable);
         assert_eq!(auth.session.audit_retention_days, 30);
         assert_eq!(auth.session.audit_max_entries, 1_000_000);
@@ -706,6 +759,19 @@ http:
             Some(PathBuf::from("/certs/key.pem").as_path())
         );
         assert!(http.enable_doc);
+        assert!(!http.cors.enabled);
+        assert!(!http.cors.allow_any_origin);
+        assert_eq!(http.cors.allowed_origins, vec!["https://app.example.com"]);
+        assert!(http.cors.allow_credentials);
+        assert!(http.self_signed_cert.enabled);
+        assert_eq!(http.self_signed_cert.common_name, "localhost");
+        assert_eq!(
+            http.self_signed_cert.san,
+            vec!["127.0.0.1".to_owned(), "::1".to_owned()]
+        );
+        assert_eq!(http.self_signed_cert.validity_days, 365);
+        assert_eq!(http.self_signed_cert.renew_before_days, 30);
+        assert_eq!(http.self_signed_cert.check_interval_secs, 3600);
     }
 
     fn assert_partial_defaults(config: BridgeConfig) {
@@ -743,6 +809,27 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
+        assert_eq!(config.node.network.max_app_message_bytes, 1024 * 1024);
+        assert_eq!(
+            config.node.network.max_pending_outbound_bytes_per_peer,
+            8 * 1024 * 1024
+        );
+        assert_eq!(
+            config.node.network.max_pending_inbound_bytes_per_peer,
+            8 * 1024 * 1024
+        );
         assert!(config.node.spec.is_none());
+
+        // auth defaults
+        assert!(!config.auth.durability);
+
+        // http.cors defaults
+        assert!(config.http.cors.enabled);
+        assert!(config.http.cors.allow_any_origin);
+        assert!(config.http.cors.allowed_origins.is_empty());
+        assert!(!config.http.cors.allow_credentials);
+
+        // http.self_signed_cert defaults
+        assert!(!config.http.self_signed_cert.enabled);
     }
 }

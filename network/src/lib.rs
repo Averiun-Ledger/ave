@@ -258,7 +258,7 @@ impl Display for MemoryLimitsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
 /// Network config
@@ -283,6 +283,18 @@ pub struct Config {
 
     /// Memory-based connection limit policy.
     pub memory_limits: MemoryLimitsConfig,
+
+    /// Maximum accepted application message payload in bytes.
+    #[serde(default = "default_max_app_message_bytes")]
+    pub max_app_message_bytes: usize,
+
+    /// Maximum buffered outbound bytes per peer while disconnected.
+    #[serde(default = "default_max_pending_outbound_bytes_per_peer")]
+    pub max_pending_outbound_bytes_per_peer: usize,
+
+    /// Maximum buffered inbound bytes per peer before helper delivery.
+    #[serde(default = "default_max_pending_inbound_bytes_per_peer")]
+    pub max_pending_inbound_bytes_per_peer: usize,
 }
 
 impl Config {
@@ -301,6 +313,42 @@ impl Config {
             routing: routing::Config::default(),
             control_list: control_list::Config::default(),
             memory_limits: MemoryLimitsConfig::default(),
+            max_app_message_bytes: default_max_app_message_bytes(),
+            max_pending_outbound_bytes_per_peer:
+                default_max_pending_outbound_bytes_per_peer(),
+            max_pending_inbound_bytes_per_peer:
+                default_max_pending_inbound_bytes_per_peer(),
+        }
+    }
+}
+
+const fn default_max_app_message_bytes() -> usize {
+    crate::utils::MAX_APP_MESSAGE_BYTES
+}
+
+const fn default_max_pending_outbound_bytes_per_peer() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER
+}
+
+const fn default_max_pending_inbound_bytes_per_peer() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            node_type: NodeType::default(),
+            listen_addresses: Vec::default(),
+            external_addresses: Vec::default(),
+            boot_nodes: Vec::default(),
+            routing: routing::Config::default(),
+            control_list: control_list::Config::default(),
+            memory_limits: MemoryLimitsConfig::default(),
+            max_app_message_bytes: default_max_app_message_bytes(),
+            max_pending_outbound_bytes_per_peer:
+                default_max_pending_outbound_bytes_per_peer(),
+            max_pending_inbound_bytes_per_peer:
+                default_max_pending_inbound_bytes_per_peer(),
         }
     }
 }

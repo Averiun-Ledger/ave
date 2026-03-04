@@ -354,6 +354,12 @@ pub struct NetworkConfigHttp {
     pub control_list: ControlListConfigHttp,
     /// Memory-based connection limit policy ("disabled", "80% of system RAM", "512 MB")
     pub memory_limits: String,
+    /// Maximum accepted application message payload in bytes.
+    pub max_app_message_bytes: usize,
+    /// Maximum buffered inbound bytes per peer while waiting for helper delivery.
+    pub max_pending_inbound_bytes_per_peer: usize,
+    /// Maximum buffered outbound bytes per peer while disconnected.
+    pub max_pending_outbound_bytes_per_peer: usize,
 }
 
 impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
@@ -370,6 +376,11 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
             routing: RoutingConfigHttp::from(value.routing),
             control_list: ControlListConfigHttp::from(value.control_list),
             memory_limits: value.memory_limits.to_string(),
+            max_app_message_bytes: value.max_app_message_bytes,
+            max_pending_outbound_bytes_per_peer:
+                value.max_pending_outbound_bytes_per_peer,
+            max_pending_inbound_bytes_per_peer:
+                value.max_pending_inbound_bytes_per_peer,
         }
     }
 }

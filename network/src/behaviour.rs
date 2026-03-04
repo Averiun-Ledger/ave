@@ -75,12 +75,14 @@ impl Behaviour {
                 limits.reqres_request_timeout,
             ));
 
+        let max_app_message_bytes = config.max_app_message_bytes as u64;
+
         let codec = request_response::cbor::codec::Codec::<
             ReqResMessage,
             ReqResMessage,
         >::default()
-        .set_request_size_maximum(1024 * 1024) // 1 MiB
-        .set_response_size_maximum(10 * 1024 * 1024); // 10 MiB
+        .set_request_size_maximum(max_app_message_bytes)
+        .set_response_size_maximum(max_app_message_bytes);
 
         let req_res = request_response::Behaviour::with_codec(
             codec,
@@ -90,8 +92,11 @@ impl Behaviour {
 
         let boot_nodes = config.boot_nodes;
 
-        let control_list_receiver =
-            build_control_lists_updaters(&config.control_list, token);
+        let control_list_receiver = build_control_lists_updaters(
+            &config.control_list,
+            token,
+            metrics.clone(),
+        );
 
         let conn_limmits = ConnectionLimits::default()
             .with_max_established(limits.conn_limmits_max_established_total)
@@ -273,7 +278,7 @@ pub enum Event {
     Dummy,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReqresFailureDirection {
     Inbound,
     Outbound,
@@ -288,7 +293,7 @@ impl ReqresFailureDirection {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReqresFailureKind {
     Timeout,
     Io,
@@ -308,6 +313,42 @@ impl ReqresFailureKind {
             Self::ResponseOmission => "response_omission",
             Self::Dial => "dial",
         }
+    }
+}
+
+pub(crate) fn map_inbound_failure_kind(
+    error: &request_response::InboundFailure,
+) -> ReqresFailureKind {
+    match error {
+        request_response::InboundFailure::Timeout => ReqresFailureKind::Timeout,
+        request_response::InboundFailure::ConnectionClosed => {
+            ReqresFailureKind::ConnectionClosed
+        }
+        request_response::InboundFailure::UnsupportedProtocols => {
+            ReqresFailureKind::Negotiation
+        }
+        request_response::InboundFailure::ResponseOmission => {
+            ReqresFailureKind::ResponseOmission
+        }
+        request_response::InboundFailure::Io(_) => ReqresFailureKind::Io,
+    }
+}
+
+pub(crate) fn map_outbound_failure_kind(
+    error: &request_response::OutboundFailure,
+) -> ReqresFailureKind {
+    match error {
+        request_response::OutboundFailure::DialFailure => {
+            ReqresFailureKind::Dial
+        }
+        request_response::OutboundFailure::Timeout => ReqresFailureKind::Timeout,
+        request_response::OutboundFailure::ConnectionClosed => {
+            ReqresFailureKind::ConnectionClosed
+        }
+        request_response::OutboundFailure::UnsupportedProtocols => {
+            ReqresFailureKind::Negotiation
+        }
+        request_response::OutboundFailure::Io(_) => ReqresFailureKind::Io,
     }
 }
 
@@ -368,23 +409,7 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
             }
             request_response::Event::ResponseSent { .. } => Self::Dummy,
             request_response::Event::InboundFailure { peer, error, .. } => {
-                let kind = match error {
-                    request_response::InboundFailure::Timeout => {
-                        ReqresFailureKind::Timeout
-                    }
-                    request_response::InboundFailure::ConnectionClosed => {
-                        ReqresFailureKind::ConnectionClosed
-                    }
-                    request_response::InboundFailure::UnsupportedProtocols => {
-                        ReqresFailureKind::Negotiation
-                    }
-                    request_response::InboundFailure::ResponseOmission => {
-                        ReqresFailureKind::ResponseOmission
-                    }
-                    request_response::InboundFailure::Io(_) => {
-                        ReqresFailureKind::Io
-                    }
-                };
+                let kind = map_inbound_failure_kind(&error);
 
                 Self::ReqresFailure {
                     peer_id: peer,
@@ -393,23 +418,7 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
                 }
             }
             request_response::Event::OutboundFailure { peer, error, .. } => {
-                let kind = match error {
-                    request_response::OutboundFailure::DialFailure => {
-                        ReqresFailureKind::Dial
-                    }
-                    request_response::OutboundFailure::Timeout => {
-                        ReqresFailureKind::Timeout
-                    }
-                    request_response::OutboundFailure::ConnectionClosed => {
-                        ReqresFailureKind::ConnectionClosed
-                    }
-                    request_response::OutboundFailure::UnsupportedProtocols => {
-                        ReqresFailureKind::Negotiation
-                    }
-                    request_response::OutboundFailure::Io(_) => {
-                        ReqresFailureKind::Io
-                    }
-                };
+                let kind = map_outbound_failure_kind(&error);
 
                 Self::ReqresFailure {
                     peer_id: peer,
@@ -445,6 +454,72 @@ mod tests {
     use serial_test::serial;
 
     use std::vec;
+
+    #[test]
+    fn map_reqres_inbound_failure_kinds() {
+        assert_eq!(
+            map_inbound_failure_kind(&request_response::InboundFailure::Timeout),
+            ReqresFailureKind::Timeout
+        );
+        assert_eq!(
+            map_inbound_failure_kind(
+                &request_response::InboundFailure::ConnectionClosed
+            ),
+            ReqresFailureKind::ConnectionClosed
+        );
+        assert_eq!(
+            map_inbound_failure_kind(
+                &request_response::InboundFailure::UnsupportedProtocols
+            ),
+            ReqresFailureKind::Negotiation
+        );
+        assert_eq!(
+            map_inbound_failure_kind(
+                &request_response::InboundFailure::ResponseOmission
+            ),
+            ReqresFailureKind::ResponseOmission
+        );
+        assert_eq!(
+            map_inbound_failure_kind(&request_response::InboundFailure::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, "x"),
+            )),
+            ReqresFailureKind::Io
+        );
+    }
+
+    #[test]
+    fn map_reqres_outbound_failure_kinds() {
+        assert_eq!(
+            map_outbound_failure_kind(
+                &request_response::OutboundFailure::DialFailure
+            ),
+            ReqresFailureKind::Dial
+        );
+        assert_eq!(
+            map_outbound_failure_kind(
+                &request_response::OutboundFailure::Timeout
+            ),
+            ReqresFailureKind::Timeout
+        );
+        assert_eq!(
+            map_outbound_failure_kind(
+                &request_response::OutboundFailure::ConnectionClosed
+            ),
+            ReqresFailureKind::ConnectionClosed
+        );
+        assert_eq!(
+            map_outbound_failure_kind(
+                &request_response::OutboundFailure::UnsupportedProtocols
+            ),
+            ReqresFailureKind::Negotiation
+        );
+        assert_eq!(
+            map_outbound_failure_kind(&request_response::OutboundFailure::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, "x"),
+            )),
+            ReqresFailureKind::Io
+        );
+    }
 
     #[test(tokio::test)]
     #[serial]

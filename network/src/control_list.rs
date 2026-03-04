@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{self, Receiver},
-    time::sleep,
+    time::{Instant, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -149,6 +149,7 @@ impl Config {
 pub fn build_control_lists_updaters(
     config: &Config,
     token: CancellationToken,
+    metrics: Option<Arc<NetworkMetrics>>,
 ) -> Option<Receiver<Event>> {
     if config.enable {
         debug!(target: TARGET, "control list enabled");
@@ -157,11 +158,18 @@ pub fn build_control_lists_updaters(
         let interval = config.interval_request;
         let service_allow = config.service_allow_list.clone();
         let service_block = config.service_block_list.clone();
+        let metrics_updater = metrics;
 
         tokio::spawn(async move {
+            let mut last_allow_success: Option<Instant> = None;
+            let mut last_block_success: Option<Instant> = None;
             loop {
                 tokio::select! {
                     _ = sleep(interval) => {
+                        if let Some(metrics) = metrics_updater.as_deref() {
+                            metrics.inc_control_list_updater_run();
+                        }
+                        let started_at = Instant::now();
                         let (
                     (vec_allow_peers, vec_block_peers),
                     (successful_allow, successful_block),
@@ -170,23 +178,56 @@ pub fn build_control_lists_updaters(
                     &service_block,
                 )
                 .await;
+                        if let Some(metrics) = metrics_updater.as_deref() {
+                            metrics.observe_control_list_updater_duration_seconds(
+                                started_at.elapsed().as_secs_f64(),
+                            );
+                        }
+
+                        let now = Instant::now();
 
                 // If at least 1 update of the list was possible
                 if successful_allow != 0 {
+                    if let Some(metrics) = metrics_updater.as_deref() {
+                        metrics.observe_control_list_allow_update(true);
+                    }
+                    last_allow_success = Some(now);
                     if let Err(e) = sender.send(Event::AllowListUpdated(vec_allow_peers)).await {
                         debug!(target: TARGET, error = %e, "allow-list update dropped: channel closed");
                     }
                 } else {
+                    if let Some(metrics) = metrics_updater.as_deref() {
+                        metrics.observe_control_list_allow_update(false);
+                    }
                     warn!(target: TARGET, "allow-list not updated: no service responded successfully");
                 }
 
                 // If at least 1 update of the list was possible
                 if successful_block != 0 {
+                    if let Some(metrics) = metrics_updater.as_deref() {
+                        metrics.observe_control_list_block_update(true);
+                    }
+                    last_block_success = Some(now);
                     if let Err(e) = sender.send(Event::BlockListUpdated(vec_block_peers)).await {
                         debug!(target: TARGET, error = %e, "block-list update dropped: channel closed");
                     }
                 } else {
+                    if let Some(metrics) = metrics_updater.as_deref() {
+                        metrics.observe_control_list_block_update(false);
+                    }
                     warn!(target: TARGET, "block-list not updated: no service responded successfully");
+                }
+
+                if let Some(metrics) = metrics_updater.as_deref() {
+                    let allow_age = last_allow_success
+                        .map_or(-1, |t| now.duration_since(t).as_secs() as i64);
+                    metrics
+                        .set_control_list_allow_last_success_age_seconds(allow_age);
+
+                    let block_age = last_block_success
+                        .map_or(-1, |t| now.duration_since(t).as_secs() as i64);
+                    metrics
+                        .set_control_list_block_last_success_age_seconds(block_age);
                 }
                     }
                     _ = token.cancelled() => {
@@ -227,7 +268,7 @@ impl Behaviour {
                 full_allow_list.push(node.peer_id.clone());
             }
 
-            Self {
+            let behaviour = Self {
                 enable: true,
                 allow_peers: HashSet::from_iter(
                     full_allow_list
@@ -243,12 +284,32 @@ impl Behaviour {
                 receiver,
                 metrics,
                 ..Default::default()
+            };
+
+            if let Some(metrics) = behaviour.metrics.as_deref() {
+                metrics
+                    .set_control_list_allow_peers(behaviour.allow_peers.len() as i64);
+                metrics
+                    .set_control_list_block_peers(behaviour.block_peers.len() as i64);
+                metrics.set_control_list_allow_last_success_age_seconds(-1);
+                metrics.set_control_list_block_last_success_age_seconds(-1);
             }
+
+            behaviour
         } else {
-            Self {
+            let behaviour = Self {
                 metrics,
                 ..Default::default()
+            };
+
+            if let Some(metrics) = behaviour.metrics.as_deref() {
+                metrics.set_control_list_allow_peers(0);
+                metrics.set_control_list_block_peers(0);
+                metrics.set_control_list_allow_last_success_age_seconds(-1);
+                metrics.set_control_list_block_last_success_age_seconds(-1);
             }
+
+            behaviour
         }
     }
 
@@ -266,6 +327,10 @@ impl Behaviour {
             self.allow_peers.difference(&new_list).cloned().collect();
         self.close_connections.extend(close_peers);
         self.allow_peers.clone_from(&new_list);
+        if let Some(metrics) = self.metrics.as_deref() {
+            metrics.inc_control_list_allow_apply();
+            metrics.set_control_list_allow_peers(self.allow_peers.len() as i64);
+        }
     }
 
     /// Method that update block list
@@ -280,6 +345,10 @@ impl Behaviour {
 
         self.close_connections.extend(new_list.clone());
         self.block_peers.clone_from(&new_list);
+        if let Some(metrics) = self.metrics.as_deref() {
+            metrics.inc_control_list_block_apply();
+            metrics.set_control_list_block_peers(self.block_peers.len() as i64);
+        }
     }
 
     /// Method that check if a peer is in allow list
@@ -457,10 +526,24 @@ mod tests {
         },
     };
     use libp2p_swarm_test::SwarmExt;
+    use prometheus_client::{encoding::text::encode, registry::Registry};
     use serial_test::serial;
     use test_log::test;
 
     use super::*;
+
+    fn metric_value(metrics: &str, name: &str) -> f64 {
+        metrics
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(name) {
+                    line.split_whitespace().nth(1)?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
 
     impl Behaviour {
         pub fn block_peer(&mut self, peer: PeerId) {
@@ -690,5 +773,42 @@ mod tests {
 
         tokio::task::spawn(Box::pin(dialer_loop));
         listener_loop.await;
+    }
+
+    #[test]
+    fn control_list_denied_metrics_by_reason() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+
+        let config = Config::default().with_enable(true);
+        let behaviour = Behaviour::new(config, &[], None, Some(metrics));
+
+        let blocked_peer = PeerId::random();
+        let not_allowed_peer = PeerId::random();
+
+        let mut behaviour = behaviour;
+        behaviour.block_peers.insert(blocked_peer);
+
+        let _ = behaviour.check_block(&blocked_peer);
+        let _ = behaviour.check_allow(&not_allowed_peer);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(&text, "network_control_list_denied_total"),
+            2.0
+        );
+        assert_eq!(
+            metric_value(&text, "network_control_list_denied_blocked_total"),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_control_list_denied_not_allowed_total"
+            ),
+            1.0
+        );
     }
 }

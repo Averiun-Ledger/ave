@@ -30,6 +30,15 @@ pub enum Error {
     #[error("failed to send response on request-response channel")]
     ResponseSend,
 
+    /// Message payload exceeds accepted maximum size.
+    #[error("network message too large: {size} bytes (max {max})")]
+    MessageTooLarge {
+        /// Actual message size in bytes.
+        size: usize,
+        /// Configured maximum accepted message size in bytes.
+        max: usize,
+    },
+
     /// No reachable bootstrap node; the network is unavailable.
     #[error("cannot connect to the ave network: no reachable bootstrap node")]
     NoBootstrapNode,

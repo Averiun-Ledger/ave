@@ -25,6 +25,11 @@ pub const REQRES_PROTOCOL: &str = "/ave/reqres/1.0.0";
 pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
+pub const MAX_APP_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
+pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize =
+    8 * 1024 * 1024; // 8 MiB
+pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize =
+    8 * 1024 * 1024; // 8 MiB
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
@@ -386,7 +391,7 @@ pub fn is_dns(addr: &Multiaddr) -> bool {
 }
 
 /// Chech if the given `Multiaddr` is a memory address.
-/// #[cfg(not(feature = "test"))]
+#[cfg(not(feature = "test"))]
 pub fn is_tcp(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| matches!(p, Protocol::Tcp(_)))
 }
