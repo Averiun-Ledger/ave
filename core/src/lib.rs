@@ -48,11 +48,11 @@ use network::{
 
 use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
+use prometheus_client::registry::Registry;
 use query::{Query, QueryMessage, QueryResponse};
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
 };
-use prometheus_client::registry::Registry;
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -129,6 +129,7 @@ impl Api {
             })?;
 
         let spec = config.spec.map(MachineSpec::from);
+        let network_metrics = network::metrics::register(registry);
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,
@@ -136,6 +137,7 @@ impl Api {
             Some(newtork_monitor_actor.clone()),
             token.clone(),
             spec,
+            Some(network_metrics),
         )
         .map_err(|e| {
             error!(error = %e, "Can not create networt");

@@ -21,7 +21,7 @@ use crate::common::{PORT_COUNTER, create_node, node_running};
 #[test(tokio::test)]
 // Recibe la copia de un sujeto sin tener la gobernanza
 async fn test_witeness_not_gov() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
+    let (nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
         vec![vec![0], vec![0]],
         vec![],
@@ -32,11 +32,8 @@ async fn test_witeness_not_gov() {
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
 
-    let governance_id = create_and_authorize_governance(
-        &owner,
-        vec![witness_alice],
-    )
-    .await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![witness_alice]).await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -131,7 +128,6 @@ async fn test_witeness_not_gov() {
     .await
     .unwrap();
 
-
     witness_bob
         .auth_subject(
             subject_id_1.clone(),
@@ -158,7 +154,6 @@ async fn test_witeness_not_gov() {
 
     assert!(!witness_bob.public_key().is_empty());
 }
-
 
 #[test(tokio::test)]
 async fn test_not_access() {

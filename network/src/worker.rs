@@ -5,6 +5,7 @@ use crate::{
     Command, CommandHelper, Config, Error, Event as NetworkEvent, MachineSpec,
     Monitor, MonitorMessage, NodeType, ResolvedSpec,
     behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage},
+    metrics::NetworkMetrics,
     resolve_spec,
     service::NetworkService,
     transport::build_transport,
@@ -20,6 +21,7 @@ use std::{
     fmt::Debug,
     num::{NonZeroU8, NonZeroUsize},
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,7 +29,7 @@ use ave_actors::ActorRef;
 use ave_common::identity::KeyPair;
 
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, Swarm,
+    Multiaddr, PeerId, StreamProtocol, Swarm, identify,
     identity::{Keypair, ed25519},
     request_response::{self, ResponseChannel},
     swarm::{self, DialError, SwarmEvent, dial_opts::DialOpts},
@@ -56,33 +58,47 @@ const MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
 /// Keeps the 100 most recent messages; when full the oldest is evicted.
 #[derive(Default)]
 struct PendingQueue {
-    messages: VecDeque<Bytes>,
+    messages: VecDeque<PendingMessage>,
+}
+
+struct PendingMessage {
+    payload: Bytes,
+    enqueued_at: Instant,
 }
 
 impl PendingQueue {
     /// Enqueue a message. Duplicates (byte-identical messages already in the
     /// queue) are silently dropped. If the count limit is reached the oldest
-    /// is evicted and `true` is returned; otherwise `false`.
-    fn push(&mut self, message: Bytes) -> bool {
-        if self.messages.contains(&message) {
-            return false;
+    /// is evicted and the evicted message is returned.
+    fn push(&mut self, message: Bytes) -> Option<PendingMessage> {
+        if self.messages.iter().any(|x| x.payload == message) {
+            return None;
         }
+
         let evicted = if self.messages.len() >= MAX_PENDING_MESSAGES_PER_PEER {
-            self.messages.pop_front();
-            true
+            self.messages.pop_front()
         } else {
-            false
+            None
         };
-        self.messages.push_back(message);
+
+        self.messages.push_back(PendingMessage {
+            payload: message,
+            enqueued_at: Instant::now(),
+        });
+
         evicted
     }
 
-    fn drain(&mut self) -> impl Iterator<Item = Bytes> + '_ {
+    fn drain(&mut self) -> impl Iterator<Item = PendingMessage> + '_ {
         self.messages.drain(..)
     }
 
     fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.messages.len()
     }
 }
 
@@ -148,6 +164,8 @@ where
     retry_timer: Option<Pin<Box<Sleep>>>,
 
     peer_action: HashMap<PeerId, Action>,
+
+    metrics: Option<Arc<NetworkMetrics>>,
 }
 
 impl<T: Debug + Serialize> NetworkWorker<T> {
@@ -158,6 +176,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         monitor: Option<ActorRef<Monitor>>,
         cancel: CancellationToken,
         machine_spec: Option<MachineSpec>,
+        metrics: Option<Arc<NetworkMetrics>>,
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
@@ -199,7 +218,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let transport = build_transport(&key, limits.clone())?;
 
         let behaviour =
-            Behaviour::new(&key.public(), config, cancel.clone(), limits);
+            Behaviour::new(
+                &key.public(),
+                config,
+                cancel.clone(),
+                limits,
+                metrics.clone(),
+            );
 
         // Create the swarm.
         let mut swarm = Swarm::new(
@@ -249,7 +274,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         info!(target: TARGET, peer_id = %local_peer_id, "local peer id");
 
-        Ok(Self {
+        let worker = Self {
             local_peer_id,
             service,
             swarm,
@@ -270,7 +295,107 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             retry_queue: BinaryHeap::new(),
             retry_timer: None,
             peer_action: HashMap::new(),
-        })
+            metrics,
+        };
+
+        if let Some(metrics) = worker.metric_handle() {
+            metrics.set_state_current(&worker.state);
+        }
+        worker.refresh_runtime_metrics();
+
+        Ok(worker)
+    }
+
+    fn metric_handle(&self) -> Option<&NetworkMetrics> {
+        self.metrics.as_deref()
+    }
+
+    fn pending_outbound_messages_len(&self) -> usize {
+        self.pending_outbound_messages
+            .values()
+            .map(PendingQueue::len)
+            .sum()
+    }
+
+    fn pending_inbound_messages_len(&self) -> usize {
+        self.pending_inbound_messages
+            .values()
+            .map(PendingQueue::len)
+            .sum()
+    }
+
+    fn pending_response_channels_len(&self) -> usize {
+        self.response_channels.values().map(VecDeque::len).sum()
+    }
+
+    fn refresh_runtime_metrics(&self) {
+        let Some(metrics) = self.metric_handle() else {
+            return;
+        };
+
+        metrics.set_retry_queue_len(self.retry_queue.len() as i64);
+        metrics.set_pending_outbound_peers(
+            self.pending_outbound_messages.len() as i64,
+        );
+        metrics.set_pending_outbound_messages(
+            self.pending_outbound_messages_len() as i64,
+        );
+        metrics.set_pending_inbound_peers(
+            self.pending_inbound_messages.len() as i64
+        );
+        metrics.set_pending_inbound_messages(
+            self.pending_inbound_messages_len() as i64,
+        );
+        metrics.set_identified_peers(self.peer_identify.len() as i64);
+        metrics.set_response_channels_pending(
+            self.pending_response_channels_len() as i64,
+        );
+    }
+
+    fn observe_pending_message_age(&self, enqueued_at: Instant) {
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_pending_message_age_seconds(
+                enqueued_at.elapsed().as_secs_f64(),
+            );
+        }
+    }
+
+    fn drop_pending_outbound_messages(&mut self, peer_id: &PeerId) -> usize {
+        let Some(mut queue) = self.pending_outbound_messages.remove(peer_id)
+        else {
+            return 0;
+        };
+
+        let mut dropped = 0usize;
+        for message in queue.drain() {
+            dropped += 1;
+            self.observe_pending_message_age(message.enqueued_at);
+        }
+        dropped
+    }
+
+    fn drop_pending_inbound_messages(&mut self, peer_id: &PeerId) {
+        if let Some(mut queue) = self.pending_inbound_messages.remove(peer_id) {
+            for message in queue.drain() {
+                self.observe_pending_message_age(message.enqueued_at);
+            }
+        }
+    }
+
+    fn observe_identify_error(
+        &self,
+        error: &swarm::StreamUpgradeError<identify::UpgradeError>,
+    ) {
+        let kind = match error {
+            swarm::StreamUpgradeError::Timeout => "timeout",
+            swarm::StreamUpgradeError::Io(_) => "io",
+            swarm::StreamUpgradeError::NegotiationFailed => "negotiation",
+            swarm::StreamUpgradeError::Apply(_) => "other",
+        };
+
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_identify_error(kind);
+        }
     }
 
     fn schedule_retry(&mut self, peer: PeerId, schedule_type: ScheduleType) {
@@ -333,6 +458,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         self.retry_queue.push(Due(peer, entry.when));
         self.arm_retry_timer();
+        self.refresh_runtime_metrics();
     }
 
     fn arm_retry_timer(&mut self) {
@@ -375,6 +501,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         } else {
             self.arm_retry_timer();
         }
+        self.refresh_runtime_metrics();
         out
     }
 
@@ -408,6 +535,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         if !responses.is_empty() {
                             self.response_channels.insert(peer, responses);
                         }
+                        self.refresh_runtime_metrics();
                         return Ok(());
                     }
                     Err(e) => {
@@ -437,14 +565,19 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     /// If the count limit is reached the oldest message is evicted to make room.
     fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
         let queue = self.pending_outbound_messages.entry(peer).or_default();
-        if queue.push(message) {
+        if let Some(evicted) = queue.push(message) {
+            self.observe_pending_message_age(evicted.enqueued_at);
             warn!(
                 target: TARGET,
                 peer_id = %peer,
                 max_messages = MAX_PENDING_MESSAGES_PER_PEER,
                 "outbound queue count limit reached; oldest message evicted",
             );
+            if let Some(metrics) = self.metric_handle() {
+                metrics.inc_outbound_queue_drop();
+            }
         }
+        self.refresh_runtime_metrics();
     }
 
     /// Add ephemeral response.
@@ -457,17 +590,22 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .entry(peer)
             .or_default()
             .push_back(response_channel);
+        self.refresh_runtime_metrics();
     }
 
     /// Send pending messages to peer.
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
         if let Some(mut queue) = self.pending_outbound_messages.remove(&peer) {
             for message in queue.drain() {
-                self.swarm.behaviour_mut().send_message(&peer, message);
+                self.observe_pending_message_age(message.enqueued_at);
+                self.swarm
+                    .behaviour_mut()
+                    .send_message(&peer, message.payload);
             }
         }
 
         self.retry_by_peer.remove(&peer);
+        self.refresh_runtime_metrics();
     }
 
     /// Get the network service.
@@ -479,6 +617,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     async fn change_state(&mut self, state: NetworkState) {
         trace!(target: TARGET, state = ?state, "state changed");
         self.state = state.clone();
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_state_transition(&state);
+        }
         self.send_event(NetworkEvent::StateChanged(state)).await;
     }
 
@@ -495,17 +636,30 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     /// Run the network worker.
     pub async fn run(&mut self) {
+        let bootstrap_start = Instant::now();
+
         // Run connection to bootstrap node.
         if let Err(error) = self.run_connection().await {
+            if let Some(metrics) = self.metric_handle() {
+                metrics.observe_bootstrap_duration_seconds(
+                    bootstrap_start.elapsed().as_secs_f64(),
+                );
+            }
             error!(target: TARGET, error = %error, "bootstrap connection failed");
             self.send_event(NetworkEvent::Error(error)).await;
             // Irrecoverable error. Cancel the node.
             self.cancel.cancel();
             return;
         }
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_bootstrap_duration_seconds(
+                bootstrap_start.elapsed().as_secs_f64(),
+            );
+        }
 
-        self.send_event(NetworkEvent::StateChanged(NetworkState::Running))
-            .await;
+        if self.state != NetworkState::Running {
+            self.change_state(NetworkState::Running).await;
+        }
 
         // Finish pre routing state, activating random walk (if node is a bootstrap).
         self.swarm.behaviour_mut().finish_prerouting_state();
@@ -547,13 +701,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             let copy_boot_nodes = self.boot_nodes.clone();
 
                             for (peer, addresses) in copy_boot_nodes {
+                                if let Some(metrics) = self.metric_handle() {
+                                    metrics.inc_dial_attempt_bootstrap();
+                                }
                                 if let Err(e) = self.swarm.dial(
                                     DialOpts::peer_id(peer)
                                         .addresses(addresses.clone())
                                         .build(),
                                 ) {
                                     let (add_to_retry, new_addresses) =
-                                        Self::init_dial_error_manager(e, peer);
+                                        self.init_dial_error_manager(e, peer);
                                     self.boot_nodes.remove(&peer);
                                     if add_to_retry {
                                         if new_addresses.is_empty() {
@@ -654,30 +811,52 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn init_dial_error_manager(
+        &self,
         e: DialError,
         peer: PeerId,
     ) -> (bool, Vec<Multiaddr>) {
         match e {
             DialError::LocalPeerId { .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("local_peer_id");
+                }
                 warn!(target: TARGET, peer_id = %peer, "dial rejected: connected peer-id matches local peer");
             }
             DialError::NoAddresses => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("no_addresses");
+                }
                 debug!(target: TARGET, peer_id = %peer, "dial skipped: no addresses");
             }
             DialError::DialPeerConditionFalse(_) => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("peer_condition");
+                }
                 debug!(target: TARGET, peer_id = %peer, "dial skipped: peer condition not met");
             }
             DialError::Denied { cause } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("denied");
+                }
                 debug!(target: TARGET, peer_id = %peer, cause = %cause, "dial denied by behaviour");
             }
             DialError::Aborted => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("aborted");
+                }
                 debug!(target: TARGET, peer_id = %peer, "dial aborted, will retry");
                 return (true, vec![]);
             }
             DialError::WrongPeerId { obtained, .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("wrong_peer_id");
+                }
                 warn!(target: TARGET, expected = %peer, obtained = %obtained, "dial failed: peer identity mismatch");
             }
             DialError::Transport(items) => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("transport");
+                }
                 debug!(target: TARGET, peer_id = %peer, "transport dial failed");
 
                 let mut new_addresses = vec![];
@@ -716,7 +895,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         peer_id: &PeerId,
     ) -> Option<(bool, Vec<Multiaddr>)> {
         match e {
-            DialError::LocalPeerId { .. } | DialError::WrongPeerId { .. } => {
+            DialError::LocalPeerId { .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("local_peer_id");
+                }
                 self.retry_by_peer.remove(peer_id);
                 self.clear_pending_messages(peer_id);
                 self.swarm
@@ -724,15 +906,43 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     .clean_hard_peer_to_remove(peer_id);
                 return None;
             }
-            DialError::NoAddresses => {}
-            DialError::DialPeerConditionFalse(..) => {
+            DialError::WrongPeerId { .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("wrong_peer_id");
+                }
+                self.retry_by_peer.remove(peer_id);
+                self.clear_pending_messages(peer_id);
+                self.swarm
+                    .behaviour_mut()
+                    .clean_hard_peer_to_remove(peer_id);
                 return None;
             }
-            DialError::Denied { .. } => {}
+            DialError::NoAddresses => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("no_addresses");
+                }
+            }
+            DialError::DialPeerConditionFalse(..) => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("peer_condition");
+                }
+                return None;
+            }
+            DialError::Denied { .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("denied");
+                }
+            }
             DialError::Aborted => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("aborted");
+                }
                 return Some((true, vec![]));
             }
             DialError::Transport(items) => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("transport");
+                }
                 let mut new_addresses = vec![];
 
                 for (address, error) in items {
@@ -776,7 +986,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 ..
             } => {
                 let (add_to_retry, new_addresses) =
-                    Self::init_dial_error_manager(error, peer_id);
+                    self.init_dial_error_manager(error, peer_id);
 
                 if let Some(addresses) = self.boot_nodes.remove(&peer_id)
                     && add_to_retry
@@ -834,6 +1044,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 peer_id,
                 error,
             }) => {
+                self.observe_identify_error(&error);
                 match error {
                     swarm::StreamUpgradeError::Timeout => {
                         // Recoverable: wait for ConnectionClosed to remove from boot_nodes.
@@ -850,14 +1061,19 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             _ => {}
         }
+        self.refresh_runtime_metrics();
     }
 
     fn clear_pending_messages(&mut self, peer_id: &PeerId) {
         warn!(target: TARGET, peer_id = %peer_id, "max dial attempts reached; dropping pending messages");
 
-        self.pending_outbound_messages.remove(peer_id);
+        let dropped = self.drop_pending_outbound_messages(peer_id);
+        if let Some(metrics) = self.metric_handle() {
+            metrics.inc_max_retries_drop_by(dropped as u64);
+        }
         self.peer_action.remove(peer_id);
         self.retry_by_peer.remove(peer_id);
+        self.refresh_runtime_metrics();
     }
 
     fn check_protocols(
@@ -902,6 +1118,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                     self.swarm.behaviour_mut().discover(&peer);
                                 },
                                 (Action::Dial, RetryKind::Dial) => {
+                                    if let Some(metrics) = self.metric_handle() {
+                                        metrics.inc_dial_attempt_runtime();
+                                    }
                                     if let Err(error) = self.swarm.dial(
                                         DialOpts::peer_id(peer)
                                             .addresses(addrs)
@@ -1060,10 +1279,15 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if let Some(mut queue) =
                                 self.pending_inbound_messages.remove(&peer_id)
                             {
+                                let mut buffered = VecDeque::new();
+                                for message in queue.drain() {
+                                    self.observe_pending_message_age(
+                                        message.enqueued_at,
+                                    );
+                                    buffered.push_back(message.payload);
+                                }
                                 self.message_to_helper(
-                                    MessagesHelper::Vec(
-                                        queue.drain().collect(),
-                                    ),
+                                    MessagesHelper::Vec(buffered),
                                     &peer_id,
                                 )
                                 .await;
@@ -1073,6 +1297,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
                     }
                     BehaviourEvent::IdentifyError { peer_id, error } => {
+                        self.observe_identify_error(&error);
                         debug!(target: TARGET, peer_id = %peer_id, error = %error, "identify error");
 
                         match error {
@@ -1087,10 +1312,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 // peer_action, which ConnectionClosed needs to trigger
                                 // its cleanup path. Clean only the state that
                                 // ConnectionClosed won't reach.
-                                self.pending_outbound_messages.remove(&peer_id);
+                                self.drop_pending_outbound_messages(&peer_id);
                                 self.retry_by_peer.remove(&peer_id);
                                 self.response_channels.remove(&peer_id);
-                                self.pending_inbound_messages.remove(&peer_id);
+                                self.drop_pending_inbound_messages(&peer_id);
                             }
                         }
 
@@ -1099,45 +1324,80 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             .close_connections(&peer_id, None);
                     }
                     BehaviourEvent::ReqresMessage { peer_id, message } => {
-                        let message_data = match message {
+                        let (message_data, is_request, response_channel) = match message {
                             request_response::Message::Request {
                                 request,
                                 channel,
                                 ..
                             } => {
-                                trace!(target: TARGET, peer_id = %peer_id, "request received");
-                                self.add_ephemeral_response(peer_id, channel);
-                                request.0
+                                (request.0, true, Some(channel))
                             }
                             request_response::Message::Response {
                                 response,
                                 ..
-                            } => {
-                                trace!(target: TARGET, peer_id = %peer_id, "response received");
-                                response.0
-                            }
+                            } => (response.0, false, None),
                         };
+
+                        if is_request {
+                            if let Some(metrics) = self.metric_handle() {
+                                metrics.inc_reqres_request_received();
+                            }
+                            trace!(target: TARGET, peer_id = %peer_id, "request received");
+                            if let Some(channel) = response_channel {
+                                self.add_ephemeral_response(peer_id, channel);
+                            }
+                        } else {
+                            if let Some(metrics) = self.metric_handle() {
+                                metrics.inc_reqres_response_received();
+                            }
+                            trace!(target: TARGET, peer_id = %peer_id, "response received");
+                        }
 
                         if self.peer_identify.contains(&peer_id) {
                             self.message_to_helper(
                                 MessagesHelper::Single(message_data),
                                 &peer_id,
                             )
-                            .await;
+                                .await;
                         } else {
                             let queue = self
                                 .pending_inbound_messages
                                 .entry(peer_id)
                                 .or_default();
-                            if queue.push(message_data) {
+                            if let Some(evicted) = queue.push(message_data) {
+                                self.observe_pending_message_age(
+                                    evicted.enqueued_at,
+                                );
                                 warn!(
                                     target: TARGET,
                                     peer_id = %peer_id,
                                     max_messages = MAX_PENDING_MESSAGES_PER_PEER,
                                     "inbound queue count limit reached; oldest message evicted",
                                 );
+                                if let Some(metrics) = self.metric_handle() {
+                                    metrics.inc_inbound_queue_drop();
+                                }
                             }
                         }
+                    }
+                    BehaviourEvent::ReqresFailure {
+                        peer_id,
+                        direction,
+                        kind,
+                    } => {
+                        if let Some(metrics) = self.metric_handle() {
+                            metrics.observe_reqres_failure(
+                                direction.as_metric_label(),
+                                kind.as_metric_label(),
+                            );
+                        }
+                        debug!(
+                            target: TARGET,
+                            peer_id = %peer_id,
+                            direction = direction.as_metric_label(),
+                            kind = kind.as_metric_label(),
+                            "request-response failure"
+                        );
                     }
                     BehaviourEvent::ClosestPeer { peer_id, info } => {
                         if matches!(
@@ -1242,7 +1502,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         self.peer_action.remove(&peer_id);
 
                         self.peer_identify.remove(&peer_id);
-                        self.pending_inbound_messages.remove(&peer_id);
+                        self.drop_pending_inbound_messages(&peer_id);
                         self.response_channels.remove(&peer_id);
 
                         self.retry_by_peer.remove(&peer_id);
@@ -1262,7 +1522,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     {
                         self.peer_action.remove(&peer_id);
                         self.retry_by_peer.remove(&peer_id);
-                        self.pending_inbound_messages.remove(&peer_id);
+                        self.drop_pending_inbound_messages(&peer_id);
                         self.response_channels.remove(&peer_id);
                         self.peer_identify.remove(&peer_id);
 
@@ -1316,6 +1576,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             _ => {}
         }
+        self.refresh_runtime_metrics();
     }
 }
 
@@ -1351,7 +1612,7 @@ mod tests {
         );
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        NetworkWorker::new(&keys, config, None, token, None).unwrap()
+        NetworkWorker::new(&keys, config, None, token, None, None).unwrap()
     }
 
     // Create a config

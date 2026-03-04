@@ -4,6 +4,7 @@
 use crate::{
     Config, Error, NodeType,
     control_list::{self, build_control_lists_updaters},
+    metrics::NetworkMetrics,
     routing::{self},
     utils::{
         IDENTIFY_PROTOCOL, LimitsConfig, REQRES_PROTOCOL, ROUTING_PROTOCOL,
@@ -32,7 +33,7 @@ use libp2p::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, iter, time::Duration};
+use std::{convert::Infallible, iter, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 /// The network composed behaviour.
@@ -63,6 +64,7 @@ impl Behaviour {
         config: Config,
         token: CancellationToken,
         limits: LimitsConfig,
+        metrics: Option<Arc<NetworkMetrics>>,
     ) -> Self {
         let stream_reqres = StreamProtocol::new(REQRES_PROTOCOL);
         let stream_routing = StreamProtocol::new(ROUTING_PROTOCOL);
@@ -142,6 +144,7 @@ impl Behaviour {
                 config.control_list,
                 &boot_nodes,
                 control_list_receiver,
+                metrics,
             ),
             identify: identify::Behaviour::new(identify_config),
             routing: routing::Behaviour::new(
@@ -253,6 +256,13 @@ pub enum Event {
         message: request_response::Message<ReqResMessage, ReqResMessage>,
     },
 
+    /// Request - Response failure event.
+    ReqresFailure {
+        peer_id: PeerId,
+        direction: ReqresFailureDirection,
+        kind: ReqresFailureKind,
+    },
+
     /// Closets peers founded.
     ClosestPeer {
         peer_id: PeerId,
@@ -261,6 +271,44 @@ pub enum Event {
 
     /// Dummy Event for control_list, ReqRes and Tell
     Dummy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReqresFailureDirection {
+    Inbound,
+    Outbound,
+}
+
+impl ReqresFailureDirection {
+    pub const fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReqresFailureKind {
+    Timeout,
+    Io,
+    Negotiation,
+    ConnectionClosed,
+    ResponseOmission,
+    Dial,
+}
+
+impl ReqresFailureKind {
+    pub const fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Io => "io",
+            Self::Negotiation => "negotiation",
+            Self::ConnectionClosed => "connection_closed",
+            Self::ResponseOmission => "response_omission",
+            Self::Dial => "dial",
+        }
+    }
 }
 
 impl From<Infallible> for Event {
@@ -318,9 +366,57 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
                     message,
                 }
             }
-            request_response::Event::ResponseSent { .. }
-            | request_response::Event::InboundFailure { .. }
-            | request_response::Event::OutboundFailure { .. } => Self::Dummy,
+            request_response::Event::ResponseSent { .. } => Self::Dummy,
+            request_response::Event::InboundFailure { peer, error, .. } => {
+                let kind = match error {
+                    request_response::InboundFailure::Timeout => {
+                        ReqresFailureKind::Timeout
+                    }
+                    request_response::InboundFailure::ConnectionClosed => {
+                        ReqresFailureKind::ConnectionClosed
+                    }
+                    request_response::InboundFailure::UnsupportedProtocols => {
+                        ReqresFailureKind::Negotiation
+                    }
+                    request_response::InboundFailure::ResponseOmission => {
+                        ReqresFailureKind::ResponseOmission
+                    }
+                    request_response::InboundFailure::Io(_) => {
+                        ReqresFailureKind::Io
+                    }
+                };
+
+                Self::ReqresFailure {
+                    peer_id: peer,
+                    direction: ReqresFailureDirection::Inbound,
+                    kind,
+                }
+            }
+            request_response::Event::OutboundFailure { peer, error, .. } => {
+                let kind = match error {
+                    request_response::OutboundFailure::DialFailure => {
+                        ReqresFailureKind::Dial
+                    }
+                    request_response::OutboundFailure::Timeout => {
+                        ReqresFailureKind::Timeout
+                    }
+                    request_response::OutboundFailure::ConnectionClosed => {
+                        ReqresFailureKind::ConnectionClosed
+                    }
+                    request_response::OutboundFailure::UnsupportedProtocols => {
+                        ReqresFailureKind::Negotiation
+                    }
+                    request_response::OutboundFailure::Io(_) => {
+                        ReqresFailureKind::Io
+                    }
+                };
+
+                Self::ReqresFailure {
+                    peer_id: peer,
+                    direction: ReqresFailureDirection::Outbound,
+                    kind,
+                }
+            }
         }
     }
 }
@@ -596,6 +692,7 @@ mod tests {
             config,
             CancellationToken::new(),
             limits,
+            None,
         );
         Swarm::new(
             transport,

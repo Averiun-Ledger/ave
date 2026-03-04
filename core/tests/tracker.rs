@@ -3635,7 +3635,6 @@ async fn test_infinty_creations() {
         },
     });
 
-    
     emit_fact(owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
@@ -3798,7 +3797,6 @@ async fn test_quantity_creations() {
         },
     });
 
-    
     emit_fact(owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
@@ -3810,19 +3808,39 @@ async fn test_quantity_creations() {
     wait_request(owner_governance, request_id_5).await.unwrap();
 
     let mut error = 0;
-    if owner_governance.get_subject_state(subject_id_1).await.is_err() {
+    if owner_governance
+        .get_subject_state(subject_id_1)
+        .await
+        .is_err()
+    {
         error += 1;
     }
-    if owner_governance.get_subject_state(subject_id_2).await.is_err() {
+    if owner_governance
+        .get_subject_state(subject_id_2)
+        .await
+        .is_err()
+    {
         error += 1;
     }
-    if owner_governance.get_subject_state(subject_id_3).await.is_err() {
+    if owner_governance
+        .get_subject_state(subject_id_3)
+        .await
+        .is_err()
+    {
         error += 1;
     }
-    if owner_governance.get_subject_state(subject_id_4).await.is_err() {
+    if owner_governance
+        .get_subject_state(subject_id_4)
+        .await
+        .is_err()
+    {
         error += 1;
     }
-    if owner_governance.get_subject_state(subject_id_5).await.is_err() {
+    if owner_governance
+        .get_subject_state(subject_id_5)
+        .await
+        .is_err()
+    {
         error += 1;
     }
 

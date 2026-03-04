@@ -46,7 +46,10 @@ impl Namespace {
     }
 
     pub fn check(&self) -> bool {
-        !self.0.iter().any(|x| x.trim().is_empty() || x.len() > 100 || x != x.trim())
+        !self
+            .0
+            .iter()
+            .any(|x| x.trim().is_empty() || x.len() > 100 || x != x.trim())
     }
 
     /// Add a name to the `Namespace`.

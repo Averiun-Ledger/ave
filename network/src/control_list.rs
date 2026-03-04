@@ -10,6 +10,7 @@ use std::{
     fmt,
     pin::Pin,
     str::FromStr,
+    sync::Arc,
     task::Poll,
     time::Duration,
 };
@@ -20,7 +21,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::{RoutingNode, utils::request_update_lists};
+use crate::{RoutingNode, metrics::NetworkMetrics, utils::request_update_lists};
 
 const TARGET: &str = "ave::network::control";
 
@@ -209,6 +210,7 @@ pub struct Behaviour {
     close_connections: VecDeque<PeerId>,
     enable: bool,
     receiver: Option<Receiver<Event>>,
+    metrics: Option<Arc<NetworkMetrics>>,
 }
 
 impl Behaviour {
@@ -217,6 +219,7 @@ impl Behaviour {
         config: Config,
         boot_nodes: &[RoutingNode],
         receiver: Option<Receiver<Event>>,
+        metrics: Option<Arc<NetworkMetrics>>,
     ) -> Self {
         if config.enable {
             let mut full_allow_list = config.allow_list.clone();
@@ -238,10 +241,14 @@ impl Behaviour {
                         .filter_map(|e| PeerId::from_str(e).ok()),
                 ),
                 receiver,
+                metrics,
                 ..Default::default()
             }
         } else {
-            Self::default()
+            Self {
+                metrics,
+                ..Default::default()
+            }
         }
     }
 
@@ -281,6 +288,9 @@ impl Behaviour {
             return Ok(());
         }
 
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_control_list_denied("not_allowed");
+        }
         debug!(target: TARGET, peer_id = %peer, "connection denied: peer not in allow list");
         Err(ConnectionDenied::new(NotAllowed { peer: *peer }))
     }
@@ -291,6 +301,9 @@ impl Behaviour {
             return Ok(());
         }
 
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_control_list_denied("blocked");
+        }
         debug!(target: TARGET, peer_id = %peer, "connection denied: peer is blocked");
         Err(ConnectionDenied::new(Blocked { peer: *peer }))
     }

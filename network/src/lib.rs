@@ -6,6 +6,7 @@ mod behaviour;
 mod control_list;
 pub mod error;
 //mod node;
+pub mod metrics;
 mod monitor;
 mod routing;
 mod service;

@@ -33,7 +33,7 @@ use crate::{
 pub struct Auth {
     #[serde(skip)]
     network: Option<Arc<NetworkSender>>,
-    
+
     #[serde(skip)]
     our_key: Arc<PublicKey>,
 
@@ -70,7 +70,11 @@ impl BorshDeserialize for Auth {
         let network = None;
         let our_key = Arc::new(PublicKey::default());
 
-        Ok(Self { network, auth, our_key })
+        Ok(Self {
+            network,
+            auth,
+            our_key,
+        })
     }
 }
 
@@ -336,15 +340,12 @@ impl Handler<Self> for Auth {
                         self.auth.get(&subject_id).cloned().unwrap_or_default();
 
                     let mut witnesses = witnesses
-                            .union(&auth_witnesses)
-                            .cloned()
-                            .collect::<HashSet<PublicKey>>();
+                        .union(&auth_witnesses)
+                        .cloned()
+                        .collect::<HashSet<PublicKey>>();
                     witnesses.remove(&self.our_key);
 
-                    (
-                        witnesses,
-                        actual_sn,
-                    )
+                    (witnesses, actual_sn)
                 };
 
                 if witnesses.is_empty() {
@@ -478,7 +479,7 @@ impl PersistentActor for Auth {
         Self {
             network: Some(params.0),
             auth: HashMap::new(),
-            our_key: params.1
+            our_key: params.1,
         }
     }
 

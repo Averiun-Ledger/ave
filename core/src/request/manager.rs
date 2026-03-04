@@ -1142,7 +1142,7 @@ impl RequestManager {
                 }
             }
             RequestManagerError::CheckLimit
-            | RequestManagerError::Governance( .. ) => {
+            | RequestManagerError::Governance(..) => {
                 if let Err(e) = self
                     .abort_request(
                         ctx,

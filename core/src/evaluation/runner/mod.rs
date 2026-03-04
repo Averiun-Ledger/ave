@@ -844,8 +844,11 @@ impl Runner {
             });
         }
 
-        if let (Some(add), Some(remove)) = (&schema_event.add, &schema_event.remove) {
-            let add_ids: HashSet<&SchemaType> = add.iter().map(|s| &s.id).collect();
+        if let (Some(add), Some(remove)) =
+            (&schema_event.add, &schema_event.remove)
+        {
+            let add_ids: HashSet<&SchemaType> =
+                add.iter().map(|s| &s.id).collect();
             for r in remove {
                 if add_ids.contains(r) {
                     return Err(RunnerError::InvalidEvent {
@@ -860,8 +863,11 @@ impl Runner {
             }
         }
 
-        if let (Some(add), Some(change)) = (&schema_event.add, &schema_event.change) {
-            let add_ids: HashSet<&SchemaType> = add.iter().map(|s| &s.id).collect();
+        if let (Some(add), Some(change)) =
+            (&schema_event.add, &schema_event.change)
+        {
+            let add_ids: HashSet<&SchemaType> =
+                add.iter().map(|s| &s.id).collect();
             for c in change {
                 if add_ids.contains(&c.actual_id) {
                     return Err(RunnerError::InvalidEvent {
@@ -908,8 +914,9 @@ impl Runner {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::InvalidValue {
                             field: "schema id".to_owned(),
-                            reason: "cannot have leading or trailing whitespace"
-                                .to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
                         },
                     });
                 }
@@ -1190,8 +1197,9 @@ impl Runner {
                         location: "check_members",
                         kind: error::InvalidEventKind::InvalidValue {
                             field: "member name".to_owned(),
-                            reason: "cannot have leading or trailing whitespace"
-                                .to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
                         },
                     });
                 }
@@ -1286,8 +1294,9 @@ impl Runner {
                         location: "check_members",
                         kind: error::InvalidEventKind::InvalidValue {
                             field: "member name to remove".to_owned(),
-                            reason: "cannot have leading or trailing whitespace"
-                                .to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
                         },
                     });
                 }

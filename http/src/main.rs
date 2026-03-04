@@ -72,7 +72,7 @@ struct ResolvedSecret {
 }
 
 impl ResolvedSecret {
-    fn is_set(&self) -> bool {
+    const fn is_set(&self) -> bool {
         !self.value.is_empty()
     }
 }
@@ -536,10 +536,7 @@ async fn main() {
     let secrets = StartupSecrets {
         auth_password: resolve_secret(args.auth_password, build_auth_password),
         key_password: resolve_secret(args.key_password, build_key_password),
-        sink_password: resolve_secret(
-            args.sink_password,
-            build_sink_password,
-        ),
+        sink_password: resolve_secret(args.sink_password, build_sink_password),
         sink_api_key: resolve_secret(args.sink_api_key, build_sink_api_key),
     };
 
@@ -638,13 +635,12 @@ async fn main() {
             HeaderValue::from_static("DENY"),
         ));
 
-    let auth_db: Option<Arc<AuthDatabase>> =
-        build_auth(
-            &config.auth,
-            &secrets.auth_password.value,
-            config.node.spec.clone(),
-        )
-            .await;
+    let auth_db: Option<Arc<AuthDatabase>> = build_auth(
+        &config.auth,
+        &secrets.auth_password.value,
+        config.node.spec.clone(),
+    )
+    .await;
 
     let (bridge, runners) = Bridge::build(
         &config,
