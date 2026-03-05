@@ -93,7 +93,8 @@ pub async fn create_node(
         spec: None,
     };
 
-    let token = CancellationToken::new();
+    let crash_token = CancellationToken::new();
+    let graceful_token = CancellationToken::new();
     let mut registry = Registry::default();
 
     let (api, runners) = Api::build(
@@ -102,7 +103,8 @@ pub async fn create_node(
         SinkAuth::default(),
         &mut registry,
         "ave",
-        &token,
+        graceful_token.clone(),
+        crash_token
     )
     .await
     .unwrap();
@@ -111,7 +113,7 @@ pub async fn create_node(
         NodeData {
             api,
             handler: runners,
-            token,
+            token: graceful_token,
             keys,
             listen_address: listen_address.to_owned(),
         },

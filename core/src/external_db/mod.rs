@@ -48,7 +48,7 @@ impl Handler<Self> for DBManager {
                     error = %error,
                     "Critical database error in subscriber"
                 );
-                ctx.system().stop_system();
+                ctx.system().crash_system();
                 Ok(())
             }
         }

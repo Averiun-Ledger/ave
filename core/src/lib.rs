@@ -104,12 +104,13 @@ impl Api {
         sink_auth: SinkAuth,
         registry: &mut Registry,
         password: &str,
-        token: &CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
         debug!("Creating Api");
 
         let (system, runner) =
-            system(config.clone(), sink_auth, password, token.clone())
+            system(config.clone(), sink_auth, password, graceful_token.clone(), crash_token.clone())
                 .await
                 .map_err(|e| {
                     error!(error = %e, "Failed to create system");
@@ -135,7 +136,8 @@ impl Api {
             &keys,
             config.network.clone(),
             Some(newtork_monitor_actor.clone()),
-            token.clone(),
+            graceful_token.clone(),
+            crash_token.clone(),
             spec,
             Some(network_metrics),
         )
@@ -148,7 +150,8 @@ impl Api {
         let service = Intermediary::build(
             worker.service().sender(),
             system.clone(),
-            token.clone(),
+            graceful_token.clone(),
+            crash_token.clone(),
         );
 
         let peer_id = worker.local_peer_id().to_string();

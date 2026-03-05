@@ -75,7 +75,8 @@ compile_error!("You must enable 'ext-sqlite'");
 pub struct Bridge {
     api: AveApi,
     config: Config,
-    cancellation: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
     #[cfg(feature = "prometheus")]
     registry: std::sync::Arc<prometheus_client::registry::Registry>,
 }
@@ -86,7 +87,8 @@ impl Bridge {
         password: &str,
         password_sink: &str,
         sink_api_key: &str,
-        token: Option<CancellationToken>,
+        graceful_token: Option<CancellationToken>,
+        crash_token: Option<CancellationToken>,
     ) -> Result<(Self, Vec<JoinHandle<()>>), BridgeError> {
         let keys = key_pair(settings, password)?;
 
@@ -107,7 +109,8 @@ impl Bridge {
 
         let mut registry = <Registry>::default();
 
-        let token = token.unwrap_or_default();
+        let graceful_token = graceful_token.unwrap_or_default();
+        let crash_token = crash_token.unwrap_or_default();
 
         let (api, runners) = AveApi::build(
             keys,
@@ -120,11 +123,13 @@ impl Bridge {
             },
             &mut registry,
             password,
-            &token.clone(),
+            graceful_token.clone(),
+            crash_token.clone()
+
         )
         .await?;
 
-        Self::bind_with_shutdown(token.clone());
+        Self::bind_with_shutdown(graceful_token.clone());
 
         #[cfg(feature = "prometheus")]
         let registry = std::sync::Arc::new(registry);
@@ -133,7 +138,8 @@ impl Bridge {
             Self {
                 api,
                 config: settings.clone(),
-                cancellation: token,
+                graceful_token,
+                crash_token,
                 #[cfg(feature = "prometheus")]
                 registry,
             },
@@ -141,8 +147,12 @@ impl Bridge {
         ))
     }
 
-    pub const fn token(&self) -> &CancellationToken {
-        &self.cancellation
+    pub const fn graceful_token(&self) -> &CancellationToken {
+        &self.graceful_token
+    }
+
+        pub const fn crash_token(&self) -> &CancellationToken {
+        &self.crash_token
     }
 
     #[cfg(feature = "prometheus")]

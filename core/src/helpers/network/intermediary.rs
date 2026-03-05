@@ -43,7 +43,8 @@ impl Intermediary {
     pub fn build(
         network_sender: mpsc::Sender<NetworkCommand>,
         system: SystemRef,
-        token: CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
     ) -> Arc<NetworkSender> {
         let (command_sender, mut command_receiver) = mpsc::channel(2048);
 
@@ -54,12 +55,16 @@ impl Intermediary {
                         if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await
                                 && let IntermediaryError::NetworkSendFailed { .. } = e {
                                     error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
-                                    token.cancel();
+                                    crash_token.cancel();
                                     break;
                                 }
 
                     },
-                    _ = token.cancelled() => {
+                    _ = graceful_token.cancelled() => {
+                        debug!("Network intermediary cancelled, stopping");
+                        break;
+                    }
+                    _ = crash_token.cancelled() => {
                         debug!("Network intermediary cancelled, stopping");
                         break;
                     }

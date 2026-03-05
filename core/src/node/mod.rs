@@ -1124,7 +1124,7 @@ impl Handler<Self> for Node {
                                     error = %e,
                                     "Failed to get authorizations from auth actor"
                                 );
-                                ctx.system().stop_system();
+                                ctx.system().crash_system();
                                 return Err(e);
                             }
                         };
@@ -1134,7 +1134,7 @@ impl Handler<Self> for Node {
                                 subject_id = %subject_id,
                                 "Unexpected response from auth actor"
                             );
-                            ctx.system().stop_system();
+                            ctx.system().crash_system();
                             return Err(ActorError::UnexpectedResponse {
                                 expected: "AuthResponse::Auths".to_owned(),
                                 path: ctx.path().clone() / "auth",
@@ -1148,7 +1148,7 @@ impl Handler<Self> for Node {
                             subject_id = %subject_id,
                             "Auth actor not found"
                         );
-                        ctx.system().stop_system();
+                        ctx.system().crash_system();
                         return Err(e);
                     }
                 };
@@ -1187,7 +1187,7 @@ impl Handler<Self> for Node {
             error = %error,
             "Child actor fault, stopping system"
         );
-        ctx.system().stop_system();
+        ctx.system().crash_system();
         ChildAction::Stop
     }
 
@@ -1202,7 +1202,7 @@ impl Handler<Self> for Node {
                 error = %e,
                 "Failed to persist node event"
             );
-            ctx.system().stop_system();
+            ctx.system().crash_system();
         }
     }
 }

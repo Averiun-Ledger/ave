@@ -193,7 +193,8 @@ impl Config {
 
 pub fn build_control_lists_updaters(
     config: &Config,
-    token: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
     metrics: Option<Arc<NetworkMetrics>>,
 ) -> Option<Receiver<Event>> {
     if config.enable {
@@ -241,7 +242,8 @@ pub fn build_control_lists_updaters(
                     service_block.clone(),
                     request_timeout,
                     max_concurrent_requests,
-                    token.clone(),
+                    graceful_token.clone(),
+                    crash_token.clone()
                 )
                 .await;
                         if let Some(metrics) = metrics_updater.as_deref() {
@@ -296,7 +298,11 @@ pub fn build_control_lists_updaters(
                         .set_control_list_block_last_success_age_seconds(block_age);
                 }
                     }
-                    _ = token.clone().cancelled_owned() => {
+                    _ = graceful_token.clone().cancelled_owned() => {
+                        debug!(target: TARGET, "control list updater stopped");
+                        break;
+                    }
+                    _ = crash_token.clone().cancelled_owned() => {
                         debug!(target: TARGET, "control list updater stopped");
                         break;
                     }
@@ -931,7 +937,7 @@ mod tests {
             .with_service_block_list(vec![url]);
 
         let mut receiver =
-            build_control_lists_updaters(&config, cancel.clone(), Some(metrics))
+            build_control_lists_updaters(&config, cancel.clone(), CancellationToken::new(), Some(metrics))
                 .expect("control-list updater receiver");
 
         tokio::time::sleep(Duration::from_millis(170)).await;
@@ -998,7 +1004,7 @@ mod tests {
             .with_service_block_list(vec![url]);
 
         let mut receiver =
-            build_control_lists_updaters(&config, cancel.clone(), Some(metrics))
+            build_control_lists_updaters(&config, cancel.clone(), CancellationToken::new(), Some(metrics))
                 .expect("control-list updater receiver");
 
         let mut got_allow = false;
@@ -1053,7 +1059,7 @@ mod tests {
             .with_service_allow_list(vec![url.clone()])
             .with_service_block_list(vec![url]);
 
-        let mut receiver = build_control_lists_updaters(&config, cancel.clone(), None)
+        let mut receiver = build_control_lists_updaters(&config, cancel.clone(), CancellationToken::new(), None)
             .expect("control-list updater receiver");
 
         tokio::time::sleep(Duration::from_millis(40)).await;

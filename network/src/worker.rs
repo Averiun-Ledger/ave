@@ -135,7 +135,8 @@ where
     monitor: Option<ActorRef<Monitor>>,
 
     /// The cancellation token.
-    cancel: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
 
     /// Node type.
     node_type: NodeType,
@@ -183,7 +184,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         keys: &KeyPair,
         config: Config,
         monitor: Option<ActorRef<Monitor>>,
-        cancel: CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
         machine_spec: Option<MachineSpec>,
         metrics: Option<Arc<NetworkMetrics>>,
     ) -> Result<Self, Error> {
@@ -238,7 +240,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let behaviour = Behaviour::new(
             &key.public(),
             config,
-            cancel.clone(),
+            graceful_token.clone(),
+            crash_token.clone(),
             limits,
             metrics.clone(),
         );
@@ -299,7 +302,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             command_receiver,
             helper_sender: None,
             monitor,
-            cancel,
+            graceful_token,
+            crash_token,
             node_type,
             boot_nodes,
             retry_boot_nodes: HashMap::new(),
@@ -662,10 +666,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     }
                 }
 
-                if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
+                if per_peer_limit > 0
+                    && queue.bytes_len() + message_len > per_peer_limit
+                {
                     dropped_bytes_limit_peer += 1;
                 } else if global_limit > 0
-                    && total_pending_bytes.saturating_add(message_len) > global_limit
+                    && total_pending_bytes.saturating_add(message_len)
+                        > global_limit
                 {
                     dropped_bytes_limit_global += 1;
                 } else {
@@ -717,10 +724,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         if let Some(metrics) = self.metric_handle() {
             metrics.inc_outbound_queue_drop_by(dropped_count);
-            metrics
-                .inc_outbound_queue_bytes_drop_per_peer_by(dropped_bytes_limit_peer);
-            metrics
-                .inc_outbound_queue_bytes_drop_global_by(dropped_bytes_limit_global);
+            metrics.inc_outbound_queue_bytes_drop_per_peer_by(
+                dropped_bytes_limit_peer,
+            );
+            metrics.inc_outbound_queue_bytes_drop_global_by(
+                dropped_bytes_limit_global,
+            );
         }
 
         self.refresh_runtime_metrics();
@@ -766,10 +775,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     }
                 }
 
-                if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
+                if per_peer_limit > 0
+                    && queue.bytes_len() + message_len > per_peer_limit
+                {
                     dropped_bytes_limit_peer += 1;
                 } else if global_limit > 0
-                    && total_pending_bytes.saturating_add(message_len) > global_limit
+                    && total_pending_bytes.saturating_add(message_len)
+                        > global_limit
                 {
                     dropped_bytes_limit_global += 1;
                 } else {
@@ -821,10 +833,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         if let Some(metrics) = self.metric_handle() {
             metrics.inc_inbound_queue_drop_by(dropped_count);
-            metrics
-                .inc_inbound_queue_bytes_drop_per_peer_by(dropped_bytes_limit_peer);
-            metrics
-                .inc_inbound_queue_bytes_drop_global_by(dropped_bytes_limit_global);
+            metrics.inc_inbound_queue_bytes_drop_per_peer_by(
+                dropped_bytes_limit_peer,
+            );
+            metrics.inc_inbound_queue_bytes_drop_global_by(
+                dropped_bytes_limit_global,
+            );
         }
 
         self.refresh_runtime_metrics();
@@ -880,7 +894,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
         {
             error!(target: TARGET, error = %e, "failed to forward event to monitor");
-            self.cancel.cancel();
+            self.crash_token.cancel();
         }
     }
 
@@ -898,7 +912,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             error!(target: TARGET, error = %error, "bootstrap connection failed");
             self.send_event(NetworkEvent::Error(error)).await;
             // Irrecoverable error. Cancel the node.
-            self.cancel.cancel();
+            self.crash_token.cancel();
             return;
         }
         if let Some(metrics) = self.metric_handle() {
@@ -1006,7 +1020,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                     event = self.swarm.select_next_some() => {
                                         self.handle_connection_events(event).await;
                                     }
-                                    _ = self.cancel.cancelled() => {
+                                    _ = self.graceful_token.cancelled() => {
+                                        return Err(Error::Cancelled);
+                                    }
+                                    _ = self.crash_token.cancelled() => {
                                         return Err(Error::Cancelled);
                                     }
                                 }
@@ -1040,9 +1057,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         event = self.swarm.select_next_some() => {
                             self.handle_connection_events(event).await;
                         }
-                        _ = self.cancel.cancelled() => {
-                            return Err(Error::Cancelled);
-                        }
+                                    _ = self.graceful_token.cancelled() => {
+                                        return Err(Error::Cancelled);
+                                    }
+                                    _ = self.crash_token.cancelled() => {
+                                        return Err(Error::Cancelled);
+                                    }
                         _ = &mut dialing_round_timeout, if dialing_timeout_active => {
                             warn!(
                                 target: TARGET,
@@ -1381,9 +1401,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         };
                     }
                 },
-                _ = self.cancel.cancelled() => {
-                    break;
-                }
+                                    _ = self.graceful_token.cancelled() => {
+                                        break;
+                                    }
+                                    _ = self.crash_token.cancelled() => {
+                                        break;
+                                    }
             }
         }
     }
@@ -1449,7 +1472,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
 
         error!(target: TARGET, "helper channel closed; shutting down");
-        self.cancel.cancel();
+        self.crash_token.cancel();
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -1845,7 +1868,8 @@ mod tests {
         boot_nodes: Vec<RoutingNode>,
         random_walk: bool,
         node_type: NodeType,
-        token: CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
         memory_addr: String,
     ) -> NetworkWorker<Dummy> {
         let config = create_config(
@@ -1856,7 +1880,7 @@ mod tests {
         );
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        NetworkWorker::new(&keys, config, None, token, None, None).unwrap()
+        NetworkWorker::new(&keys, config, None, graceful_token, crash_token, None, None).unwrap()
     }
 
     // Create a config
@@ -1925,6 +1949,7 @@ mod tests {
             &keys,
             config,
             None,
+            CancellationToken::new(),
             CancellationToken::new(),
             None,
             Some(metrics),
@@ -2003,6 +2028,7 @@ mod tests {
             &keys,
             config,
             None,
+            CancellationToken::new(),
             CancellationToken::new(),
             None,
             Some(metrics),
@@ -2097,6 +2123,7 @@ mod tests {
             config,
             None,
             CancellationToken::new(),
+            CancellationToken::new(),
             None,
             Some(metrics),
         )
@@ -2164,6 +2191,7 @@ mod tests {
             false,
             NodeType::Addressable,
             CancellationToken::new(),
+            CancellationToken::new(),
             "/memory/3200".to_owned(),
         );
         let remote_keys = Libp2pKeypair::generate_ed25519();
@@ -2227,6 +2255,7 @@ mod tests {
             false,
             NodeType::Addressable,
             CancellationToken::new(),
+            CancellationToken::new(),
             "/memory/3201".to_owned(),
         );
         let remote_keys = Libp2pKeypair::generate_ed25519();
@@ -2258,10 +2287,12 @@ mod tests {
             worker.retry_by_peer.get(&remote_peer).map(|s| s.kind),
             Some(RetryKind::Dial)
         ));
-        assert!(worker
-            .pending_outbound_messages
-            .get(&remote_peer)
-            .is_some_and(|q| !q.is_empty()));
+        assert!(
+            worker
+                .pending_outbound_messages
+                .get(&remote_peer)
+                .is_some_and(|q| !q.is_empty())
+        );
 
         worker
             .handle_event(build_identified_event(
@@ -2294,6 +2325,7 @@ mod tests {
             false,
             NodeType::Addressable,
             CancellationToken::new(),
+            CancellationToken::new(),
             "/memory/3301".to_owned(),
         );
 
@@ -2317,7 +2349,6 @@ mod tests {
     #[serial]
     async fn test_no_boot_nodes() {
         let boot_nodes = vec![];
-        let token = CancellationToken::new();
 
         // Build a node.
         let node_addr = "/memory/3000";
@@ -2325,7 +2356,8 @@ mod tests {
             boot_nodes.clone(),
             false,
             NodeType::Addressable,
-            token.clone(),
+            CancellationToken::new(),
+            CancellationToken::new(),
             node_addr.to_owned(),
         );
         if let Err(e) = node.run_connection().await {
@@ -2342,7 +2374,6 @@ mod tests {
     #[serial]
     async fn test_fake_boot_node() {
         let mut boot_nodes = vec![];
-        let token = CancellationToken::new();
 
         // Build a fake bootstrap node.
         let fake_boot_peer = PeerId::random();
@@ -2359,7 +2390,8 @@ mod tests {
             boot_nodes.clone(),
             false,
             NodeType::Addressable,
-            token.clone(),
+            CancellationToken::new(),
+            CancellationToken::new(),
             node_addr.to_owned(),
         );
 
@@ -2378,15 +2410,14 @@ mod tests {
     async fn test_connect() {
         let mut boot_nodes = vec![];
 
-        let token = CancellationToken::new();
-
         // Build a bootstrap node.
         let boot_addr = "/memory/3003";
         let mut boot = build_worker(
             boot_nodes.clone(),
             false,
             NodeType::Bootstrap,
-            token.clone(),
+            CancellationToken::new(),
+            CancellationToken::new(),
             boot_addr.to_owned(),
         );
 
@@ -2403,7 +2434,8 @@ mod tests {
             boot_nodes,
             false,
             NodeType::Ephemeral,
-            token.clone(),
+            CancellationToken::new(),
+            CancellationToken::new(),
             node_addr.to_owned(),
         );
 

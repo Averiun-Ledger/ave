@@ -238,11 +238,13 @@ async fn request_peer_list(
     client: reqwest::Client,
     service: String,
     request_timeout: Duration,
-    token: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
     list_kind: &'static str,
 ) -> Option<Vec<String>> {
     let response = tokio::select! {
-        _ = token.clone().cancelled_owned() => return None,
+        _ = graceful_token.clone().cancelled_owned() => return None,
+        _ = crash_token.clone().cancelled_owned() => return None,
         response = client.get(&service).timeout(request_timeout).send() => response,
     };
 
@@ -260,7 +262,8 @@ async fn request_peer_list(
             }
 
             let peers = tokio::select! {
-                _ = token.clone().cancelled_owned() => return None,
+                _ = graceful_token.clone().cancelled_owned() => return None,
+                _ = crash_token.clone().cancelled_owned() => return None,
                 peers = res.json::<Vec<String>>() => peers,
             };
 
@@ -306,22 +309,26 @@ async fn request_peer_lists(
     services: Vec<String>,
     request_timeout: Duration,
     max_concurrent_requests: usize,
-    token: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
     list_kind: &'static str,
 ) -> (Vec<String>, u16) {
-    if services.is_empty() || token.is_cancelled() {
+    if services.is_empty() || graceful_token.is_cancelled() || crash_token.is_cancelled() {
         return (vec![], 0);
     }
 
     let responses = stream::iter(services.into_iter().map(|service| {
         let client = client.clone();
-        let token = token.clone();
+        let graceful_token = graceful_token.clone();
+        let crash_token = crash_token.clone();
+        
         async move {
             request_peer_list(
-                client,
+                client.clone(),
                 service,
                 request_timeout,
-                token,
+                graceful_token,
+                crash_token,
                 list_kind,
             )
             .await
@@ -348,7 +355,8 @@ pub async fn request_update_lists(
     service_block: Vec<String>,
     request_timeout: Duration,
     max_concurrent_requests: usize,
-    token: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
 ) -> ((Vec<String>, Vec<String>), (u16, u16)) {
     let (
         (vec_allow_peers, successful_allow),
@@ -359,7 +367,8 @@ pub async fn request_update_lists(
             service_allow,
             request_timeout,
             max_concurrent_requests,
-            token.clone(),
+            graceful_token.clone(),
+            crash_token.clone(),
             "allow"
         ),
         request_peer_lists(
@@ -367,7 +376,8 @@ pub async fn request_update_lists(
             service_block,
             request_timeout,
             max_concurrent_requests,
-            token,
+            graceful_token.clone(),
+            crash_token.clone(),
             "block"
         )
     );

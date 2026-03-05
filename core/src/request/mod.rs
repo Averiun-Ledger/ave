@@ -897,7 +897,7 @@ impl Actor for RequestHandler {
                 error = %e,
                 "Failed to obtain helpers during pre_start"
             );
-            ctx.system().stop_system();
+            ctx.system().crash_system();
             return Err(ActorError::FunctionalCritical { description: e });
         };
 
@@ -1213,7 +1213,7 @@ impl Handler<Self> for RequestHandler {
                                 error = %e,
                                 "Failed to end child actor when queue is empty"
                             );
-                            ctx.system().stop_system();
+                            ctx.system().crash_system();
                             return Err(e);
                         }
                         return Ok(RequestHandlerResponse::None);
@@ -1226,7 +1226,7 @@ impl Handler<Self> for RequestHandler {
                             error = %e,
                             "Failed to end child actor when no events available"
                         );
-                        ctx.system().stop_system();
+                        ctx.system().crash_system();
                         return Err(e);
                     }
                     return Ok(RequestHandlerResponse::None);
@@ -1257,7 +1257,7 @@ impl Handler<Self> for RequestHandler {
                                 error = %e,
                                 "Failed to handle queue error"
                             );
-                            ctx.system().stop_system();
+                            ctx.system().crash_system();
                             return Err(e);
                         };
 
@@ -1275,7 +1275,7 @@ impl Handler<Self> for RequestHandler {
                         error = %e,
                         "Failed to transition from queue to handling"
                     );
-                    ctx.system().stop_system();
+                    ctx.system().crash_system();
                     return Err(e);
                 }
 
@@ -1297,7 +1297,7 @@ impl Handler<Self> for RequestHandler {
                         error = %e,
                         "Failed to enqueue next event"
                     );
-                    ctx.system().stop_system();
+                    ctx.system().crash_system();
                     return Err(e);
                 }
 
@@ -1315,7 +1315,7 @@ impl Handler<Self> for RequestHandler {
             error = %error,
             "Child fault in request handler"
         );
-        ctx.system().stop_system();
+        ctx.system().crash_system();
         ChildAction::Stop
     }
 
@@ -1329,7 +1329,7 @@ impl Handler<Self> for RequestHandler {
                 error = %e,
                 "Failed to persist event"
             );
-            ctx.system().stop_system();
+            ctx.system().crash_system();
         };
     }
 }

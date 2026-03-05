@@ -187,7 +187,7 @@ impl TestServer {
                 .expect("Failed to parse bridge config");
 
         let (bridge, runners) =
-            Bridge::build(&bridge_config, "test", "", "", None)
+            Bridge::build(&bridge_config, "test", "", "", None, None)
                 .await
                 .expect("Failed to create bridge");
 

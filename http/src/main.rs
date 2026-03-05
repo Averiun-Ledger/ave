@@ -26,6 +26,7 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use futures::future::join_all;
 use middleware::tower_trace;
 use server::build_routes;
+use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
@@ -676,12 +677,16 @@ async fn main() {
     )
     .await;
 
+    let graceful_token = CancellationToken::new();
+    let crash_token = CancellationToken::new();
+
     let (bridge, runners) = Bridge::build(
         &config,
         &secrets.key_password.value,
         &secrets.sink_password.value,
         &secrets.sink_api_key.value,
-        None,
+        Some(graceful_token.clone()),
+        Some(crash_token.clone()),
     )
     .await
     .map_err(|e| {
@@ -815,6 +820,17 @@ async fn main() {
         })
         .await
         .expect("Can not run axum server");
+    }
+
+    // Runners have finished. Determine exit code based on which token fired:
+    // - crash_token  → fatal internal error → exit(1) so Docker restarts the container
+    // - graceful_token → controlled stop   → normal exit (code 0)
+    if crash_token.is_cancelled() {
+        error!(
+            target: TARGET,
+            "fatal error detected — exiting with code 1 for container restart"
+        );
+        std::process::exit(1);
     }
 }
 

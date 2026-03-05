@@ -236,7 +236,7 @@ impl Handler<Self> for RequestTracking {
                 error = %e,
                 "Failed to publish event"
             );
-            ctx.system().stop_system();
+            ctx.system().crash_system();
         };
     }
 }

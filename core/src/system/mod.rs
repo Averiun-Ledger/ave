@@ -40,10 +40,11 @@ pub async fn system(
     config: Config,
     sink_auth: SinkAuth,
     password: &str,
-    token: CancellationToken,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
-    let (system, mut runner) = ActorSystem::create(token.clone());
+    let (system, mut runner) = ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
     system
         .add_helper("config", ConfigHelper::from(config.clone()))
@@ -200,6 +201,7 @@ pub mod tests {
             config.clone(),
             SinkAuth::default(),
             "password",
+            CancellationToken::new(),
             CancellationToken::new(),
         )
         .await

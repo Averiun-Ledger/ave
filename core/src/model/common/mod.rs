@@ -420,7 +420,7 @@ where
 {
     error!("Falling, error: {}, actor: {}", error, ctx.path());
     if let Err(_e) = ctx.emit_fail(error.clone()).await {
-        ctx.system().stop_system();
+        ctx.system().crash_system();
     };
     error
 }

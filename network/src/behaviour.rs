@@ -62,7 +62,8 @@ impl Behaviour {
     pub fn new(
         public_key: &PublicKey,
         config: Config,
-        token: CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
         limits: LimitsConfig,
         metrics: Option<Arc<NetworkMetrics>>,
     ) -> Self {
@@ -94,7 +95,8 @@ impl Behaviour {
 
         let control_list_receiver = build_control_lists_updaters(
             &config.control_list,
-            token,
+            graceful_token,
+            crash_token,
             metrics.clone(),
         );
 
@@ -771,6 +773,7 @@ mod tests {
         let behaviour = Behaviour::new(
             &local_key.public(),
             config,
+            CancellationToken::new(),
             CancellationToken::new(),
             limits,
             None,
