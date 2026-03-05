@@ -74,7 +74,8 @@ impl PendingQueue {
 
     fn pop_front(&mut self) -> Option<PendingMessage> {
         let popped = self.messages.pop_front()?;
-        self.pending_bytes = self.pending_bytes.saturating_sub(popped.payload.len());
+        self.pending_bytes =
+            self.pending_bytes.saturating_sub(popped.payload.len());
         Some(popped)
     }
 
@@ -228,14 +229,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
 
-        let behaviour =
-            Behaviour::new(
-                &key.public(),
-                config,
-                cancel.clone(),
-                limits,
-                metrics.clone(),
-            );
+        let behaviour = Behaviour::new(
+            &key.public(),
+            config,
+            cancel.clone(),
+            limits,
+            metrics.clone(),
+        );
 
         // Create the swarm.
         let mut swarm = Swarm::new(
@@ -368,15 +368,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         metrics.set_pending_outbound_messages(
             self.pending_outbound_messages_len() as i64,
         );
-        metrics
-            .set_pending_outbound_bytes(self.pending_outbound_bytes_len() as i64);
+        metrics.set_pending_outbound_bytes(
+            self.pending_outbound_bytes_len() as i64
+        );
         metrics.set_pending_inbound_peers(
             self.pending_inbound_messages.len() as i64
         );
         metrics.set_pending_inbound_messages(
             self.pending_inbound_messages_len() as i64,
         );
-        metrics.set_pending_inbound_bytes(self.pending_inbound_bytes_len() as i64);
+        metrics
+            .set_pending_inbound_bytes(self.pending_inbound_bytes_len() as i64);
         metrics.set_identified_peers(self.peer_identify.len() as i64);
         metrics.set_response_channels_pending(
             self.pending_response_channels_len() as i64,
@@ -1516,19 +1518,18 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             .close_connections(&peer_id, None);
                     }
                     BehaviourEvent::ReqresMessage { peer_id, message } => {
-                        let (message_data, is_request, response_channel) = match message {
-                            request_response::Message::Request {
-                                request,
-                                channel,
-                                ..
-                            } => {
-                                (request.0, true, Some(channel))
-                            }
-                            request_response::Message::Response {
-                                response,
-                                ..
-                            } => (response.0, false, None),
-                        };
+                        let (message_data, is_request, response_channel) =
+                            match message {
+                                request_response::Message::Request {
+                                    request,
+                                    channel,
+                                    ..
+                                } => (request.0, true, Some(channel)),
+                                request_response::Message::Response {
+                                    response,
+                                    ..
+                                } => (response.0, false, None),
+                            };
 
                         if message_data.len() > self.max_app_message_bytes {
                             warn!(
@@ -1568,7 +1569,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 MessagesHelper::Single(message_data),
                                 &peer_id,
                             )
-                                .await;
+                            .await;
                         } else {
                             self.add_pending_inbound_message(
                                 peer_id,
@@ -1900,10 +1901,7 @@ mod tests {
             ),
             1.0
         );
-        assert_eq!(
-            metric_value(&text, "network_pending_outbound_bytes"),
-            16.0
-        );
+        assert_eq!(metric_value(&text, "network_pending_outbound_bytes"), 16.0);
         assert!(
             metric_value(&text, "network_pending_message_age_seconds_count")
                 >= 1.0

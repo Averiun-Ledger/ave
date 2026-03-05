@@ -71,12 +71,15 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     }
 
     if network.max_pending_inbound_bytes_per_peer == 0 {
-        let msg = "network.max_pending_inbound_bytes_per_peer must be greater than 0".to_owned();
+        let msg =
+            "network.max_pending_inbound_bytes_per_peer must be greater than 0"
+                .to_owned();
         error!(error = %msg, "Invalid network configuration");
         return Err(BridgeError::ConfigBuild(msg));
     }
 
-    if network.max_pending_inbound_bytes_per_peer < network.max_app_message_bytes
+    if network.max_pending_inbound_bytes_per_peer
+        < network.max_app_message_bytes
     {
         let msg = format!(
             "network.max_pending_inbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
@@ -89,8 +92,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
 
     for addr in &network.listen_addresses {
         if addr.trim().is_empty() {
-            let msg = "network.listen_addresses contains an empty address"
-                .to_owned();
+            let msg =
+                "network.listen_addresses contains an empty address".to_owned();
             error!(error = %msg, "Invalid network configuration");
             return Err(BridgeError::ConfigBuild(msg));
         }
@@ -129,8 +132,9 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
 
     let control_list = &network.control_list;
     if control_list.get_interval_request().is_zero() {
-        let msg = "network.control_list.interval_request must be greater than 0"
-            .to_owned();
+        let msg =
+            "network.control_list.interval_request must be greater than 0"
+                .to_owned();
         error!(error = %msg, "Invalid network configuration");
         return Err(BridgeError::ConfigBuild(msg));
     }
@@ -142,7 +146,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
         return Err(BridgeError::ConfigBuild(msg));
     }
 
-    if control_list.get_request_timeout() > control_list.get_interval_request() {
+    if control_list.get_request_timeout() > control_list.get_interval_request()
+    {
         let msg = format!(
             "network.control_list.request_timeout ({:?}) must be <= network.control_list.interval_request ({:?})",
             control_list.get_request_timeout(),
@@ -159,7 +164,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     }
 
     for service in control_list.get_service_allow_list() {
-        if !(service.starts_with("http://") || service.starts_with("https://")) {
+        if !(service.starts_with("http://") || service.starts_with("https://"))
+        {
             let msg = format!(
                 "network.control_list.service_allow_list contains an invalid URL: {service}"
             );
@@ -169,7 +175,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     }
 
     for service in control_list.get_service_block_list() {
-        if !(service.starts_with("http://") || service.starts_with("https://")) {
+        if !(service.starts_with("http://") || service.starts_with("https://"))
+        {
             let msg = format!(
                 "network.control_list.service_block_list contains an invalid URL: {service}"
             );
@@ -853,10 +860,7 @@ http:
             node.network.control_list.get_request_timeout(),
             Duration::from_secs(7)
         );
-        assert_eq!(
-            node.network.control_list.get_max_concurrent_requests(),
-            16
-        );
+        assert_eq!(node.network.control_list.get_max_concurrent_requests(), 16);
         assert_eq!(
             node.network.memory_limits,
             MemoryLimitsConfig::Percentage { value: 0.8 }
@@ -998,7 +1002,11 @@ http:
             Duration::from_secs(5)
         );
         assert_eq!(
-            config.node.network.control_list.get_max_concurrent_requests(),
+            config
+                .node
+                .network
+                .control_list
+                .get_max_concurrent_requests(),
             8
         );
         assert_eq!(config.node.network.max_app_message_bytes, 1024 * 1024);

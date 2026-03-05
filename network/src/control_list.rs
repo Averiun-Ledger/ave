@@ -1,8 +1,8 @@
 use libp2p::{
-    swarm::{
-        dummy, CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm,
-    },
     Multiaddr, PeerId,
+    swarm::{
+        CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm, dummy,
+    },
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -16,13 +16,13 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{self, Receiver},
-    time::{interval, Instant, MissedTickBehavior},
+    time::{Instant, MissedTickBehavior, interval},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
-    metrics::NetworkMetrics, utils::request_update_lists, RoutingNode,
+    RoutingNode, metrics::NetworkMetrics, utils::request_update_lists,
 };
 
 const TARGET: &str = "ave::network::control";
@@ -585,11 +585,11 @@ impl NetworkBehaviour for Behaviour {
 mod tests {
     use futures::StreamExt;
     use libp2p::{
-        swarm::{
-            dial_opts::DialOpts, ConnectionError, DialError, ListenError,
-            SwarmEvent,
-        },
         Swarm,
+        swarm::{
+            ConnectionError, DialError, ListenError, SwarmEvent,
+            dial_opts::DialOpts,
+        },
     };
     use libp2p_swarm_test::SwarmExt;
     use prometheus_client::{encoding::text::encode, registry::Registry};

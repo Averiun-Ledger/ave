@@ -1,13 +1,13 @@
-use crate::{routing::RoutingNode, Error};
+use crate::{Error, routing::RoutingNode};
 use bytes::Bytes;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ip_network::IpNetwork;
 use libp2p::{
+    Multiaddr, PeerId,
     identity::{self},
     multiaddr::Protocol,
     multihash::Multihash,
     swarm::ConnectionId,
-    Multiaddr, PeerId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;

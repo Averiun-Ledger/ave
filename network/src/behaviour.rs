@@ -341,7 +341,9 @@ pub(crate) fn map_outbound_failure_kind(
         request_response::OutboundFailure::DialFailure => {
             ReqresFailureKind::Dial
         }
-        request_response::OutboundFailure::Timeout => ReqresFailureKind::Timeout,
+        request_response::OutboundFailure::Timeout => {
+            ReqresFailureKind::Timeout
+        }
         request_response::OutboundFailure::ConnectionClosed => {
             ReqresFailureKind::ConnectionClosed
         }
@@ -417,7 +419,9 @@ impl From<request_response::Event<ReqResMessage, ReqResMessage>> for Event {
                     kind,
                 }
             }
-            request_response::Event::OutboundFailure { peer, error, .. } => {
+            request_response::Event::OutboundFailure {
+                peer, error, ..
+            } => {
                 let kind = map_outbound_failure_kind(&error);
 
                 Self::ReqresFailure {
@@ -458,7 +462,9 @@ mod tests {
     #[test]
     fn map_reqres_inbound_failure_kinds() {
         assert_eq!(
-            map_inbound_failure_kind(&request_response::InboundFailure::Timeout),
+            map_inbound_failure_kind(
+                &request_response::InboundFailure::Timeout
+            ),
             ReqresFailureKind::Timeout
         );
         assert_eq!(

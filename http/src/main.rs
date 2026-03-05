@@ -789,15 +789,15 @@ async fn main() {
         axum::serve(
             listener_http,
             tower_trace(build_routes(
-            config.http.enable_doc,
-            bridge,
-            auth_db,
-            #[cfg(feature = "prometheus")]
-            registry,
-        ))
-                .layer(security_headers)
-                .layer(cors)
-                .into_make_service_with_connect_info::<SocketAddr>(),
+                config.http.enable_doc,
+                bridge,
+                auth_db,
+                #[cfg(feature = "prometheus")]
+                registry,
+            ))
+            .layer(security_headers)
+            .layer(cors)
+            .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             join_all(runners).await;

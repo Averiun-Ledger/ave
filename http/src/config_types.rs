@@ -377,10 +377,10 @@ impl From<ave_bridge::NetworkConfig> for NetworkConfigHttp {
             control_list: ControlListConfigHttp::from(value.control_list),
             memory_limits: value.memory_limits.to_string(),
             max_app_message_bytes: value.max_app_message_bytes,
-            max_pending_outbound_bytes_per_peer:
-                value.max_pending_outbound_bytes_per_peer,
-            max_pending_inbound_bytes_per_peer:
-                value.max_pending_inbound_bytes_per_peer,
+            max_pending_outbound_bytes_per_peer: value
+                .max_pending_outbound_bytes_per_peer,
+            max_pending_inbound_bytes_per_peer: value
+                .max_pending_inbound_bytes_per_peer,
         }
     }
 }

@@ -194,10 +194,9 @@ impl TestServer {
         let auth_db: Option<Arc<AuthDatabase>> =
             build_auth(&bridge_config.auth, "AdminPass123!", None).await;
 
-        
-        let registry =  bridge.registry().clone();
+        let registry = bridge.registry().clone();
         // Build the REAL router using the actual server code
-        let app = build_routes(false, bridge, auth_db,registry);
+        let app = build_routes(false, bridge, auth_db, registry);
 
         // Bind to a random available port
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

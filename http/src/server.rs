@@ -965,11 +965,10 @@ pub fn build_routes(
             ;
 
         // Routes that require authentication & permission checks
-        let authed = Router::new()
-            .merge(main_routes)
-            .merge(protected_routes);
+        let authed = Router::new().merge(main_routes).merge(protected_routes);
         #[cfg(feature = "prometheus")]
-        let authed = authed.merge(ave_bridge::prometheus::build_routes(registry));
+        let authed =
+            authed.merge(ave_bridge::prometheus::build_routes(registry));
         let authed = authed.layer(protected_layers);
 
         // Login remains unauthenticated but needs DB extension
@@ -1149,10 +1148,7 @@ pub async fn permission_layer(
 /// - `Some(AllowAny)` — any authenticated user may proceed (admin routes use inline checks).
 /// - `Some(Require(r, a))` — caller must hold permission `r:a`.
 /// - `None` — route not recognized; access is **denied**.
-pub fn permission_for(
-    method: &Method,
-    path: &str,
-) -> Option<PermissionResult> {
+pub fn permission_for(method: &Method, path: &str) -> Option<PermissionResult> {
     use Action::*;
     use PermissionResult::*;
     use Resource::*;
