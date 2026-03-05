@@ -1,15 +1,17 @@
-use crate::{Error, routing::RoutingNode};
+use crate::{routing::RoutingNode, Error};
 use bytes::Bytes;
+use futures::{stream, StreamExt};
 use ip_network::IpNetwork;
 use libp2p::{
-    Multiaddr, PeerId,
     identity::{self},
     multiaddr::Protocol,
     multihash::Multihash,
     swarm::ConnectionId,
+    Multiaddr, PeerId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use std::{
@@ -26,10 +28,8 @@ pub const ROUTING_PROTOCOL: &str = "/ave/routing/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/ave/1.0.0";
 pub const USER_AGENT: &str = "ave/0.8.0";
 pub const MAX_APP_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
-pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize =
-    8 * 1024 * 1024; // 8 MiB
-pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize =
-    8 * 1024 * 1024; // 8 MiB
+pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
+pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
@@ -232,65 +232,143 @@ pub enum MessagesHelper {
 }
 
 /// Method that update allow and block lists
+async fn request_peer_list(
+    client: reqwest::Client,
+    service: String,
+    request_timeout: Duration,
+    token: CancellationToken,
+    list_kind: &'static str,
+) -> Option<Vec<String>> {
+    let response = tokio::select! {
+        _ = token.cancelled() => return None,
+        response = client.get(&service).timeout(request_timeout).send() => response,
+    };
+
+    match response {
+        Ok(res) => {
+            if !res.status().is_success() {
+                warn!(
+                    target: TARGET,
+                    list_kind = list_kind,
+                    url = service,
+                    status = %res.status(),
+                    "control-list service returned error status"
+                );
+                return None;
+            }
+
+            let peers = tokio::select! {
+                _ = token.cancelled() => return None,
+                peers = res.json::<Vec<String>>() => peers,
+            };
+
+            match peers {
+                Ok(peers) => Some(peers),
+                Err(e) => {
+                    warn!(
+                        target: TARGET,
+                        list_kind = list_kind,
+                        url = service,
+                        error = %e,
+                        "control-list service returned unexpected body"
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                warn!(
+                    target: TARGET,
+                    list_kind = list_kind,
+                    url = service,
+                    timeout_secs = request_timeout.as_secs_f64(),
+                    "control-list service timed out"
+                );
+            } else {
+                warn!(
+                    target: TARGET,
+                    list_kind = list_kind,
+                    url = service,
+                    error = %e,
+                    "control-list service unreachable"
+                );
+            }
+            None
+        }
+    }
+}
+
+async fn request_peer_lists(
+    client: reqwest::Client,
+    services: &[String],
+    request_timeout: Duration,
+    max_concurrent_requests: usize,
+    token: CancellationToken,
+    list_kind: &'static str,
+) -> (Vec<String>, u16) {
+    if services.is_empty() || token.is_cancelled() {
+        return (vec![], 0);
+    }
+
+    let responses = stream::iter(services.iter().cloned().map(|service| {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            request_peer_list(
+                client,
+                service,
+                request_timeout,
+                token,
+                list_kind,
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(max_concurrent_requests.max(1))
+    .collect::<Vec<Option<Vec<String>>>>()
+    .await;
+
+    let mut peers = Vec::new();
+    let mut successful = 0u16;
+
+    for item in responses.into_iter().flatten() {
+        peers.extend(item);
+        successful = successful.saturating_add(1);
+    }
+
+    (peers, successful)
+}
+
 pub async fn request_update_lists(
+    client: reqwest::Client,
     service_allow: &[String],
     service_block: &[String],
+    request_timeout: Duration,
+    max_concurrent_requests: usize,
+    token: CancellationToken,
 ) -> ((Vec<String>, Vec<String>), (u16, u16)) {
-    let mut vec_allow_peers: Vec<String> = vec![];
-    let mut vec_block_peers: Vec<String> = vec![];
-    let mut successful_allow: u16 = 0;
-    let mut successful_block: u16 = 0;
-    let client = reqwest::Client::new();
-
-    for service in service_allow {
-        match client.get(service).send().await {
-            Ok(res) => {
-                let fail = !res.status().is_success();
-                if !fail {
-                    match res.json().await {
-                        Ok(peers) => {
-                            let peers: Vec<String> = peers;
-                            vec_allow_peers.append(&mut peers.clone());
-                            successful_allow += 1;
-                        }
-                        Err(e) => {
-                            warn!(target: TARGET, url = %service, error = %e, "allow-list service returned unexpected body");
-                        }
-                    }
-                } else {
-                    warn!(target: TARGET, url = %service, status = %res.status(), "allow-list service returned error status");
-                }
-            }
-            Err(e) => {
-                warn!(target: TARGET, url = %service, error = %e, "allow-list service unreachable");
-            }
-        }
-    }
-
-    for service in service_block {
-        match client.get(service).send().await {
-            Ok(res) => {
-                let fail = !res.status().is_success();
-                if !fail {
-                    match res.json().await {
-                        Ok(peers) => {
-                            let peers: Vec<String> = peers;
-                            vec_block_peers.append(&mut peers.clone());
-                            successful_block += 1;
-                        }
-                        Err(e) => {
-                            warn!(target: TARGET, url = %service, error = %e, "block-list service returned unexpected body");
-                        }
-                    }
-                } else {
-                    warn!(target: TARGET, url = %service, status = %res.status(), "block-list service returned error status");
-                }
-            }
-            Err(e) => {
-                warn!(target: TARGET, url = %service, error = %e, "block-list service unreachable");
-            }
-        }
-    }
+    let (
+        (vec_allow_peers, successful_allow),
+        (vec_block_peers, successful_block),
+    ) = tokio::join!(
+        request_peer_lists(
+            client.clone(),
+            service_allow,
+            request_timeout,
+            max_concurrent_requests,
+            token.clone(),
+            "allow"
+        ),
+        request_peer_lists(
+            client,
+            service_block,
+            request_timeout,
+            max_concurrent_requests,
+            token,
+            "block"
+        )
+    );
 
     (
         (vec_allow_peers, vec_block_peers),

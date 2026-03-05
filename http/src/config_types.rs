@@ -431,6 +431,10 @@ pub struct ControlListConfigHttp {
     pub service_block_list: Vec<String>,
     /// Time interval in seconds for updating the lists
     pub interval_request_secs: u64,
+    /// Timeout in seconds for each control-list HTTP request
+    pub request_timeout_secs: u64,
+    /// Maximum number of concurrent HTTP requests while refreshing lists
+    pub max_concurrent_requests: usize,
 }
 
 impl From<ave_bridge::ControlListConfig> for ControlListConfigHttp {
@@ -442,6 +446,8 @@ impl From<ave_bridge::ControlListConfig> for ControlListConfigHttp {
             service_allow_list: value.get_service_allow_list(),
             service_block_list: value.get_service_block_list(),
             interval_request_secs: value.get_interval_request().as_secs(),
+            request_timeout_secs: value.get_request_timeout().as_secs(),
+            max_concurrent_requests: value.get_max_concurrent_requests(),
         }
     }
 }

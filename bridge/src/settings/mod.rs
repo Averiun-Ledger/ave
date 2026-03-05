@@ -1,4 +1,5 @@
 use config::Config;
+use std::collections::HashSet;
 use tracing::{error, warn};
 
 pub mod command;
@@ -37,10 +38,176 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
 
 /// Validate network configuration
 fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
-    config.node.network.memory_limits.validate().map_err(|e| {
+    let network = &config.node.network;
+
+    network.memory_limits.validate().map_err(|e| {
         error!(error = %e, "Invalid network configuration");
         BridgeError::ConfigBuild(e)
-    })
+    })?;
+
+    if network.max_app_message_bytes == 0 {
+        let msg =
+            "network.max_app_message_bytes must be greater than 0".to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_outbound_bytes_per_peer == 0 {
+        let msg = "network.max_pending_outbound_bytes_per_peer must be greater than 0".to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_outbound_bytes_per_peer
+        < network.max_app_message_bytes
+    {
+        let msg = format!(
+            "network.max_pending_outbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
+            network.max_pending_outbound_bytes_per_peer,
+            network.max_app_message_bytes
+        );
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_inbound_bytes_per_peer == 0 {
+        let msg = "network.max_pending_inbound_bytes_per_peer must be greater than 0".to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_inbound_bytes_per_peer < network.max_app_message_bytes
+    {
+        let msg = format!(
+            "network.max_pending_inbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
+            network.max_pending_inbound_bytes_per_peer,
+            network.max_app_message_bytes
+        );
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    for addr in &network.listen_addresses {
+        if addr.trim().is_empty() {
+            let msg = "network.listen_addresses contains an empty address"
+                .to_owned();
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    for addr in &network.external_addresses {
+        if addr.trim().is_empty() {
+            let msg = "network.external_addresses contains an empty address"
+                .to_owned();
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    for (index, node) in network.boot_nodes.iter().enumerate() {
+        if node.peer_id.trim().is_empty() {
+            let msg = format!("network.boot_nodes[{index}].peer_id is empty");
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+        if node.address.is_empty() {
+            let msg = format!(
+                "network.boot_nodes[{index}] must contain at least one address"
+            );
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+        if node.address.iter().any(|addr| addr.trim().is_empty()) {
+            let msg = format!(
+                "network.boot_nodes[{index}] contains an empty address"
+            );
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    let control_list = &network.control_list;
+    if control_list.get_interval_request().is_zero() {
+        let msg = "network.control_list.interval_request must be greater than 0"
+            .to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if control_list.get_request_timeout().is_zero() {
+        let msg = "network.control_list.request_timeout must be greater than 0"
+            .to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if control_list.get_request_timeout() > control_list.get_interval_request() {
+        let msg = format!(
+            "network.control_list.request_timeout ({:?}) must be <= network.control_list.interval_request ({:?})",
+            control_list.get_request_timeout(),
+            control_list.get_interval_request()
+        );
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if control_list.get_max_concurrent_requests() == 0 {
+        let msg = "network.control_list.max_concurrent_requests must be greater than 0".to_owned();
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    for service in control_list.get_service_allow_list() {
+        if !(service.starts_with("http://") || service.starts_with("https://")) {
+            let msg = format!(
+                "network.control_list.service_allow_list contains an invalid URL: {service}"
+            );
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    for service in control_list.get_service_block_list() {
+        if !(service.starts_with("http://") || service.starts_with("https://")) {
+            let msg = format!(
+                "network.control_list.service_block_list contains an invalid URL: {service}"
+            );
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    if control_list.get_enable() {
+        let has_allow_source = !control_list.get_allow_list().is_empty()
+            || !control_list.get_service_allow_list().is_empty()
+            || !network.boot_nodes.is_empty();
+        if !has_allow_source {
+            let msg = "network.control_list.enable is true but there are no allow sources (allow_list, service_allow_list or boot_nodes)".to_owned();
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+
+        let allow: HashSet<String> = control_list
+            .get_allow_list()
+            .into_iter()
+            .map(|peer| peer.trim().to_owned())
+            .collect();
+        let block: HashSet<String> = control_list
+            .get_block_list()
+            .into_iter()
+            .map(|peer| peer.trim().to_owned())
+            .collect();
+        if let Some(peer) = allow.intersection(&block).next() {
+            let msg = format!(
+                "network.control_list has peer present in both allow_list and block_list: {peer}"
+            );
+            error!(error = %msg, "Invalid network configuration");
+            return Err(BridgeError::ConfigBuild(msg));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate HTTPS configuration consistency
@@ -86,7 +253,10 @@ mod tests {
     use network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
 
-    use crate::{config::Config as BridgeConfig, settings::build_config};
+    use crate::{
+        config::Config as BridgeConfig, error::BridgeError,
+        settings::build_config,
+    };
 
     const FULL_TOML: &str = r#"
 keys_path = "/custom/keys"
@@ -137,6 +307,8 @@ block_list = ["Peer1", "Peer2"]
 service_allow_list = ["http://allow.local/list"]
 service_block_list = ["http://block.local/list"]
 interval_request = 42
+request_timeout = 7
+max_concurrent_requests = 16
 
 [node.network.memory_limits]
 type = "percentage"
@@ -265,6 +437,8 @@ node:
       service_allow_list: [http://allow.local/list]
       service_block_list: [http://block.local/list]
       interval_request: 42
+      request_timeout: 7
+      max_concurrent_requests: 16
     memory_limits:
       type: percentage
       value: 0.8
@@ -401,7 +575,9 @@ http:
         "block_list": ["Peer1", "Peer2"],
         "service_allow_list": ["http://allow.local/list"],
         "service_block_list": ["http://block.local/list"],
-        "interval_request": 42
+        "interval_request": 42,
+        "request_timeout": 7,
+        "max_concurrent_requests": 16
       },
       "memory_limits": {
         "type": "percentage",
@@ -674,6 +850,14 @@ http:
             Duration::from_secs(42)
         );
         assert_eq!(
+            node.network.control_list.get_request_timeout(),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            node.network.control_list.get_max_concurrent_requests(),
+            16
+        );
+        assert_eq!(
             node.network.memory_limits,
             MemoryLimitsConfig::Percentage { value: 0.8 }
         );
@@ -809,6 +993,14 @@ http:
             config.node.network.control_list.get_interval_request(),
             Duration::from_secs(60)
         );
+        assert_eq!(
+            config.node.network.control_list.get_request_timeout(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            config.node.network.control_list.get_max_concurrent_requests(),
+            8
+        );
         assert_eq!(config.node.network.max_app_message_bytes, 1024 * 1024);
         assert_eq!(
             config.node.network.max_pending_outbound_bytes_per_peer,
@@ -831,5 +1023,83 @@ http:
 
         // http.self_signed_cert defaults
         assert!(!config.http.self_signed_cert.enabled);
+    }
+
+    #[test]
+    fn build_config_rejects_invalid_network_memory_limits() {
+        const INVALID_TOML: &str = r#"
+        [node.network.memory_limits]
+        type = "percentage"
+        value = 2.0
+        "#;
+
+        let path = write_config("toml", INVALID_TOML);
+        let err =
+            build_config(path.to_str().unwrap()).expect_err("invalid config");
+
+        match err {
+            BridgeError::ConfigBuild(msg) => {
+                assert!(msg.contains("network.memory_limits percentage"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_config_rejects_invalid_network_message_limits() {
+        const INVALID_TOML: &str = r#"
+        [node.network]
+        max_app_message_bytes = 0
+        "#;
+
+        let path = write_config("toml", INVALID_TOML);
+        let err =
+            build_config(path.to_str().unwrap()).expect_err("invalid config");
+
+        match err {
+            BridgeError::ConfigBuild(msg) => {
+                assert!(msg.contains("max_app_message_bytes"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_config_rejects_invalid_control_list_timeout() {
+        const INVALID_TOML: &str = r#"
+        [node.network.control_list]
+        interval_request = 30
+        request_timeout = 40
+        "#;
+
+        let path = write_config("toml", INVALID_TOML);
+        let err =
+            build_config(path.to_str().unwrap()).expect_err("invalid config");
+
+        match err {
+            BridgeError::ConfigBuild(msg) => {
+                assert!(msg.contains("request_timeout"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_config_rejects_invalid_control_list_max_concurrency() {
+        const INVALID_TOML: &str = r#"
+        [node.network.control_list]
+        max_concurrent_requests = 0
+        "#;
+
+        let path = write_config("toml", INVALID_TOML);
+        let err =
+            build_config(path.to_str().unwrap()).expect_err("invalid config");
+
+        match err {
+            BridgeError::ConfigBuild(msg) => {
+                assert!(msg.contains("max_concurrent_requests"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

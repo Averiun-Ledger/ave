@@ -316,6 +316,16 @@ fn log_effective_configuration(
     );
     info!(
         target: TARGET,
+        "  control-list timeout : {}s",
+        control.get_request_timeout().as_secs()
+    );
+    info!(
+        target: TARGET,
+        "  control-list concurr : {}",
+        control.get_max_concurrent_requests()
+    );
+    info!(
+        target: TARGET,
         "  control-list allow peers: {}",
         allow_list.len()
     );
@@ -346,6 +356,21 @@ fn log_effective_configuration(
     for service in &block_services {
         info!(target: TARGET, "    block service: {}", service);
     }
+    info!(
+        target: TARGET,
+        "  msg limit : {} bytes",
+        config.node.network.max_app_message_bytes
+    );
+    info!(
+        target: TARGET,
+        "  out limit : {} bytes/peer",
+        config.node.network.max_pending_outbound_bytes_per_peer
+    );
+    info!(
+        target: TARGET,
+        "  in limit  : {} bytes/peer",
+        config.node.network.max_pending_inbound_bytes_per_peer
+    );
 
     info!(target: TARGET, "[node]");
     info!(target: TARGET, "  keys      : {}", config.keys_path.display());

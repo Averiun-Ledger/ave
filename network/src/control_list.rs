@@ -1,8 +1,8 @@
 use libp2p::{
-    Multiaddr, PeerId,
     swarm::{
-        CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm, dummy,
+        dummy, CloseConnection, ConnectionDenied, NetworkBehaviour, ToSwarm,
     },
+    Multiaddr, PeerId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -16,14 +16,22 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{self, Receiver},
-    time::{Instant, sleep},
+    time::{interval, Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::{RoutingNode, metrics::NetworkMetrics, utils::request_update_lists};
+use crate::{
+    metrics::NetworkMetrics, utils::request_update_lists, RoutingNode,
+};
 
 const TARGET: &str = "ave::network::control";
+const fn default_request_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+const fn default_max_concurrent_requests() -> usize {
+    8
+}
 
 /// Configuration for the control list behaviour.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +55,17 @@ pub struct Config {
     /// Time interval to be used for queries updating the lists
     #[serde(deserialize_with = "deserialize_duration_secs")]
     interval_request: Duration,
+
+    /// Timeout for each allow/block list HTTP request.
+    #[serde(
+        default = "default_request_timeout",
+        deserialize_with = "deserialize_duration_secs"
+    )]
+    request_timeout: Duration,
+
+    /// Maximum number of concurrent HTTP requests when refreshing control lists.
+    #[serde(default = "default_max_concurrent_requests")]
+    max_concurrent_requests: usize,
 }
 
 fn deserialize_duration_secs<'de, D>(
@@ -68,6 +87,8 @@ impl Default for Config {
             service_allow_list: Default::default(),
             service_block_list: Default::default(),
             interval_request: Duration::from_secs(60),
+            request_timeout: default_request_timeout(),
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }
@@ -116,9 +137,31 @@ impl Config {
         self
     }
 
+    /// Set request timeout.
+    pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Set max concurrent requests.
+    pub const fn with_max_concurrent_requests(mut self, value: usize) -> Self {
+        self.max_concurrent_requests = value;
+        self
+    }
+
     /// Set interval request
     pub const fn get_interval_request(&self) -> Duration {
         self.interval_request
+    }
+
+    /// Get request timeout
+    pub const fn get_request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// Get max concurrent requests.
+    pub const fn get_max_concurrent_requests(&self) -> usize {
+        self.max_concurrent_requests
     }
 
     /// Get enable
@@ -155,17 +198,34 @@ pub fn build_control_lists_updaters(
         debug!(target: TARGET, "control list enabled");
 
         let (sender, receiver) = mpsc::channel(8);
-        let interval = config.interval_request;
+        let update_interval = config.interval_request;
         let service_allow = config.service_allow_list.clone();
         let service_block = config.service_block_list.clone();
         let metrics_updater = metrics;
+        let request_timeout = config.request_timeout;
+        let max_concurrent_requests = config.max_concurrent_requests;
 
         tokio::spawn(async move {
+            let client = match reqwest::Client::builder()
+                .connect_timeout(request_timeout)
+                .build()
+            {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!(target: TARGET, error = %e, "failed to build control-list http client, falling back to default client");
+                    reqwest::Client::new()
+                }
+            };
+
             let mut last_allow_success: Option<Instant> = None;
             let mut last_block_success: Option<Instant> = None;
+            let mut ticker = interval(update_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            // Keep previous semantics: first update happens after `interval`.
+            ticker.tick().await;
             loop {
                 tokio::select! {
-                    _ = sleep(interval) => {
+                    _ = ticker.tick() => {
                         if let Some(metrics) = metrics_updater.as_deref() {
                             metrics.inc_control_list_updater_run();
                         }
@@ -174,8 +234,12 @@ pub fn build_control_lists_updaters(
                     (vec_allow_peers, vec_block_peers),
                     (successful_allow, successful_block),
                 ) = request_update_lists(
+                    client.clone(),
                     &service_allow,
                     &service_block,
+                    request_timeout,
+                    max_concurrent_requests,
+                    token.clone(),
                 )
                 .await;
                         if let Some(metrics) = metrics_updater.as_deref() {
@@ -287,10 +351,12 @@ impl Behaviour {
             };
 
             if let Some(metrics) = behaviour.metrics.as_deref() {
-                metrics
-                    .set_control_list_allow_peers(behaviour.allow_peers.len() as i64);
-                metrics
-                    .set_control_list_block_peers(behaviour.block_peers.len() as i64);
+                metrics.set_control_list_allow_peers(
+                    behaviour.allow_peers.len() as i64,
+                );
+                metrics.set_control_list_block_peers(
+                    behaviour.block_peers.len() as i64,
+                );
                 metrics.set_control_list_allow_last_success_age_seconds(-1);
                 metrics.set_control_list_block_last_success_age_seconds(-1);
             }
@@ -519,11 +585,11 @@ impl NetworkBehaviour for Behaviour {
 mod tests {
     use futures::StreamExt;
     use libp2p::{
-        Swarm,
         swarm::{
-            ConnectionError, DialError, ListenError, SwarmEvent,
-            dial_opts::DialOpts,
+            dial_opts::DialOpts, ConnectionError, DialError, ListenError,
+            SwarmEvent,
         },
+        Swarm,
     };
     use libp2p_swarm_test::SwarmExt;
     use prometheus_client::{encoding::text::encode, registry::Registry};
