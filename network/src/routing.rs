@@ -303,7 +303,7 @@ impl NetworkBehaviour for Behaviour {
                     .on_swarm_event(FromSwarm::ConnectionEstablished(e));
             }
             FromSwarm::ConnectionClosed(e) => {
-                self.num_connections -= 1;
+                self.num_connections = self.num_connections.saturating_sub(1);
                 self.kademlia.on_swarm_event(FromSwarm::ConnectionClosed(e));
             }
             _ => self.kademlia.on_swarm_event(event),

@@ -52,14 +52,9 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
         return Err(BridgeError::ConfigBuild(msg));
     }
 
-    if network.max_pending_outbound_bytes_per_peer == 0 {
-        let msg = "network.max_pending_outbound_bytes_per_peer must be greater than 0".to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_outbound_bytes_per_peer
-        < network.max_app_message_bytes
+    if network.max_pending_outbound_bytes_per_peer > 0
+        && network.max_pending_outbound_bytes_per_peer
+            < network.max_app_message_bytes
     {
         let msg = format!(
             "network.max_pending_outbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
@@ -70,20 +65,37 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
         return Err(BridgeError::ConfigBuild(msg));
     }
 
-    if network.max_pending_inbound_bytes_per_peer == 0 {
-        let msg =
-            "network.max_pending_inbound_bytes_per_peer must be greater than 0"
-                .to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
-
-    if network.max_pending_inbound_bytes_per_peer
-        < network.max_app_message_bytes
+    if network.max_pending_inbound_bytes_per_peer > 0
+        && network.max_pending_inbound_bytes_per_peer
+            < network.max_app_message_bytes
     {
         let msg = format!(
             "network.max_pending_inbound_bytes_per_peer ({}) must be >= network.max_app_message_bytes ({})",
             network.max_pending_inbound_bytes_per_peer,
+            network.max_app_message_bytes
+        );
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_outbound_bytes_total > 0
+        && network.max_pending_outbound_bytes_total < network.max_app_message_bytes
+    {
+        let msg = format!(
+            "network.max_pending_outbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
+            network.max_pending_outbound_bytes_total,
+            network.max_app_message_bytes
+        );
+        error!(error = %msg, "Invalid network configuration");
+        return Err(BridgeError::ConfigBuild(msg));
+    }
+
+    if network.max_pending_inbound_bytes_total > 0
+        && network.max_pending_inbound_bytes_total < network.max_app_message_bytes
+    {
+        let msg = format!(
+            "network.max_pending_inbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
+            network.max_pending_inbound_bytes_total,
             network.max_app_message_bytes
         );
         error!(error = %msg, "Invalid network configuration");
@@ -157,11 +169,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
         return Err(BridgeError::ConfigBuild(msg));
     }
 
-    if control_list.get_max_concurrent_requests() == 0 {
-        let msg = "network.control_list.max_concurrent_requests must be greater than 0".to_owned();
-        error!(error = %msg, "Invalid network configuration");
-        return Err(BridgeError::ConfigBuild(msg));
-    }
+    // `max_concurrent_requests = 0` is accepted and normalized at runtime to 1
+    // (see network/utils.rs request_peer_lists buffer_unordered max(1)).
 
     for service in control_list.get_service_allow_list() {
         if !(service.starts_with("http://") || service.starts_with("https://"))
@@ -298,6 +307,8 @@ boot_nodes = [
 max_app_message_bytes = 2097152
 max_pending_outbound_bytes_per_peer = 16777216
 max_pending_inbound_bytes_per_peer = 8388608
+max_pending_outbound_bytes_total = 33554432
+max_pending_inbound_bytes_total = 25165824
 
 [node.network.routing]
 dht_random_walk = false
@@ -430,6 +441,8 @@ node:
     max_app_message_bytes: 2097152
     max_pending_outbound_bytes_per_peer: 16777216
     max_pending_inbound_bytes_per_peer: 8388608
+    max_pending_outbound_bytes_total: 33554432
+    max_pending_inbound_bytes_total: 25165824
     routing:
       dht_random_walk: false
       discovery_only_if_under_num: 25
@@ -568,6 +581,8 @@ http:
       "max_app_message_bytes": 2097152,
       "max_pending_outbound_bytes_per_peer": 16777216,
       "max_pending_inbound_bytes_per_peer": 8388608,
+      "max_pending_outbound_bytes_total": 33554432,
+      "max_pending_inbound_bytes_total": 25165824,
       "routing": {
         "dht_random_walk": false,
         "discovery_only_if_under_num": 25,
@@ -868,6 +883,8 @@ http:
         assert_eq!(node.network.max_app_message_bytes, 2097152);
         assert_eq!(node.network.max_pending_outbound_bytes_per_peer, 16777216);
         assert_eq!(node.network.max_pending_inbound_bytes_per_peer, 8388608);
+        assert_eq!(node.network.max_pending_outbound_bytes_total, 33554432);
+        assert_eq!(node.network.max_pending_inbound_bytes_total, 25165824);
         let logging = &config.logging;
         assert_eq!(
             logging.output,
@@ -1018,6 +1035,8 @@ http:
             config.node.network.max_pending_inbound_bytes_per_peer,
             8 * 1024 * 1024
         );
+        assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
+        assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
         assert!(config.node.spec.is_none());
 
         // auth defaults
@@ -1093,21 +1112,42 @@ http:
     }
 
     #[test]
-    fn build_config_rejects_invalid_control_list_max_concurrency() {
-        const INVALID_TOML: &str = r#"
+    fn build_config_allows_zero_control_list_max_concurrency() {
+        const ZERO_TOML: &str = r#"
         [node.network.control_list]
         max_concurrent_requests = 0
         "#;
 
-        let path = write_config("toml", INVALID_TOML);
-        let err =
-            build_config(path.to_str().unwrap()).expect_err("invalid config");
+        let path = write_config("toml", ZERO_TOML);
+        let config = build_config(path.to_str().unwrap())
+            .expect("zero max_concurrent_requests should be accepted");
+        assert_eq!(
+            config
+                .node
+                .network
+                .control_list
+                .get_max_concurrent_requests(),
+            0
+        );
+    }
 
-        match err {
-            BridgeError::ConfigBuild(msg) => {
-                assert!(msg.contains("max_concurrent_requests"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+    #[test]
+    fn build_config_allows_zero_pending_queue_limits() {
+        const ZERO_LIMITS_TOML: &str = r#"
+        [node.network]
+        max_pending_outbound_bytes_per_peer = 0
+        max_pending_inbound_bytes_per_peer = 0
+        max_pending_outbound_bytes_total = 0
+        max_pending_inbound_bytes_total = 0
+        "#;
+
+        let path = write_config("toml", ZERO_LIMITS_TOML);
+        let config = build_config(path.to_str().unwrap())
+            .expect("zero queue limits should be accepted");
+
+        assert_eq!(config.node.network.max_pending_outbound_bytes_per_peer, 0);
+        assert_eq!(config.node.network.max_pending_inbound_bytes_per_peer, 0);
+        assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
+        assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
     }
 }

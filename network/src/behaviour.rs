@@ -316,7 +316,7 @@ impl ReqresFailureKind {
     }
 }
 
-pub(crate) fn map_inbound_failure_kind(
+pub const fn map_inbound_failure_kind(
     error: &request_response::InboundFailure,
 ) -> ReqresFailureKind {
     match error {
@@ -334,7 +334,7 @@ pub(crate) fn map_inbound_failure_kind(
     }
 }
 
-pub(crate) fn map_outbound_failure_kind(
+pub const fn map_outbound_failure_kind(
     error: &request_response::OutboundFailure,
 ) -> ReqresFailureKind {
     match error {

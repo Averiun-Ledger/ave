@@ -371,6 +371,16 @@ fn log_effective_configuration(
         "  in limit  : {} bytes/peer",
         config.node.network.max_pending_inbound_bytes_per_peer
     );
+    info!(
+        target: TARGET,
+        "  out total : {} bytes (0=unlimited)",
+        config.node.network.max_pending_outbound_bytes_total
+    );
+    info!(
+        target: TARGET,
+        "  in total  : {} bytes (0=unlimited)",
+        config.node.network.max_pending_inbound_bytes_total
+    );
 
     info!(target: TARGET, "[node]");
     info!(target: TARGET, "  keys      : {}", config.keys_path.display());

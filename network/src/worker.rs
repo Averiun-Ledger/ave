@@ -171,6 +171,8 @@ where
     max_app_message_bytes: usize,
     max_pending_outbound_bytes_per_peer: usize,
     max_pending_inbound_bytes_per_peer: usize,
+    max_pending_outbound_bytes_total: usize,
+    max_pending_inbound_bytes_total: usize,
 
     metrics: Option<Arc<NetworkMetrics>>,
 }
@@ -225,6 +227,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             config.max_pending_outbound_bytes_per_peer;
         let max_pending_inbound_bytes_per_peer =
             config.max_pending_inbound_bytes_per_peer;
+        let max_pending_outbound_bytes_total =
+            config.max_pending_outbound_bytes_total;
+        let max_pending_inbound_bytes_total =
+            config.max_pending_inbound_bytes_total;
 
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
@@ -309,6 +315,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             max_app_message_bytes,
             max_pending_outbound_bytes_per_peer,
             max_pending_inbound_bytes_per_peer,
+            max_pending_outbound_bytes_total,
+            max_pending_inbound_bytes_total,
             metrics,
         };
 
@@ -617,9 +625,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
         let message_len = message.len();
         let mut dropped_count = 0u64;
-        let mut dropped_bytes_limit = 0u64;
+        let mut dropped_bytes_limit_peer = 0u64;
+        let mut dropped_bytes_limit_global = 0u64;
         let mut dropped_messages = Vec::new();
         let mut duplicate = false;
+        let mut total_pending_bytes = self.pending_outbound_bytes_len();
+        let per_peer_limit = self.max_pending_outbound_bytes_per_peer;
+        let global_limit = self.max_pending_outbound_bytes_total;
 
         {
             let queue = self.pending_outbound_messages.entry(peer).or_default();
@@ -629,27 +641,33 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
                     if let Some(evicted) = queue.pop_front() {
                         dropped_count += 1;
+                        total_pending_bytes = total_pending_bytes
+                            .saturating_sub(evicted.payload.len());
                         dropped_messages.push(evicted);
                     } else {
                         break;
                     }
                 }
 
-                while queue.bytes_len() + message_len
-                    > self.max_pending_outbound_bytes_per_peer
-                {
-                    if let Some(evicted) = queue.pop_front() {
-                        dropped_bytes_limit += 1;
-                        dropped_messages.push(evicted);
-                    } else {
-                        break;
+                if per_peer_limit > 0 {
+                    while queue.bytes_len() + message_len > per_peer_limit {
+                        if let Some(evicted) = queue.pop_front() {
+                            dropped_bytes_limit_peer += 1;
+                            total_pending_bytes = total_pending_bytes
+                                .saturating_sub(evicted.payload.len());
+                            dropped_messages.push(evicted);
+                        } else {
+                            break;
+                        }
                     }
                 }
 
-                if queue.bytes_len() + message_len
-                    > self.max_pending_outbound_bytes_per_peer
+                if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
+                    dropped_bytes_limit_peer += 1;
+                } else if global_limit > 0
+                    && total_pending_bytes.saturating_add(message_len) > global_limit
                 {
-                    dropped_bytes_limit += 1;
+                    dropped_bytes_limit_global += 1;
                 } else {
                     queue.push_back(message);
                 }
@@ -675,20 +693,34 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             );
         }
 
-        if dropped_bytes_limit > 0 {
+        if dropped_bytes_limit_peer > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit,
+                dropped = dropped_bytes_limit_peer,
                 message_bytes = message_len,
-                max_queue_bytes = self.max_pending_outbound_bytes_per_peer,
+                max_queue_bytes = per_peer_limit,
                 "outbound queue bytes limit reached; messages evicted/dropped",
+            );
+        }
+
+        if dropped_bytes_limit_global > 0 {
+            warn!(
+                target: TARGET,
+                peer_id = %peer,
+                dropped = dropped_bytes_limit_global,
+                message_bytes = message_len,
+                max_queue_bytes_total = global_limit,
+                "outbound global queue bytes limit reached; messages dropped",
             );
         }
 
         if let Some(metrics) = self.metric_handle() {
             metrics.inc_outbound_queue_drop_by(dropped_count);
-            metrics.inc_outbound_queue_bytes_drop_by(dropped_bytes_limit);
+            metrics
+                .inc_outbound_queue_bytes_drop_per_peer_by(dropped_bytes_limit_peer);
+            metrics
+                .inc_outbound_queue_bytes_drop_global_by(dropped_bytes_limit_global);
         }
 
         self.refresh_runtime_metrics();
@@ -697,9 +729,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     fn add_pending_inbound_message(&mut self, peer: PeerId, message: Bytes) {
         let message_len = message.len();
         let mut dropped_count = 0u64;
-        let mut dropped_bytes_limit = 0u64;
+        let mut dropped_bytes_limit_peer = 0u64;
+        let mut dropped_bytes_limit_global = 0u64;
         let mut dropped_messages = Vec::new();
         let mut duplicate = false;
+        let mut total_pending_bytes = self.pending_inbound_bytes_len();
+        let per_peer_limit = self.max_pending_inbound_bytes_per_peer;
+        let global_limit = self.max_pending_inbound_bytes_total;
 
         {
             let queue = self.pending_inbound_messages.entry(peer).or_default();
@@ -709,27 +745,33 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
                     if let Some(evicted) = queue.pop_front() {
                         dropped_count += 1;
+                        total_pending_bytes = total_pending_bytes
+                            .saturating_sub(evicted.payload.len());
                         dropped_messages.push(evicted);
                     } else {
                         break;
                     }
                 }
 
-                while queue.bytes_len() + message_len
-                    > self.max_pending_inbound_bytes_per_peer
-                {
-                    if let Some(evicted) = queue.pop_front() {
-                        dropped_bytes_limit += 1;
-                        dropped_messages.push(evicted);
-                    } else {
-                        break;
+                if per_peer_limit > 0 {
+                    while queue.bytes_len() + message_len > per_peer_limit {
+                        if let Some(evicted) = queue.pop_front() {
+                            dropped_bytes_limit_peer += 1;
+                            total_pending_bytes = total_pending_bytes
+                                .saturating_sub(evicted.payload.len());
+                            dropped_messages.push(evicted);
+                        } else {
+                            break;
+                        }
                     }
                 }
 
-                if queue.bytes_len() + message_len
-                    > self.max_pending_inbound_bytes_per_peer
+                if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit {
+                    dropped_bytes_limit_peer += 1;
+                } else if global_limit > 0
+                    && total_pending_bytes.saturating_add(message_len) > global_limit
                 {
-                    dropped_bytes_limit += 1;
+                    dropped_bytes_limit_global += 1;
                 } else {
                     queue.push_back(message);
                 }
@@ -755,20 +797,34 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             );
         }
 
-        if dropped_bytes_limit > 0 {
+        if dropped_bytes_limit_peer > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
-                dropped = dropped_bytes_limit,
+                dropped = dropped_bytes_limit_peer,
                 message_bytes = message_len,
-                max_queue_bytes = self.max_pending_inbound_bytes_per_peer,
+                max_queue_bytes = per_peer_limit,
                 "inbound queue bytes limit reached; messages evicted/dropped",
+            );
+        }
+
+        if dropped_bytes_limit_global > 0 {
+            warn!(
+                target: TARGET,
+                peer_id = %peer,
+                dropped = dropped_bytes_limit_global,
+                message_bytes = message_len,
+                max_queue_bytes_total = global_limit,
+                "inbound global queue bytes limit reached; messages dropped",
             );
         }
 
         if let Some(metrics) = self.metric_handle() {
             metrics.inc_inbound_queue_drop_by(dropped_count);
-            metrics.inc_inbound_queue_bytes_drop_by(dropped_bytes_limit);
+            metrics
+                .inc_inbound_queue_bytes_drop_per_peer_by(dropped_bytes_limit_peer);
+            metrics
+                .inc_inbound_queue_bytes_drop_global_by(dropped_bytes_limit_global);
         }
 
         self.refresh_runtime_metrics();
@@ -903,8 +959,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                         .addresses(addresses.clone())
                                         .build(),
                                 ) {
-                                    let (add_to_retry, new_addresses) =
-                                        self.init_dial_error_manager(e, peer);
+                                    let (add_to_retry, new_addresses) = self
+                                        .handle_dial_error(e, &peer, true)
+                                        .unwrap_or((false, vec![]));
                                     self.boot_nodes.remove(&peer);
                                     if add_to_retry {
                                         if new_addresses.is_empty() {
@@ -1004,165 +1061,137 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
     }
 
-    fn init_dial_error_manager(
-        &mut self,
-        e: DialError,
-        peer: PeerId,
-    ) -> (bool, Vec<Multiaddr>) {
-        match e {
-            DialError::LocalPeerId { .. } => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("local_peer_id");
-                }
-                warn!(target: TARGET, peer_id = %peer, "dial rejected: connected peer-id matches local peer");
+    fn collect_retryable_transport_addresses(
+        &self,
+        items: Vec<(Multiaddr, libp2p::TransportError<std::io::Error>)>,
+        trace_unreachable: bool,
+    ) -> Vec<Multiaddr> {
+        let mut new_addresses = vec![];
+        for (address, error) in items {
+            if trace_unreachable {
+                trace!(target: TARGET, addr = %address, err = ?error, "address unreachable");
             }
-            DialError::NoAddresses => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("no_addresses");
-                }
-                debug!(target: TARGET, peer_id = %peer, "dial skipped: no addresses");
-            }
-            DialError::DialPeerConditionFalse(_) => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("peer_condition");
-                }
-                debug!(target: TARGET, peer_id = %peer, "dial skipped: peer condition not met");
-            }
-            DialError::Denied { cause } => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("denied");
-                }
-                debug!(target: TARGET, peer_id = %peer, cause = %cause, "dial denied by behaviour");
-            }
-            DialError::Aborted => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("aborted");
-                }
-                debug!(target: TARGET, peer_id = %peer, "dial aborted, will retry");
-                return (true, vec![]);
-            }
-            DialError::WrongPeerId { obtained, .. } => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("wrong_peer_id");
-                }
-                warn!(target: TARGET, expected = %peer, obtained = %obtained, "dial failed: peer identity mismatch");
-            }
-            DialError::Transport(items) => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("transport");
-                }
-                debug!(target: TARGET, peer_id = %peer, "transport dial failed");
 
-                let mut new_addresses = vec![];
-
-                for (address, error) in items {
-                    trace!(target: TARGET, addr = %address, err = ?error, "address unreachable");
-
-                    if let libp2p::TransportError::Other(e) = error {
-                        match e.kind() {
-                            std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::TimedOut
-                            | std::io::ErrorKind::ConnectionAborted
-                            | std::io::ErrorKind::NotConnected
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::Interrupted
-                            | std::io::ErrorKind::HostUnreachable
-                            | std::io::ErrorKind::NetworkUnreachable => {
-                                new_addresses.push(address);
-                            }
-                            _ => {}
-                        }
-                    };
+            if let libp2p::TransportError::Other(e) = error {
+                match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable => {
+                        new_addresses.push(address);
+                    }
+                    _ => {}
                 }
-                if !new_addresses.is_empty() {
-                    return (true, new_addresses);
-                }
-            }
+            };
         }
 
-        (false, vec![])
+        new_addresses
     }
 
-    fn dial_error_manager(
+    /// Classify a dial error and return retry decision.
+    ///
+    /// - `bootstrap_flow = true` keeps bootstrap-specific behaviour/logs.
+    /// - `bootstrap_flow = false` keeps runtime-specific behaviour/logs/cleanup.
+    fn handle_dial_error(
         &mut self,
         e: DialError,
         peer_id: &PeerId,
+        bootstrap_flow: bool,
     ) -> Option<(bool, Vec<Multiaddr>)> {
         match e {
             DialError::LocalPeerId { .. } => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("local_peer_id");
                 }
-                self.retry_by_peer.remove(peer_id);
-                self.clear_pending_messages(peer_id);
-                self.swarm
-                    .behaviour_mut()
-                    .clean_hard_peer_to_remove(peer_id);
-                return None;
-            }
-            DialError::WrongPeerId { .. } => {
-                if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("wrong_peer_id");
+                if bootstrap_flow {
+                    warn!(target: TARGET, peer_id = %peer_id, "dial rejected: connected peer-id matches local peer");
+                    return Some((false, vec![]));
                 }
+
                 self.retry_by_peer.remove(peer_id);
                 self.clear_pending_messages(peer_id);
                 self.swarm
                     .behaviour_mut()
                     .clean_hard_peer_to_remove(peer_id);
-                return None;
+                None
             }
             DialError::NoAddresses => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("no_addresses");
                 }
+                if bootstrap_flow {
+                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: no addresses");
+                }
+                Some((false, vec![]))
             }
-            DialError::DialPeerConditionFalse(..) => {
+            DialError::DialPeerConditionFalse(_) => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("peer_condition");
                 }
-                return None;
+                if bootstrap_flow {
+                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met");
+                    return Some((false, vec![]));
+                }
+
+                None
             }
-            DialError::Denied { .. } => {
+            DialError::Denied { cause } => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("denied");
                 }
+                if bootstrap_flow {
+                    debug!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour");
+                }
+                Some((false, vec![]))
             }
             DialError::Aborted => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("aborted");
                 }
-                return Some((true, vec![]));
+                if bootstrap_flow {
+                    debug!(target: TARGET, peer_id = %peer_id, "dial aborted, will retry");
+                }
+                Some((true, vec![]))
+            }
+            DialError::WrongPeerId { obtained, .. } => {
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.observe_dial_failure("wrong_peer_id");
+                }
+                if bootstrap_flow {
+                    warn!(target: TARGET, expected = %peer_id, obtained = %obtained, "dial failed: peer identity mismatch");
+                    return Some((false, vec![]));
+                }
+
+                self.retry_by_peer.remove(peer_id);
+                self.clear_pending_messages(peer_id);
+                self.swarm
+                    .behaviour_mut()
+                    .clean_hard_peer_to_remove(peer_id);
+                None
             }
             DialError::Transport(items) => {
                 if let Some(metrics) = self.metric_handle() {
                     metrics.observe_dial_failure("transport");
                 }
-                let mut new_addresses = vec![];
-
-                for (address, error) in items {
-                    if let libp2p::TransportError::Other(e) = error {
-                        match e.kind() {
-                            std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::TimedOut
-                            | std::io::ErrorKind::ConnectionAborted
-                            | std::io::ErrorKind::NotConnected
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::Interrupted
-                            | std::io::ErrorKind::HostUnreachable
-                            | std::io::ErrorKind::NetworkUnreachable => {
-                                new_addresses.push(address);
-                            }
-                            _ => {}
-                        }
-                    };
+                if bootstrap_flow {
+                    debug!(target: TARGET, peer_id = %peer_id, "transport dial failed");
                 }
+
+                let new_addresses = self.collect_retryable_transport_addresses(
+                    items,
+                    bootstrap_flow,
+                );
                 if !new_addresses.is_empty() {
-                    return Some((true, new_addresses));
+                    Some((true, new_addresses))
+                } else {
+                    Some((false, vec![]))
                 }
             }
         }
-
-        Some((false, vec![]))
     }
 
     /// Handle connection events.
@@ -1179,8 +1208,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 error,
                 ..
             } => {
-                let (add_to_retry, new_addresses) =
-                    self.init_dial_error_manager(error, peer_id);
+                let (add_to_retry, new_addresses) = self
+                    .handle_dial_error(error, &peer_id, true)
+                    .unwrap_or((false, vec![]));
 
                 if let Some(addresses) = self.boot_nodes.remove(&peer_id)
                     && add_to_retry
@@ -1321,7 +1351,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                             .extend_addresses_through_behaviour()
                                             .build()
                                     ) && let Some((retry, new_address)) =
-                                        self.dial_error_manager(error, &peer) {
+                                        self.handle_dial_error(error, &peer, false) {
 
                                         self.peer_action.remove(&peer);
                                         if retry {
@@ -1651,7 +1681,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     self.swarm.behaviour_mut().add_peer_to_remove(&peer_id);
 
                     if let Some((retry, new_address)) =
-                        self.dial_error_manager(error, &peer_id)
+                        self.handle_dial_error(error, &peer_id, false)
                     {
                         if retry {
                             let addr = new_address
@@ -1783,6 +1813,9 @@ mod tests {
     use crate::routing::RoutingNode;
 
     use super::*;
+    use libp2p::core::{ConnectedPoint, Endpoint, transport::PortUse};
+    use libp2p::identity::Keypair as Libp2pKeypair;
+    use libp2p::swarm::ConnectionId;
     use prometheus_client::{encoding::text::encode, registry::Registry};
     use serde::Deserialize;
     use test_log::test;
@@ -1847,6 +1880,34 @@ mod tests {
         }
     }
 
+    fn build_identified_event(
+        peer_id: PeerId,
+        public_key: libp2p::identity::PublicKey,
+        connection_id: ConnectionId,
+    ) -> SwarmEvent<BehaviourEvent> {
+        SwarmEvent::Behaviour(BehaviourEvent::Identified {
+            peer_id,
+            info: Box::new(identify::Info {
+                public_key,
+                protocol_version: IDENTIFY_PROTOCOL.to_owned(),
+                agent_version: "test-agent".to_owned(),
+                listen_addrs: vec!["/memory/9999".parse().expect("multiaddr")],
+                protocols: vec![StreamProtocol::new(REQRES_PROTOCOL)],
+                observed_addr: "/memory/9998".parse().expect("multiaddr"),
+                signed_peer_record: None,
+            }),
+            connection_id,
+        })
+    }
+
+    fn test_endpoint() -> ConnectedPoint {
+        ConnectedPoint::Dialer {
+            address: "/memory/9997".parse().expect("multiaddr"),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        }
+    }
+
     #[test]
     fn outbound_queue_respects_bytes_limit_and_updates_metrics() {
         let mut config = create_config(
@@ -1901,11 +1962,355 @@ mod tests {
             ),
             1.0
         );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+            ),
+            0.0
+        );
         assert_eq!(metric_value(&text, "network_pending_outbound_bytes"), 16.0);
         assert!(
             metric_value(&text, "network_pending_message_age_seconds_count")
                 >= 1.0
         );
+    }
+
+    #[test]
+    fn zero_pending_bytes_limits_disable_byte_drops() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3101".to_owned()],
+        );
+        config.max_pending_outbound_bytes_per_peer = 0;
+        config.max_pending_inbound_bytes_per_peer = 0;
+        config.max_pending_outbound_bytes_total = 0;
+        config.max_pending_inbound_bytes_total = 0;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            None,
+            CancellationToken::new(),
+            None,
+            Some(metrics),
+        )
+        .expect("worker");
+
+        let peer = PeerId::random();
+        for i in 0..3u8 {
+            let payload = Bytes::from(vec![i + 1; 12]);
+            worker.add_pending_outbound_message(peer, payload);
+        }
+        for i in 0..3u8 {
+            let payload = Bytes::from(vec![i + 7; 12]);
+            worker.add_pending_inbound_message(peer, payload);
+        }
+
+        let outbound = worker
+            .pending_outbound_messages
+            .get(&peer)
+            .expect("outbound queue exists");
+        let inbound = worker
+            .pending_inbound_messages
+            .get(&peer)
+            .expect("inbound queue exists");
+        assert_eq!(outbound.len(), 3);
+        assert_eq!(outbound.bytes_len(), 36);
+        assert_eq!(inbound.len(), 3);
+        assert_eq!(inbound.bytes_len(), 36);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_inbound_queue_bytes_limit_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_inbound_queue_bytes_limit_per_peer_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_inbound_queue_bytes_limit_global_total"
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn outbound_global_bytes_limit_applies_across_peers() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3102".to_owned()],
+        );
+        config.max_pending_outbound_bytes_per_peer = 0;
+        config.max_pending_outbound_bytes_total = 20;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            None,
+            CancellationToken::new(),
+            None,
+            Some(metrics),
+        )
+        .expect("worker");
+
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+
+        worker.add_pending_outbound_message(
+            peer_a,
+            Bytes::from_static(b"aaaaaaaaaaaa"), // 12 bytes
+        );
+        worker.add_pending_outbound_message(
+            peer_b,
+            Bytes::from_static(b"bbbbbbbbbbbb"), // rejected by global limit
+        );
+
+        assert_eq!(worker.pending_outbound_bytes_len(), 12);
+        assert_eq!(
+            worker
+                .pending_outbound_messages
+                .get(&peer_a)
+                .expect("peer_a queue")
+                .len(),
+            1
+        );
+        assert_eq!(
+            worker
+                .pending_outbound_messages
+                .get(&peer_b)
+                .map_or(0, PendingQueue::len),
+            0
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_total"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+            ),
+            1.0
+        );
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn pending_inbound_messages_keep_arrival_order_after_identify() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            "/memory/3200".to_owned(),
+        );
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let remote_peer = remote_keys.public().to_peer_id();
+
+        worker.add_pending_inbound_message(
+            remote_peer,
+            Bytes::from_static(b"msg-2"),
+        );
+        worker.add_pending_inbound_message(
+            remote_peer,
+            Bytes::from_static(b"msg-1"),
+        );
+        worker.add_pending_inbound_message(
+            remote_peer,
+            Bytes::from_static(b"msg-3"),
+        );
+
+        let (helper_sender, mut helper_rx) = mpsc::channel(8);
+        worker.add_helper_sender(helper_sender);
+
+        worker
+            .handle_event(build_identified_event(
+                remote_peer,
+                remote_keys.public(),
+                ConnectionId::new_unchecked(11),
+            ))
+            .await;
+
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let command = tokio::time::timeout(
+                Duration::from_millis(200),
+                helper_rx.recv(),
+            )
+            .await
+            .expect("helper receive timeout")
+            .expect("helper channel closed");
+            let CommandHelper::ReceivedMessage { message, .. } = command else {
+                panic!("unexpected helper command")
+            };
+            received.push(message);
+        }
+
+        assert_eq!(
+            received,
+            vec![
+                Bytes::from_static(b"msg-2"),
+                Bytes::from_static(b"msg-1"),
+                Bytes::from_static(b"msg-3"),
+            ]
+        );
+        assert!(!worker.pending_inbound_messages.contains_key(&remote_peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn flapping_connection_retries_then_flushes_outbound_queue() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            "/memory/3201".to_owned(),
+        );
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let remote_peer = remote_keys.public().to_peer_id();
+        let first_connection = ConnectionId::new_unchecked(21);
+        let second_connection = ConnectionId::new_unchecked(22);
+
+        worker.add_pending_outbound_message(
+            remote_peer,
+            Bytes::from_static(b"needs-redelivery"),
+        );
+        worker
+            .peer_action
+            .insert(remote_peer, Action::Identified(first_connection));
+        worker.peer_identify.insert(remote_peer);
+
+        worker
+            .handle_event(SwarmEvent::ConnectionClosed {
+                peer_id: remote_peer,
+                connection_id: first_connection,
+                endpoint: test_endpoint(),
+                num_established: 0,
+                cause: None,
+            })
+            .await;
+
+        assert!(worker.retry_by_peer.contains_key(&remote_peer));
+        assert!(matches!(
+            worker.retry_by_peer.get(&remote_peer).map(|s| s.kind),
+            Some(RetryKind::Dial)
+        ));
+        assert!(worker
+            .pending_outbound_messages
+            .get(&remote_peer)
+            .is_some_and(|q| !q.is_empty()));
+
+        worker
+            .handle_event(build_identified_event(
+                remote_peer,
+                remote_keys.public(),
+                second_connection,
+            ))
+            .await;
+
+        assert!(!worker.pending_outbound_messages.contains_key(&remote_peer));
+        assert!(!worker.retry_by_peer.contains_key(&remote_peer));
+        assert!(matches!(
+            worker.peer_action.get(&remote_peer),
+            Some(Action::Identified(id)) if *id == second_connection
+        ));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_identify_timeout_keeps_bootnode_until_close() {
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let remote_peer = remote_keys.public().to_peer_id();
+        let boot_node = RoutingNode {
+            peer_id: remote_peer.to_string(),
+            address: vec!["/memory/3300".to_owned()],
+        };
+
+        let mut worker = build_worker(
+            vec![boot_node],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            "/memory/3301".to_owned(),
+        );
+
+        assert!(worker.boot_nodes.contains_key(&remote_peer));
+        assert!(!worker.retry_boot_nodes.contains_key(&remote_peer));
+
+        worker
+            .handle_connection_events(SwarmEvent::Behaviour(
+                BehaviourEvent::IdentifyError {
+                    peer_id: remote_peer,
+                    error: swarm::StreamUpgradeError::Timeout,
+                },
+            ))
+            .await;
+
+        assert!(worker.boot_nodes.contains_key(&remote_peer));
+        assert!(!worker.retry_boot_nodes.contains_key(&remote_peer));
     }
 
     #[test(tokio::test)]

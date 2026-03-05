@@ -26,6 +26,10 @@ pub struct NetworkMetrics {
     dropped_inbound_queue_limit: Counter,
     dropped_outbound_queue_bytes_limit: Counter,
     dropped_inbound_queue_bytes_limit: Counter,
+    dropped_outbound_queue_bytes_limit_per_peer: Counter,
+    dropped_outbound_queue_bytes_limit_global: Counter,
+    dropped_inbound_queue_bytes_limit_per_peer: Counter,
+    dropped_inbound_queue_bytes_limit_global: Counter,
     dropped_max_retries: Counter,
     dropped_oversized_inbound: Counter,
     dropped_oversized_outbound: Counter,
@@ -93,6 +97,10 @@ impl NetworkMetrics {
             dropped_inbound_queue_limit: Counter::default(),
             dropped_outbound_queue_bytes_limit: Counter::default(),
             dropped_inbound_queue_bytes_limit: Counter::default(),
+            dropped_outbound_queue_bytes_limit_per_peer: Counter::default(),
+            dropped_outbound_queue_bytes_limit_global: Counter::default(),
+            dropped_inbound_queue_bytes_limit_per_peer: Counter::default(),
+            dropped_inbound_queue_bytes_limit_global: Counter::default(),
             dropped_max_retries: Counter::default(),
             dropped_oversized_inbound: Counter::default(),
             dropped_oversized_outbound: Counter::default(),
@@ -217,9 +225,29 @@ impl NetworkMetrics {
             self.dropped_outbound_queue_bytes_limit.clone(),
         );
         registry.register(
+            "network_messages_dropped_outbound_queue_bytes_limit_per_peer",
+            "Outbound messages evicted or dropped due to per-peer queue bytes limit.",
+            self.dropped_outbound_queue_bytes_limit_per_peer.clone(),
+        );
+        registry.register(
+            "network_messages_dropped_outbound_queue_bytes_limit_global",
+            "Outbound messages dropped due to global queue bytes limit.",
+            self.dropped_outbound_queue_bytes_limit_global.clone(),
+        );
+        registry.register(
             "network_messages_dropped_inbound_queue_bytes_limit",
             "Inbound messages evicted or dropped due to queue bytes limit.",
             self.dropped_inbound_queue_bytes_limit.clone(),
+        );
+        registry.register(
+            "network_messages_dropped_inbound_queue_bytes_limit_per_peer",
+            "Inbound messages evicted or dropped due to per-peer queue bytes limit.",
+            self.dropped_inbound_queue_bytes_limit_per_peer.clone(),
+        );
+        registry.register(
+            "network_messages_dropped_inbound_queue_bytes_limit_global",
+            "Inbound messages dropped due to global queue bytes limit.",
+            self.dropped_inbound_queue_bytes_limit_global.clone(),
         );
         registry.register(
             "network_messages_dropped_max_retries",
@@ -511,14 +539,30 @@ impl NetworkMetrics {
         }
     }
 
-    pub(crate) fn inc_outbound_queue_bytes_drop_by(&self, count: u64) {
+    pub(crate) fn inc_outbound_queue_bytes_drop_per_peer_by(&self, count: u64) {
         if count > 0 {
+            self.dropped_outbound_queue_bytes_limit_per_peer.inc_by(count);
             self.dropped_outbound_queue_bytes_limit.inc_by(count);
         }
     }
 
-    pub(crate) fn inc_inbound_queue_bytes_drop_by(&self, count: u64) {
+    pub(crate) fn inc_outbound_queue_bytes_drop_global_by(&self, count: u64) {
         if count > 0 {
+            self.dropped_outbound_queue_bytes_limit_global.inc_by(count);
+            self.dropped_outbound_queue_bytes_limit.inc_by(count);
+        }
+    }
+
+    pub(crate) fn inc_inbound_queue_bytes_drop_per_peer_by(&self, count: u64) {
+        if count > 0 {
+            self.dropped_inbound_queue_bytes_limit_per_peer.inc_by(count);
+            self.dropped_inbound_queue_bytes_limit.inc_by(count);
+        }
+    }
+
+    pub(crate) fn inc_inbound_queue_bytes_drop_global_by(&self, count: u64) {
+        if count > 0 {
+            self.dropped_inbound_queue_bytes_limit_global.inc_by(count);
             self.dropped_inbound_queue_bytes_limit.inc_by(count);
         }
     }

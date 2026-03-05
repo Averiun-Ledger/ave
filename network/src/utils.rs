@@ -30,6 +30,8 @@ pub const USER_AGENT: &str = "ave/0.8.0";
 pub const MAX_APP_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
+pub const DEFAULT_MAX_PENDING_OUTBOUND_BYTES_TOTAL: usize = 0; // disabled
+pub const DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL: usize = 0; // disabled
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerIdToEd25519Error {
@@ -240,7 +242,7 @@ async fn request_peer_list(
     list_kind: &'static str,
 ) -> Option<Vec<String>> {
     let response = tokio::select! {
-        _ = token.cancelled() => return None,
+        _ = token.clone().cancelled_owned() => return None,
         response = client.get(&service).timeout(request_timeout).send() => response,
     };
 
@@ -258,7 +260,7 @@ async fn request_peer_list(
             }
 
             let peers = tokio::select! {
-                _ = token.cancelled() => return None,
+                _ = token.clone().cancelled_owned() => return None,
                 peers = res.json::<Vec<String>>() => peers,
             };
 
@@ -301,7 +303,7 @@ async fn request_peer_list(
 
 async fn request_peer_lists(
     client: reqwest::Client,
-    services: &[String],
+    services: Vec<String>,
     request_timeout: Duration,
     max_concurrent_requests: usize,
     token: CancellationToken,
@@ -311,7 +313,7 @@ async fn request_peer_lists(
         return (vec![], 0);
     }
 
-    let responses = stream::iter(services.iter().cloned().map(|service| {
+    let responses = stream::iter(services.into_iter().map(|service| {
         let client = client.clone();
         let token = token.clone();
         async move {
@@ -342,8 +344,8 @@ async fn request_peer_lists(
 
 pub async fn request_update_lists(
     client: reqwest::Client,
-    service_allow: &[String],
-    service_block: &[String],
+    service_allow: Vec<String>,
+    service_block: Vec<String>,
     request_timeout: Duration,
     max_concurrent_requests: usize,
     token: CancellationToken,

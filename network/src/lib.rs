@@ -289,12 +289,24 @@ pub struct Config {
     pub max_app_message_bytes: usize,
 
     /// Maximum buffered outbound bytes per peer while disconnected.
+    /// `0` disables the per-peer bytes limit.
     #[serde(default = "default_max_pending_outbound_bytes_per_peer")]
     pub max_pending_outbound_bytes_per_peer: usize,
 
     /// Maximum buffered inbound bytes per peer before helper delivery.
+    /// `0` disables the per-peer bytes limit.
     #[serde(default = "default_max_pending_inbound_bytes_per_peer")]
     pub max_pending_inbound_bytes_per_peer: usize,
+
+    /// Maximum total buffered outbound bytes across all peers while disconnected.
+    /// `0` disables the global bytes limit.
+    #[serde(default = "default_max_pending_outbound_bytes_total")]
+    pub max_pending_outbound_bytes_total: usize,
+
+    /// Maximum total buffered inbound bytes across all peers before helper delivery.
+    /// `0` disables the global bytes limit.
+    #[serde(default = "default_max_pending_inbound_bytes_total")]
+    pub max_pending_inbound_bytes_total: usize,
 }
 
 impl Config {
@@ -318,6 +330,10 @@ impl Config {
                 default_max_pending_outbound_bytes_per_peer(),
             max_pending_inbound_bytes_per_peer:
                 default_max_pending_inbound_bytes_per_peer(),
+            max_pending_outbound_bytes_total:
+                default_max_pending_outbound_bytes_total(),
+            max_pending_inbound_bytes_total:
+                default_max_pending_inbound_bytes_total(),
         }
     }
 }
@@ -332,6 +348,14 @@ const fn default_max_pending_outbound_bytes_per_peer() -> usize {
 
 const fn default_max_pending_inbound_bytes_per_peer() -> usize {
     crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_PER_PEER
+}
+
+const fn default_max_pending_outbound_bytes_total() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_OUTBOUND_BYTES_TOTAL
+}
+
+const fn default_max_pending_inbound_bytes_total() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL
 }
 
 impl Default for Config {
@@ -349,6 +373,10 @@ impl Default for Config {
                 default_max_pending_outbound_bytes_per_peer(),
             max_pending_inbound_bytes_per_peer:
                 default_max_pending_inbound_bytes_per_peer(),
+            max_pending_outbound_bytes_total:
+                default_max_pending_outbound_bytes_total(),
+            max_pending_inbound_bytes_total:
+                default_max_pending_inbound_bytes_total(),
         }
     }
 }

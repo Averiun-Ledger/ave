@@ -64,6 +64,7 @@ pub struct Config {
     request_timeout: Duration,
 
     /// Maximum number of concurrent HTTP requests when refreshing control lists.
+    /// `0` is treated as `1` (sequential requests).
     #[serde(default = "default_max_concurrent_requests")]
     max_concurrent_requests: usize,
 }
@@ -143,7 +144,7 @@ impl Config {
         self
     }
 
-    /// Set max concurrent requests.
+    /// Set max concurrent requests. `0` is treated as `1` at runtime.
     pub const fn with_max_concurrent_requests(mut self, value: usize) -> Self {
         self.max_concurrent_requests = value;
         self
@@ -159,7 +160,8 @@ impl Config {
         self.request_timeout
     }
 
-    /// Get max concurrent requests.
+    /// Get max concurrent requests configured value.
+    /// Runtime uses at least one concurrent request.
     pub const fn get_max_concurrent_requests(&self) -> usize {
         self.max_concurrent_requests
     }
@@ -235,8 +237,8 @@ pub fn build_control_lists_updaters(
                     (successful_allow, successful_block),
                 ) = request_update_lists(
                     client.clone(),
-                    &service_allow,
-                    &service_block,
+                    service_allow.clone(),
+                    service_block.clone(),
                     request_timeout,
                     max_concurrent_requests,
                     token.clone(),
@@ -294,7 +296,7 @@ pub fn build_control_lists_updaters(
                         .set_control_list_block_last_success_age_seconds(block_age);
                 }
                     }
-                    _ = token.cancelled() => {
+                    _ = token.clone().cancelled_owned() => {
                         debug!(target: TARGET, "control list updater stopped");
                         break;
                     }
@@ -595,6 +597,7 @@ mod tests {
     use prometheus_client::{encoding::text::encode, registry::Registry};
     use serial_test::serial;
     use test_log::test;
+    use tokio::{io::AsyncWriteExt, net::TcpListener, time::timeout};
 
     use super::*;
 
@@ -646,6 +649,38 @@ mod tests {
         let listener = Swarm::new_ephemeral_tokio(|_| behaviour);
 
         (dialer, listener)
+    }
+
+    async fn spawn_slow_json_service(
+        delay: Duration,
+    ) -> (String, CancellationToken) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow service");
+        let addr = listener.local_addr().expect("local addr");
+        let stop = CancellationToken::new();
+        let stop_task = stop.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop_task.cancelled() => break,
+                    incoming = listener.accept() => {
+                        let Ok((mut socket, _)) = incoming else {
+                            break;
+                        };
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]";
+                            let _ = socket.write_all(response).await;
+                            let _ = socket.shutdown().await;
+                        });
+                    }
+                }
+            }
+        });
+
+        (format!("http://{addr}/list"), stop)
     }
 
     #[test(tokio::test)]
@@ -876,5 +911,168 @@ mod tests {
             ),
             1.0
         );
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn slow_services_timeout_without_emitting_updates() {
+        let (url, slow_server_stop) =
+            spawn_slow_json_service(Duration::from_millis(250)).await;
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let cancel = CancellationToken::new();
+
+        let config = Config::default()
+            .with_enable(true)
+            .with_interval_request(Duration::from_millis(20))
+            .with_request_timeout(Duration::from_millis(30))
+            .with_max_concurrent_requests(1)
+            .with_service_allow_list(vec![url.clone()])
+            .with_service_block_list(vec![url]);
+
+        let mut receiver =
+            build_control_lists_updaters(&config, cancel.clone(), Some(metrics))
+                .expect("control-list updater receiver");
+
+        tokio::time::sleep(Duration::from_millis(170)).await;
+
+        let next_event = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(
+            next_event.is_err(),
+            "slow timed-out services should not emit list updates"
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert!(
+            metric_value(&text, "network_control_list_updater_runs_total")
+                >= 1.0
+        );
+        assert!(
+            metric_value(
+                &text,
+                "network_control_list_allow_update_failure_total"
+            ) >= 1.0
+        );
+        assert!(
+            metric_value(
+                &text,
+                "network_control_list_block_update_failure_total"
+            ) >= 1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_control_list_allow_update_success_total"
+            ),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_control_list_block_update_success_total"
+            ),
+            0.0
+        );
+
+        cancel.cancel();
+        slow_server_stop.cancel();
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn zero_max_concurrent_requests_is_treated_as_one() {
+        let (url, server_stop) =
+            spawn_slow_json_service(Duration::from_millis(1)).await;
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let cancel = CancellationToken::new();
+
+        let config = Config::default()
+            .with_enable(true)
+            .with_interval_request(Duration::from_millis(20))
+            .with_request_timeout(Duration::from_millis(200))
+            .with_max_concurrent_requests(0)
+            .with_service_allow_list(vec![url.clone()])
+            .with_service_block_list(vec![url]);
+
+        let mut receiver =
+            build_control_lists_updaters(&config, cancel.clone(), Some(metrics))
+                .expect("control-list updater receiver");
+
+        let mut got_allow = false;
+        let mut got_block = false;
+        for _ in 0..20 {
+            let event = timeout(Duration::from_millis(60), receiver.recv()).await;
+            if let Ok(Some(event)) = event {
+                match event {
+                    Event::AllowListUpdated(_) => got_allow = true,
+                    Event::BlockListUpdated(_) => got_block = true,
+                }
+            }
+            if got_allow && got_block {
+                break;
+            }
+        }
+
+        assert!(got_allow, "allow-list update should be emitted");
+        assert!(got_block, "block-list update should be emitted");
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert!(
+            metric_value(
+                &text,
+                "network_control_list_allow_update_success_total"
+            ) >= 1.0
+        );
+        assert!(
+            metric_value(
+                &text,
+                "network_control_list_block_update_success_total"
+            ) >= 1.0
+        );
+
+        cancel.cancel();
+        server_stop.cancel();
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn cancellation_stops_updater_during_slow_requests() {
+        let (url, server_stop) =
+            spawn_slow_json_service(Duration::from_secs(2)).await;
+        let cancel = CancellationToken::new();
+
+        let config = Config::default()
+            .with_enable(true)
+            .with_interval_request(Duration::from_millis(10))
+            .with_request_timeout(Duration::from_secs(5))
+            .with_max_concurrent_requests(1)
+            .with_service_allow_list(vec![url.clone()])
+            .with_service_block_list(vec![url]);
+
+        let mut receiver = build_control_lists_updaters(&config, cancel.clone(), None)
+            .expect("control-list updater receiver");
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        cancel.cancel();
+
+        let closed = timeout(Duration::from_secs(1), async {
+            loop {
+                if receiver.recv().await.is_none() {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            closed.is_ok(),
+            "updater should stop and close channel after cancellation"
+        );
+
+        server_stop.cancel();
     }
 }
