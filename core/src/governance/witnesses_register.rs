@@ -623,20 +623,6 @@ impl Actor for WitnessesRegister {
         }
         Ok(())
     }
-
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        if let Err(e) = self.stop_store(ctx).await {
-            error!(
-                error = %e,
-                "Failed to stop witnesses_register store"
-            );
-            return Err(e);
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -1025,14 +1011,19 @@ impl PersistentActor for WitnessesRegister {
             } => {
                 for ((schema_id, ns, creator), witnesses) in new_creator.iter()
                 {
+                    // Crear la entrada aunque witnesses esté vacío, para que
+                    // futuros "change" con update_creator_witnesses puedan
+                    // encontrarla con get_mut.
+                    let creator_entry = self
+                        .witnesses_creator
+                        .entry((
+                            creator.clone(),
+                            ns.clone(),
+                            schema_id.clone(),
+                        ))
+                        .or_default();
                     for witness in witnesses.iter() {
-                        self.witnesses_creator
-                            .entry((
-                                creator.clone(),
-                                ns.clone(),
-                                schema_id.clone(),
-                            ))
-                            .or_default()
+                        creator_entry
                             .entry(witness.clone())
                             .or_default()
                             .1 = Some(*version);

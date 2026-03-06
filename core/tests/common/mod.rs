@@ -2,8 +2,7 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::ApprovalStateRes,
     identity::{
-        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
-        keys::{Ed25519Signer, KeyPair},
+        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey, Signature, Signed, keys::{Ed25519Signer, KeyPair}
     },
     request::{
         ConfirmRequest, CreateRequest, EventRequest, FactRequest,
@@ -16,7 +15,7 @@ use ave_core::{
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
         AveInternalDBFeatureConfig, Config, SinkAuth,
-    },
+    }
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
@@ -289,6 +288,34 @@ pub async fn emit_fact(
     });
 
     let response = node.own_request(request).await?;
+    // state of request
+    let request_id = response.request_id;
+
+    if !wait_request_state {
+        return Ok(request_id);
+    }
+
+    wait_request(node, request_id.clone()).await.unwrap();
+
+    Ok(request_id)
+}
+
+pub async fn emit_fact_signed(
+    node: &Api,
+    keys: &KeyPair,
+    subject_id: DigestIdentifier,
+    payload_json: serde_json::Value,
+    wait_request_state: bool,
+) -> Result<DigestIdentifier, Box<dyn std::error::Error>> {
+    let request = EventRequest::Fact(FactRequest {
+        subject_id,
+        payload: ValueWrapper(payload_json),
+    });
+
+    let signature = Signature::new(&request, keys).unwrap();
+    let signed_event = Signed::from_parts(request, signature);
+
+    let response = node.external_request(signed_event).await?;
     // state of request
     let request_id = response.request_id;
 

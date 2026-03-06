@@ -138,20 +138,6 @@ impl Actor for Register {
         }
         Ok(())
     }
-
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        if let Err(e) = self.stop_store(ctx).await {
-            error!(
-                error = %e,
-                "Failed to stop register store"
-            );
-            return Err(e);
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

@@ -346,20 +346,6 @@ impl Actor for ApprPersist {
         }
         Ok(())
     }
-
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        if let Err(e) = self.stop_store(ctx).await {
-            error!(
-                error = %e,
-                "Failed to stop approver store"
-            );
-            return Err(e);
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

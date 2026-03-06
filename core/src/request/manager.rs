@@ -1566,21 +1566,6 @@ impl Actor for RequestManager {
         }
         Ok(())
     }
-
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        if let Err(e) = self.stop_store(ctx).await {
-            error!(
-                error = %e,
-                subject_id = %self.subject_id,
-                "Failed to stop store"
-            );
-            return Err(e);
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

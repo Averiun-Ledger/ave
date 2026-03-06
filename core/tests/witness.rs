@@ -6309,3 +6309,231 @@ async fn test_more_cases_2() {
             .is_err()
     );
 }
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BLOQUE 14 — Tests para bugs nuevos (A, B, C)
+// ─────────────────────────────────────────────────────────────────────────────
+#[test(tokio::test)]
+async fn test_more_cases_3() {
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0]],
+        vec![],
+        true,
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [],
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id_1, ..) = create_subject(
+        &witness_alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+
+    emit_fact(&witness_alice, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+        let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+
+    emit_fact(&witness_alice, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+        let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+
+    emit_fact(&witness_alice, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Bob"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": ["Witnesses", "Bob"]
+                                }
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "roles": {
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": ["Witnesses", "Bob", "Owner"]
+                                }
+                            ]
+                        },
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+
+    emit_fact(&witness_alice, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_alice, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner, subject_id_1.clone(), Some(4))
+        .await
+        .unwrap();
+}
