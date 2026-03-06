@@ -541,7 +541,24 @@ impl GovernanceData {
             .map(|x| x.0)
             .cloned()
         else {
-            return false;
+            if let HashThisRole::Schema {
+                role: RoleTypes::Issuer,
+                schema_id,
+                ..
+            } = data
+            {
+                if self.roles_tracker_schemas.issuer_any() {
+                    return true;
+                }
+
+                let Some(roles) = self.roles_schema.get(&schema_id) else {
+                    return false;
+                };
+
+                return roles.issuer_any();
+            } else {
+                return false;
+            }
         };
 
         match data {

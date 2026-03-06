@@ -348,6 +348,10 @@ impl RolesTrackerSchemas {
         }
     }
 
+    pub fn issuer_any(&self) -> bool {
+        self.issuer.any
+    }
+
     pub fn hash_this_rol(
         &self,
         role: RoleTypes,
@@ -642,6 +646,10 @@ impl RolesSchema {
             validation: hash_val,
             evaluation: hash_eval,
         }
+    }
+
+    pub fn issuer_any(&self) -> bool {
+        self.issuer.any
     }
 
     pub fn hash_this_rol(
