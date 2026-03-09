@@ -928,6 +928,29 @@ pub fn build_routes(
                 "/admin/api-keys/{key_id}/rotate",
                 post(apikey_handlers::rotate_api_key),
             )
+            .route(
+                "/admin/api-keys/{key_id}/plan",
+                put(apikey_handlers::assign_api_key_plan),
+            )
+            .route(
+                "/admin/api-keys/{key_id}/quota",
+                get(apikey_handlers::get_api_key_quota_status),
+            )
+            .route(
+                "/admin/api-keys/{key_id}/quota-extensions",
+                post(apikey_handlers::add_api_key_quota_extension),
+            )
+            .route(
+                "/admin/usage-plans",
+                get(apikey_handlers::list_usage_plans)
+                    .post(apikey_handlers::create_usage_plan),
+            )
+            .route(
+                "/admin/usage-plans/{plan_id}",
+                get(apikey_handlers::get_usage_plan)
+                    .put(apikey_handlers::update_usage_plan)
+                    .delete(apikey_handlers::delete_usage_plan),
+            )
             .route("/admin/resources", get(system_handlers::list_resources))
             .route("/admin/actions", get(system_handlers::list_actions))
             .route("/admin/audit-logs", get(system_handlers::query_audit_logs))

@@ -20,9 +20,10 @@ impl AuthDatabase {
         conn.query_row(
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
+                    k.last_used_at, k.last_used_ip, kp.plan_id
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
+             LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              WHERE k.id = ?1",
             params![key_id],
             |row| {
@@ -41,6 +42,7 @@ impl AuthDatabase {
                     revoked_reason: row.get(11)?,
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
+                    plan_id: row.get(14)?,
                 })
             },
         )
@@ -224,17 +226,19 @@ impl AuthDatabase {
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
+                    k.last_used_at, k.last_used_ip, kp.plan_id
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
+             LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              WHERE k.user_id = ?1
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
+                    k.last_used_at, k.last_used_ip, kp.plan_id
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
+             LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              WHERE k.user_id = ?1 AND k.revoked = 0
              ORDER BY k.created_at DESC"
         };
@@ -260,6 +264,7 @@ impl AuthDatabase {
                     revoked_reason: row.get(11)?,
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
+                    plan_id: row.get(14)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
@@ -308,16 +313,18 @@ impl AuthDatabase {
         let query = if include_revoked {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
+                    k.last_used_at, k.last_used_ip, kp.plan_id
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
+             LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              ORDER BY k.created_at DESC"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked, k.revoked_at, k.revoked_reason,
-                    k.last_used_at, k.last_used_ip
+                    k.last_used_at, k.last_used_ip, kp.plan_id
              FROM api_keys k
              INNER JOIN users u ON k.user_id = u.id
+             LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              WHERE k.revoked = 0
              ORDER BY k.created_at DESC"
         };
@@ -343,6 +350,7 @@ impl AuthDatabase {
                     revoked_reason: row.get(11)?,
                     last_used_at: row.get(12)?,
                     last_used_ip: row.get(13)?,
+                    plan_id: row.get(14)?,
                 })
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?

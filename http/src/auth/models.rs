@@ -226,6 +226,7 @@ pub struct ApiKeyInfo {
     #[serde(serialize_with = "serialize_ts_opt", skip_deserializing)]
     pub last_used_at: Option<i64>,
     pub last_used_ip: Option<String>,
+    pub plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -253,6 +254,71 @@ pub struct CreateApiKeyResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RevokeApiKeyRequest {
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct UsagePlan {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub monthly_events: i64,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
+    pub created_at: i64,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateUsagePlanRequest {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub monthly_events: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateUsagePlanRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub monthly_events: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AssignApiKeyPlanRequest {
+    pub plan_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateQuotaExtensionRequest {
+    pub extra_events: i64,
+    /// UTC month in YYYY-MM format. If omitted, current UTC month is used.
+    pub usage_month: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct QuotaExtensionInfo {
+    pub id: i64,
+    pub api_key_id: String,
+    pub usage_month: String,
+    pub extra_events: i64,
+    pub reason: Option<String>,
+    pub created_by: Option<i64>,
+    #[serde(serialize_with = "serialize_ts", skip_deserializing)]
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ApiKeyQuotaStatus {
+    pub api_key_id: String,
+    pub usage_month: String,
+    pub plan_id: Option<String>,
+    pub plan_limit: Option<i64>,
+    pub extensions_total: i64,
+    pub effective_limit: Option<i64>,
+    pub used_events: i64,
+    pub remaining_events: Option<i64>,
+    pub has_quota: bool,
 }
 
 // =============================================================================

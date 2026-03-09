@@ -371,6 +371,16 @@ pub async fn rotate_api_key(
         )
         .map_err(db_error_to_response)?;
 
+    // Preserve usage plan assignment on rotation.
+    if let Some(plan_id) = existing.plan_id.as_deref() {
+        db.assign_api_key_plan(
+            &key_info.id,
+            Some(plan_id),
+            Some(auth_ctx.user_id),
+        )
+        .map_err(db_error_to_response)?;
+    }
+
     let response = CreateApiKeyResponse { api_key, key_info };
 
     // Audit log
@@ -393,6 +403,266 @@ pub async fn rotate_api_key(
     }
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Create usage plan (admin)
+#[utoipa::path(
+    post,
+    path = "/admin/usage-plans",
+    operation_id = "createUsagePlan",
+    tag = "API Key Management",
+    request_body = CreateUsagePlanRequest,
+    responses(
+        (status = 201, description = "Usage plan created successfully", body = UsagePlan),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 409, description = "Plan already exists", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn create_usage_plan(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Json(req): Json<CreateUsagePlanRequest>,
+) -> Result<(StatusCode, Json<UsagePlan>), (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "post")?;
+
+    let plan = db
+        .create_usage_plan(
+            &req.id,
+            &req.name,
+            req.description.as_deref(),
+            req.monthly_events,
+        )
+        .map_err(db_error_to_response)?;
+
+    Ok((StatusCode::CREATED, Json(plan)))
+}
+
+/// List usage plans (admin)
+#[utoipa::path(
+    get,
+    path = "/admin/usage-plans",
+    operation_id = "listUsagePlans",
+    tag = "API Key Management",
+    responses(
+        (status = 200, description = "List usage plans", body = Vec<UsagePlan>),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn list_usage_plans(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+) -> Result<Json<Vec<UsagePlan>>, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "get")?;
+
+    let plans = db.list_usage_plans().map_err(db_error_to_response)?;
+    Ok(Json(plans))
+}
+
+/// Get usage plan by id (admin)
+#[utoipa::path(
+    get,
+    path = "/admin/usage-plans/{plan_id}",
+    operation_id = "getUsagePlan",
+    tag = "API Key Management",
+    params(
+        ("plan_id" = String, Path, description = "Usage plan id")
+    ),
+    responses(
+        (status = 200, description = "Usage plan", body = UsagePlan),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "Plan not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_usage_plan(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(plan_id): Path<String>,
+) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "get")?;
+
+    let plan = db.get_usage_plan(&plan_id).map_err(db_error_to_response)?;
+    Ok(Json(plan))
+}
+
+/// Update usage plan (admin)
+#[utoipa::path(
+    put,
+    path = "/admin/usage-plans/{plan_id}",
+    operation_id = "updateUsagePlan",
+    tag = "API Key Management",
+    params(
+        ("plan_id" = String, Path, description = "Usage plan id")
+    ),
+    request_body = UpdateUsagePlanRequest,
+    responses(
+        (status = 200, description = "Updated usage plan", body = UsagePlan),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "Plan not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn update_usage_plan(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(plan_id): Path<String>,
+    Json(req): Json<UpdateUsagePlanRequest>,
+) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "put")?;
+
+    let plan = db
+        .update_usage_plan(
+            &plan_id,
+            req.name.as_deref(),
+            req.description.as_deref(),
+            req.monthly_events,
+        )
+        .map_err(db_error_to_response)?;
+
+    Ok(Json(plan))
+}
+
+/// Delete usage plan (admin)
+#[utoipa::path(
+    delete,
+    path = "/admin/usage-plans/{plan_id}",
+    operation_id = "deleteUsagePlan",
+    tag = "API Key Management",
+    params(
+        ("plan_id" = String, Path, description = "Usage plan id")
+    ),
+    responses(
+        (status = 204, description = "Usage plan deleted"),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "Plan not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn delete_usage_plan(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(plan_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "delete")?;
+
+    db.delete_usage_plan(&plan_id)
+        .map_err(db_error_to_response)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Assign (or clear) usage plan from API key (admin)
+#[utoipa::path(
+    put,
+    path = "/admin/api-keys/{id}/plan",
+    operation_id = "assignApiKeyPlan",
+    tag = "API Key Management",
+    params(
+        ("id" = String, Path, description = "API key id")
+    ),
+    request_body = AssignApiKeyPlanRequest,
+    responses(
+        (status = 200, description = "API key plan updated", body = ApiKeyInfo),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "API key or plan not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn assign_api_key_plan(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(id): Path<String>,
+    Json(req): Json<AssignApiKeyPlanRequest>,
+) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "put")?;
+
+    db.assign_api_key_plan(&id, req.plan_id.as_deref(), Some(auth_ctx.user_id))
+        .map_err(db_error_to_response)?;
+
+    let updated = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+    Ok(Json(updated))
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct QuotaStatusQuery {
+    pub usage_month: Option<String>,
+}
+
+/// Get monthly quota status for API key (admin)
+#[utoipa::path(
+    get,
+    path = "/admin/api-keys/{id}/quota",
+    operation_id = "getApiKeyQuotaStatus",
+    tag = "API Key Management",
+    params(
+        ("id" = String, Path, description = "API key id"),
+        ("usage_month" = Option<String>, Query, description = "UTC month in YYYY-MM")
+    ),
+    responses(
+        (status = 200, description = "API key quota status", body = ApiKeyQuotaStatus),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "API key not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_api_key_quota_status(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(id): Path<String>,
+    Query(params): Query<QuotaStatusQuery>,
+) -> Result<Json<ApiKeyQuotaStatus>, (StatusCode, Json<ErrorResponse>)> {
+    check_permission(&auth_ctx, "admin_api_key", "get")?;
+
+    let status = db
+        .get_api_key_quota_status(&id, params.usage_month.as_deref())
+        .map_err(db_error_to_response)?;
+
+    Ok(Json(status))
+}
+
+/// Add monthly quota extension for API key (admin)
+#[utoipa::path(
+    post,
+    path = "/admin/api-keys/{id}/quota-extensions",
+    operation_id = "addApiKeyQuotaExtension",
+    tag = "API Key Management",
+    params(
+        ("id" = String, Path, description = "API key id")
+    ),
+    request_body = CreateQuotaExtensionRequest,
+    responses(
+        (status = 201, description = "Quota extension created", body = QuotaExtensionInfo),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "API key not found", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn add_api_key_quota_extension(
+    AuthContextExtractor(auth_ctx): AuthContextExtractor,
+    Extension(db): Extension<Arc<AuthDatabase>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateQuotaExtensionRequest>,
+) -> Result<
+    (StatusCode, Json<QuotaExtensionInfo>),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    check_permission(&auth_ctx, "admin_api_key", "post")?;
+
+    let extension = db
+        .add_quota_extension(
+            &id,
+            req.extra_events,
+            req.usage_month.as_deref(),
+            req.reason.as_deref(),
+            Some(auth_ctx.user_id),
+        )
+        .map_err(db_error_to_response)?;
+
+    Ok((StatusCode::CREATED, Json(extension)))
 }
 
 // =============================================================================
