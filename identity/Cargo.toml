@@ -1,10 +1,10 @@
 [package]
 name = "ave-identity"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 description = "Generic cryptographic primitives with algorithm identification"
-readme.workspace = true
+readme = "README.md"
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true

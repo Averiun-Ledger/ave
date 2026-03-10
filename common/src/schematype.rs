@@ -1,3 +1,5 @@
+//! Schema identifiers used by Ave subjects and governance rules.
+
 use std::fmt::Display;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -8,6 +10,10 @@ use utoipa::ToSchema;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
+/// Schema identifier.
+///
+/// Reserved values are represented as dedicated variants and custom schema ids
+/// are stored in [`SchemaType::Type`].
 #[derive(
     Default,
     Debug,
@@ -21,6 +27,7 @@ use ts_rs::TS;
     BorshDeserialize,
 )]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
+/// Reserved words used by the schema system.
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export, type = "string"))]
 pub enum SchemaType {
@@ -70,6 +77,7 @@ impl std::str::FromStr for SchemaType {
 }
 
 impl SchemaType {
+    /// Returns the serialized string length of the schema identifier.
     pub const fn len(&self) -> usize {
         match self {
             Self::Governance => "governance".len(),
@@ -78,6 +86,7 @@ impl SchemaType {
         }
     }
 
+    /// Returns `true` when the custom schema identifier is empty.
     pub const fn is_empty(&self) -> bool {
         match self {
             Self::Governance => false,
@@ -86,6 +95,7 @@ impl SchemaType {
         }
     }
 
+    /// Returns `true` when the schema identifier is valid in stored state.
     pub fn is_valid(&self) -> bool {
         match self {
             Self::Governance => true,
@@ -99,6 +109,7 @@ impl SchemaType {
         }
     }
 
+    /// Returns `true` when the schema identifier is valid in incoming requests.
     pub fn is_valid_in_request(&self) -> bool {
         match self {
             Self::Governance => true,
@@ -124,6 +135,7 @@ impl Display for SchemaType {
 }
 
 impl SchemaType {
+    /// Returns `true` when the schema is the governance schema.
     pub const fn is_gov(&self) -> bool {
         matches!(self, Self::Governance)
     }

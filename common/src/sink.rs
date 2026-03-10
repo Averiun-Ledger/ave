@@ -1,3 +1,5 @@
+//! Sink payloads exported from ledger events.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -6,6 +8,7 @@ use crate::SchemaType;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
+/// Event data sent to external sink consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -17,6 +20,7 @@ pub struct DataToSink {
     pub sink_timestamp: u64,
 }
 
+/// Flattened ledger event stored or emitted by sink integrations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -29,8 +33,8 @@ pub enum DataToSinkEvent {
         schema_id: SchemaType,
         namespace: String,
         sn: u64,
-        gov_version:u64,
-        state: Value
+        gov_version: u64,
+        state: Value,
     },
     Fact {
         governance_id: Option<String>,
@@ -41,7 +45,7 @@ pub enum DataToSinkEvent {
         payload: Value,
         patch: Value,
         sn: u64,
-        gov_version:u64
+        gov_version: u64,
     },
     Transfer {
         governance_id: Option<String>,
@@ -50,33 +54,34 @@ pub enum DataToSinkEvent {
         owner: String,
         new_owner: String,
         sn: u64,
-        gov_version:u64
+        gov_version: u64,
     },
     Confirm {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
-        patch:Option<Value>,
-        gov_version:u64
+        patch: Option<Value>,
+        gov_version: u64,
     },
     Reject {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
-        gov_version:u64
+        gov_version: u64,
     },
     Eol {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
-        gov_version:u64
+        gov_version: u64,
     },
 }
 
 impl DataToSinkEvent {
+    /// Returns `(subject_id, schema_id)` for the event.
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
             Self::Create {

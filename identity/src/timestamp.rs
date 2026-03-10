@@ -1,13 +1,10 @@
-//! Timestamp type for cryptographic signatures
-//!
-//! This module provides a simple timestamp type that can be used in signatures
-//! to record when a signature was created.
+//! Timestamp helpers used by signed values.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-/// A timestamp representing nanoseconds since UNIX epoch
+/// Nanoseconds since the Unix epoch.
 #[derive(
     Debug,
     Clone,
@@ -25,17 +22,17 @@ use time::OffsetDateTime;
 pub struct TimeStamp(u64);
 
 impl TimeStamp {
-    /// Returns a new `TimeStamp` representing the current time
+    /// Returns the current UTC timestamp in nanoseconds.
     pub fn now() -> Self {
         Self(OffsetDateTime::now_utc().unix_timestamp_nanos() as u64)
     }
 
-    /// Create a timestamp from nanoseconds since UNIX epoch
+    /// Builds a timestamp from raw nanoseconds since the Unix epoch.
     pub const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
     }
 
-    /// Get the timestamp as nanoseconds since UNIX epoch
+    /// Returns the raw nanosecond value.
     pub const fn as_nanos(&self) -> u64 {
         self.0
     }

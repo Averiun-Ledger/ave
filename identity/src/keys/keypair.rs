@@ -1,4 +1,4 @@
-//! Generic key pair wrapper for any DSA implementation
+//! Algorithm-agnostic key pair wrapper.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,12 +7,12 @@ use std::fmt;
 
 use super::{DSA, DSAlgorithm, Ed25519Signer, PublicKey, SignatureIdentifier};
 
-/// Key pair types supported by the system
+/// Key pair algorithms supported by this crate.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
 )]
 pub enum KeyPairAlgorithm {
-    /// Ed25519 elliptic curve signature scheme
+    /// Ed25519 elliptic curve signature scheme.
     #[default]
     Ed25519,
 }
@@ -34,18 +34,7 @@ impl From<KeyPairAlgorithm> for DSAlgorithm {
 }
 
 impl KeyPairAlgorithm {
-    /// Generate a new key pair for this algorithm
-    ///
-    /// This is a convenience method that creates a new random key pair
-    /// of the specified algorithm type.
-    ///
-    /// # Example
-    /// ```rust
-    /// use ave_identity::keys::KeyPairAlgorithm;
-    ///
-    /// let algorithm = KeyPairAlgorithm::Ed25519;
-    /// let keypair = algorithm.generate_keypair().unwrap();
-    /// ```
+    /// Generates a random key pair for this algorithm.
     pub fn generate_keypair(&self) -> Result<KeyPair, CryptoError> {
         KeyPair::generate(*self)
     }
@@ -59,39 +48,16 @@ impl fmt::Display for KeyPairAlgorithm {
     }
 }
 
-/// Generic key pair wrapper that can hold any DSA implementation
+/// Owns a signing key and exposes a stable high-level API.
 ///
-/// This provides algorithm-agnostic operations for signing and verification.
-///
-/// Cloning a KeyPair is cheap because the underlying secret keys are stored
-/// in Arc<EncryptedMem>, so only the reference is cloned, not the encrypted data.
-///
-/// # Example
-///
-/// ```rust
-/// use ave_identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
-///
-/// // Generate a key pair
-/// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).expect("Failed to generate key pair");
-///
-/// let message = b"Hello, World!";
-///
-/// // Sign message using generic interface
-/// let signature = keypair.sign(message).unwrap();
-///
-/// // Get public key
-/// let public_key = keypair.public_key();
-///
-/// // Verify
-/// assert!(public_key.verify(message, &signature).is_ok());
-/// ```
+/// Use this type when the caller should not depend on a concrete algorithm.
 #[derive(Clone)]
 pub enum KeyPair {
     Ed25519(Ed25519Signer),
 }
 
 impl KeyPair {
-    /// Generate a new random key pair of the specified type
+    /// Generates a random key pair for `key_type`.
     pub fn generate(key_type: KeyPairAlgorithm) -> Result<Self, CryptoError> {
         match key_type {
             KeyPairAlgorithm::Ed25519 => {
@@ -100,24 +66,9 @@ impl KeyPair {
         }
     }
 
-    /// Create key pair from PKCS#8 DER-encoded secret key
+    /// Imports a key pair from PKCS#8 DER bytes.
     ///
-    /// This method automatically detects the algorithm from the OID in the DER structure.
-    /// Supported OIDs:
-    /// - Ed25519: 1.3.101.112
-    ///
-    /// # Errors
-    /// - Returns `InvalidDerFormat` if the DER structure is malformed
-    /// - Returns `UnsupportedAlgorithm` if the algorithm OID is not supported
-    /// - Returns `InvalidSecretKey` if the key data is invalid
-    ///
-    /// # Example
-    /// ```no_run
-    /// use ave_identity::keys::KeyPair;
-    ///
-    /// let der_bytes = std::fs::read("private_key.der").unwrap();
-    /// let keypair = KeyPair::from_secret_der(&der_bytes).unwrap();
-    /// ```
+    /// The algorithm is detected from the OID stored in the DER structure.
     pub fn from_secret_der(der: &[u8]) -> Result<Self, CryptoError> {
         use pkcs8::{ObjectIdentifier, PrivateKeyInfo};
 
@@ -162,7 +113,7 @@ impl KeyPair {
         }
     }
 
-    /// Create key pair from seed
+    /// Builds a key pair from an exact 32-byte seed.
     pub fn from_seed(
         key_type: KeyPairAlgorithm,
         seed: &[u8; 32],
@@ -174,7 +125,7 @@ impl KeyPair {
         }
     }
 
-    /// Derive key pair from arbitrary data (will be hashed)
+    /// Derives a deterministic key pair from arbitrary bytes.
     pub fn derive_from_data(
         key_type: KeyPairAlgorithm,
         data: &[u8],
@@ -186,10 +137,9 @@ impl KeyPair {
         }
     }
 
-    /// Create key pair from secret key bytes
+    /// Imports a key pair from raw secret key bytes.
     ///
-    /// Attempts to auto-detect the algorithm from key length.
-    /// For explicit algorithm selection, use `from_secret_key_with_type`.
+    /// For explicit algorithm selection, use [`Self::from_secret_key_with_type`].
     pub fn from_secret_key(secret_key: &[u8]) -> Result<Self, CryptoError> {
         // Try to detect algorithm from key length
         match secret_key.len() {
@@ -203,7 +153,7 @@ impl KeyPair {
         }
     }
 
-    /// Create key pair from secret key bytes with explicit type
+    /// Imports a key pair from raw secret key bytes and an explicit algorithm.
     pub fn from_secret_key_with_type(
         key_type: KeyPairAlgorithm,
         secret_key: &[u8],
@@ -215,7 +165,7 @@ impl KeyPair {
         }
     }
 
-    /// Get the key pair type
+    /// Returns the key pair algorithm.
     #[inline]
     pub const fn key_type(&self) -> KeyPairAlgorithm {
         match self {
@@ -223,7 +173,7 @@ impl KeyPair {
         }
     }
 
-    /// Sign a message using the appropriate algorithm
+    /// Signs `message`.
     #[inline]
     pub fn sign(
         &self,
@@ -234,7 +184,7 @@ impl KeyPair {
         }
     }
 
-    /// Get the algorithm used by this key pair
+    /// Returns the signature algorithm used by this key pair.
     #[inline]
     pub fn algorithm(&self) -> DSAlgorithm {
         match self {
@@ -242,7 +192,7 @@ impl KeyPair {
         }
     }
 
-    /// Get the algorithm identifier
+    /// Returns the one-byte identifier for the algorithm.
     #[inline]
     pub fn algorithm_id(&self) -> u8 {
         match self {
@@ -250,7 +200,7 @@ impl KeyPair {
         }
     }
 
-    /// Get the public key bytes
+    /// Returns the raw public key bytes.
     #[inline]
     pub fn public_key_bytes(&self) -> Vec<u8> {
         match self {
@@ -258,14 +208,14 @@ impl KeyPair {
         }
     }
 
-    /// Get the public key as a PublicKey wrapper
+    /// Returns the public key wrapper.
     #[inline]
     pub fn public_key(&self) -> PublicKey {
         PublicKey::new(self.algorithm(), self.public_key_bytes())
             .expect("KeyPair should always have valid public key")
     }
 
-    /// Get the secret key bytes (if available)
+    /// Returns the raw secret key bytes.
     #[inline]
     pub fn secret_key_bytes(&self) -> Result<Vec<u8>, CryptoError> {
         match self {
@@ -273,10 +223,9 @@ impl KeyPair {
         }
     }
 
-    /// Serialize to bytes (includes algorithm identifier and secret key)
+    /// Serializes the key pair as `identifier || secret_key`.
     ///
-    /// # Warning
-    /// This exposes the secret key. Use with extreme caution.
+    /// This exposes the secret key material.
     pub fn to_bytes(&self) -> Result<Vec<u8>, CryptoError> {
         let secret = self.secret_key_bytes()?;
         let mut result = Vec::with_capacity(1 + secret.len());
@@ -285,7 +234,7 @@ impl KeyPair {
         Ok(result)
     }
 
-    /// Deserialize from bytes (includes algorithm identifier)
+    /// Deserializes a key pair from `identifier || secret_key`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.is_empty() {
             return Err(CryptoError::InvalidSecretKey(
@@ -301,22 +250,7 @@ impl KeyPair {
         Self::from_secret_key_with_type(key_type, secret_key)
     }
 
-    /// Serialize to PKCS#8 DER format
-    ///
-    /// This creates a DER-encoded PKCS#8 PrivateKeyInfo structure containing
-    /// the secret key and algorithm identifier.
-    ///
-    /// # Errors
-    /// - Returns `InvalidSecretKey` if the secret key cannot be retrieved
-    ///
-    /// # Example
-    /// ```no_run
-    /// use ave_identity::keys::{KeyPair, KeyPairAlgorithm};
-    ///
-    /// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-    /// let der_bytes = keypair.to_secret_der().unwrap();
-    /// std::fs::write("private_key.der", der_bytes).unwrap();
-    /// ```
+    /// Exports the secret key as PKCS#8 DER.
     pub fn to_secret_der(&self) -> Result<Vec<u8>, CryptoError> {
         use pkcs8::{ObjectIdentifier, PrivateKeyInfo, der::Encode};
 

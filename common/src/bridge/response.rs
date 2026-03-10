@@ -1,4 +1,4 @@
-//! Response types from Ave API
+//! Response payloads returned by the Ave API.
 
 use crate::{
     SchemaType,
@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
-/// Approval entry combining the request details and its current state.
+/// Approval entry with request data and current state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -79,7 +79,7 @@ pub struct ApprovalReq {
     pub signer: String,
 }
 
-/// Monitor network states
+/// Network status exposed by monitoring endpoints.
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

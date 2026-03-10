@@ -1,10 +1,36 @@
-//! # Ave Common
+//! Shared types used across the Ave workspace.
 //!
-//! Common types and utilities for Ave without heavy dependencies.
+//! `ave-common` keeps request, governance, bridge and utility types in one
+//! crate with a small dependency surface. It is intended for code that needs
+//! Ave domain models without depending on heavier runtime crates.
 //!
-//! This crate re-exports essential types needed for working with Ave,
-//! such as identity and cryptography, without pulling in heavy dependencies
-//! like wasmtime that don't compile on all architectures.
+//! Main areas:
+//! - request types for ledger events
+//! - governance payloads and policy models
+//! - bridge types for API-facing serialization
+//! - utility wrappers such as [`SchemaType`], [`Namespace`] and [`ValueWrapper`]
+//!
+//! Feature flags:
+//! - `common`: enables the domain and bridge models
+//! - `value-wrapper`: enables [`ValueWrapper`]
+//! - `openapi`: derives `utoipa` schemas
+//! - `typescript`: derives TypeScript exports
+//!
+//! ```rust
+//! use ave_common::{Namespace, SchemaType};
+//! use ave_common::identity::DigestIdentifier;
+//! use ave_common::request::{CreateRequest, EventRequest};
+//!
+//! let request = EventRequest::Create(CreateRequest {
+//!     name: Some("subject".to_string()),
+//!     description: None,
+//!     governance_id: DigestIdentifier::default(),
+//!     schema_id: SchemaType::Governance,
+//!     namespace: Namespace::from("demo.root"),
+//! });
+//!
+//! assert!(request.is_create_event());
+//! ```
 #[cfg(feature = "common")]
 pub mod governance;
 

@@ -1,28 +1,7 @@
-//! Generic hash functions with algorithm identification
+//! Hashing primitives with algorithm identifiers.
 //!
-//! This module provides a generic interface for hash functions with automatic
-//! algorithm identification via 1-byte prefixes.
-//!
-//! ## Example
-//!
-//! ```rust
-//! use ave_identity::hash::{Hash, Blake3Hasher, DigestIdentifier};
-//!
-//! let hasher = Blake3Hasher;
-//! let data = b"Hello, World!";
-//!
-//! // Compute hash
-//! let hash = hasher.hash(data);
-//!
-//! // Convert to string (includes algorithm identifier)
-//! let hash_str = hash.to_string();
-//!
-//! // Parse from string (automatically detects algorithm)
-//! let parsed: DigestIdentifier = hash_str.parse().unwrap();
-//!
-//! // Verify
-//! assert_eq!(hash, parsed);
-//! ```
+//! A digest stores the algorithm together with the hash bytes so it can be
+//! serialized, parsed and verified without external metadata.
 
 use crate::common::{AlgorithmIdentifiedBytes, base64_encoding};
 use crate::error::CryptoError;
@@ -36,40 +15,22 @@ const BLAKE3_ID: u8 = b'B';
 /// Blake3 hash output length in bytes
 pub const BLAKE3_OUTPUT_LENGTH: usize = 32;
 
-/// Trait for hash algorithms with algorithm identification
+/// Common interface for supported hash algorithms.
 pub trait Hash {
-    /// Get the algorithm identifier (1 byte)
+    /// Returns the one-byte identifier used by this algorithm.
     fn algorithm_id(&self) -> u8;
 
-    /// Get the expected output length in bytes (excluding identifier)
+    /// Returns the digest length, excluding the identifier byte.
     fn output_length(&self) -> usize;
 
-    /// Compute hash of the input data
+    /// Hashes `data` and returns a typed digest.
     fn hash(&self, data: &[u8]) -> DigestIdentifier;
 
-    /// Get the algorithm enum variant
+    /// Returns the enum variant for this algorithm.
     fn algorithm(&self) -> HashAlgorithm;
 }
 
-/// Compute hash of any value that implements BorshSerialize
-///
-/// This is a convenience function that serializes the value using Borsh
-/// and then hashes it using the specified hasher.
-///
-/// # Example
-///
-/// ```
-/// use ave_identity::{hash_borsh, BLAKE3_HASHER};
-/// use borsh::BorshSerialize;
-///
-/// #[derive(BorshSerialize)]
-/// struct MyData {
-///     value: u64,
-/// }
-///
-/// let data = MyData { value: 42 };
-/// let hash = hash_borsh(&BLAKE3_HASHER, &data).unwrap();
-/// ```
+/// Serializes `value` with Borsh and hashes the resulting bytes.
 #[inline]
 pub fn hash_borsh<T: BorshSerialize>(
     hasher: &dyn Hash,
@@ -80,7 +41,7 @@ pub fn hash_borsh<T: BorshSerialize>(
     Ok(hasher.hash(&serialized))
 }
 
-/// Enumeration of supported hash algorithms
+/// Hash algorithms supported by this crate.
 #[derive(
     Debug,
     Clone,
@@ -100,21 +61,21 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
-    /// Get the 1-byte identifier for this algorithm
+    /// Returns the one-byte identifier for this algorithm.
     pub const fn identifier(&self) -> u8 {
         match self {
             Self::Blake3 => BLAKE3_ID,
         }
     }
 
-    /// Get the output length for this algorithm (excluding identifier)
+    /// Returns the digest length, excluding the identifier byte.
     pub const fn output_length(&self) -> usize {
         match self {
             Self::Blake3 => BLAKE3_OUTPUT_LENGTH,
         }
     }
 
-    /// Parse algorithm from 1-byte identifier
+    /// Parses an algorithm from its one-byte identifier.
     pub fn from_identifier(id: u8) -> Result<Self, CryptoError> {
         match id {
             BLAKE3_ID => Ok(Self::Blake3),
@@ -122,7 +83,7 @@ impl HashAlgorithm {
         }
     }
 
-    /// Create a hasher instance for this algorithm
+    /// Creates a hasher instance for this algorithm.
     pub fn hasher(&self) -> Box<dyn Hash> {
         match self {
             Self::Blake3 => Box::new(Blake3Hasher),
@@ -138,11 +99,7 @@ impl fmt::Display for HashAlgorithm {
     }
 }
 
-/// Digest identifier with algorithm identification
-///
-/// The output contains:
-/// - 1 byte: algorithm identifier
-/// - N bytes: actual hash value (length depends on algorithm)
+/// Digest bytes plus the algorithm used to produce them.
 #[derive(
     Clone,
     PartialEq,
@@ -158,7 +115,7 @@ pub struct DigestIdentifier {
 }
 
 impl DigestIdentifier {
-    /// Create a new hash output
+    /// Creates a digest and validates the byte length for `algorithm`.
     pub fn new(
         algorithm: HashAlgorithm,
         hash: Vec<u8>,
@@ -173,34 +130,22 @@ impl DigestIdentifier {
         })
     }
 
-    /// Get the algorithm used
+    /// Returns the digest algorithm.
     #[inline]
     pub const fn algorithm(&self) -> HashAlgorithm {
         self.inner.algorithm
     }
 
-    /// Get the hash bytes (without identifier)
+    /// Returns the raw digest bytes, without the identifier.
     #[inline]
     pub fn hash_bytes(&self) -> &[u8] {
         self.inner.as_bytes()
     }
 
-    /// Get the hash as a fixed-size array
+    /// Converts the digest bytes into an array of size `N`.
     ///
-    /// This method converts the hash bytes into an array of the specified size.
-    /// The size must match the algorithm's output length.
-    ///
-    /// # Errors
-    /// Returns an error if the requested size doesn't match the algorithm's output length.
-    ///
-    /// # Example
-    /// ```
-    /// use ave_identity::{BLAKE3_HASHER, hash::{BLAKE3_OUTPUT_LENGTH, Hash}};
-    ///
-    /// let hash = BLAKE3_HASHER.hash(b"Hello, World!");
-    /// let array: [u8; 32] = hash.hash_array().unwrap();
-    /// assert_eq!(array.len(), BLAKE3_OUTPUT_LENGTH);
-    /// ```
+    /// Returns an error when `N` does not match the length required by the
+    /// embedded algorithm.
     pub fn hash_array<const N: usize>(&self) -> Result<[u8; N], CryptoError> {
         let hash_bytes = self.hash_bytes();
         let expected_len = self.algorithm().output_length();
@@ -220,14 +165,14 @@ impl DigestIdentifier {
             })
     }
 
-    /// Get the full bytes including algorithm identifier
+    /// Serializes the digest as `identifier || digest_bytes`.
     #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner
             .to_bytes_with_prefix(self.inner.algorithm.identifier())
     }
 
-    /// Parse from bytes (includes algorithm identifier)
+    /// Parses a digest from `identifier || digest_bytes`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.is_empty() {
             return Err(CryptoError::InvalidHashFormat(
@@ -263,17 +208,14 @@ impl DigestIdentifier {
         }
     }
 
-    /// Verify that this hash matches the given data using the embedded algorithm
+    /// Hashes `data` and compares it with `self`.
     pub fn verify(&self, data: &[u8]) -> bool {
         let hasher = self.inner.algorithm.hasher();
         let computed = hasher.hash(data);
         computed == *self
     }
 
-    /// Check if this is an empty digest (created via Default)
-    ///
-    /// Returns `true` if the hash bytes are empty, which indicates
-    /// this digest was created using `Default::default()`.
+    /// Returns `true` when this is the empty placeholder value.
     #[inline]
     pub const fn is_empty(&self) -> bool {
         self.inner.bytes.is_empty()
@@ -281,10 +223,7 @@ impl DigestIdentifier {
 }
 
 impl Default for DigestIdentifier {
-    /// Creates an empty digest identifier using Blake3 algorithm
-    ///
-    /// This is primarily useful for initialization purposes.
-    /// Use `is_empty()` to check if a digest was created via `default()`.
+    /// Creates an empty placeholder digest using Blake3 as the default tag.
     fn default() -> Self {
         Self {
             inner: AlgorithmIdentifiedBytes {
@@ -370,11 +309,11 @@ impl std::str::FromStr for DigestIdentifier {
     }
 }
 
-/// Blake3 hasher implementation (32 bytes output)
+/// Blake3 hasher.
 #[derive(Debug, Clone, Copy)]
 pub struct Blake3Hasher;
 
-/// Global constant instance of Blake3 hasher for efficient reuse
+/// Reusable Blake3 hasher instance.
 pub const BLAKE3_HASHER: Blake3Hasher = Blake3Hasher;
 
 impl Hash for Blake3Hasher {

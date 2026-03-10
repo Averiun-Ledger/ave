@@ -1,4 +1,4 @@
-//! Digital signature identifier with algorithm identification
+//! Signature wrapper with an embedded algorithm identifier.
 
 use crate::common::{AlgorithmIdentifiedBytes, base64_encoding};
 use crate::error::CryptoError;
@@ -9,11 +9,7 @@ use std::fmt;
 
 use super::{DSAlgorithm, ED25519_PUBLIC_KEY_LENGTH, ED25519_SIGNATURE_LENGTH};
 
-/// Digital signature identifier with algorithm identification
-///
-/// The output contains:
-/// - 1 byte: algorithm identifier
-/// - N bytes: actual signature value (length depends on algorithm)
+/// Signature bytes plus the algorithm used to verify them.
 #[derive(
     Clone,
     PartialEq,
@@ -29,7 +25,7 @@ pub struct SignatureIdentifier {
 }
 
 impl SignatureIdentifier {
-    /// Create a new signature identifier
+    /// Creates a signature and validates the byte length for `algorithm`.
     pub fn new(
         algorithm: DSAlgorithm,
         signature: Vec<u8>,
@@ -44,26 +40,26 @@ impl SignatureIdentifier {
         })
     }
 
-    /// Get the algorithm used
+    /// Returns the signature algorithm.
     #[inline]
     pub const fn algorithm(&self) -> DSAlgorithm {
         self.inner.algorithm
     }
 
-    /// Get the signature bytes (without identifier)
+    /// Returns the raw signature bytes, without the identifier.
     #[inline]
     pub fn signature_bytes(&self) -> &[u8] {
         self.inner.as_bytes()
     }
 
-    /// Get the full bytes including algorithm identifier
+    /// Serializes the signature as `identifier || signature_bytes`.
     #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner
             .to_bytes_with_prefix(self.inner.algorithm.identifier())
     }
 
-    /// Parse from bytes (includes algorithm identifier)
+    /// Parses a signature from `identifier || signature_bytes`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.is_empty() {
             return Err(CryptoError::InvalidSignatureFormat(
@@ -94,7 +90,7 @@ impl SignatureIdentifier {
         format!("{}{}", algorithm_char, data_base64)
     }
 
-    /// Verify the signature against the message and public key
+    /// Verifies `message` with `public_key`.
     pub fn verify(
         &self,
         message: &[u8],

@@ -1,5 +1,4 @@
-//! # Namespace model.
-//!
+//! Hierarchical namespace type used by subjects and governance roles.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -14,8 +13,7 @@ use utoipa::ToSchema;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
-/// This is the name space for a `Subject`.
-///
+/// Dot-separated namespace.
 #[derive(
     Clone,
     Hash,
@@ -33,18 +31,13 @@ use ts_rs::TS;
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct Namespace(Vec<String>);
 
-/// `Namespace` implementation.
 impl Namespace {
-    /// Create a new `Namespace`.
-    ///
-    /// # Returns
-    ///
-    /// A new `Namespace`.
-    ///
+    /// Creates an empty namespace.
     pub const fn new() -> Self {
         Self(Vec::new())
     }
 
+    /// Returns `true` when all namespace tokens are non-empty, trimmed and short enough.
     pub fn check(&self) -> bool {
         !self
             .0
@@ -52,12 +45,7 @@ impl Namespace {
             .any(|x| x.trim().is_empty() || x.len() > 100 || x != x.trim())
     }
 
-    /// Add a name to the `Namespace`.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name to add.
-    ///
+    /// Appends a non-empty token to the namespace.
     pub fn add(&mut self, name: &str) {
         let name = name.trim();
 
@@ -66,12 +54,7 @@ impl Namespace {
         }
     }
 
-    /// Root name of the `Namespace`.
-    ///
-    /// # Returns
-    ///
-    /// The root name of the `Namespace`.
-    ///
+    /// Returns the top-level namespace segment.
     pub fn root(&self) -> Self {
         if self.0.len() == 1 {
             self.clone()
@@ -82,12 +65,7 @@ impl Namespace {
         }
     }
 
-    /// Returns the parent of the name space.
-    ///
-    /// # Returns
-    ///
-    /// Returns the parent of the name space.
-    ///
+    /// Returns the direct parent namespace.
     pub fn parent(&self) -> Self {
         if self.0.len() > 1 {
             let mut tokens = self.0.clone();
@@ -98,36 +76,17 @@ impl Namespace {
         }
     }
 
-    /// Returns the key of the name space.
-    ///
-    /// # Returns
-    ///
-    /// Returns the key of the path.
-    ///
+    /// Returns the last namespace segment.
     pub fn key(&self) -> String {
         self.0.last().cloned().unwrap_or_else(|| "".to_string())
     }
 
-    /// Returns the levels size of the name space.
-    ///
-    /// # Returns
-    ///
-    /// Returns the levels size of the name space.
-    ///
+    /// Returns the number of namespace segments.
     pub const fn level(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns the name space at a specific level.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - The level to return the name space at.
-    ///
-    /// # Returns
-    ///
-    /// Returns the name space at a specific level.
-    ///
+    /// Returns the namespace truncated to `level` segments.
     pub fn at_level(&self, level: usize) -> Self {
         if level == 0 || level > self.level() {
             self.clone()
@@ -138,41 +97,18 @@ impl Namespace {
         }
     }
 
-    /// Returns if the name space is empty.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is empty.
-    ///
+    /// Returns `true` when the namespace has no segments.
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns if the name space is an ancestor of another name space.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other name space to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is an ancestor of the other name space.
-    ///
+    /// Returns `true` when `self` is a strict ancestor of `other`.
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
         let me = format!("{}.", self);
         other.to_string().as_str().starts_with(me.as_str()) || self.is_empty()
     }
 
-    /// Returns if the name space is an ancestor or equal of another name space.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other name space to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is an ancestor of the other name space.
-    ///
+    /// Returns `true` when `self` is an ancestor of `other` or both are equal.
     pub fn is_ancestor_or_equal_of(&self, other: &Self) -> bool {
         let me = format!("{}.", self);
         other.to_string().as_str().starts_with(me.as_str())
@@ -180,55 +116,23 @@ impl Namespace {
             || self == other
     }
 
-    /// Returns if the name space is a descendant of another name space.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other name space to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is a descendant of the other name space.
-    ///
+    /// Returns `true` when `self` is a strict descendant of `other`.
     pub fn is_descendant_of(&self, other: &Self) -> bool {
         let me = self.to_string();
         me.as_str().starts_with(format!("{}.", other).as_str())
     }
 
-    /// Returns if the name space is a parent of another name space.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other name space to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is a parent of the other name space.
-    ///
+    /// Returns `true` when `self` is the direct parent of `other`.
     pub fn is_parent_of(&self, other: &Self) -> bool {
         *self == other.parent()
     }
 
-    /// Returns if the name space is a child of another name space.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other name space to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is a child of the other name space.
-    ///
+    /// Returns `true` when `self` is the direct child of `other`.
     pub fn is_child_of(&self, other: &Self) -> bool {
         self.parent() == *other
     }
 
-    /// Returns if the name space is top level.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the name space is top level.
-    ///
+    /// Returns `true` when the namespace has a single segment.
     pub const fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }

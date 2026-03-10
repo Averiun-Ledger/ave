@@ -1,34 +1,4 @@
-//! Public key wrapper with algorithm identification
-//!
-//! This module provides a generic public key wrapper that can hold keys from any
-//! supported digital signature algorithm. The public key includes a 1-byte algorithm
-//! identifier prefix, enabling automatic algorithm detection when parsing.
-//!
-//! ## Example
-//!
-//! ```
-//! use ave_identity::keys::{KeyPair, KeyPairAlgorithm, PublicKey};
-//!
-//! // Generate a key pair
-//! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-//!
-//! // Get the public key
-//! let public_key = keypair.public_key();
-//!
-//! // Sign a message
-//! let message = b"Hello, World!";
-//! let signature = keypair.sign(message).unwrap();
-//!
-//! // Verify with the public key
-//! assert!(public_key.verify(message, &signature).is_ok());
-//!
-//! // Serialize to string (includes algorithm identifier)
-//! let key_str = public_key.to_string();
-//!
-//! // Parse from string (automatically detects algorithm)
-//! let parsed: PublicKey = key_str.parse().unwrap();
-//! assert_eq!(public_key, parsed);
-//! ```
+//! Public key wrapper with an embedded algorithm identifier.
 
 use crate::common::{AlgorithmIdentifiedBytes, base64_encoding};
 use crate::error::CryptoError;
@@ -38,44 +8,7 @@ use std::fmt;
 
 use super::{DSAlgorithm, SignatureIdentifier};
 
-/// Public key wrapper with algorithm identification
-///
-/// This structure provides a generic wrapper for public keys from any supported
-/// digital signature algorithm (currently Ed25519). The key includes a 1-byte
-/// algorithm identifier prefix that enables automatic algorithm detection.
-///
-/// ## Structure
-///
-/// - **1 byte**: Algorithm identifier (e.g., 'E' for Ed25519)
-/// - **N bytes**: Public key bytes (length depends on algorithm)
-///
-/// ## Features
-///
-/// - **Algorithm agnostic**: Works with any DSA implementation
-/// - **Automatic detection**: Algorithm is detected from the identifier byte
-/// - **Serialization**: Supports Base64, Borsh, and Serde JSON serialization
-/// - **Verification**: Direct signature verification without needing the algorithm type
-///
-/// ## Example
-///
-/// ```
-/// use ave_identity::keys::{KeyPair, KeyPairAlgorithm, DSAlgorithm};
-///
-/// // Generate a keypair and extract public key
-/// let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
-/// let public_key = keypair.public_key();
-///
-/// // Check the algorithm
-/// assert_eq!(public_key.algorithm(), DSAlgorithm::Ed25519);
-///
-/// // Get raw bytes (32 bytes for Ed25519)
-/// let key_bytes = public_key.as_bytes();
-/// assert_eq!(key_bytes.len(), 32);
-///
-/// // Serialize to string with algorithm identifier
-/// let key_str = public_key.to_string();
-/// println!("Public key: {}", key_str);
-/// ```
+/// Public key bytes plus the algorithm used to interpret them.
 #[derive(
     Clone,
     PartialEq,
@@ -91,7 +24,7 @@ pub struct PublicKey {
 }
 
 impl PublicKey {
-    /// Create a new public key
+    /// Creates a public key and validates the byte length for `algorithm`.
     pub fn new(
         algorithm: DSAlgorithm,
         key_bytes: Vec<u8>,
@@ -106,26 +39,26 @@ impl PublicKey {
         })
     }
 
-    /// Get the algorithm
+    /// Returns the key algorithm.
     #[inline]
     pub const fn algorithm(&self) -> DSAlgorithm {
         self.inner.algorithm
     }
 
-    /// Get the key bytes (without identifier)
+    /// Returns the raw key bytes, without the identifier.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.inner.as_bytes()
     }
 
-    /// Get the full bytes including algorithm identifier
+    /// Serializes the key as `identifier || key_bytes`.
     #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner
             .to_bytes_with_prefix(self.inner.algorithm.identifier())
     }
 
-    /// Parse from bytes (includes algorithm identifier)
+    /// Parses a key from `identifier || key_bytes`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.is_empty() {
             return Err(CryptoError::InvalidPublicKey(
@@ -161,7 +94,7 @@ impl PublicKey {
         }
     }
 
-    /// Verify a signature with this public key
+    /// Verifies `signature` against `message`.
     pub fn verify(
         &self,
         message: &[u8],
@@ -177,10 +110,7 @@ impl PublicKey {
         signature.verify(message, &self.inner.bytes)
     }
 
-    /// Check if this is an empty public key (created via Default)
-    ///
-    /// Returns `true` if the key bytes are empty, which indicates
-    /// this public key was created using `Default::default()`.
+    /// Returns `true` when this is the empty placeholder value.
     #[inline]
     pub const fn is_empty(&self) -> bool {
         self.inner.bytes.is_empty()

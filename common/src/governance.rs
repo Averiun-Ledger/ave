@@ -1,3 +1,9 @@
+//! Governance update payloads.
+//!
+//! These types model member, role, schema and policy changes applied to a
+//! governance subject. They are plain serializable data structures and are
+//! shared by the API layer, the core ledger and TypeScript exports.
+
 use std::{
     collections::{BTreeSet, HashSet},
     hash::Hash,
@@ -13,6 +19,7 @@ use crate::{Namespace, SchemaType};
 
 pub type MemberName = String;
 
+/// Governance change set grouped by concern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -24,6 +31,7 @@ pub struct GovernanceEvent {
 }
 
 ///// Members /////
+/// Member additions and removals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -32,6 +40,7 @@ pub struct MemberEvent {
     pub remove: Option<HashSet<MemberName>>,
 }
 
+/// New member entry used in governance updates.
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -41,6 +50,7 @@ pub struct NewMember {
 }
 
 ///// Roles /////
+/// Role updates grouped by role family.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -248,6 +258,7 @@ pub struct SchemaPolicieChange {
     pub validate: Option<Quorum>,
 }
 
+/// Governance-wide quorum policy.
 /// Governance quorum.
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash, Eq,

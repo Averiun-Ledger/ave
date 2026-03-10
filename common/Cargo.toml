@@ -1,10 +1,10 @@
 [package]
 name = "ave-common"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 authors.workspace = true
 description = "Averiun Ledger common library"
-readme.workspace = true
+readme = "README.md"
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true

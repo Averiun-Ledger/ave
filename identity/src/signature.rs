@@ -1,7 +1,7 @@
-//! High-level signature structures with metadata
+//! Signed values with metadata.
 //!
-//! This module provides signature structures that include additional metadata
-//! like timestamps and content hashes, suitable for auditable signing operations.
+//! These types keep the signature, signer, timestamp and content hash together
+//! so callers can store or transmit a self-describing signed payload.
 
 use crate::{
     error::CryptoError,
@@ -15,13 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use subtle::ConstantTimeEq;
 
-/// A complete signature that includes metadata
-///
-/// This structure includes:
-/// - The signer's public key
-/// - A timestamp of when the signature was created
-/// - A hash of the signed content
-/// - The cryptographic signature itself
+/// Signature metadata plus the signature bytes.
 #[derive(
     Debug,
     Clone,
@@ -36,47 +30,21 @@ use subtle::ConstantTimeEq;
     PartialOrd,
 )]
 pub struct Signature {
-    /// The public key of the signer
+    /// Public key of the signer.
     pub signer: PublicKey,
-    /// Timestamp when the signature was created
+    /// Creation timestamp.
     pub timestamp: TimeStamp,
-    /// Hash of the content that was signed
+    /// Hash of the serialized content and timestamp.
     pub content_hash: DigestIdentifier,
-    /// The cryptographic signature
+    /// Signature bytes.
     pub value: SignatureIdentifier,
 }
 
 impl Signature {
-    /// Create a new signature for the given content
+    /// Signs `content`.
     ///
-    /// This method:
-    /// 1. Captures the current timestamp
-    /// 2. Serializes the content together with the timestamp
-    /// 3. Hashes the serialized payload using Blake3
-    /// 4. Signs the hash with the provided signer
-    ///
-    /// The timestamp is included in the signed data to prevent replay attacks
-    /// and provide temporal context for the signature.
-    ///
-    /// # Arguments
-    /// * `content` - The content to sign (must implement BorshSerialize)
-    /// * `signer` - Any signer implementing the DSA trait
-    ///
-    /// # Example
-    /// ```
-    /// use ave_identity::signature::Signature;
-    /// use ave_identity::keys::Ed25519Signer;
-    /// use borsh::{BorshSerialize, BorshDeserialize};
-    ///
-    /// #[derive(BorshSerialize, BorshDeserialize)]
-    /// struct MyData {
-    ///     value: String,
-    /// }
-    ///
-    /// let signer = Ed25519Signer::generate().expect("Failed to generate signer");
-    /// let data = MyData { value: "test".to_string() };
-    /// let signature = Signature::new(&data, &signer).unwrap();
-    /// ```
+    /// The method serializes `(content, timestamp)` with Borsh, hashes the
+    /// result with Blake3 and signs that digest.
     pub fn new<T: BorshSerialize>(
         content: &T,
         signer: &dyn DSA,
@@ -112,13 +80,7 @@ impl Signature {
         })
     }
 
-    /// Verify the signature against the given content
-    ///
-    /// # Arguments
-    /// * `content` - The content to verify (must implement BorshSerialize)
-    ///
-    /// # Returns
-    /// `Ok(())` if the signature is valid, `Err(CryptoError)` otherwise
+    /// Verifies this signature against `content`.
     pub fn verify<T: BorshSerialize>(
         &self,
         content: &T,
@@ -147,10 +109,7 @@ impl Signature {
     }
 }
 
-/// A signed data structure that pairs content with its signature
-///
-/// This generic structure can wrap any type that implements BorshSerialize
-/// and BorshDeserialize, ensuring the data and its signature are kept together.
+/// Content bundled together with its signature metadata.
 #[derive(
     Debug,
     Clone,
@@ -166,38 +125,35 @@ pub struct Signed<T>
 where
     T: BorshSerialize + BorshDeserialize + Clone,
 {
-    /// The actual data content
+    /// Signed content.
     content: T,
-    /// The signature for this content
+    /// Signature metadata for `content`.
     signature: Signature,
 }
 
 impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
-    /// Create a new signed data structure
-    ///
-    /// # Arguments
-    /// * `content` - The content to sign
-    /// * `signer` - Any signer implementing the DSA trait
+    /// Signs `content` and stores the resulting metadata alongside it.
     pub fn new(content: T, signer: &dyn DSA) -> Result<Self, CryptoError> {
         let signature = Signature::new(&content, signer)?;
         Ok(Self { content, signature })
     }
 
-    /// Create from existing content and signature
+    /// Creates a signed value from pre-existing parts.
     pub const fn from_parts(content: T, signature: Signature) -> Self {
         Self { content, signature }
     }
 
-    /// Verify the signature matches the content
+    /// Verifies the stored content against the stored signature.
     pub fn verify(&self) -> Result<(), CryptoError> {
         self.signature.verify(&self.content)
     }
 
-    /// Get the signer's public key
+    /// Returns the signature metadata.
     pub const fn signature(&self) -> &Signature {
         &self.signature
     }
 
+    /// Returns the signed content.
     pub const fn content(&self) -> &T {
         &self.content
     }

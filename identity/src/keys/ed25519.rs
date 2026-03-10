@@ -1,4 +1,4 @@
-//! Ed25519 signature implementation with encrypted secret key storage
+//! Ed25519 signer backed by encrypted in-memory secret key storage.
 
 use crate::error::CryptoError;
 use ed25519_dalek::{Signer as Ed25519SignerTrait, SigningKey, VerifyingKey};
@@ -20,21 +20,15 @@ pub const ED25519_SECRET_KEY_LENGTH: usize = 32;
 /// Ed25519 signature length in bytes
 pub const ED25519_SIGNATURE_LENGTH: usize = 64;
 
-/// Ed25519 signer implementation with encrypted secret key storage
+/// Ed25519 signer.
 ///
-/// The secret key is stored encrypted in memory using the `memsecurity` crate,
-/// which provides encryption, automatic zeroization, and memory locking (mlock)
-/// for enhanced security.
-///
-/// The secret key is wrapped in an `Arc`, making cloning cheap and safe.
-/// Cloning only clones the reference, not the encrypted data, and the secret
-/// key is immutable after creation.
+/// The public key is always available. The secret key, when present, is kept in
+/// encrypted memory and is only decrypted for signing.
 #[derive(Default, Clone)]
 pub struct Ed25519Signer {
-    /// Public verifying key
+    /// Public verifying key.
     public_key: VerifyingKey,
-    /// Encrypted secret key (None for verification-only instances)
-    /// Wrapped in Arc to allow cheap cloning without duplicating sensitive data
+    /// Encrypted secret key, or `None` for verification-only instances.
     secret_key: Option<Arc<EncryptedMem>>,
 }
 
@@ -70,11 +64,7 @@ impl Ed25519Signer {
         Ok(Arc::new(encrypted))
     }
 
-    /// Generate a new random Ed25519 key pair
-    ///
-    /// # Errors
-    /// Returns an error if the system's random number generator is unavailable
-    /// or fails to provide sufficient entropy.
+    /// Generates a random Ed25519 signer.
     pub fn generate() -> Result<Self, CryptoError> {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).map_err(|e| {
@@ -86,28 +76,12 @@ impl Ed25519Signer {
         Self::from_seed(&seed)
     }
 
-    /// Derive keys from arbitrary data (will be hashed to 32 bytes)
+    /// Derives a deterministic signer from arbitrary bytes.
     ///
-    /// This method accepts data of any length and uses Blake3 to derive
-    /// a deterministic 32-byte seed for Ed25519 key generation.
+    /// The input is hashed with Blake3 and the resulting 32 bytes are used as
+    /// the Ed25519 seed. This is useful for reproducible keys.
     ///
-    /// **Important**: This function ALWAYS hashes the input, even if you provide
-    /// exactly 32 bytes. This means:
-    /// - `derive_from_data(&[x; 32])` will produce DIFFERENT keys than `from_seed(&[x; 32])`
-    /// - Use this for arbitrary-length data, passphrases, or when you want deterministic hashing
-    /// - Use `from_seed()` when you already have a properly-sized 32-byte seed
-    ///   that should be used directly without additional hashing
-    ///
-    /// # Errors
-    /// Returns an error if the data is empty or if the secret key encryption fails.
-    ///
-    /// # Example
-    /// ```
-    /// use ave_identity::keys::Ed25519Signer;
-    ///
-    /// // Derive from a passphrase
-    /// let signer = Ed25519Signer::derive_from_data(b"my secure passphrase").unwrap();
-    /// ```
+    /// This is not a password-hard KDF.
     pub fn derive_from_data(data: &[u8]) -> Result<Self, CryptoError> {
         // Reject empty data
         if data.is_empty() {
@@ -130,24 +104,9 @@ impl Ed25519Signer {
         Self::from_seed(&key_array)
     }
 
-    /// Create from a seed of exactly 32 bytes (no hashing)
+    /// Builds a signer from an exact 32-byte seed.
     ///
-    /// Use this when you already have a properly-sized 32-byte seed that should
-    /// be used directly as the Ed25519 secret key WITHOUT additional hashing.
-    ///
-    /// **Important**: This function does NOT hash the input. If you want deterministic
-    /// key derivation from arbitrary data or passphrases, use `derive_from_data()` instead.
-    ///
-    /// # Errors
-    /// Returns an error if the secret key encryption fails.
-    ///
-    /// # Example
-    /// ```
-    /// use ave_identity::keys::Ed25519Signer;
-    ///
-    /// let seed = [42u8; 32];
-    /// let signer = Ed25519Signer::from_seed(&seed).unwrap();
-    /// ```
+    /// Unlike [`Self::derive_from_data`], this method does not hash the input.
     pub fn from_seed(seed: &[u8; 32]) -> Result<Self, CryptoError> {
         // Seed length is guaranteed by type system (&[u8; 32])
         let signing_key = SigningKey::from_bytes(seed);
@@ -162,10 +121,7 @@ impl Ed25519Signer {
         })
     }
 
-    /// Create from secret key bytes (32 bytes)
-    ///
-    /// # Errors
-    /// Returns an error if the key length is invalid or encryption fails.
+    /// Builds a signer from 32 secret key bytes.
     pub fn from_secret_key(secret_key: &[u8]) -> Result<Self, CryptoError> {
         let key_bytes: [u8; 32] = secret_key.try_into().map_err(|_| {
             CryptoError::InvalidSecretKey(format!(
@@ -177,9 +133,7 @@ impl Ed25519Signer {
         Self::from_seed(&key_bytes)
     }
 
-    /// Create a verification-only instance from a public key
-    ///
-    /// This creates an Ed25519Signer that can only verify signatures, not create them.
+    /// Builds a verification-only signer from a public key.
     pub fn from_public_key(public_key: &[u8]) -> Result<Self, CryptoError> {
         if public_key.len() != ED25519_PUBLIC_KEY_LENGTH {
             return Err(CryptoError::InvalidPublicKey(format!(
@@ -201,15 +155,12 @@ impl Ed25519Signer {
         })
     }
 
-    /// Get the public key
+    /// Returns the public key.
     pub const fn public_key(&self) -> VerifyingKey {
         self.public_key
     }
 
-    /// Get the secret key bytes (decrypts from secure storage)
-    ///
-    /// # Errors
-    /// Returns an error if no secret key is available or decryption fails.
+    /// Returns the decrypted secret key bytes.
     pub fn secret_key_bytes(&self) -> Result<Vec<u8>, CryptoError> {
         self.decrypt_secret_bytes()
     }

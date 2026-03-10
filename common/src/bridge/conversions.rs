@@ -1,7 +1,4 @@
-//! Type conversions between Bridge API types and internal types
-//!
-//! This module provides trait-based conversions between the lightweight bridge types
-//! used for API communication and the internal types used for business logic.
+//! Conversions between bridge models and internal domain models.
 
 use std::str::FromStr;
 

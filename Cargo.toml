@@ -23,7 +23,7 @@ keywords = ["traceability", "distributed-ledger", "Averiun", "sustainability"]
 rust-version = "1.91.0"
 
 [workspace.dependencies]
-ave-identity = { path = "identity", version = "0.2.0" }
+ave-identity = { path = "identity", version = "0.3.0" }
 ave-common = { path = "common" }
 pkcs8 = { version = "0.10.2" }
 axum = { version = "0.8.8" }

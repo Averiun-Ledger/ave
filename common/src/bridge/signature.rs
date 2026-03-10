@@ -1,5 +1,4 @@
-//! Signature model.
-//!
+//! API representation of signed metadata.
 
 use crate::{
     error::SignatureError,
@@ -16,7 +15,7 @@ use utoipa::ToSchema;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
-/// Signature model for API communication
+/// Signature payload used by bridge requests and responses.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

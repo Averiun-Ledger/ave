@@ -1,6 +1,4 @@
-//! Request types for Ave API
-//!
-//! These types are used for communication with the Ave HTTP API
+//! Request and query types exposed by the Ave API.
 
 use std::fmt::Display;
 
@@ -16,6 +14,7 @@ use ts_rs::TS;
 #[cfg(feature = "openapi")]
 use utoipa::{IntoParams, ToSchema};
 
+/// Filters subjects by activity and schema.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -26,6 +25,7 @@ pub struct SubjectQuery {
     pub schema_id: Option<String>,
 }
 
+/// Filters governances by activity.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -35,6 +35,7 @@ pub struct GovQuery {
     pub active: Option<bool>,
 }
 
+/// Filters approvals by state.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -44,6 +45,7 @@ pub struct ApprovalQuery {
     pub state: Option<ApprovalState>,
 }
 
+/// Pagination and time filters for event queries.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -62,6 +64,7 @@ pub struct EventsQuery {
     pub event_type: Option<EventRequestType>,
 }
 
+/// Pagination filters for abort queries.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -75,6 +78,7 @@ pub struct AbortsQuery {
     pub reverse: Option<bool>,
 }
 
+/// Query for retrieving the first or last events of a subject.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
@@ -86,6 +90,7 @@ pub struct FirstEndEvents {
     pub event_type: Option<EventRequestType>,
 }
 
+/// Event request type used by API filters and responses.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -190,7 +195,7 @@ impl Display for ApprovalState {
     }
 }
 
-/// Signed event request
+/// API event request plus optional signature metadata.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -202,7 +207,7 @@ pub struct BridgeSignedEventRequest {
     pub signature: Option<BridgeSignature>,
 }
 
-/// Event request
+/// Event request payload received or returned by the API.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

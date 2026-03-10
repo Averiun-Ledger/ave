@@ -1,16 +1,11 @@
-//! Error types for Ave Common
-//!
-//! This module provides error types for common operations including:
-//! - Bridge API conversions
-//! - Signature parsing
-//! - General operations
+//! Error types used by `ave-common`.
 
 use thiserror::Error;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
-/// Error type for conversion failures between Bridge API types and internal types.
+/// Errors returned when converting bridge payloads into internal types.
 #[derive(Debug, Clone, Error)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum ConversionError {
@@ -36,7 +31,7 @@ pub enum ConversionError {
     MissingNamespace,
 }
 
-/// Error type for signature parsing failures.
+/// Errors returned when decoding API-facing signatures.
 #[derive(Debug, Clone, Error)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum SignatureError {
@@ -50,7 +45,7 @@ pub enum SignatureError {
     InvalidContentHash(String),
 }
 
-/// General error type for Ave Common operations.
+/// Top-level error type for this crate.
 #[derive(Error, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub enum Error {

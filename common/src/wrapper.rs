@@ -1,3 +1,5 @@
+//! JSON value wrapper with bounded Borsh serialization.
+
 use std::{
     io::{Read, Write},
     ops::Deref,
@@ -14,20 +16,10 @@ const MAX_RECURSION_DEPTH: usize = 128;
 // Maximum array/object length to prevent memory exhaustion
 const MAX_COLLECTION_SIZE: u32 = 100_000;
 
-/// Wrapper for `serde_json::Value` that implements `BorshSerialize` and `BorshDeserialize`.
+/// `serde_json::Value` with Borsh support and basic decoding limits.
 ///
-/// This type bridges the gap between JSON-based state/event representations and the
-/// efficient Borsh binary serialization format used for WASM boundary crossings.
-/// It allows contract states and events (which are JSON-compatible) to be efficiently
-/// transferred between the WASM module and the host runtime.
-///
-/// The wrapper handles all JSON value types:
-/// - Bool: Boolean values
-/// - Number: Numeric values (f64, i64, u64)
-/// - String: Text values
-/// - Array: Ordered collections of values
-/// - Object: Key-value maps
-/// - Null: Null values
+/// This wrapper is used when Ave payloads need to cross Borsh-based boundaries
+/// without losing their JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct ValueWrapper(pub Value);
 
@@ -45,16 +37,7 @@ impl Default for ValueWrapper {
     }
 }
 
-/// Borsh serialization implementation for `ValueWrapper`.
-///
-/// Serializes JSON values into an efficient binary format using type tags.
-/// Each JSON type is prefixed with a discriminator byte to identify its type:
-/// - 0: Boolean
-/// - 1: Number (with sub-discriminator for f64=0, i64=1, u64=2)
-/// - 2: String
-/// - 3: Array
-/// - 4: Object
-/// - 5: Null
+/// Serializes JSON values with explicit type tags.
 impl BorshSerialize for ValueWrapper {
     #[inline]
     fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -150,23 +133,8 @@ impl BorshSerialize for ValueWrapper {
     }
 }
 
-/// Borsh deserialization implementation for `ValueWrapper`.
-///
-/// Deserializes binary Borsh data back into JSON values by reading type discriminators
-/// and reconstructing the appropriate JSON value type. This is the inverse of the
-/// serialization process.
-///
-/// The type tags used are:
-/// - 0: Boolean
-/// - 1: Number (with sub-discriminator for f64=0, i64=1, u64=2)
-/// - 2: String
-/// - 3: Array
-/// - 4: Object
-/// - 5: Null
 impl ValueWrapper {
     /// Internal deserialization with recursion depth tracking.
-    ///
-    /// This prevents stack overflow attacks from deeply nested structures.
     fn deserialize_reader_with_depth<R: Read>(
         reader: &mut R,
         depth: usize,

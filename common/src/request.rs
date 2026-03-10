@@ -1,10 +1,15 @@
+//! Ledger event request types.
+//!
+//! These structures describe the input accepted by the core ledger flow before
+//! it is wrapped in transport-specific formats.
+
 use ave_identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{Namespace, SchemaType, ValueWrapper};
 
-/// An enum representing a Ave Ledger event request.
+/// Event request accepted by the ledger.
 #[derive(
     Debug,
     Clone,
@@ -16,21 +21,22 @@ use crate::{Namespace, SchemaType, ValueWrapper};
     BorshDeserialize,
 )]
 pub enum EventRequest {
-    /// A request to create a new subject.
+    /// Creates a new subject.
     Create(CreateRequest),
-    /// A request to add a fact to a subject.
+    /// Appends a fact to an existing subject.
     Fact(FactRequest),
-    /// A request to transfer ownership of a subject.
+    /// Transfers subject ownership.
     Transfer(TransferRequest),
-
+    /// Confirms a transfer.
     Confirm(ConfirmRequest),
-
+    /// Rejects a transfer.
     Reject(RejectRequest),
-    /// A request to mark a subject as end-of-life.
+    /// Marks a subject as end-of-life.
     EOL(EOLRequest),
 }
 
 impl EventRequest {
+    /// Returns `true` when `signer` is allowed to sign this request.
     pub fn check_request_signature(
         &self,
         signer: &PublicKey,
@@ -48,13 +54,20 @@ impl EventRequest {
         }
     }
 
+    /// Returns `true` when the request is a `Create`.
     pub const fn is_create_event(&self) -> bool {
         matches!(self, Self::Create(_create_request))
     }
+
+    /// Returns `true` when the request is a `Fact`.
     pub const fn is_fact_event(&self) -> bool {
         matches!(self, Self::Fact(_fact_request))
     }
 
+    /// Returns the subject identifier affected by the request.
+    ///
+    /// `Create` requests do not have a subject id yet, so they return the empty
+    /// digest placeholder used by the rest of the workspace.
     pub fn get_subject_id(&self) -> DigestIdentifier {
         match self {
             Self::Create(_create_request) => DigestIdentifier::default(),
@@ -71,7 +84,7 @@ impl EventRequest {
     }
 }
 
-/// A struct representing a request to create a new subject.
+/// Payload for a `Create` event.
 #[derive(
     Debug,
     Clone,
@@ -83,19 +96,19 @@ impl EventRequest {
     BorshDeserialize,
 )]
 pub struct CreateRequest {
-    /// The name of subject.
+    /// Optional subject name.
     pub name: Option<String>,
-    /// The description of subject.
+    /// Optional subject description.
     pub description: Option<String>,
-    /// The identifier of the governance contract.
+    /// Governance identifier.
     pub governance_id: DigestIdentifier,
-    /// The identifier of the schema used to validate the event.
+    /// Schema used to validate the initial state.
     pub schema_id: SchemaType,
-    /// The namespace of the subject.
+    /// Subject namespace.
     pub namespace: Namespace,
 }
 
-/// A struct representing a request to add a fact to a subject.
+/// Payload for a `Fact` event.
 #[derive(
     Debug,
     Clone,
@@ -107,13 +120,13 @@ pub struct CreateRequest {
     BorshDeserialize,
 )]
 pub struct FactRequest {
-    /// The identifier of the subject to which the fact will be added.
+    /// Subject identifier.
     pub subject_id: DigestIdentifier,
-    /// The payload of the fact to be added.
+    /// JSON payload to append to the subject state.
     pub payload: ValueWrapper,
 }
 
-/// A struct representing a request to transfer ownership of a subject.
+/// Payload for a `Transfer` event.
 #[derive(
     Debug,
     Clone,
@@ -125,13 +138,13 @@ pub struct FactRequest {
     BorshDeserialize,
 )]
 pub struct TransferRequest {
-    /// The identifier of the subject to transfer ownership of.
+    /// Subject identifier.
     pub subject_id: DigestIdentifier,
-    /// The identifier of the public key of the new owner.
+    /// Public key of the new owner.
     pub new_owner: PublicKey,
 }
 
-/// A struct representing a request to transfer ownership of a subject.
+/// Payload for a `Confirm` event.
 #[derive(
     Debug,
     Clone,
@@ -144,11 +157,11 @@ pub struct TransferRequest {
 )]
 pub struct ConfirmRequest {
     pub subject_id: DigestIdentifier,
-    /// The new name of old owner, only for governance confirm, if is None in governance confirm, old owner will not add to members
+    /// Optional name for the previous owner in governance updates.
     pub name_old_owner: Option<String>,
 }
 
-/// A struct representing a request to mark a subject as end-of-life.
+/// Payload for an `EOL` event.
 #[derive(
     Debug,
     Clone,
@@ -160,10 +173,11 @@ pub struct ConfirmRequest {
     BorshDeserialize,
 )]
 pub struct EOLRequest {
-    /// The identifier of the subject to mark as end-of-life.
+    /// Subject identifier.
     pub subject_id: DigestIdentifier,
 }
 
+/// Payload for a `Reject` event.
 #[derive(
     Debug,
     Clone,

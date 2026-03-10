@@ -1,41 +1,12 @@
-//! Cryptographic keys and digital signatures with algorithm identification
+//! Key and signature primitives.
 //!
-//! This module provides a generic interface for digital signature algorithms with automatic
-//! algorithm identification via 1-byte prefixes.
+//! The public API is split in two layers:
+//! - [`KeyPair`] for an algorithm-agnostic entry point
+//! - concrete implementations such as [`Ed25519Signer`] when you want the
+//!   algorithm explicitly
 //!
-//! ## Example
-//!
-//! ```rust
-//! use ave_identity::keys::{KeyPair, KeyPairAlgorithm, DSA};
-//!
-//! // Generate a key pair (algorithm-agnostic)
-//! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).expect("Failed to generate key pair");
-//!
-//! let message = b"Hello, World!";
-//!
-//! // Sign message using generic interface
-//! let signature = keypair.sign(message).unwrap();
-//!
-//! // Convert to string (includes algorithm identifier)
-//! let sig_str = signature.to_string();
-//!
-//! // Get public key
-//! let public_key = keypair.public_key();
-//!
-//! // Verify signature
-//! assert!(public_key.verify(message, &signature).is_ok());
-//! ```
-//!
-//! ## Direct Algorithm Usage
-//!
-//! You can also use specific algorithm implementations directly:
-//!
-//! ```rust
-//! use ave_identity::keys::{DSA, Ed25519Signer};
-//!
-//! let signer = Ed25519Signer::generate().unwrap();
-//! let signature = signer.sign(b"message").unwrap();
-//! ```
+//! Public keys and signatures carry a one-byte algorithm identifier so they can
+//! be serialized and parsed without extra metadata.
 
 use crate::error::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -57,25 +28,25 @@ pub use keypair::{KeyPair, KeyPairAlgorithm};
 pub use public_key::PublicKey;
 pub use signature_identifier::SignatureIdentifier;
 
-/// Trait for digital signature algorithms with algorithm identification
+/// Common interface for supported signature algorithms.
 pub trait DSA {
-    /// Get the algorithm identifier (1 byte)
+    /// Returns the one-byte identifier for this algorithm.
     fn algorithm_id(&self) -> u8;
 
-    /// Get the expected signature length in bytes (excluding identifier)
+    /// Returns the signature length, excluding the identifier byte.
     fn signature_length(&self) -> usize;
 
-    /// Sign the message
+    /// Signs `message`.
     fn sign(&self, message: &[u8]) -> Result<SignatureIdentifier, CryptoError>;
 
-    /// Get the algorithm enum variant
+    /// Returns the enum variant for this algorithm.
     fn algorithm(&self) -> DSAlgorithm;
 
-    /// Get the public key bytes
+    /// Returns the raw public key bytes.
     fn public_key_bytes(&self) -> Vec<u8>;
 }
 
-/// Enumeration of supported digital signature algorithms
+/// Digital signature algorithms supported by this crate.
 #[derive(
     Debug,
     Clone,
@@ -95,28 +66,28 @@ pub enum DSAlgorithm {
 }
 
 impl DSAlgorithm {
-    /// Get the 1-byte identifier for this algorithm
+    /// Returns the one-byte identifier for this algorithm.
     pub const fn identifier(&self) -> u8 {
         match self {
             Self::Ed25519 => ED25519_ID,
         }
     }
 
-    /// Get the signature length for this algorithm (excluding identifier)
+    /// Returns the signature length, excluding the identifier byte.
     pub const fn signature_length(&self) -> usize {
         match self {
             Self::Ed25519 => ED25519_SIGNATURE_LENGTH,
         }
     }
 
-    /// Get the public key length for this algorithm
+    /// Returns the public key length for this algorithm.
     pub const fn public_key_length(&self) -> usize {
         match self {
             Self::Ed25519 => ED25519_PUBLIC_KEY_LENGTH,
         }
     }
 
-    /// Parse algorithm from 1-byte identifier
+    /// Parses an algorithm from its one-byte identifier.
     pub fn from_identifier(id: u8) -> Result<Self, CryptoError> {
         match id {
             ED25519_ID => Ok(Self::Ed25519),

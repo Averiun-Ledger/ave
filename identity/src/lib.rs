@@ -1,38 +1,27 @@
-//! # Crypto Module
+//! Cryptographic primitives used by Ave.
 //!
-//! A generic cryptographic module with algorithm identification via single-letter prefixes
-//! and secure key storage using encrypted memory.
+//! The crate exposes:
+//! - hashes with algorithm identifiers
+//! - Ed25519 key generation, signing and verification
+//! - signed payloads with timestamp and content hash
+//! - compact string formats for hashes, public keys and signatures
 //!
-//! This module provides generic traits for hash functions and digital signatures,
-//! with each algorithm identified by a unique 1-byte (single letter) prefix.
+//! Current identifiers:
+//! - `B`: Blake3 digest
+//! - `E`: Ed25519 key or signature
 //!
-//! ## Design
+//! Secret keys are kept in encrypted memory through `memsecurity` and are
+//! decrypted only when a signing operation needs them.
 //!
-//! - Each algorithm has a 1-byte identifier (e.g., 'B' for Blake3)
-//! - The identifier is prepended to the output (hash or signature)
-//! - When parsing from Base64 strings, the first character identifies the algorithm
-//! - Generic traits allow easy addition of new algorithms
-//! - Private keys are stored encrypted in memory using `memsecurity` crate
+//! ```rust
+//! use ave_identity::{BLAKE3_HASHER, Hash, KeyPair, KeyPairAlgorithm};
 //!
-//! ## Security Features
+//! let keypair = KeyPair::generate(KeyPairAlgorithm::Ed25519).unwrap();
+//! let digest = BLAKE3_HASHER.hash(b"hello");
+//! let signature = keypair.sign(digest.hash_bytes()).unwrap();
 //!
-//! - **Encrypted storage**: Private keys are encrypted using ASCON AEAD
-//! - **Automatic zeroization**: Memory is cleared when keys are dropped
-//! - **Memory locking**: Keys are locked in RAM (mlock) to prevent swap
-//! - **Temporary decryption**: Keys are only decrypted during signing operations
-//!
-//! ## Currently Supported Algorithms
-//!
-//! - **Hash**: Blake3 (32 bytes) with identifier 'B'
-//! - **Signature**: Ed25519 with identifier 'E'
-//!
-//! ## Modules
-//!
-//! - [`hash`]: Hash functions with algorithm identification
-//! - [`keys`]: Digital signature algorithms and key management
-//! - [`signature`]: High-level signature structures with metadata
-//! - [`timestamp`]: Timestamp utilities for signatures
-//! - [`error`]: Error types for cryptographic operations
+//! assert!(keypair.public_key().verify(digest.hash_bytes(), &signature).is_ok());
+//! ```
 
 mod common;
 pub mod error;
