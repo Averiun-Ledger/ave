@@ -184,6 +184,12 @@ impl AuthDatabase {
         conn.execute_batch(migration_002).map_err(|e| {
             DatabaseError::Migration(format!("migration 002 failed: {}", e))
         })?;
+
+        let migration_003 =
+            include_str!("../../migrations/003_usage_plans.sql");
+        conn.execute_batch(migration_003).map_err(|e| {
+            DatabaseError::Migration(format!("migration 003 failed: {}", e))
+        })?;
         drop(conn);
 
         info!(target: TARGET, "database migrations completed");

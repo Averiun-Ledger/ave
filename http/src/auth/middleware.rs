@@ -4,7 +4,7 @@
 
 use crate::auth::middleware::uuid::Uuid;
 
-use super::database::AuthDatabase;
+use super::database::{AuthDatabase, DatabaseError};
 use super::models::{AuthContext, ErrorResponse};
 use axum::{
     Json,
@@ -137,6 +137,45 @@ where
                 }),
             )
         })?;
+
+        // Optional monthly quota per API key.
+        // Backward-compatible: keys without a plan remain unlimited.
+        if !auth_ctx.is_management_key {
+            db.consume_monthly_quota(&auth_ctx.api_key_id).map_err(
+                |e| match e {
+                    DatabaseError::RateLimitExceeded(message) => {
+                        warn!(
+                            target: TARGET,
+                            key_id = %auth_ctx.api_key_id,
+                            ip = ?ip_address,
+                            error = %message,
+                            "monthly quota exceeded"
+                        );
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(ErrorResponse { error: message }),
+                        )
+                    }
+                    other => {
+                        error!(
+                            target: TARGET,
+                            key_id = %auth_ctx.api_key_id,
+                            ip = ?ip_address,
+                            error = %other,
+                            "monthly quota check failed"
+                        );
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error:
+                                    "Internal error while checking monthly quota"
+                                        .to_string(),
+                            }),
+                        )
+                    }
+                },
+            )?;
+        }
 
         // Store auth context in request extensions for later use
         parts.extensions.insert(Arc::new(auth_ctx));

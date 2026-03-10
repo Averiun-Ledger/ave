@@ -3,15 +3,18 @@ use crate::server::{self};
 use crate::{
     auth::{
         admin_handlers::{self, ListUsersQuery, ResetPasswordRequest},
-        apikey_handlers::{self, ListApiKeysQuery},
+        apikey_handlers::{self, ListApiKeysQuery, QuotaStatusQuery},
         login_handler::{self, ChangePasswordRequest},
         models::{
-            Action, ApiKeyInfo, AuditLog, AuditLogQuery, CreateApiKeyRequest,
-            CreateApiKeyResponse, CreateRoleRequest, CreateUserRequest,
-            ErrorResponse, LoginRequest, LoginResponse, Permission, Resource,
-            RevokeApiKeyRequest, Role, RoleInfo, RotateApiKeyRequest,
+            Action, ApiKeyInfo, ApiKeyQuotaStatus, AssignApiKeyPlanRequest,
+            AuditLog, AuditLogQuery, CreateApiKeyRequest, CreateApiKeyResponse,
+            CreateQuotaExtensionRequest, CreateRoleRequest,
+            CreateUsagePlanRequest, CreateUserRequest, ErrorResponse,
+            LoginRequest, LoginResponse, Permission, QuotaExtensionInfo,
+            Resource, RevokeApiKeyRequest, Role, RoleInfo, RotateApiKeyRequest,
             SetPermissionRequest, SystemConfig, UpdateRoleRequest,
-            UpdateSystemConfigRequest, UpdateUserRequest, UserInfo,
+            UpdateSystemConfigRequest, UpdateUsagePlanRequest,
+            UpdateUserRequest, UsagePlan, UserInfo,
         },
         system_handlers::{
             self, AuditStatsQuery, DetailedPermissionsResponse,
@@ -167,6 +170,14 @@ impl Modify for SecurityAddon {
         apikey_handlers::get_api_key,
         apikey_handlers::revoke_api_key,
         apikey_handlers::rotate_api_key,
+        apikey_handlers::assign_api_key_plan,
+        apikey_handlers::get_api_key_quota_status,
+        apikey_handlers::add_api_key_quota_extension,
+        apikey_handlers::create_usage_plan,
+        apikey_handlers::list_usage_plans,
+        apikey_handlers::get_usage_plan,
+        apikey_handlers::update_usage_plan,
+        apikey_handlers::delete_usage_plan,
 
         // ── My Account ──────────────────────────────────────────
         apikey_handlers::create_my_api_key,
@@ -223,6 +234,14 @@ impl Modify for SecurityAddon {
             RotateApiKeyRequest,
             RevokeApiKeyRequest,
             ListApiKeysQuery,
+            AssignApiKeyPlanRequest,
+            CreateQuotaExtensionRequest,
+            QuotaExtensionInfo,
+            ApiKeyQuotaStatus,
+            UsagePlan,
+            CreateUsagePlanRequest,
+            UpdateUsagePlanRequest,
+            QuotaStatusQuery,
 
             // ── Audit & system ──────────────────────────────────
             AuditLog,

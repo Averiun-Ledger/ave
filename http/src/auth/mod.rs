@@ -13,6 +13,7 @@ pub mod database;
 mod database_apikeys;
 pub mod database_audit;
 mod database_ext;
+mod database_quota;
 pub mod middleware;
 pub mod models;
 

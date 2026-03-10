@@ -592,6 +592,138 @@ async fn test_apply_ttl_to_legacy_api_keys() {
     assert_eq!(info.expires_at, Some(info.created_at + 100));
 }
 
+#[test(tokio::test)]
+async fn test_api_key_without_plan_has_unlimited_monthly_quota() {
+    let (db, _dirs) = create_test_db();
+
+    let user = db
+        .create_user("quota_unlimited", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("no_plan"), None, None, false)
+        .unwrap();
+
+    for _ in 0..550 {
+        db.consume_monthly_quota(&key_info.id).unwrap();
+    }
+
+    let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
+    assert!(!status.has_quota);
+    assert!(status.plan_id.is_none());
+    assert!(status.effective_limit.is_none());
+    assert_eq!(status.used_events, 550);
+}
+
+#[test(tokio::test)]
+async fn test_monthly_quota_enforced_when_plan_assigned() {
+    let (db, _dirs) = create_test_db();
+
+    let user = db
+        .create_user("quota_limited", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("with_plan"), None, None, false)
+        .unwrap();
+
+    db.create_usage_plan("basic", "Basic", None, 2).unwrap();
+    db.assign_api_key_plan(&key_info.id, Some("basic"), Some(1))
+        .unwrap();
+
+    db.consume_monthly_quota(&key_info.id).unwrap();
+    db.consume_monthly_quota(&key_info.id).unwrap();
+
+    let third = db.consume_monthly_quota(&key_info.id);
+    assert!(matches!(third, Err(DatabaseError::RateLimitExceeded(_))));
+
+    let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
+    assert!(status.has_quota);
+    assert_eq!(status.plan_id.as_deref(), Some("basic"));
+    assert_eq!(status.effective_limit, Some(2));
+    assert_eq!(status.used_events, 2);
+    assert_eq!(status.remaining_events, Some(0));
+}
+
+#[test(tokio::test)]
+async fn test_quota_extension_adds_capacity() {
+    let (db, _dirs) = create_test_db();
+
+    let user = db
+        .create_user("quota_extension", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("ext_plan"), None, None, false)
+        .unwrap();
+
+    db.create_usage_plan("starter", "Starter", None, 2).unwrap();
+    db.assign_api_key_plan(&key_info.id, Some("starter"), Some(1))
+        .unwrap();
+
+    db.consume_monthly_quota(&key_info.id).unwrap();
+    db.consume_monthly_quota(&key_info.id).unwrap();
+    assert!(matches!(
+        db.consume_monthly_quota(&key_info.id),
+        Err(DatabaseError::RateLimitExceeded(_))
+    ));
+
+    db.add_quota_extension(
+        &key_info.id,
+        500,
+        None,
+        Some("manual extension"),
+        Some(1),
+    )
+    .unwrap();
+
+    db.consume_monthly_quota(&key_info.id).unwrap();
+    let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
+    assert_eq!(status.plan_limit, Some(2));
+    assert_eq!(status.extensions_total, 500);
+    assert_eq!(status.effective_limit, Some(502));
+    assert_eq!(status.used_events, 3);
+}
+
+#[test(tokio::test)]
+async fn test_cannot_assign_plan_to_management_key() {
+    let (db, _dirs) = create_test_db();
+
+    let user = db
+        .create_user("quota_mgmt_plan", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, mgmt_key_info) = db
+        .create_api_key(user.id, Some("mgmt_key"), None, None, true)
+        .unwrap();
+
+    db.create_usage_plan("mgmt_test", "Mgmt test", None, 10)
+        .unwrap();
+
+    let result =
+        db.assign_api_key_plan(&mgmt_key_info.id, Some("mgmt_test"), Some(1));
+    assert!(matches!(result, Err(DatabaseError::Validation(_))));
+}
+
+#[test(tokio::test)]
+async fn test_management_key_does_not_consume_monthly_quota() {
+    let (db, _dirs) = create_test_db();
+
+    let user = db
+        .create_user("quota_mgmt_skip", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, mgmt_key_info) = db
+        .create_api_key(user.id, Some("mgmt_key2"), None, None, true)
+        .unwrap();
+
+    for _ in 0..20 {
+        db.consume_monthly_quota(&mgmt_key_info.id).unwrap();
+    }
+
+    let status = db
+        .get_api_key_quota_status(&mgmt_key_info.id, None)
+        .unwrap();
+    assert!(!status.has_quota);
+    assert!(status.plan_id.is_none());
+    assert_eq!(status.used_events, 0);
+}
+
 // =============================================================================
 // PERMISSION TESTS
 // =============================================================================
