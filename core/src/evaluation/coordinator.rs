@@ -52,6 +52,7 @@ impl EvalCoordinator {
 
 #[derive(Debug, Clone)]
 pub enum EvalCoordinatorMessage {
+    EndRetry,
     NetworkEvaluation {
         evaluation_req: Box<Signed<EvaluationReq>>,
         node_key: PublicKey,
@@ -91,6 +92,47 @@ impl Handler<Self> for EvalCoordinator {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
+            EvalCoordinatorMessage::EndRetry => {
+                debug!(
+                    node_key = %self.node_key,
+                    "Retry exhausted, notifying parent and stopping"
+                );
+
+                match ctx.get_parent::<Evaluation>().await {
+                    Ok(evaluation_actor) => {
+                        if let Err(e) = evaluation_actor
+                            .tell(EvaluationMessage::Response {
+                                evaluation_res: EvaluationRes::TimeOut,
+                                signature: None,
+                                sender: self.node_key.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to evaluation actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                request_id = %self.request_id,
+                                version = self.version,
+                                "Timeout response sent to evaluation actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            path = %ctx.path().parent(),
+                            "Evaluation actor not found"
+                        );
+                        emit_fail(ctx, e).await;
+                    }
+                }
+
+                ctx.stop(None).await;
+            }
             EvalCoordinatorMessage::NetworkEvaluation {
                 evaluation_req,
                 node_key,
@@ -134,7 +176,13 @@ impl Handler<Self> for EvalCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(60)),
                 );
 
-                let retry_actor = RetryActor::new(target, message, strategy);
+                let retry_actor =
+                    RetryActor::new_with_parent_message::<Self>(
+                        target,
+                        message,
+                        strategy,
+                        EvalCoordinatorMessage::EndRetry,
+                    );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(
@@ -284,54 +332,6 @@ impl Handler<Self> for EvalCoordinator {
         }
 
         Ok(())
-    }
-
-    async fn on_child_error(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) {
-        match error {
-            ActorError::Retry => {
-                match ctx.get_parent::<Evaluation>().await {
-                    Ok(evaluation_actor) => {
-                        if let Err(e) = evaluation_actor
-                            .tell(EvaluationMessage::Response {
-                                evaluation_res: EvaluationRes::TimeOut,
-                                signature: None,
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            error!(
-                                error = %e,
-                                "Failed to send timeout response to evaluation actor"
-                            );
-                            emit_fail(ctx, e).await;
-                        } else {
-                            debug!(
-                                request_id = %self.request_id,
-                                version = self.version,
-                                "Timeout response sent to evaluation actor"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
-                            path = %ctx.path().parent(),
-                            "Evaluation actor not found"
-                        );
-                        emit_fail(ctx, e).await;
-                    }
-                }
-
-                ctx.stop(None).await;
-            }
-            _ => {
-                error!(error = %error, "Unexpected child error");
-            }
-        };
     }
 
     async fn on_child_fault(

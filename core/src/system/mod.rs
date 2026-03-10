@@ -65,7 +65,7 @@ pub async fn system(
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
     // Build database manager.
-    let db = Database::open(&config.internal_db, actor_spec)
+    let mut db = Database::open(&config.internal_db, actor_spec)
         .map_err(|e| SystemError::DatabaseOpen(e.to_string()))?;
     system.add_helper("store", db.clone()).await;
 

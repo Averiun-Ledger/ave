@@ -498,14 +498,7 @@ where
     A::Event: BorshSerialize + BorshDeserialize,
 {
     let store = ctx.get_child::<Store<A>>("store").await?;
-    let response = store.ask(StoreCommand::Purge).await?;
-
-    if let StoreResponse::Error(e) = response {
-        return Err(ActorError::StoreOperation {
-            operation: "purge".to_string(),
-            reason: e.to_string(),
-        });
-    };
+    let _response = store.ask(StoreCommand::Purge).await?;
 
     Ok(())
 }
@@ -522,9 +515,6 @@ where
 
     match response {
         StoreResponse::LastEvent(event) => Ok(event),
-        StoreResponse::Error(e) => Err(ActorError::FunctionalCritical {
-            description: e.to_string(),
-        }),
         _ => Err(ActorError::UnexpectedResponse {
             path: ActorPath::from(format!("{}/store", ctx.path())),
             expected: "StoreResponse::LastEvent".to_owned(),
@@ -551,9 +541,6 @@ where
 
     match response {
         StoreResponse::Events(events) => Ok(events),
-        StoreResponse::Error(e) => Err(ActorError::FunctionalCritical {
-            description: e.to_string(),
-        }),
         _ => Err(ActorError::UnexpectedResponse {
             path: ActorPath::from(format!("{}/store", ctx.path())),
             expected: "StoreResponse::Events".to_owned(),

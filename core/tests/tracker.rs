@@ -4,7 +4,7 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
-    identity::{KeyPair, PublicKey, keys::Ed25519Signer},
+    identity::{HashAlgorithm, KeyPair, PublicKey, hash_borsh, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
 };

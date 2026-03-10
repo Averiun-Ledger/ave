@@ -29,6 +29,8 @@ pub enum DataToSinkEvent {
         schema_id: SchemaType,
         namespace: String,
         sn: u64,
+        gov_version:u64,
+        state: Value
     },
     Fact {
         governance_id: Option<String>,
@@ -37,7 +39,9 @@ pub enum DataToSinkEvent {
         issuer: String,
         owner: String,
         payload: Value,
+        patch: Value,
         sn: u64,
+        gov_version:u64
     },
     Transfer {
         governance_id: Option<String>,
@@ -46,24 +50,29 @@ pub enum DataToSinkEvent {
         owner: String,
         new_owner: String,
         sn: u64,
+        gov_version:u64
     },
     Confirm {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
+        patch:Option<Value>,
+        gov_version:u64
     },
     Reject {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
+        gov_version:u64
     },
     Eol {
         governance_id: Option<String>,
         subject_id: String,
         schema_id: SchemaType,
         sn: u64,
+        gov_version:u64
     },
 }
 

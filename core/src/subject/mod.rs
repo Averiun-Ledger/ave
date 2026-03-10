@@ -42,6 +42,7 @@ use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sinkdata::{SinkData, SinkDataMessage};
 use tracing::{debug, error};
 
@@ -170,6 +171,38 @@ pub struct DataForSink {
     pub issuer: String,
     pub event_request_timestamp: u64,
     pub event_ledger_timestamp: u64,
+    pub gov_version: u64,
+    pub event_data_ledger: EventLedgerDataForSink
+}
+
+
+
+pub enum EventLedgerDataForSink {
+    Create{
+        state: Value
+    },
+    Fact {
+        patch: Value
+    },
+    Confirm {
+        patch: Option<Value>
+    },
+    Other
+}
+
+impl EventLedgerDataForSink {
+    pub fn build(protocols: &Protocols, state: &Value) -> Self {
+        match protocols {
+            Protocols::Create { .. } => Self::Create { state: state.clone() },
+            Protocols::TrackerFact { evaluation, .. }
+            | Protocols::GovFact { evaluation, .. } => Self::Fact { patch: evaluation.evaluator_res().expect("event is valid").patch.0},
+            Protocols::Transfer { .. }
+            | Protocols::Reject { .. } 
+            | Protocols::EOL { .. } => Self::Other,
+            Protocols::TrackerConfirm { .. } => Self::Confirm { patch: None },
+            Protocols::GovConfirm { evaluation, .. } => Self::Confirm { patch: Some(evaluation.evaluator_res().expect("event is valid").patch.0) },
+        }
+    }
 }
 
 #[derive(
@@ -752,16 +785,18 @@ where
         data: DataForSink,
         event: &EventRequest,
     ) -> Result<(), ActorError> {
-        let event = match event {
-            EventRequest::Create(..) => DataToSinkEvent::Create {
+        let event = match (event, data.event_data_ledger) {
+            (EventRequest::Create(..), EventLedgerDataForSink::Create { state }) => DataToSinkEvent::Create {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 owner: data.owner,
                 schema_id: data.schema_id,
                 namespace: data.namespace.to_string(),
                 sn: data.sn,
+                gov_version: data.gov_version,
+                state
             },
-            EventRequest::Fact(fact_request) => DataToSinkEvent::Fact {
+            (EventRequest::Fact(fact_request), EventLedgerDataForSink::Fact { patch } )=> DataToSinkEvent::Fact {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 issuer: data.issuer.to_string(),
@@ -769,8 +804,10 @@ where
                 payload: fact_request.payload.0.clone(),
                 schema_id: data.schema_id,
                 sn: data.sn,
+                gov_version: data.gov_version,
+                patch
             },
-            EventRequest::Transfer(transfer_request) => {
+            (EventRequest::Transfer(transfer_request), EventLedgerDataForSink::Other) => {
                 DataToSinkEvent::Transfer {
                     governance_id: data.gov_id,
                     subject_id: data.subject_id,
@@ -778,30 +815,36 @@ where
                     new_owner: transfer_request.new_owner.to_string(),
                     schema_id: data.schema_id,
                     sn: data.sn,
+                    gov_version: data.gov_version
                 }
             }
-            EventRequest::Confirm(..) => DataToSinkEvent::Confirm {
+            (EventRequest::Confirm(..), EventLedgerDataForSink::Confirm { patch }) => DataToSinkEvent::Confirm {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
+                gov_version: data.gov_version,
+                patch
             },
-            EventRequest::Reject(..) => DataToSinkEvent::Reject {
+            (EventRequest::Reject(..), EventLedgerDataForSink::Other) => DataToSinkEvent::Reject {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
+                gov_version: data.gov_version
             },
-            EventRequest::EOL(..) => DataToSinkEvent::Eol {
+            (EventRequest::EOL(..) , EventLedgerDataForSink::Other)=> DataToSinkEvent::Eol {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
+                gov_version: data.gov_version
             },
+            _ => {unreachable!("EventLedgerDataForSink is created according to protocols and protocols according to EventRequest")}
         };
 
         let msg = SinkDataMessage::Event {
-            event,
+            event: Box::new(event),
             event_request_timestamp: data.event_request_timestamp,
             event_ledger_timestamp: data.event_ledger_timestamp,
         };

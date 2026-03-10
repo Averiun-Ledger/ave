@@ -62,6 +62,7 @@ pub struct InitApprLight {
 
 #[derive(Debug, Clone)]
 pub enum ApprLightMessage {
+    EndRetry,
     // Lanza los retries y envía la petición a la network(exponencial)
     NetworkApproval {
         approval_req: Signed<ApprovalReq>,
@@ -100,6 +101,52 @@ impl Handler<Self> for ApprLight {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
+            ApprLightMessage::EndRetry => {
+                debug!(
+                    node_key = %self.node_key,
+                    "Retry exhausted, notifying parent and stopping"
+                );
+
+                match ctx.get_parent::<Approval>().await {
+                    Ok(approval_actor) => {
+                        if let Err(e) = approval_actor
+                            .tell(ApprovalMessage::Response {
+                                approval_res: ApprovalRes::TimeOut(TimeOut {
+                                    re_trys: 3,
+                                    timestamp: TimeStamp::now(),
+                                    who: self.node_key.clone(),
+                                }),
+                                sender: self.node_key.clone(),
+                                signature: None,
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to approval actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        }
+
+                        debug!(
+                            request_id = %self.request_id,
+                            version = self.version,
+                            node_key = %self.node_key,
+                            "Timeout response sent to approval actor"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            path = %ctx.path().parent(),
+                            "Approval actor not found"
+                        );
+                        emit_fail(ctx, e).await;
+                    }
+                }
+
+                ctx.stop(None).await;
+            },
             ApprLightMessage::NetworkApproval { approval_req } => {
                 // Solo admitimos eventos FACT
                 let subject_id = approval_req.content().subject_id.clone();
@@ -127,7 +174,7 @@ impl Handler<Self> for ApprLight {
                     ])),
                 );
 
-                let retry_actor = RetryActor::new(target, message, strategy);
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(target, message, strategy, ApprLightMessage::EndRetry);
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(
@@ -265,65 +312,6 @@ impl Handler<Self> for ApprLight {
             }
         }
         Ok(())
-    }
-
-    async fn on_child_error(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) {
-        match error {
-            ActorError::Retry => {
-                match ctx.get_parent::<Approval>().await {
-                    Ok(approval_actor) => {
-                        if let Err(e) = approval_actor
-                            .tell(ApprovalMessage::Response {
-                                approval_res: ApprovalRes::TimeOut(TimeOut {
-                                    re_trys: 3,
-                                    timestamp: TimeStamp::now(),
-                                    who: self.node_key.clone(),
-                                }),
-                                sender: self.node_key.clone(),
-                                signature: None,
-                            })
-                            .await
-                        {
-                            error!(
-                                error = %e,
-                                "Failed to send timeout response to approval actor"
-                            );
-                            emit_fail(ctx, e).await;
-                        }
-
-                        debug!(
-                            request_id = %self.request_id,
-                            version = self.version,
-                            node_key = %self.node_key,
-                            "Timeout response sent to approval actor"
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
-                            path = %ctx.path().parent(),
-                            "Approval actor not found"
-                        );
-                        emit_fail(ctx, e).await;
-                    }
-                }
-
-                ctx.stop(None).await;
-            }
-            _ => {
-                error!(
-                    request_id = %self.request_id,
-                    version = self.version,
-                    node_key = %self.node_key,
-                    error = ?error,
-                    "Unexpected child error"
-                );
-            }
-        };
     }
 
     async fn on_child_fault(

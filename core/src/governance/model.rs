@@ -348,7 +348,7 @@ impl RolesTrackerSchemas {
         }
     }
 
-    pub fn issuer_any(&self) -> bool {
+    pub const fn issuer_any(&self) -> bool {
         self.issuer.any
     }
 
@@ -648,7 +648,7 @@ impl RolesSchema {
         }
     }
 
-    pub fn issuer_any(&self) -> bool {
+    pub const fn issuer_any(&self) -> bool {
         self.issuer.any
     }
 

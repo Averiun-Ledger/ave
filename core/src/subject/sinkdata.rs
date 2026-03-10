@@ -77,7 +77,7 @@ impl SinkDataMessage {
                 metadata.subject_id.to_string(),
                 metadata.schema_id.to_string(),
             ),
-            Self::Event { event, .. } => match &event {
+            Self::Event { event, .. } => match &**event {
                 DataToSinkEvent::Create {
                     subject_id,
                     schema_id,
@@ -117,7 +117,7 @@ impl SinkDataMessage {
 pub enum SinkDataMessage {
     UpdateState(Box<Metadata>),
     Event {
-        event: DataToSinkEvent,
+        event: Box<DataToSinkEvent>,
         event_request_timestamp: u64,
         event_ledger_timestamp: u64,
     },
@@ -136,7 +136,7 @@ impl Response for SinkDataResponse {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SinkDataEvent {
-    Event(DataToSink),
+    Event(Box<DataToSink>),
     State(Box<Metadata>),
 }
 
@@ -167,7 +167,7 @@ impl Handler<Self> for SinkData {
         let (subject_id, schema_id) = msg.get_subject_schema();
         let msg_type = match &msg {
             SinkDataMessage::UpdateState(..) => "UpdateState",
-            SinkDataMessage::Event { event, .. } => match &event {
+            SinkDataMessage::Event { event, .. } => match &**event {
                 DataToSinkEvent::Create { .. } => "Create",
                 DataToSinkEvent::Fact { .. } => "Fact",
                 DataToSinkEvent::Transfer { .. } => "Transfer",
@@ -185,13 +185,13 @@ impl Handler<Self> for SinkData {
                 event,
                 event_request_timestamp,
                 event_ledger_timestamp,
-            } => SinkDataEvent::Event(DataToSink {
-                event,
+            } => SinkDataEvent::Event(Box::new(DataToSink {
+                event: *event,
                 public_key: self.public_key.clone(),
                 event_request_timestamp,
                 event_ledger_timestamp,
                 sink_timestamp: TimeStamp::now().as_nanos(),
-            }),
+            })),
         };
 
         self.on_event(event, ctx).await;

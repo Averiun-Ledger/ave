@@ -82,7 +82,7 @@ impl DbManager<DbCollection, DbCollection> for Database {
         }
     }
 
-    fn stop(self) -> Result<(), StoreError> {
+    fn stop(&mut self) -> Result<(), StoreError> {
         match self {
             #[cfg(feature = "rocksdb")]
             Database::RocksDb(manager) => manager.stop(),
@@ -139,7 +139,7 @@ impl Collection for DbCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
+    ) ->  Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
         match self {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::iter(store, reverse),
@@ -157,7 +157,7 @@ impl Collection for DbCollection {
         }
     }
 
-    fn last(&self) -> Option<(String, Vec<u8>)> {
+    fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
         match self {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::last(store),

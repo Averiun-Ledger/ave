@@ -41,6 +41,7 @@ impl Actor for DistriCoordinator {
 
 #[derive(Debug, Clone)]
 pub enum DistriCoordinatorMessage {
+    EndRetry,
     // Enviar a un nodo la replicación.
     NetworkDistribution {
         request_id: String,
@@ -65,6 +66,45 @@ impl Handler<Self> for DistriCoordinator {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
+            DistriCoordinatorMessage::EndRetry => {
+                debug!(
+                    node_key = %self.node_key,
+                    "Retry exhausted, notifying parent and stopping"
+                );
+
+                match ctx.get_parent::<Distribution>().await {
+                    Ok(distribution_actor) => {
+                        if let Err(e) = distribution_actor
+                            .tell(DistributionMessage::Response {
+                                sender: self.node_key.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                node_key = %self.node_key,
+                                error = %e,
+                                "Failed to notify parent distribution actor after retry exhausted"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                node_key = %self.node_key,
+                                "Parent distribution actor notified of retry exhaustion"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            node_key = %self.node_key,
+                            error = %e,
+                            "Failed to get parent distribution actor after retry exhausted"
+                        );
+                        emit_fail(ctx, e).await;
+                    }
+                }
+
+                ctx.stop(None).await;
+            }
             DistriCoordinatorMessage::NetworkDistribution {
                 request_id,
                 ledger,
@@ -96,7 +136,13 @@ impl Handler<Self> for DistriCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
-                let retry_actor = RetryActor::new(target, message, strategy);
+                let retry_actor =
+                    RetryActor::new_with_parent_message::<Self>(
+                        target,
+                        message,
+                        strategy,
+                        DistriCoordinatorMessage::EndRetry,
+                    );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(
@@ -207,62 +253,6 @@ impl Handler<Self> for DistriCoordinator {
         };
 
         Ok(())
-    }
-
-    async fn on_child_error(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) {
-        match error {
-            ActorError::Retry => {
-                debug!(
-                    node_key = %self.node_key,
-                    error = %error,
-                    "Retry exhausted, notifying parent and stopping"
-                );
-
-                match ctx.get_parent::<Distribution>().await {
-                    Ok(distribution_actor) => {
-                        if let Err(e) = distribution_actor
-                            .tell(DistributionMessage::Response {
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            error!(
-                                node_key = %self.node_key,
-                                error = %e,
-                                "Failed to notify parent distribution actor after retry exhausted"
-                            );
-                            emit_fail(ctx, e).await;
-                        } else {
-                            debug!(
-                                node_key = %self.node_key,
-                                "Parent distribution actor notified of retry exhaustion"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            node_key = %self.node_key,
-                            error = %e,
-                            "Failed to get parent distribution actor after retry exhausted"
-                        );
-                        emit_fail(ctx, e).await;
-                    }
-                }
-
-                ctx.stop(None).await;
-            }
-            _ => {
-                error!(
-                    node_key = %self.node_key,
-                    error = %error,
-                    "Unexpected child error"
-                );
-            }
-        };
     }
 
     async fn on_child_fault(

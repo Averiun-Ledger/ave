@@ -22,17 +22,18 @@ use super::{Update, UpdateMessage};
 #[derive(Clone, Debug)]
 pub struct Updater {
     network: Arc<NetworkSender>,
-    node: PublicKey,
+    node_key: PublicKey,
 }
 
 impl Updater {
-    pub const fn new(node: PublicKey, network: Arc<NetworkSender>) -> Self {
-        Self { node, network }
+    pub const fn new(node_key: PublicKey, network: Arc<NetworkSender>) -> Self {
+        Self { node_key, network }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum UpdaterMessage {
+    EndRetry,
     NetworkLastSn {
         subject_id: DigestIdentifier,
         node_key: PublicKey,
@@ -70,6 +71,44 @@ impl Handler<Self> for Updater {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
+            UpdaterMessage::EndRetry => {
+                debug!(
+                    node_key = %self.node_key,
+                    "Retry exhausted, notifying parent and stopping"
+                );
+
+                match ctx.get_parent::<Update>().await {
+                    Ok(update_actor) => {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::Response {
+                                sender: self.node_key.clone(),
+                                sn: 0,
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to update actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                node = %self.node_key,
+                                "Timeout response sent to update actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            path = %ctx.path().parent(),
+                            "Update actor not found"
+                        );
+                        emit_fail(ctx, e).await;
+                    }
+                };
+
+                ctx.stop(None).await;
+            }
             UpdaterMessage::NetworkLastSn {
                 subject_id,
                 node_key,
@@ -96,7 +135,12 @@ impl Handler<Self> for Updater {
                     FixedIntervalStrategy::new(1, Duration::from_secs(10)),
                 );
 
-                let retry_actor = RetryActor::new(target, message, strategy);
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(
+                    target,
+                    message,
+                    strategy,
+                    UpdaterMessage::EndRetry,
+                );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(
@@ -133,12 +177,12 @@ impl Handler<Self> for Updater {
                 };
             }
             UpdaterMessage::NetworkResponse { sn, sender } => {
-                if sender == self.node {
+                if sender == self.node_key {
                     match ctx.get_parent::<Update>().await {
                         Ok(update_actor) => {
                             if let Err(e) = update_actor
                                 .tell(UpdateMessage::Response {
-                                    sender: self.node.clone(),
+                                    sender: self.node_key.clone(),
                                     sn,
                                 })
                                 .await
@@ -196,63 +240,13 @@ impl Handler<Self> for Updater {
         Ok(())
     }
 
-    // TODO ver si en los child_error quitamos el emit_fail
-    async fn on_child_error(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) {
-        match error {
-            ActorError::Retry => {
-                match ctx.get_parent::<Update>().await {
-                    Ok(update_actor) => {
-                        if let Err(e) = update_actor
-                            .tell(UpdateMessage::Response {
-                                sender: self.node.clone(),
-                                sn: 0,
-                            })
-                            .await
-                        {
-                            error!(
-                                error = %e,
-                                "Failed to send timeout response to update actor"
-                            );
-                            emit_fail(ctx, e).await;
-                        } else {
-                            debug!(
-                                node = %self.node,
-                                "Timeout response sent to update actor"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            path = %ctx.path().parent(),
-                            "Update actor not found"
-                        );
-                        emit_fail(ctx, e).await;
-                    }
-                };
-
-                ctx.stop(None).await;
-            }
-            _ => {
-                error!(
-                    node = %self.node,
-                    error = %error,
-                    "Unexpected child error"
-                );
-            }
-        };
-    }
-
     async fn on_child_fault(
         &mut self,
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         error!(
-            node = %self.node,
+            node = %self.node_key,
             error = %error,
             "Child fault in updater actor"
         );

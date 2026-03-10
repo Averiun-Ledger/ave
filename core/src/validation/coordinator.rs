@@ -62,6 +62,7 @@ pub enum ValiCoordinatorMessage {
         version: u64,
         sender: PublicKey,
     },
+    EndRetry
 }
 
 impl Message for ValiCoordinatorMessage {}
@@ -91,6 +92,48 @@ impl Handler<Self> for ValiCoordinator {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
+            ValiCoordinatorMessage::EndRetry => {
+                debug!(
+                    node_key = %self.node_key,
+                    "Retry exhausted, notifying parent and stopping"
+                );
+
+                match ctx.get_parent::<Validation>().await {
+                    Ok(validation_actor) => {
+                        if let Err(e) = validation_actor
+                            .tell(ValidationMessage::Response {
+                                validation_res: Box::new(
+                                    ValidationRes::TimeOut,
+                                ),
+                                signature: None,
+                                sender: self.node_key.clone(),
+                            })
+                            .await
+                        {
+                            error!(
+                                error = %e,
+                                "Failed to send timeout response to validation actor"
+                            );
+                            emit_fail(ctx, e).await;
+                        } else {
+                            debug!(
+                                request_id = %self.request_id,
+                                version = self.version,
+                                "Timeout response sent to validation actor"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            path = %ctx.path().parent(),
+                            "Validation actor not found"
+                        );
+                        emit_fail(ctx, e).await;
+                    }
+                }
+
+                ctx.stop(None).await;
+            },
             ValiCoordinatorMessage::NetworkValidation {
                 validation_req,
                 node_key,
@@ -131,7 +174,7 @@ impl Handler<Self> for ValiCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
-                let retry_actor = RetryActor::new(target, message, strategy);
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(target, message, strategy, ValiCoordinatorMessage::EndRetry);
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(
@@ -280,61 +323,6 @@ impl Handler<Self> for ValiCoordinator {
         }
 
         Ok(())
-    }
-
-    async fn on_child_error(
-        &mut self,
-        error: ActorError,
-        ctx: &mut ActorContext<Self>,
-    ) {
-        match error {
-            ActorError::Retry => {
-                match ctx.get_parent::<Validation>().await {
-                    Ok(validation_actor) => {
-                        if let Err(e) = validation_actor
-                            .tell(ValidationMessage::Response {
-                                validation_res: Box::new(
-                                    ValidationRes::TimeOut,
-                                ),
-                                signature: None,
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            error!(
-                                error = %e,
-                                "Failed to send timeout response to validation actor"
-                            );
-                            emit_fail(ctx, e).await;
-                        } else {
-                            debug!(
-                                request_id = %self.request_id,
-                                version = self.version,
-                                "Timeout response sent to validation actor"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            path = %ctx.path().parent(),
-                            "Validation actor not found"
-                        );
-                        emit_fail(ctx, e).await;
-                    }
-                }
-
-                ctx.stop(None).await;
-            }
-            _ => {
-                error!(
-                    node_key = %self.node_key,
-                    request_id = %self.request_id,
-                    version = self.version,
-                    error = %error,
-                    "Unexpected child error"
-                );
-            }
-        };
     }
 
     async fn on_child_fault(
