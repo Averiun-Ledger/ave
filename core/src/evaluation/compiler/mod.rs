@@ -63,7 +63,7 @@ impl Compiler {
     [dependencies]
     serde = { version = "1.0.219", features = ["derive"] }
     serde_json = "1.0.140"
-    ave-contract-sdk = "0.6.0"
+    ave-contract-sdk = "0.7.0"
 
     [profile.release]
     strip = "debuginfo"

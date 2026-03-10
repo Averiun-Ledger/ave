@@ -15,7 +15,7 @@ ave-identity|--all-features
 ave-network|--all-features
 ave-core|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
 ave-bridge|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
-ave-http|--no-default-features --features sqlite,ext-sqlite;--no-default-features --features rocksdb,ext-sqlite
+ave-http|--no-default-features --features sqlite,ext-sqlite,prometheus;--no-default-features --features rocksdb,ext-sqlite,prometheus
 EOF
 
 # Global state

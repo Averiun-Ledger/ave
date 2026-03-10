@@ -818,13 +818,14 @@ where
                     gov_version: data.gov_version
                 }
             }
-            (EventRequest::Confirm(..), EventLedgerDataForSink::Confirm { patch }) => DataToSinkEvent::Confirm {
+            (EventRequest::Confirm( confirm_request), EventLedgerDataForSink::Confirm { patch }) => DataToSinkEvent::Confirm {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
                 schema_id: data.schema_id,
                 sn: data.sn,
                 gov_version: data.gov_version,
-                patch
+                patch,
+                name_old_owner: confirm_request.name_old_owner.clone()
             },
             (EventRequest::Reject(..), EventLedgerDataForSink::Other) => DataToSinkEvent::Reject {
                 governance_id: data.gov_id,

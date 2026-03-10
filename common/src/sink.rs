@@ -63,6 +63,7 @@ pub enum DataToSinkEvent {
         sn: u64,
         patch: Option<Value>,
         gov_version: u64,
+        name_old_owner: Option<String>
     },
     Reject {
         governance_id: Option<String>,
