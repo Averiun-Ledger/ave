@@ -23,18 +23,42 @@ pub enum SinkError {
     TokenParse(String),
 
     /// Failed to send data to sink.
-    #[error("failed to send data to sink: {0}")]
-    SendRequest(String),
+    #[error("failed to send data to sink: {message}")]
+    SendRequest { message: String, retryable: bool },
 
     /// Sink returned unauthorized (401).
     #[error("sink authentication failed")]
     Unauthorized,
 
     /// Sink returned unprocessable entity (422).
-    #[error("sink rejected data format")]
-    UnprocessableEntity,
+    #[error("sink rejected data format: {message}")]
+    UnprocessableEntity { message: String },
 
     /// Sink returned an HTTP error.
     #[error("sink returned HTTP {status}: {message}")]
-    HttpStatus { status: u16, message: String },
+    HttpStatus {
+        status: u16,
+        message: String,
+        retryable: bool,
+    },
+
+    /// Sink worker stopped because shutdown was requested.
+    #[error("sink shutdown in progress")]
+    Shutdown,
+}
+
+impl SinkError {
+    pub const fn is_transient(&self) -> bool {
+        match self {
+            Self::SendRequest { retryable, .. }
+            | Self::HttpStatus { retryable, .. } => *retryable,
+            Self::ClientBuild(_)
+            | Self::AuthRequest(_)
+            | Self::AuthEndpoint(_)
+            | Self::TokenParse(_)
+            | Self::Unauthorized
+            | Self::UnprocessableEntity { .. }
+            | Self::Shutdown => false,
+        }
+    }
 }

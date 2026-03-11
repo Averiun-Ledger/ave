@@ -262,7 +262,8 @@ mod tests {
     use ave_core::{
         config::{
             AveExternalDBFeatureConfig, AveInternalDBFeatureConfig,
-            LoggingOutput, LoggingRotation, MachineSpec, SinkServer,
+            LoggingOutput, LoggingRotation, MachineSpec, SinkQueuePolicy,
+            SinkRoutingStrategy, SinkServer,
         },
         subject::sinkdata::SinkTypes,
     };
@@ -345,11 +346,31 @@ level = "debug"
 auth = "https://auth.service"
 username = "sink-user"
 
-[sink.sinks]
-primary = [
-    { server = "SinkOne", events = ["Create", "All"], url = "https://sink.one", auth = true },
-    { server = "SinkTwo", events = ["Transfer"], url = "https://sink.two", auth = false }
-]
+[[sink.sinks.primary]]
+server = "SinkOne"
+events = ["Create", "All"]
+url = "https://sink.one"
+auth = true
+concurrency = 4
+queue_capacity = 2048
+queue_policy = "drop_oldest"
+routing_strategy = "unordered_round_robin"
+connect_timeout_ms = 5000
+request_timeout_ms = 30000
+max_retries = 5
+
+[[sink.sinks.primary]]
+server = "SinkTwo"
+events = ["Transfer"]
+url = "https://sink.two"
+auth = false
+concurrency = 2
+queue_capacity = 512
+queue_policy = "drop_newest"
+routing_strategy = "ordered_by_subject"
+connect_timeout_ms = 3000
+request_timeout_ms = 15000
+max_retries = 1
 
 [auth]
 enable = true
@@ -488,10 +509,24 @@ sink:
         events: [Create, All]
         url: https://sink.one
         auth: true
+        concurrency: 4
+        queue_capacity: 2048
+        queue_policy: drop_oldest
+        routing_strategy: unordered_round_robin
+        connect_timeout_ms: 5000
+        request_timeout_ms: 30000
+        max_retries: 5
       - server: SinkTwo
         events: [Transfer]
         url: https://sink.two
         auth: false
+        concurrency: 2
+        queue_capacity: 512
+        queue_policy: drop_newest
+        routing_strategy: ordered_by_subject
+        connect_timeout_ms: 3000
+        request_timeout_ms: 15000
+        max_retries: 1
 auth:
   enable: true
   database_path: /var/db/auth.db
@@ -641,13 +676,27 @@ http:
           "server": "SinkOne",
           "events": ["Create", "All"],
           "url": "https://sink.one",
-          "auth": true
+          "auth": true,
+          "concurrency": 4,
+          "queue_capacity": 2048,
+          "queue_policy": "drop_oldest",
+          "routing_strategy": "unordered_round_robin",
+          "connect_timeout_ms": 5000,
+          "request_timeout_ms": 30000,
+          "max_retries": 5
         },
         {
           "server": "SinkTwo",
           "events": ["Transfer"],
           "url": "https://sink.two",
-          "auth": false
+          "auth": false,
+          "concurrency": 2,
+          "queue_capacity": 512,
+          "queue_policy": "drop_newest",
+          "routing_strategy": "ordered_by_subject",
+          "connect_timeout_ms": 3000,
+          "request_timeout_ms": 15000,
+          "max_retries": 1
         }
       ]
     }
@@ -931,12 +980,26 @@ http:
                     events: BTreeSet::from([SinkTypes::All, SinkTypes::Create]),
                     url: "https://sink.one".to_owned(),
                     auth: true,
+                    concurrency: 4,
+                    queue_capacity: 2048,
+                    queue_policy: SinkQueuePolicy::DropOldest,
+                    routing_strategy: SinkRoutingStrategy::UnorderedRoundRobin,
+                    connect_timeout_ms: 5_000,
+                    request_timeout_ms: 30_000,
+                    max_retries: 5,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
                     events: BTreeSet::from([SinkTypes::Transfer]),
                     url: "https://sink.two".to_owned(),
                     auth: false,
+                    concurrency: 2,
+                    queue_capacity: 512,
+                    queue_policy: SinkQueuePolicy::DropNewest,
+                    routing_strategy: SinkRoutingStrategy::OrderedBySubject,
+                    connect_timeout_ms: 3_000,
+                    request_timeout_ms: 15_000,
+                    max_retries: 1,
                 },
             ],
         );

@@ -1928,3 +1928,55 @@ async fn test_system_info_deserialization() {
     // Session audit max entries: explicitly set in test config
     assert_eq!(config.auth.session.audit_max_entries, 1_000_000);
 }
+
+#[test]
+fn test_sink_server_http_fields() {
+    use ave_http::config_types::SinkServerHttp;
+
+    // Verify SinkServerHttp has all expected fields by deserializing from JSON
+    let json = serde_json::json!({
+        "server": "TestSink",
+        "events": ["Create", "Transfer"],
+        "url": "https://test.sink",
+        "auth": true,
+        "concurrency": 4,
+        "queue_capacity": 2048,
+        "queue_policy": "drop_oldest",
+        "routing_strategy": "unordered_round_robin",
+        "connect_timeout_ms": 5000,
+        "request_timeout_ms": 30000,
+        "max_retries": 5
+    });
+
+    let http: SinkServerHttp = serde_json::from_value(json).unwrap();
+
+    assert_eq!(http.server, "TestSink");
+    assert_eq!(http.url, "https://test.sink");
+    assert!(http.auth);
+    assert_eq!(http.concurrency, 4);
+    assert_eq!(http.queue_capacity, 2048);
+    assert_eq!(http.queue_policy, "drop_oldest");
+    assert_eq!(http.routing_strategy, "unordered_round_robin");
+    assert_eq!(http.connect_timeout_ms, 5000);
+    assert_eq!(http.request_timeout_ms, 30000);
+    assert_eq!(http.max_retries, 5);
+
+    // Verify alternate enum values
+    let json2 = serde_json::json!({
+        "server": "S2",
+        "events": [],
+        "url": "https://s2",
+        "auth": false,
+        "concurrency": 1,
+        "queue_capacity": 1024,
+        "queue_policy": "drop_newest",
+        "routing_strategy": "ordered_by_subject",
+        "connect_timeout_ms": 2000,
+        "request_timeout_ms": 10000,
+        "max_retries": 3
+    });
+
+    let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
+    assert_eq!(http2.queue_policy, "drop_newest");
+    assert_eq!(http2.routing_strategy, "ordered_by_subject");
+}

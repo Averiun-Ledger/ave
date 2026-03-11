@@ -23,7 +23,8 @@ pub use ave_core::{
     config::Config as AveConfig,
     config::{
         AveExternalDBConfig, AveInternalDBConfig, LoggingConfig, LoggingOutput,
-        LoggingRotation, SinkConfig, SinkServer,
+        LoggingRotation, SinkConfig, SinkQueuePolicy, SinkRoutingStrategy,
+        SinkServer,
     },
     error::Error,
 };

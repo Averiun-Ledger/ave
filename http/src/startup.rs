@@ -602,6 +602,21 @@ fn log_effective_configuration(
                 s.auth,
                 s.events
             );
+            info!(
+                target: TARGET,
+                "      concurrency: {} | queue: {} ({:?}) | routing: {:?}",
+                s.concurrency,
+                s.queue_capacity,
+                s.queue_policy,
+                s.routing_strategy
+            );
+            info!(
+                target: TARGET,
+                "      connect: {}ms | request: {}ms | retries: {}",
+                s.connect_timeout_ms,
+                s.request_timeout_ms,
+                s.max_retries
+            );
         }
     }
 
