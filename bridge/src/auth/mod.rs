@@ -62,6 +62,9 @@ pub struct ApiKeyConfig {
     /// Maximum number of API keys per user
     /// 0 = unlimited
     pub max_keys_per_user: u32,
+
+    /// Prefix used when generating API keys
+    pub prefix: String,
 }
 
 impl Default for ApiKeyConfig {
@@ -69,6 +72,7 @@ impl Default for ApiKeyConfig {
         Self {
             default_ttl_seconds: 2592000,
             max_keys_per_user: 10,
+            prefix: "ave_node_".to_string(),
         }
     }
 }

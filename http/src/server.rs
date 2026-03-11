@@ -28,6 +28,7 @@ use ave_bridge::{
             TransferSubject,
         },
     },
+    http::ProxyConfig,
 };
 use axum::{
     Extension, Json, Router,
@@ -794,237 +795,6 @@ pub async fn get_subject_state(
     Ok(Json(bridge.get_subject_state(subject_id).await?))
 }
 
-pub fn build_routes(
-    doc: bool,
-    bridge: Bridge,
-    auth_db: Option<Arc<AuthDatabase>>,
-    #[cfg(feature = "prometheus")] registry: std::sync::Arc<
-        prometheus_client::registry::Registry,
-    >,
-) -> Router {
-    let bridge = Arc::new(bridge);
-
-    let main_routes = Router::new()
-        .route("/peer-id", get(get_peer_id))
-        .route("/public-key", get(get_public_key))
-        .route("/config", get(get_config))
-        .route("/network-state", get(get_network_state))
-        .route("/requests-in-manager", get(get_requests_in_manager))
-        .route(
-            "/requests-in-manager/{subject_id}",
-            get(get_requests_in_manager_subject_id),
-        )
-        .route("/approval", get(get_approvals))
-        .route("/approval/{subject_id}", get(get_approval))
-        .route("/approval/{subject_id}", patch(patch_approve))
-        .route(
-            "/request-abort/{subject_id}",
-            post(post_manual_request_abort),
-        )
-        .route("/request", post(post_event_request))
-        .route("/request", get(get_all_request_state))
-        .route("/request/{request_id}", get(get_request_state))
-        .route("/pending-transfers", get(get_pending_transfers))
-        .route("/auth", get(get_all_auth_subjects))
-        .route("/auth/{subject_id}", put(put_auth_subject))
-        .route("/auth/{subject_id}", get(get_witnesses_subject))
-        .route("/auth/{subject_id}", delete(delete_auth_subject))
-        .route("/update/{subject_id}", post(post_update_subject))
-        .route(
-            "/manual-distribution/{subject_id}",
-            post(post_manual_distribution),
-        )
-        .route("/subjects", get(get_all_govs))
-        .route("/subjects/{governance_id}", get(get_all_subjs))
-        .route("/events/{subject_id}", get(get_events))
-        .route("/events/{subject_id}/{sn}", get(get_event_sn))
-        .route("/aborts/{subject_id}", get(get_aborts))
-        .route(
-            "/events-first-last/{subject_id}",
-            get(get_first_or_end_events),
-        )
-        .route("/state/{subject_id}", get(get_subject_state))
-        .layer(ServiceBuilder::new().layer(Extension(bridge)));
-
-    let doc_routes = if doc {
-        Some(
-            SwaggerUi::new("/doc/")
-                .url("/api-docs/openapi.json", ApiDoc::openapi()),
-        )
-    } else {
-        None
-    };
-
-    if let Some(db) = auth_db {
-        // Apply layers in declared order (outer -> inner) using ServiceBuilder.
-        let protected_layers = ServiceBuilder::new()
-            // 1) DB extension must run first so extractors can see it.
-            .layer(Extension(db.clone()))
-            // 2) Extract API key and inject AuthContext.
-            .layer(middleware::from_extractor::<ApiKeyAuthNew>())
-            // 3) Enforce permissions with the injected context.
-            .layer(middleware::from_fn(permission_layer))
-            // 4) Enforce read-only mode.
-            .layer(middleware::from_fn(read_only_layer))
-            // 5) Audit logs (runs outermost).
-            .layer(middleware::from_fn(audit_layer));
-
-        let protected_routes = Router::new()
-            .route(
-                "/admin/users",
-                get(admin_handlers::list_users)
-                    .post(admin_handlers::create_user),
-            )
-            .route(
-                "/admin/users/{user_id}",
-                get(admin_handlers::get_user)
-                    .put(admin_handlers::update_user)
-                    .delete(admin_handlers::delete_user),
-            )
-            .route(
-                "/admin/users/{user_id}/password",
-                post(admin_handlers::reset_user_password),
-            )
-            .route(
-                "/admin/users/{user_id}/roles/{role_id}",
-                post(admin_handlers::assign_role)
-                    .delete(admin_handlers::remove_role),
-            )
-            .route(
-                "/admin/users/{user_id}/permissions",
-                get(admin_handlers::get_user_permissions)
-                    .post(admin_handlers::set_user_permission)
-                    .delete(admin_handlers::remove_user_permission),
-            )
-            .route(
-                "/admin/roles",
-                get(admin_handlers::list_roles)
-                    .post(admin_handlers::create_role),
-            )
-            .route(
-                "/admin/roles/{role_id}",
-                get(admin_handlers::get_role)
-                    .put(admin_handlers::update_role)
-                    .delete(admin_handlers::delete_role),
-            )
-            .route(
-                "/admin/roles/{role_id}/permissions",
-                get(admin_handlers::get_role_permissions)
-                    .post(admin_handlers::set_role_permission)
-                    .delete(admin_handlers::remove_role_permission),
-            )
-            .route(
-                "/admin/api-keys/user/{user_id}",
-                post(apikey_handlers::create_api_key_for_user)
-                    .get(apikey_handlers::list_user_api_keys_admin),
-            )
-            .route("/admin/api-keys", get(apikey_handlers::list_all_api_keys))
-            .route(
-                "/admin/api-keys/{key_id}",
-                get(apikey_handlers::get_api_key)
-                    .delete(apikey_handlers::revoke_api_key),
-            )
-            .route(
-                "/admin/api-keys/{key_id}/rotate",
-                post(apikey_handlers::rotate_api_key),
-            )
-            .route(
-                "/admin/api-keys/{key_id}/plan",
-                put(apikey_handlers::assign_api_key_plan),
-            )
-            .route(
-                "/admin/api-keys/{key_id}/quota",
-                get(apikey_handlers::get_api_key_quota_status),
-            )
-            .route(
-                "/admin/api-keys/{key_id}/quota-extensions",
-                post(apikey_handlers::add_api_key_quota_extension),
-            )
-            .route(
-                "/admin/usage-plans",
-                get(apikey_handlers::list_usage_plans)
-                    .post(apikey_handlers::create_usage_plan),
-            )
-            .route(
-                "/admin/usage-plans/{plan_id}",
-                get(apikey_handlers::get_usage_plan)
-                    .put(apikey_handlers::update_usage_plan)
-                    .delete(apikey_handlers::delete_usage_plan),
-            )
-            .route("/admin/resources", get(system_handlers::list_resources))
-            .route("/admin/actions", get(system_handlers::list_actions))
-            .route("/admin/audit-logs", get(system_handlers::query_audit_logs))
-            .route(
-                "/admin/audit-logs/stats",
-                get(system_handlers::get_audit_stats),
-            )
-            .route(
-                "/admin/rate-limits/stats",
-                get(system_handlers::get_rate_limit_stats),
-            )
-            .route("/admin/config", get(system_handlers::list_system_config))
-            .route(
-                "/admin/config/{key}",
-                put(system_handlers::update_system_config),
-            )
-            .route("/me", get(system_handlers::get_me))
-            .route("/me/permissions", get(system_handlers::get_my_permissions))
-            .route(
-                "/me/permissions/detailed",
-                get(system_handlers::get_my_permissions_detailed),
-            )
-            .route(
-                "/me/api-keys",
-                post(apikey_handlers::create_my_api_key)
-                    .get(apikey_handlers::list_my_api_keys),
-            )
-            .route(
-                "/me/api-keys/{name}",
-                delete(apikey_handlers::revoke_my_api_key),
-            )
-            // Authentication is enforced by the outer `protected_layers`.
-            // Avoid adding the extractor here to prevent double execution
-            // (which was incrementing rate-limit counters twice).
-            ;
-
-        // Routes that require authentication & permission checks
-        let authed = Router::new().merge(main_routes).merge(protected_routes);
-        #[cfg(feature = "prometheus")]
-        let authed =
-            authed.merge(ave_bridge::prometheus::build_routes(registry));
-        let authed = authed.layer(protected_layers);
-
-        // Login remains unauthenticated but needs DB extension
-        let mut app = Router::new()
-            .route("/login", post(login_handler::login))
-            .route("/change-password", post(login_handler::change_password))
-            .layer(ServiceBuilder::new().layer(Extension(db)))
-            .merge(authed);
-
-        if let Some(doc_routes) = doc_routes {
-            app = app.merge(doc_routes);
-        }
-
-        app
-    } else {
-        let app = main_routes;
-        #[cfg(feature = "prometheus")]
-        let app = app.merge(ave_bridge::prometheus::build_routes(registry));
-        let mut app = app;
-        if let Some(doc_routes) = doc_routes {
-            app = app.merge(doc_routes);
-        }
-        app
-    }
-}
-
-async fn read_only_layer(
-    req: axum::http::Request<Body>,
-    next: middleware::Next,
-) -> Response {
-    next.run(req).await
-}
-
 async fn audit_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
@@ -1087,6 +857,295 @@ pub enum PermissionResult {
     AllowAny,
     /// Route requires the caller to hold the given resource + action.
     Require(Resource, Action),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteMethodSpec {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl RouteMethodSpec {
+    fn matches(self, method: &Method) -> bool {
+        match self {
+            Self::Get => *method == Method::GET,
+            Self::Post => *method == Method::POST,
+            Self::Put => *method == Method::PUT,
+            Self::Patch => *method == Method::PATCH,
+            Self::Delete => *method == Method::DELETE,
+        }
+    }
+}
+
+fn path_matches_template(template: &str, path: &str) -> bool {
+    let mut template_segments = template.split('/').filter(|segment| !segment.is_empty());
+    let mut path_segments = path.split('/').filter(|segment| !segment.is_empty());
+
+    loop {
+        match (template_segments.next(), path_segments.next()) {
+            (None, None) => return true,
+            (Some(template_segment), Some(path_segment)) => {
+                let is_param = template_segment.starts_with('{')
+                    && template_segment.ends_with('}');
+                if !is_param && template_segment != path_segment {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+macro_rules! main_route_catalog {
+    ($callback:ident, $($args:tt)*) => {
+        $callback!($($args)*, get, "/peer-id", get_peer_id, require NodeSystem Get);
+        $callback!($($args)*, get, "/public-key", get_public_key, require NodeSystem Get);
+        $callback!($($args)*, get, "/config", get_config, require NodeManagement Get);
+        $callback!($($args)*, get, "/network-state", get_network_state, require NodeSystem Get);
+        $callback!($($args)*, get, "/requests-in-manager", get_requests_in_manager, require NodeRequest Get);
+        $callback!($($args)*, get, "/requests-in-manager/{subject_id}", get_requests_in_manager_subject_id, require NodeRequest Get);
+        $callback!($($args)*, get, "/approval", get_approvals, require NodeSubject Get);
+        $callback!($($args)*, get, "/approval/{subject_id}", get_approval, require NodeSubject Get);
+        $callback!($($args)*, patch, "/approval/{subject_id}", patch_approve, require NodeSubject Patch);
+        $callback!($($args)*, post, "/request-abort/{subject_id}", post_manual_request_abort, require NodeSubject Post);
+        $callback!($($args)*, post, "/request", post_event_request, require NodeRequest Post);
+        $callback!($($args)*, get, "/request", get_all_request_state, require NodeRequest Get);
+        $callback!($($args)*, get, "/request/{request_id}", get_request_state, require NodeRequest Get);
+        $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
+        $callback!($($args)*, get, "/auth", get_all_auth_subjects, require NodeSubject Get);
+        $callback!($($args)*, put, "/auth/{subject_id}", put_auth_subject, require NodeSubject Put);
+        $callback!($($args)*, get, "/auth/{subject_id}", get_witnesses_subject, require NodeSubject Get);
+        $callback!($($args)*, delete, "/auth/{subject_id}", delete_auth_subject, require NodeSubject Delete);
+        $callback!($($args)*, post, "/update/{subject_id}", post_update_subject, require NodeSubject Post);
+        $callback!($($args)*, post, "/manual-distribution/{subject_id}", post_manual_distribution, require NodeSubject Post);
+        $callback!($($args)*, get, "/subjects", get_all_govs, require NodeSubject Get);
+        $callback!($($args)*, get, "/subjects/{governance_id}", get_all_subjs, require NodeSubject Get);
+        $callback!($($args)*, get, "/events/{subject_id}", get_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/events/{subject_id}/{sn}", get_event_sn, require NodeSubject Get);
+        $callback!($($args)*, get, "/aborts/{subject_id}", get_aborts, require NodeSubject Get);
+        $callback!($($args)*, get, "/events-first-last/{subject_id}", get_first_or_end_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/state/{subject_id}", get_subject_state, require NodeSubject Get);
+        $callback!($($args)*, external_get, "/metrics", metrics_endpoint, require NodeManagement Get);
+    };
+}
+
+macro_rules! auth_route_catalog {
+    ($callback:ident, $($args:tt)*) => {
+        $callback!($($args)*, get, "/admin/users", admin_handlers::list_users, allow_any);
+        $callback!($($args)*, post, "/admin/users", admin_handlers::create_user, allow_any);
+        $callback!($($args)*, get, "/admin/users/{user_id}", admin_handlers::get_user, allow_any);
+        $callback!($($args)*, put, "/admin/users/{user_id}", admin_handlers::update_user, allow_any);
+        $callback!($($args)*, delete, "/admin/users/{user_id}", admin_handlers::delete_user, allow_any);
+        $callback!($($args)*, post, "/admin/users/{user_id}/password", admin_handlers::reset_user_password, allow_any);
+        $callback!($($args)*, post, "/admin/users/{user_id}/roles/{role_id}", admin_handlers::assign_role, allow_any);
+        $callback!($($args)*, delete, "/admin/users/{user_id}/roles/{role_id}", admin_handlers::remove_role, allow_any);
+        $callback!($($args)*, get, "/admin/users/{user_id}/permissions", admin_handlers::get_user_permissions, allow_any);
+        $callback!($($args)*, post, "/admin/users/{user_id}/permissions", admin_handlers::set_user_permission, allow_any);
+        $callback!($($args)*, delete, "/admin/users/{user_id}/permissions", admin_handlers::remove_user_permission, allow_any);
+        $callback!($($args)*, get, "/admin/roles", admin_handlers::list_roles, allow_any);
+        $callback!($($args)*, post, "/admin/roles", admin_handlers::create_role, allow_any);
+        $callback!($($args)*, get, "/admin/roles/{role_id}", admin_handlers::get_role, allow_any);
+        $callback!($($args)*, put, "/admin/roles/{role_id}", admin_handlers::update_role, allow_any);
+        $callback!($($args)*, delete, "/admin/roles/{role_id}", admin_handlers::delete_role, allow_any);
+        $callback!($($args)*, get, "/admin/roles/{role_id}/permissions", admin_handlers::get_role_permissions, allow_any);
+        $callback!($($args)*, post, "/admin/roles/{role_id}/permissions", admin_handlers::set_role_permission, allow_any);
+        $callback!($($args)*, delete, "/admin/roles/{role_id}/permissions", admin_handlers::remove_role_permission, allow_any);
+        $callback!($($args)*, post, "/admin/api-keys/user/{user_id}", apikey_handlers::create_api_key_for_user, allow_any);
+        $callback!($($args)*, get, "/admin/api-keys/user/{user_id}", apikey_handlers::list_user_api_keys_admin, allow_any);
+        $callback!($($args)*, get, "/admin/api-keys", apikey_handlers::list_all_api_keys, allow_any);
+        $callback!($($args)*, get, "/admin/api-keys/{key_id}", apikey_handlers::get_api_key, allow_any);
+        $callback!($($args)*, delete, "/admin/api-keys/{key_id}", apikey_handlers::revoke_api_key, allow_any);
+        $callback!($($args)*, post, "/admin/api-keys/{key_id}/rotate", apikey_handlers::rotate_api_key, allow_any);
+        $callback!($($args)*, put, "/admin/api-keys/{key_id}/plan", apikey_handlers::assign_api_key_plan, allow_any);
+        $callback!($($args)*, get, "/admin/api-keys/{key_id}/quota", apikey_handlers::get_api_key_quota_status, allow_any);
+        $callback!($($args)*, post, "/admin/api-keys/{key_id}/quota-extensions", apikey_handlers::add_api_key_quota_extension, allow_any);
+        $callback!($($args)*, get, "/admin/usage-plans", apikey_handlers::list_usage_plans, allow_any);
+        $callback!($($args)*, post, "/admin/usage-plans", apikey_handlers::create_usage_plan, allow_any);
+        $callback!($($args)*, get, "/admin/usage-plans/{plan_id}", apikey_handlers::get_usage_plan, allow_any);
+        $callback!($($args)*, put, "/admin/usage-plans/{plan_id}", apikey_handlers::update_usage_plan, allow_any);
+        $callback!($($args)*, delete, "/admin/usage-plans/{plan_id}", apikey_handlers::delete_usage_plan, allow_any);
+        $callback!($($args)*, get, "/admin/resources", system_handlers::list_resources, allow_any);
+        $callback!($($args)*, get, "/admin/actions", system_handlers::list_actions, allow_any);
+        $callback!($($args)*, get, "/admin/audit-logs", system_handlers::query_audit_logs, allow_any);
+        $callback!($($args)*, get, "/admin/audit-logs/stats", system_handlers::get_audit_stats, allow_any);
+        $callback!($($args)*, get, "/admin/rate-limits/stats", system_handlers::get_rate_limit_stats, allow_any);
+        $callback!($($args)*, get, "/admin/config", system_handlers::list_system_config, allow_any);
+        $callback!($($args)*, put, "/admin/config/{key}", system_handlers::update_system_config, allow_any);
+        $callback!($($args)*, get, "/me", system_handlers::get_me, require User Get);
+        $callback!($($args)*, get, "/me/permissions", system_handlers::get_my_permissions, require User Get);
+        $callback!($($args)*, get, "/me/permissions/detailed", system_handlers::get_my_permissions_detailed, require User Get);
+        $callback!($($args)*, post, "/me/api-keys", apikey_handlers::create_my_api_key, require UserApiKey Post);
+        $callback!($($args)*, get, "/me/api-keys", apikey_handlers::list_my_api_keys, require UserApiKey Get);
+        $callback!($($args)*, delete, "/me/api-keys/{name}", apikey_handlers::revoke_my_api_key, require UserApiKey Delete);
+    };
+}
+
+macro_rules! public_auth_route_catalog {
+    ($callback:ident, $($args:tt)*) => {
+        $callback!($($args)*, post, "/login", login_handler::login);
+        $callback!($($args)*, post, "/change-password", login_handler::change_password);
+    };
+}
+
+macro_rules! append_catalog_route {
+    ($router:ident, get, $path:literal, $handler:path, $($access:tt)+) => {
+        $router = $router.route($path, get($handler));
+    };
+    ($router:ident, post, $path:literal, $handler:path, $($access:tt)+) => {
+        $router = $router.route($path, post($handler));
+    };
+    ($router:ident, put, $path:literal, $handler:path, $($access:tt)+) => {
+        $router = $router.route($path, put($handler));
+    };
+    ($router:ident, patch, $path:literal, $handler:path, $($access:tt)+) => {
+        $router = $router.route($path, patch($handler));
+    };
+    ($router:ident, delete, $path:literal, $handler:path, $($access:tt)+) => {
+        $router = $router.route($path, delete($handler));
+    };
+    ($router:ident, external_get, $path:literal, $handler:ident, $($access:tt)+) => {};
+}
+
+macro_rules! append_public_route {
+    ($router:ident, get, $path:literal, $handler:path) => {
+        $router = $router.route($path, get($handler));
+    };
+    ($router:ident, post, $path:literal, $handler:path) => {
+        $router = $router.route($path, post($handler));
+    };
+}
+
+macro_rules! match_catalog_route {
+    ($method:expr, $path:expr, get, $template:literal, $handler:path, allow_any) => {
+        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::AllowAny);
+        }
+    };
+    ($method:expr, $path:expr, post, $template:literal, $handler:path, allow_any) => {
+        if RouteMethodSpec::Post.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::AllowAny);
+        }
+    };
+    ($method:expr, $path:expr, put, $template:literal, $handler:path, allow_any) => {
+        if RouteMethodSpec::Put.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::AllowAny);
+        }
+    };
+    ($method:expr, $path:expr, patch, $template:literal, $handler:path, allow_any) => {
+        if RouteMethodSpec::Patch.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::AllowAny);
+        }
+    };
+    ($method:expr, $path:expr, delete, $template:literal, $handler:path, allow_any) => {
+        if RouteMethodSpec::Delete.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::AllowAny);
+        }
+    };
+    ($method:expr, $path:expr, get, $template:literal, $handler:path, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+    ($method:expr, $path:expr, post, $template:literal, $handler:path, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Post.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+    ($method:expr, $path:expr, put, $template:literal, $handler:path, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Put.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+    ($method:expr, $path:expr, patch, $template:literal, $handler:path, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Patch.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+    ($method:expr, $path:expr, delete, $template:literal, $handler:path, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Delete.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+    ($method:expr, $path:expr, external_get, $template:literal, $handler:ident, require $resource:ident $action:ident) => {
+        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
+            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        }
+    };
+}
+
+pub fn build_routes(
+    doc: bool,
+    proxy_config: ProxyConfig,
+    bridge: Bridge,
+    auth_db: Option<Arc<AuthDatabase>>,
+    #[cfg(feature = "prometheus")] registry: std::sync::Arc<
+        tokio::sync::Mutex<prometheus_client::registry::Registry>,
+    >,
+) -> Router {
+    let bridge = Arc::new(bridge);
+    let proxy = Arc::new(proxy_config);
+
+    let mut main_routes = Router::new();
+    main_route_catalog!(append_catalog_route, main_routes);
+    let main_routes = main_routes.layer(
+        ServiceBuilder::new()
+            .layer(Extension(bridge))
+            .layer(Extension(proxy.clone())),
+    );
+
+    let doc_routes = if doc {
+        Some(
+            SwaggerUi::new("/doc/")
+                .url("/api-docs/openapi.json", ApiDoc::openapi()),
+        )
+    } else {
+        None
+    };
+
+    if let Some(db) = auth_db {
+        let protected_layers = ServiceBuilder::new()
+            .layer(Extension(db.clone()))
+            .layer(Extension(proxy.clone()))
+            .layer(middleware::from_extractor::<ApiKeyAuthNew>())
+            .layer(middleware::from_fn(permission_layer))
+            .layer(middleware::from_fn(audit_layer));
+
+        let mut protected_routes = Router::new();
+        auth_route_catalog!(append_catalog_route, protected_routes);
+        let authed = Router::new().merge(main_routes).merge(protected_routes);
+        #[cfg(feature = "prometheus")]
+        let authed =
+            authed.merge(ave_bridge::prometheus::build_routes(registry));
+        let authed = authed.layer(protected_layers);
+
+        let mut public_auth_routes = Router::new();
+        public_auth_route_catalog!(append_public_route, public_auth_routes);
+        let mut app = public_auth_routes
+            .layer(
+                ServiceBuilder::new()
+                    .layer(Extension(db))
+                    .layer(Extension(proxy.clone())),
+            )
+            .merge(authed);
+
+        if let Some(doc_routes) = doc_routes {
+            app = app.merge(doc_routes);
+        }
+
+        app
+    } else {
+        let app = main_routes;
+        #[cfg(feature = "prometheus")]
+        let app = app.merge(ave_bridge::prometheus::build_routes(registry));
+        let mut app = app;
+        if let Some(doc_routes) = doc_routes {
+            app = app.merge(doc_routes);
+        }
+        app
+    }
 }
 
 pub async fn permission_layer(
@@ -1172,103 +1231,17 @@ pub async fn permission_layer(
 /// - `Some(Require(r, a))` — caller must hold permission `r:a`.
 /// - `None` — route not recognized; access is **denied**.
 pub fn permission_for(method: &Method, path: &str) -> Option<PermissionResult> {
-    use Action::*;
-    use PermissionResult::*;
-    use Resource::*;
-
-    // Admin routes perform their own inline permission checks inside each handler.
-    if path.starts_with("/admin/") {
-        return Some(AllowAny);
-    }
-
-    let (resource, action) = match (method, path) {
-        // Event requests
-        (&Method::POST, "/request") => (NodeRequest, Post),
-        (&Method::GET, "/request") => (NodeRequest, Get),
-        (&Method::GET, p) if p.starts_with("/request/") => (NodeRequest, Get),
-
-        // Requests in manager
-        (&Method::GET, "/requests-in-manager") => (NodeRequest, Get),
-        (&Method::GET, p) if p.starts_with("/requests-in-manager/") => {
-            (NodeRequest, Get)
-        }
-
-        // Approvals
-        (&Method::GET, "/approval") => (NodeSubject, Get),
-        (&Method::GET, p) if p.starts_with("/approval/") => (NodeSubject, Get),
-        (&Method::PATCH, p) if p.starts_with("/approval/") => {
-            (NodeSubject, Patch)
-        }
-
-        // Request abort
-        (&Method::POST, p) if p.starts_with("/request-abort/") => {
-            (NodeSubject, Post)
-        }
-
-        // Ledger subject queries
-        (&Method::GET, p) if p.starts_with("/events-first-last/") => {
-            (NodeSubject, Get)
-        }
-        (&Method::GET, p) if p.starts_with("/events/") => (NodeSubject, Get),
-        (&Method::GET, p) if p.starts_with("/aborts/") => (NodeSubject, Get),
-
-        // Authorization / witnesses
-        (&Method::GET, "/auth") => (NodeSubject, Get),
-        (&Method::GET, p) if p.starts_with("/auth/") => (NodeSubject, Get),
-        (&Method::PUT, p) if p.starts_with("/auth/") => (NodeSubject, Put),
-        (&Method::DELETE, p) if p.starts_with("/auth/") => {
-            (NodeSubject, Delete)
-        }
-
-        // Updates / distribution
-        (&Method::POST, p) if p.starts_with("/update/") => (NodeSubject, Post),
-        (&Method::POST, p) if p.starts_with("/manual-distribution/") => {
-            (NodeSubject, Post)
-        }
-
-        // User self-service
-        (&Method::GET, "/me") => (User, Get),
-        (&Method::GET, "/me/permissions") => (User, Get),
-        (&Method::GET, "/me/permissions/detailed") => (User, Get),
-
-        // Self API keys (management key required)
-        (&Method::GET, "/me/api-keys") => (UserApiKey, Get),
-        (&Method::POST, "/me/api-keys") => (UserApiKey, Post),
-        (&Method::DELETE, p) if p.starts_with("/me/api-keys/") => {
-            (UserApiKey, Delete)
-        }
-
-        // Ledger info
-        (&Method::GET, p) if p.starts_with("/state/") => (NodeSubject, Get),
-
-        // Register - governances and subjects
-        (&Method::GET, "/subjects") => (NodeSubject, Get),
-        (&Method::GET, p) if p.starts_with("/subjects/") => (NodeSubject, Get),
-
-        // Transfers
-        (&Method::GET, "/pending-transfers") => (NodeSubject, Get),
-
-        // Node/system info
-        (&Method::GET, "/public-key") => (NodeSystem, Get),
-        (&Method::GET, "/peer-id") => (NodeSystem, Get),
-        (&Method::GET, "/network-state") => (NodeSystem, Get),
-
-        // Node management (manager + superadmin only)
-        (&Method::GET, "/config") => (NodeManagement, Get),
-        (&Method::GET, "/metrics") => (NodeManagement, Get),
-
-        // Unknown route → deny
-        _ => return None,
-    };
-
-    Some(Require(resource, action))
+    main_route_catalog!(match_catalog_route, method, path);
+    auth_route_catalog!(match_catalog_route, method, path);
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ave_bridge::auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
+        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig,
+        SessionConfig,
     };
     use axum::{
         Router,

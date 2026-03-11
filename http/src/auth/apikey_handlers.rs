@@ -3,6 +3,9 @@
 // REST API endpoints for API key management
 
 use super::database::{AuthDatabase, DatabaseError};
+use super::http_api::{
+    DatabaseErrorMapping, run_db as shared_run_db,
+};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use axum::{
@@ -12,28 +15,18 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::warn;
 use utoipa::ToSchema;
 
-const TARGET: &str = "ave::http::auth";
-
-/// Convert DatabaseError to HTTP response tuple
-fn db_error_to_response(
-    err: DatabaseError,
-) -> (StatusCode, Json<ErrorResponse>) {
-    let (status, message) = match err {
-        DatabaseError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-        DatabaseError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
-        DatabaseError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
-        DatabaseError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, msg),
-        DatabaseError::AccountLocked(msg) => (StatusCode::FORBIDDEN, msg),
-        DatabaseError::RateLimitExceeded(msg) => {
-            (StatusCode::TOO_MANY_REQUESTS, msg)
-        }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-
-    (status, Json(ErrorResponse { error: message }))
+async fn run_db<T, F>(
+    db: &Arc<AuthDatabase>,
+    operation: &'static str,
+    work: F,
+) -> Result<T, (StatusCode, Json<ErrorResponse>)>
+where
+    T: Send + 'static,
+    F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
+{
+    shared_run_db(db, operation, DatabaseErrorMapping::admin(), work).await
 }
 
 // =============================================================================
@@ -82,36 +75,39 @@ pub async fn create_api_key_for_user(
         ));
     }
 
-    let (api_key, key_info) = db
-        .create_api_key(
+    let name = req.name.clone();
+    let description = req.description.clone();
+    let expires_in_seconds = req.expires_in_seconds;
+    let actor_user_id = auth_ctx.user_id;
+    let actor_api_key_id = auth_ctx.api_key_id.clone();
+    let actor_ip_address = auth_ctx.ip_address.clone();
+    let endpoint = format!("/admin/api-keys/user/{}", user_id);
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let (api_key, key_info) = run_db(&db, "create_api_key_for_user", move |db| {
+        db.create_api_key_transactional(
             user_id,
-            Some(req.name.as_str()),
-            req.description.as_deref(),
-            req.expires_in_seconds,
+            Some(&name),
+            description.as_deref(),
+            expires_in_seconds,
             false,
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(actor_user_id),
+                api_key_id: Some(&actor_api_key_id),
+                action_type: "api_key_created",
+                endpoint: Some(&endpoint),
+                http_method: Some("POST"),
+                ip_address: actor_ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
+    })
+    .await?;
 
     let response = CreateApiKeyResponse { api_key, key_info };
-
-    // Audit log
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(auth_ctx.user_id),
-            api_key_id: Some(&auth_ctx.api_key_id),
-            action_type: "api_key_created",
-            endpoint: Some(&format!("/admin/api-keys/user/{}", user_id)),
-            http_method: Some("POST"),
-            ip_address: auth_ctx.ip_address.as_deref(),
-            user_agent: None,
-            request_id: None,
-            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write audit log");
-    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -139,9 +135,11 @@ pub async fn list_all_api_keys(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let keys = db
-        .list_all_api_keys(params.include_revoked.unwrap_or(false))
-        .map_err(db_error_to_response)?;
+    let include_revoked = params.include_revoked.unwrap_or(false);
+    let keys = run_db(&db, "list_all_api_keys", move |db| {
+        db.list_all_api_keys(include_revoked)
+    })
+    .await?;
 
     Ok(Json(keys))
 }
@@ -177,9 +175,11 @@ pub async fn list_user_api_keys_admin(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let keys = db
-        .list_user_api_keys(user_id, params.include_revoked.unwrap_or(false))
-        .map_err(db_error_to_response)?;
+    let include_revoked = params.include_revoked.unwrap_or(false);
+    let keys = run_db(&db, "list_user_api_keys_admin", move |db| {
+        db.list_user_api_keys(user_id, include_revoked)
+    })
+    .await?;
 
     Ok(Json(keys))
 }
@@ -208,7 +208,8 @@ pub async fn get_api_key(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+    let key_info =
+        run_db(&db, "get_api_key", move |db| db.get_api_key_info(&id)).await?;
 
     Ok(Json(key_info))
 }
@@ -251,7 +252,11 @@ pub async fn revoke_api_key(
 
     // SECURITY FIX: Prevent API key DoS by revoking other users' keys
     // Get the key to check ownership
-    let key_info = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+    let lookup_id = id.clone();
+    let key_info = run_db(&db, "get_api_key_for_revoke", move |db| {
+        db.get_api_key_info(&lookup_id)
+    })
+    .await?;
 
     // Only superadmin can revoke keys of other users
     if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
@@ -264,32 +269,34 @@ pub async fn revoke_api_key(
         ));
     }
 
-    let reason = req.as_ref().and_then(|r| r.reason.as_deref());
-
-    db.revoke_api_key(&id, Some(auth_ctx.user_id), reason)
-        .map_err(db_error_to_response)?;
-
-    // Audit log
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(auth_ctx.user_id),
-            api_key_id: Some(&auth_ctx.api_key_id),
-            action_type: "api_key_revoked",
-            endpoint: Some(&format!("/admin/api-keys/{}", id)),
-            http_method: Some("DELETE"),
-            ip_address: auth_ctx.ip_address.as_deref(),
-            user_agent: None,
-            request_id: None,
-            details: Some(
-                &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-                    .unwrap_or_default(),
-            ),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write audit log");
-    }
+    let reason = req.as_ref().and_then(|r| r.reason.clone());
+    let audit_details = req
+        .as_ref()
+        .map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+        .unwrap_or_default();
+    let revoke_id = id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    run_db(&db, "revoke_api_key", move |db| {
+        db.revoke_api_key_transactional(
+            &revoke_id,
+            Some(auth_ctx_for_db.user_id),
+            reason.as_deref(),
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "api_key_revoked",
+                endpoint: Some(&format!("/admin/api-keys/{}", revoke_id)),
+                http_method: Some("DELETE"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
+        )
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -324,7 +331,11 @@ pub async fn rotate_api_key(
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
     // Fetch existing key for user and defaults
-    let existing = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+    let lookup_id = id.clone();
+    let existing = run_db(&db, "get_api_key_for_rotate", move |db| {
+        db.get_api_key_info(&lookup_id)
+    })
+    .await?;
 
     // SECURITY FIX: Prevent API key theft via rotation of other users' keys
     // Only superadmin can rotate keys of other users
@@ -340,67 +351,41 @@ pub async fn rotate_api_key(
 
     // Extract request body or use defaults
     let req = req.as_ref().map(|r| &r.0);
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
 
-    // Revoke old key first
-    db.revoke_api_key(
-        &existing.id,
-        Some(auth_ctx.user_id),
-        req.and_then(|r| r.reason.as_deref()),
-    )
-    .map_err(db_error_to_response)?;
-
-    // Create replacement key
-    // Use provided values or fall back to existing values
-    let new_name = req
-        .and_then(|r| r.name.as_deref())
-        .unwrap_or(existing.name.as_str());
-    let new_description = req
-        .and_then(|r| r.description.as_deref())
-        .or(existing.description.as_deref());
-
-    // Handle expires_in_seconds: if provided in request, use it; otherwise keep existing TTL
-    let new_expires_in = req.and_then(|r| r.expires_in_seconds);
-
-    let (api_key, key_info) = db
-        .create_api_key(
-            existing.user_id,
-            Some(new_name),
-            new_description,
-            new_expires_in,
-            existing.is_management,
+    let existing_id = existing.id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    let req_name = req.and_then(|r| r.name.clone());
+    let req_description = req.and_then(|r| r.description.clone());
+    let req_expires = req.and_then(|r| r.expires_in_seconds);
+    let req_reason = req.and_then(|r| r.reason.clone());
+    let rotate_endpoint = format!("/admin/api-keys/{}/rotate", id);
+    let (api_key, key_info) = run_db(&db, "rotate_api_key", move |db| {
+        db.rotate_api_key_transactional(
+            &existing_id,
+            req_name.as_deref(),
+            req_description.as_deref(),
+            req_expires,
+            Some(auth_ctx_for_db.user_id),
+            req_reason.as_deref(),
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "api_key_rotated",
+                endpoint: Some(&rotate_endpoint),
+                http_method: Some("POST"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
-
-    // Preserve usage plan assignment on rotation.
-    if let Some(plan_id) = existing.plan_id.as_deref() {
-        db.assign_api_key_plan(
-            &key_info.id,
-            Some(plan_id),
-            Some(auth_ctx.user_id),
-        )
-        .map_err(db_error_to_response)?;
-    }
+    })
+    .await?;
 
     let response = CreateApiKeyResponse { api_key, key_info };
-
-    // Audit log
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(auth_ctx.user_id),
-            api_key_id: Some(&auth_ctx.api_key_id),
-            action_type: "api_key_rotated",
-            endpoint: Some(&format!("/admin/api-keys/{}/rotate", id)),
-            http_method: Some("POST"),
-            ip_address: auth_ctx.ip_address.as_deref(),
-            user_agent: None,
-            request_id: None,
-            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write audit log");
-    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -427,14 +412,34 @@ pub async fn create_usage_plan(
 ) -> Result<(StatusCode, Json<UsagePlan>), (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
-    let plan = db
-        .create_usage_plan(
-            &req.id,
-            &req.name,
-            req.description.as_deref(),
-            req.monthly_events,
+    let plan_id = req.id.clone();
+    let plan_name = req.name.clone();
+    let description = req.description.clone();
+    let monthly_events = req.monthly_events;
+    let auth_ctx_for_db = auth_ctx.clone();
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let plan = run_db(&db, "create_usage_plan", move |db| {
+        db.create_usage_plan_transactional(
+            &plan_id,
+            &plan_name,
+            description.as_deref(),
+            monthly_events,
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "usage_plan_created",
+                endpoint: Some("/admin/usage-plans"),
+                http_method: Some("POST"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
+    })
+    .await?;
 
     Ok((StatusCode::CREATED, Json(plan)))
 }
@@ -457,7 +462,8 @@ pub async fn list_usage_plans(
 ) -> Result<Json<Vec<UsagePlan>>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let plans = db.list_usage_plans().map_err(db_error_to_response)?;
+    let plans =
+        run_db(&db, "list_usage_plans", move |db| db.list_usage_plans()).await?;
     Ok(Json(plans))
 }
 
@@ -484,7 +490,9 @@ pub async fn get_usage_plan(
 ) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let plan = db.get_usage_plan(&plan_id).map_err(db_error_to_response)?;
+    let plan =
+        run_db(&db, "get_usage_plan", move |db| db.get_usage_plan(&plan_id))
+            .await?;
     Ok(Json(plan))
 }
 
@@ -501,6 +509,7 @@ pub async fn get_usage_plan(
     responses(
         (status = 200, description = "Updated usage plan", body = UsagePlan),
         (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 409, description = "Plan name already exists", body = ErrorResponse),
         (status = 404, description = "Plan not found", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -513,14 +522,34 @@ pub async fn update_usage_plan(
 ) -> Result<Json<UsagePlan>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "put")?;
 
-    let plan = db
-        .update_usage_plan(
-            &plan_id,
-            req.name.as_deref(),
-            req.description.as_deref(),
-            req.monthly_events,
+    let req_name = req.name.clone();
+    let req_description = req.description.clone();
+    let req_monthly_events = req.monthly_events;
+    let update_plan_id = plan_id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let plan = run_db(&db, "update_usage_plan", move |db| {
+        db.update_usage_plan_transactional(
+            &update_plan_id,
+            req_name.as_deref(),
+            req_description.as_deref(),
+            req_monthly_events,
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "usage_plan_updated",
+                endpoint: Some(&format!("/admin/usage-plans/{}", plan_id)),
+                http_method: Some("PUT"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
+    })
+    .await?;
 
     Ok(Json(plan))
 }
@@ -548,8 +577,27 @@ pub async fn delete_usage_plan(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "delete")?;
 
-    db.delete_usage_plan(&plan_id)
-        .map_err(db_error_to_response)?;
+    let delete_plan_id = plan_id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    run_db(&db, "delete_usage_plan", move |db| {
+        db.delete_usage_plan_transactional(
+            &delete_plan_id,
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "usage_plan_deleted",
+                endpoint: Some(&format!("/admin/usage-plans/{}", plan_id)),
+                http_method: Some("DELETE"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&serde_json::json!({ "plan_id": plan_id }).to_string()),
+                success: true,
+                error_message: None,
+            }),
+        )
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -579,10 +627,33 @@ pub async fn assign_api_key_plan(
 ) -> Result<Json<ApiKeyInfo>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "put")?;
 
-    db.assign_api_key_plan(&id, req.plan_id.as_deref(), Some(auth_ctx.user_id))
-        .map_err(db_error_to_response)?;
-
-    let updated = db.get_api_key_info(&id).map_err(db_error_to_response)?;
+    let plan_id = req.plan_id.clone();
+    let auth_ctx_user_id = auth_ctx.user_id;
+    let assign_id = id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let updated = run_db(&db, "assign_api_key_plan", move |db| {
+        db.assign_api_key_plan_transactional(
+            &assign_id,
+            plan_id.as_deref(),
+            Some(auth_ctx_user_id),
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "api_key_plan_updated",
+                endpoint: Some(&format!("/admin/api-keys/{}/plan", id)),
+                http_method: Some("PUT"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
+        )?;
+        db.get_api_key_info(&assign_id)
+    })
+    .await?;
     Ok(Json(updated))
 }
 
@@ -616,9 +687,11 @@ pub async fn get_api_key_quota_status(
 ) -> Result<Json<ApiKeyQuotaStatus>, (StatusCode, Json<ErrorResponse>)> {
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
-    let status = db
-        .get_api_key_quota_status(&id, params.usage_month.as_deref())
-        .map_err(db_error_to_response)?;
+    let usage_month = params.usage_month.clone();
+    let status = run_db(&db, "get_api_key_quota_status", move |db| {
+        db.get_api_key_quota_status(&id, usage_month.as_deref())
+    })
+    .await?;
 
     Ok(Json(status))
 }
@@ -652,15 +725,39 @@ pub async fn add_api_key_quota_extension(
 > {
     check_permission(&auth_ctx, "admin_api_key", "post")?;
 
-    let extension = db
-        .add_quota_extension(
-            &id,
-            req.extra_events,
-            req.usage_month.as_deref(),
-            req.reason.as_deref(),
-            Some(auth_ctx.user_id),
+    let extra_events = req.extra_events;
+    let usage_month = req.usage_month.clone();
+    let reason = req.reason.clone();
+    let auth_ctx_user_id = auth_ctx.user_id;
+    let quota_key_id = id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let extension = run_db(&db, "add_api_key_quota_extension", move |db| {
+        db.add_quota_extension_transactional(
+            &quota_key_id,
+            extra_events,
+            usage_month.as_deref(),
+            reason.as_deref(),
+            Some(auth_ctx_user_id),
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "api_key_quota_extension_created",
+                endpoint: Some(&format!(
+                    "/admin/api-keys/{}/quota-extensions",
+                    id
+                )),
+                http_method: Some("POST"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
+    })
+    .await?;
 
     Ok((StatusCode::CREATED, Json(extension)))
 }
@@ -710,36 +807,38 @@ pub async fn create_my_api_key(
         ));
     }
 
-    let (api_key, key_info) = db
-        .create_api_key(
-            auth_ctx.user_id,
-            Some(req.name.as_str()),
-            req.description.as_deref(),
-            req.expires_in_seconds,
+    let name = req.name.clone();
+    let description = req.description.clone();
+    let expires_in_seconds = req.expires_in_seconds;
+    let user_id = auth_ctx.user_id;
+    let actor_api_key_id = auth_ctx.api_key_id.clone();
+    let actor_ip_address = auth_ctx.ip_address.clone();
+    let audit_details = serde_json::to_string(&req).unwrap_or_default();
+    let (api_key, key_info) = run_db(&db, "create_my_api_key", move |db| {
+        db.create_api_key_transactional(
+            user_id,
+            Some(&name),
+            description.as_deref(),
+            expires_in_seconds,
             false,
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(user_id),
+                api_key_id: Some(&actor_api_key_id),
+                action_type: "api_key_created",
+                endpoint: Some("/me/api-keys"),
+                http_method: Some("POST"),
+                ip_address: actor_ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
         )
-        .map_err(db_error_to_response)?;
+    })
+    .await?;
 
     let response = CreateApiKeyResponse { api_key, key_info };
-
-    // Audit log
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(auth_ctx.user_id),
-            api_key_id: Some(&auth_ctx.api_key_id),
-            action_type: "api_key_created",
-            endpoint: Some("/me/api-keys"),
-            http_method: Some("POST"),
-            ip_address: auth_ctx.ip_address.as_deref(),
-            user_agent: None,
-            request_id: None,
-            details: Some(&serde_json::to_string(&req).unwrap_or_default()),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write audit log");
-    }
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -781,12 +880,12 @@ pub async fn list_my_api_keys(
         ));
     }
 
-    let keys = db
-        .list_user_api_keys(
-            auth_ctx.user_id,
-            params.include_revoked.unwrap_or(false),
-        )
-        .map_err(db_error_to_response)?;
+    let user_id = auth_ctx.user_id;
+    let include_revoked = params.include_revoked.unwrap_or(false);
+    let keys = run_db(&db, "list_my_api_keys", move |db| {
+        db.list_user_api_keys(user_id, include_revoked)
+    })
+    .await?;
 
     Ok(Json(keys))
 }
@@ -833,9 +932,12 @@ pub async fn revoke_my_api_key(
     }
 
     // Verify the key belongs to the user and is active by name
-    let key_info = db
-        .get_active_api_key_by_name(auth_ctx.user_id, &name)
-        .map_err(db_error_to_response)?;
+    let user_id = auth_ctx.user_id;
+    let lookup_name = name.clone();
+    let key_info = run_db(&db, "get_active_api_key_by_name", move |db| {
+        db.get_active_api_key_by_name(user_id, &lookup_name)
+    })
+    .await?;
 
     // Cannot revoke the current key
     if key_info.id == auth_ctx.api_key_id {
@@ -857,32 +959,35 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    let reason = req.as_ref().and_then(|r| r.reason.as_deref());
-
-    db.revoke_api_key(&key_info.id, Some(auth_ctx.user_id), reason)
-        .map_err(db_error_to_response)?;
-
-    // Audit log
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(auth_ctx.user_id),
-            api_key_id: Some(&auth_ctx.api_key_id),
-            action_type: "api_key_revoked",
-            endpoint: Some(&format!("/me/api-keys/{}", name)),
-            http_method: Some("DELETE"),
-            ip_address: auth_ctx.ip_address.as_deref(),
-            user_agent: None,
-            request_id: None,
-            details: Some(
-                &req.map(|r| serde_json::to_string(&r.0).unwrap_or_default())
-                    .unwrap_or_default(),
-            ),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write audit log");
-    }
+    let reason = req.as_ref().and_then(|r| r.reason.clone());
+    let audit_details = req
+        .as_ref()
+        .map(|r| serde_json::to_string(&r.0).unwrap_or_default())
+        .unwrap_or_default();
+    let revoke_id = key_info.id.clone();
+    let auth_ctx_for_db = auth_ctx.clone();
+    let endpoint = format!("/me/api-keys/{}", name);
+    run_db(&db, "revoke_my_api_key", move |db| {
+        db.revoke_api_key_transactional(
+            &revoke_id,
+            Some(auth_ctx_for_db.user_id),
+            reason.as_deref(),
+            Some(crate::auth::database_audit::AuditLogParams {
+                user_id: Some(auth_ctx_for_db.user_id),
+                api_key_id: Some(&auth_ctx_for_db.api_key_id),
+                action_type: "api_key_revoked",
+                endpoint: Some(&endpoint),
+                http_method: Some("DELETE"),
+                ip_address: auth_ctx_for_db.ip_address.as_deref(),
+                user_agent: None,
+                request_id: None,
+                details: Some(&audit_details),
+                success: true,
+                error_message: None,
+            }),
+        )
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

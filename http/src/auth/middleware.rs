@@ -6,6 +6,8 @@ use crate::auth::middleware::uuid::Uuid;
 
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::{AuthContext, ErrorResponse};
+use super::request_meta;
+use ave_bridge::ProxyConfig;
 use axum::{
     Json,
     extract::{ConnectInfo, FromRequestParts, Request},
@@ -16,6 +18,7 @@ use axum::{
 use rand::RngExt;
 use std::fmt::Display;
 use std::{net::SocketAddr, sync::Arc};
+use std::time::Instant;
 use tracing::{error, warn};
 
 const TARGET: &str = "ave::http::auth";
@@ -47,12 +50,17 @@ where
         let Some(db) = auth_db else {
             return Ok(Self);
         };
+        let request_started = Instant::now();
+        let mut db_operations = 0u64;
 
         // Auth is enabled - validate API key
         let api_key = parts
             .headers
             .get("X-API-Key")
-            .and_then(|v| v.to_str().ok())
+            .and_then(|v| match v.to_str() {
+                Ok(s) => Some(s),
+                Err(_) => None,
+            })
             .ok_or_else(|| {
                 (
                     StatusCode::UNAUTHORIZED,
@@ -64,15 +72,40 @@ where
 
         // SECURITY FIX: Extract IP from socket address, not client headers
         // X-Forwarded-For and X-Real-IP can be spoofed to bypass rate limiting
-        let ip_address = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|conn| conn.0.ip().to_string());
+        let ip_address = match (
+            parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+            parts.extensions.get::<Arc<ProxyConfig>>(),
+        ) {
+            (Some(conn), Some(proxy)) => request_meta::resolve_client_ip(
+                &parts.headers,
+                conn.0,
+                proxy.as_ref(),
+            )
+            .map(|ip| ip.to_string()),
+            (Some(conn), None) => Some(conn.0.ip().to_string()),
+            _ => None,
+        };
 
         // SECURITY FIX: Pre-authentication rate limiting by IP
         // Check rate limit BEFORE verifying credentials to prevent brute force attacks
-        db.check_rate_limit(None, ip_address.as_deref(), Some("/auth/*"))
-            .map_err(|e| {
+        let pre_auth_ip = ip_address.clone();
+        let pre_auth_result = db
+            .run_blocking("pre_auth_rate_limit", move |db| {
+                db.check_rate_limit(
+                    None,
+                    pre_auth_ip.as_deref(),
+                    Some("/auth/*"),
+                )
+            })
+            .await;
+        db_operations += 1;
+        pre_auth_result.map_err(|e| {
+            db.record_request_db_metrics(
+                "api_key_auth",
+                db_operations,
+                request_started.elapsed(),
+            );
+            {
                 warn!(
                     target: TARGET,
                     ip = ?ip_address,
@@ -85,97 +118,104 @@ where
                         error: format!("Rate limit exceeded: {}", e),
                     }),
                 )
+            }
+        })?;
+
+        let request_path = parts.uri.path().to_string();
+        let auth_api_key = api_key.to_string();
+        let auth_ip = ip_address.clone();
+        let auth_ctx = db
+            .run_blocking("authenticate_api_key_request", move |db| {
+                db.authenticate_api_key_request(
+                    &auth_api_key,
+                    auth_ip.as_deref(),
+                    &request_path,
+                )
+            })
+            .await
+            .map_err(|e| match e {
+                DatabaseError::RateLimitExceeded(message) => {
+                    db.record_request_db_metrics(
+                        "api_key_auth",
+                        db_operations + 1,
+                        request_started.elapsed(),
+                    );
+                    warn!(
+                        target: TARGET,
+                        ip = ?ip_address,
+                        error = %message,
+                        "authenticated request rate limited"
+                    );
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(ErrorResponse { error: message }),
+                    )
+                }
+                DatabaseError::PasswordChangeRequired(message) => {
+                    db.record_request_db_metrics(
+                        "api_key_auth",
+                        db_operations + 1,
+                        request_started.elapsed(),
+                    );
+                    warn!(
+                        target: TARGET,
+                        ip = ?ip_address,
+                        error = %message,
+                        "api key blocked pending password change"
+                    );
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse { error: message }),
+                    )
+                }
+                DatabaseError::PermissionDenied(_)
+                | DatabaseError::AccountLocked(_) => {
+                    db.record_request_db_metrics(
+                        "api_key_auth",
+                        db_operations + 1,
+                        request_started.elapsed(),
+                    );
+                    warn!(
+                        target: TARGET,
+                        ip = ?ip_address,
+                        error = %e,
+                        "api key authentication failed"
+                    );
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ErrorResponse {
+                            error: format!("Authentication failed: {}", e),
+                        }),
+                    )
+                }
+                other => {
+                    db.record_request_db_metrics(
+                        "api_key_auth",
+                        db_operations + 1,
+                        request_started.elapsed(),
+                    );
+                    error!(
+                        target: TARGET,
+                        ip = ?ip_address,
+                        error = %other,
+                        "authentication pipeline failed"
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error:
+                                "Internal error while authenticating request"
+                                    .to_string(),
+                        }),
+                    )
+                }
             })?;
-
-        let mut auth_ctx = db.verify_api_key(api_key).map_err(|e| {
-            warn!(
-                target: TARGET,
-                ip = ?ip_address,
-                error = %e,
-                "api key authentication failed"
-            );
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: format!("Authentication failed: {}", e),
-                }),
-            )
-        })?;
-
-        auth_ctx.ip_address = ip_address.clone();
-
-        // Update API key last used
-        if let Err(e) =
-            db.update_api_key_usage(&auth_ctx.api_key_id, ip_address.as_deref())
-        {
-            warn!(
-                target: TARGET,
-                error = %e,
-                key_id = %auth_ctx.api_key_id,
-                "failed to update api key last used"
-            );
-        }
-
-        // Post-authentication rate limit (per API key)
-        db.check_rate_limit(
-            Some(&auth_ctx.api_key_id),
-            ip_address.as_deref(),
-            parts.uri.path().into(),
-        )
-        .map_err(|e| {
-            warn!(
-                target: TARGET,
-                key_id = %auth_ctx.api_key_id,
-                ip = ?ip_address,
-                error = %e,
-                "post-auth rate limit exceeded"
-            );
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(ErrorResponse {
-                    error: format!("Rate limit exceeded: {}", e),
-                }),
-            )
-        })?;
-
-        // Optional monthly quota per API key.
-        // Backward-compatible: keys without a plan remain unlimited.
-        if !auth_ctx.is_management_key {
-            db.consume_monthly_quota(&auth_ctx.api_key_id).map_err(
-                |e| match e {
-                    DatabaseError::RateLimitExceeded(message) => {
-                        warn!(
-                            target: TARGET,
-                            key_id = %auth_ctx.api_key_id,
-                            ip = ?ip_address,
-                            error = %message,
-                            "monthly quota exceeded"
-                        );
-                        (
-                            StatusCode::TOO_MANY_REQUESTS,
-                            Json(ErrorResponse { error: message }),
-                        )
-                    }
-                    other => {
-                        error!(
-                            target: TARGET,
-                            key_id = %auth_ctx.api_key_id,
-                            ip = ?ip_address,
-                            error = %other,
-                            "monthly quota check failed"
-                        );
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error:
-                                    "Internal error while checking monthly quota"
-                                        .to_string(),
-                            }),
-                        )
-                    }
-                },
-            )?;
-        }
+        db_operations += 1;
+        db.record_request_db_metrics(
+            "api_key_auth",
+            db_operations,
+            request_started.elapsed(),
+        );
 
         // Store auth context in request extensions for later use
         parts.extensions.insert(Arc::new(auth_ctx));
@@ -260,17 +300,32 @@ pub async fn audit_log_middleware(
 
     // SECURITY FIX: Get IP from socket address only, ignore client headers
     // X-Forwarded-For and X-Real-IP can be spoofed
-    let ip_address = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip().to_string());
-
-    // Get user agent
-    let user_agent = req
-        .headers()
-        .get("User-Agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let request_meta = match (
+        req.extensions().get::<ConnectInfo<SocketAddr>>(),
+        req.extensions().get::<Arc<ProxyConfig>>(),
+    ) {
+        (Some(conn), Some(proxy)) => request_meta::extract_request_meta(
+            req.headers(),
+            conn.0,
+            proxy.as_ref(),
+        ),
+        (Some(conn), None) => request_meta::RequestMeta {
+            ip_address: Some(conn.0.ip().to_string()),
+            user_agent: req
+                .headers()
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
+        },
+        _ => request_meta::RequestMeta {
+            ip_address: None,
+            user_agent: req
+                .headers()
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
+        },
+    };
+    let ip_address = request_meta.ip_address;
+    let user_agent = request_meta.user_agent;
 
     // Process request
     let response = next.run(req).await;
@@ -291,41 +346,65 @@ pub async fn audit_log_middleware(
 
         // If we have auth_ctx, use normal logging
         if let Some(ctx) = auth_ctx {
-            if let Err(e) = db.log_api_request(
-                &ctx,
-                crate::auth::database_audit::ApiRequestParams {
-                    path: &path,
-                    method: &method,
-                    ip_address: ip_address.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                    request_id: &request_id,
-                    success,
-                    error_message: error_message.as_deref(),
-                },
-            ) {
+            let ctx = (*ctx).clone();
+            let path_for_log = path.clone();
+            let method_for_log = method.clone();
+            let ip_for_log = ip_address.clone();
+            let user_agent_for_log = user_agent.clone();
+            let request_id_for_log = request_id.clone();
+            let error_for_log = error_message.clone();
+            if let Err(e) = db
+                .run_blocking("log_api_request", move |db| {
+                    db.log_api_request(
+                        &ctx,
+                        crate::auth::database_audit::ApiRequestParams {
+                            path: &path_for_log,
+                            method: &method_for_log,
+                            ip_address: ip_for_log.as_deref(),
+                            user_agent: user_agent_for_log.as_deref(),
+                            request_id: &request_id_for_log,
+                            success,
+                            error_message: error_for_log.as_deref(),
+                        },
+                    )
+                })
+                .await
+            {
                 error!(target: TARGET, error = %e, "failed to write request audit log");
             }
         } else {
             // No auth context - log as unauthenticated request
-            if let Err(e) = db.create_audit_log(
-                crate::auth::database_audit::AuditLogParams {
-                    user_id: None,
-                    api_key_id: None,
-                    action_type: if success {
-                        "unauthenticated_request_success"
-                    } else {
-                        "unauthenticated_request_failed"
-                    },
-                    endpoint: Some(&path),
-                    http_method: Some(&method),
-                    ip_address: ip_address.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                    request_id: Some(&request_id),
-                    details: Some(&format!("{} {}", method, path)),
-                    success,
-                    error_message: error_message.as_deref(),
-                },
-            ) {
+            let path_for_log = path.clone();
+            let method_for_log = method.clone();
+            let ip_for_log = ip_address.clone();
+            let user_agent_for_log = user_agent.clone();
+            let request_id_for_log = request_id.clone();
+            let error_for_log = error_message.clone();
+            let details = format!("{} {}", method, path);
+            if let Err(e) = db
+                .run_blocking("create_unauthenticated_audit_log", move |db| {
+                    db.create_audit_log(
+                        crate::auth::database_audit::AuditLogParams {
+                            user_id: None,
+                            api_key_id: None,
+                            action_type: if success {
+                                "unauthenticated_request_success"
+                            } else {
+                                "unauthenticated_request_failed"
+                            },
+                            endpoint: Some(&path_for_log),
+                            http_method: Some(&method_for_log),
+                            ip_address: ip_for_log.as_deref(),
+                            user_agent: user_agent_for_log.as_deref(),
+                            request_id: Some(&request_id_for_log),
+                            details: Some(&details),
+                            success,
+                            error_message: error_for_log.as_deref(),
+                        },
+                    )
+                })
+                .await
+            {
                 error!(target: TARGET, error = %e, "failed to write audit log");
             }
         }

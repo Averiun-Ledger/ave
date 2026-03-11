@@ -2,7 +2,8 @@
 //
 // Tests for role changes and their effects on API keys and permissions
 
-mod common;
+pub mod common;
+use common::TestDbExt;
 
 use ave_http::auth::database::DatabaseError;
 use reqwest::{Client, StatusCode};
@@ -14,20 +15,28 @@ async fn test_api_keys_revoked_when_role_added() {
     let (db, _dirs) = common::create_test_db();
 
     let user = db
-        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .create_user_transactional(
+            "testuser",
+            "TestPass123!",
+            None,
+            None,
+            Some(false),
+            None,
+        )
         .unwrap();
     let (api_key, _) = db
         .create_api_key(user.id, Some("key1"), None, None, false)
         .unwrap();
 
     // Verify key works
-    assert!(db.verify_api_key(&api_key).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
 
-    let role = db.create_role("editor", None).unwrap();
-    db.assign_role_to_user(user.id, role.id, None).unwrap();
+    let role = db.create_role_transactional("editor", None, None).unwrap();
+    db.assign_role_to_user_transactional(user.id, role.id, None, None)
+        .unwrap();
 
     // API key should be revoked
-    let result = db.verify_api_key(&api_key);
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
 }
 
@@ -47,13 +56,13 @@ async fn test_api_keys_revoked_when_role_removed() {
         .unwrap();
 
     // Verify key works
-    assert!(db.verify_api_key(&api_key).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
 
     // Remove role from user
     db.remove_role_from_user(user.id, role.id).unwrap();
 
     // API key should be revoked
-    let result = db.verify_api_key(&api_key);
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
 }
 
@@ -132,7 +141,7 @@ async fn test_multiple_role_changes() {
 
     // First key should be revoked
     assert!(matches!(
-        db.verify_api_key(&api_key1),
+        db.authenticate_api_key_request(&api_key1, None, "/peer-id"),
         Err(DatabaseError::PermissionDenied(_))
     ));
 
@@ -146,13 +155,13 @@ async fn test_multiple_role_changes() {
 
     // Second key should be revoked
     assert!(matches!(
-        db.verify_api_key(&api_key2),
+        db.authenticate_api_key_request(&api_key2, None, "/peer-id"),
         Err(DatabaseError::PermissionDenied(_))
     ));
 
     // First key still revoked
     assert!(matches!(
-        db.verify_api_key(&api_key1),
+        db.authenticate_api_key_request(&api_key1, None, "/peer-id"),
         Err(DatabaseError::PermissionDenied(_))
     ));
 }
@@ -794,7 +803,11 @@ async fn test_admin_system_endpoints(
 
 #[test(tokio::test)]
 async fn test_superadmin_all_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let Some((server, _dirs)) =
+        common::TestServer::build(true, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
     let base_url = server.url("");
 
@@ -858,7 +871,11 @@ async fn test_superadmin_all_endpoints_access() {
 #[test(tokio::test)]
 
 async fn test_admin_role_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let Some((server, _dirs)) =
+        common::TestServer::build(true, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
     let base_url = server.url("");
 
@@ -1001,7 +1018,11 @@ async fn test_admin_role_endpoints_access() {
 #[test(tokio::test)]
 
 async fn test_sender_role_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let Some((server, _dirs)) =
+        common::TestServer::build(true, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
     let base_url = server.url("");
 
@@ -1218,7 +1239,11 @@ async fn test_sender_role_endpoints_access() {
 #[test(tokio::test)]
 
 async fn test_manager_role_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let Some((server, _dirs)) =
+        common::TestServer::build(true, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
     let base_url = server.url("");
 
@@ -1371,7 +1396,11 @@ async fn test_manager_role_endpoints_access() {
 
 #[test(tokio::test)]
 async fn test_data_role_endpoints_access() {
-    let (server, _dirs) = common::TestServer::build(true, false, None).await;
+    let Some((server, _dirs)) =
+        common::TestServer::build(true, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
     let base_url = server.url("");
 

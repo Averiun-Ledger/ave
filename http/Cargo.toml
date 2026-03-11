@@ -30,6 +30,7 @@ reqwest = {  workspace = true }
 rustls = { version = "0.23.36", features = ["ring"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { workspace = true }
+ip_network = { workspace = true }
 axum-extra = "0.12.5"
 serde_qs = { version = "1.0", features = ["axum"] }
 tower = "0.5.3"

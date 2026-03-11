@@ -3,14 +3,20 @@
 // Database-backed login endpoint that returns full authentication context
 
 use super::database::{AuthDatabase, DatabaseError};
+use super::http_api::{
+    DatabaseErrorMapping, db_error_to_response as shared_db_error_to_response,
+};
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
+use super::request_meta;
+use ave_bridge::ProxyConfig;
 use axum::{
     Extension, Json,
     extract::ConnectInfo,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
 use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc};
+use std::time::Instant;
 use tracing::warn;
 
 const TARGET: &str = "ave::http::auth";
@@ -19,22 +25,7 @@ const TARGET: &str = "ave::http::auth";
 fn db_error_to_response(
     err: DatabaseError,
 ) -> (StatusCode, Json<ErrorResponse>) {
-    let (status, message) = match err {
-        DatabaseError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-        DatabaseError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
-        DatabaseError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
-        DatabaseError::PermissionDenied(msg) => (StatusCode::UNAUTHORIZED, msg),
-        DatabaseError::AccountLocked(msg) => (StatusCode::UNAUTHORIZED, msg),
-        DatabaseError::RateLimitExceeded(msg) => {
-            (StatusCode::TOO_MANY_REQUESTS, msg)
-        }
-        DatabaseError::PasswordChangeRequired(msg) => {
-            (StatusCode::FORBIDDEN, msg)
-        }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-
-    (status, Json(ErrorResponse { error: message }))
+    shared_db_error_to_response(err, DatabaseErrorMapping::login())
 }
 
 /// Login endpoint - authenticate with username/password and get API key
@@ -58,20 +49,34 @@ fn db_error_to_response(
 )]
 pub async fn login(
     Extension(db): Extension<Arc<AuthDatabase>>,
+    Extension(proxy): Extension<Arc<ProxyConfig>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (ip_address, user_agent) = extract_request_meta(&headers, addr);
+    let request_meta = request_meta::extract_request_meta(&headers, addr, &proxy);
+    let ip_address = request_meta.ip_address;
+    let user_agent = request_meta.user_agent;
+    let request_started = Instant::now();
+    let mut db_operations = 0u64;
 
     // SECURITY FIX: Check rate limit BEFORE credential verification
     // This prevents brute force attacks by limiting requests per IP
-    db.check_rate_limit(
-        None, // No API key for pre-auth requests
-        ip_address.as_deref(),
-        "/login".into(),
-    )
+    let pre_auth_ip = ip_address.clone();
+    db.run_blocking("login_pre_auth_rate_limit", move |db| {
+        db.check_rate_limit(
+            None,
+            pre_auth_ip.as_deref(),
+            Some("/login"),
+        )
+    })
+    .await
     .map_err(|e| {
+        db.record_request_db_metrics(
+            "login",
+            db_operations + 1,
+            request_started.elapsed(),
+        );
         (
             StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorResponse {
@@ -79,11 +84,54 @@ pub async fn login(
             }),
         )
     })?;
+    db_operations += 1;
 
-    // Verify credentials and get user
-    let user = db
-        .verify_credentials(&req.username, &req.password)
+    let login_username = req.username.clone();
+    let login_password = req.password.clone();
+    let login_ip = ip_address.clone();
+    let login_user_agent = user_agent.clone();
+    let (user, roles, permissions, api_key) = db
+        .run_blocking("login_session", move |db| {
+            let user = db.verify_credentials_transactional(
+                &login_username,
+                &login_password,
+                login_ip.as_deref(),
+                login_user_agent.as_deref(),
+            )?;
+            let roles = db.get_user_roles(user.id)?;
+            let permissions = db.calculate_user_permissions(user.id)?;
+            let session_name = format!("{}_session", user.username);
+            let audit_details =
+                format!("User {} logged in successfully", user.username);
+            let (api_key, _key_info) = db.issue_management_api_key_transactional(
+                user.id,
+                Some(&session_name),
+                None,
+                None,
+                Some(crate::auth::database_audit::AuditLogParams {
+                    user_id: Some(user.id),
+                    api_key_id: None,
+                    action_type: "login_success",
+                    endpoint: Some("/login"),
+                    http_method: Some("POST"),
+                    ip_address: login_ip.as_deref(),
+                    user_agent: login_user_agent.as_deref(),
+                    request_id: None,
+                    details: Some(&audit_details),
+                    success: true,
+                    error_message: None,
+                }),
+            )?;
+
+            Ok((user, roles, permissions, api_key))
+        })
+        .await
         .map_err(|e| {
+            db.record_request_db_metrics(
+                "login",
+                db_operations + 1,
+                request_started.elapsed(),
+            );
             warn!(
                 target: TARGET,
                 username = %req.username,
@@ -91,50 +139,10 @@ pub async fn login(
                 error = %e,
                 "login failed"
             );
-
-            // Log failed login attempt
-            if let Err(ae) = db.create_audit_log(
-                crate::auth::database_audit::AuditLogParams {
-                    user_id: None,    // No user_id for failed login
-                    api_key_id: None, // No API key yet
-                    action_type: "login_failed",
-                    endpoint: Some("/login"),
-                    http_method: Some("POST"),
-                    ip_address: ip_address.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                    request_id: None,
-                    details: Some(&format!(
-                        "Failed login for username: {}",
-                        req.username
-                    )),
-                    success: false,
-                    error_message: Some(&e.to_string()),
-                },
-            ) {
-                warn!(target: TARGET, error = %ae, "failed to write login audit log");
-            }
-
             db_error_to_response(e)
         })?;
-
-    // Get user's roles
-    let roles = db.get_user_roles(user.id).map_err(db_error_to_response)?;
-
-    // Get user's permissions
-    let permissions = db
-        .calculate_user_permissions(user.id)
-        .map_err(db_error_to_response)?;
-
-    // Create API key for this session
-    let (api_key, key_info) = db
-        .create_api_key(
-            user.id,
-            Some(&format!("{}_session", user.username)),
-            None, // No description
-            None, // Use role's default TTL
-            true, // management key
-        )
-        .map_err(db_error_to_response)?;
+    db_operations += 1;
+    db.record_request_db_metrics("login", db_operations, request_started.elapsed());
 
     // Build user info
     let user_info = UserInfo {
@@ -149,28 +157,6 @@ pub async fn login(
         roles,
     };
 
-    // Log successful login
-    if let Err(e) =
-        db.create_audit_log(crate::auth::database_audit::AuditLogParams {
-            user_id: Some(user.id),
-            api_key_id: Some(&key_info.id),
-            action_type: "login_success",
-            endpoint: Some("/login"),
-            http_method: Some("POST"),
-            ip_address: ip_address.as_deref(),
-            user_agent: user_agent.as_deref(),
-            request_id: None,
-            details: Some(&format!(
-                "User {} logged in successfully",
-                user.username
-            )),
-            success: true,
-            error_message: None,
-        })
-    {
-        warn!(target: TARGET, error = %e, "failed to write login audit log");
-    }
-
     Ok(Json(LoginResponse {
         api_key,
         user: user_info,
@@ -183,23 +169,6 @@ pub struct ChangePasswordRequest {
     pub username: String,
     pub current_password: String,
     pub new_password: String,
-}
-
-fn extract_request_meta(
-    headers: &HeaderMap,
-    addr: SocketAddr,
-) -> (Option<String>, Option<String>) {
-    // SECURITY FIX: Use socket address directly instead of trusting client headers
-    // X-Forwarded-For can be spoofed by attackers to bypass rate limiting
-    // Only trust proxy headers if explicitly configured (future enhancement)
-    let ip_address = Some(addr.ip().to_string());
-
-    let user_agent = headers
-        .get("User-Agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    (ip_address, user_agent)
 }
 
 /// Endpoint to change password when it is required (no API key needed)
@@ -218,20 +187,33 @@ fn extract_request_meta(
 )]
 pub async fn change_password(
     Extension(db): Extension<Arc<AuthDatabase>>,
+    Extension(proxy): Extension<Arc<ProxyConfig>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let (ip_address, _user_agent) = extract_request_meta(&headers, addr);
+    let request_meta = request_meta::extract_request_meta(&headers, addr, &proxy);
+    let ip_address = request_meta.ip_address;
+    let request_started = Instant::now();
+    let mut db_operations = 0u64;
 
     // SECURITY FIX: Check rate limit BEFORE credential verification
     // This prevents brute force attacks on password change endpoint
-    db.check_rate_limit(
-        None, // No API key for pre-auth requests
-        ip_address.as_deref(),
-        "/change-password".into(),
-    )
+    let pre_auth_ip = ip_address.clone();
+    db.run_blocking("change_password_pre_auth_rate_limit", move |db| {
+        db.check_rate_limit(
+            None,
+            pre_auth_ip.as_deref(),
+            Some("/change-password"),
+        )
+    })
+    .await
     .map_err(|e| {
+        db.record_request_db_metrics(
+            "change_password",
+            db_operations + 1,
+            request_started.elapsed(),
+        );
         (
             StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorResponse {
@@ -239,13 +221,33 @@ pub async fn change_password(
             }),
         )
     })?;
+    db_operations += 1;
 
-    db.change_password_with_credentials(
-        &req.username,
-        &req.current_password,
-        &req.new_password,
-    )
-    .map_err(db_error_to_response)?;
+    let username = req.username.clone();
+    let current_password = req.current_password.clone();
+    let new_password = req.new_password.clone();
+    db.run_blocking("change_password_with_credentials", move |db| {
+        db.change_password_with_credentials(
+            &username,
+            &current_password,
+            &new_password,
+        )
+    })
+    .await
+    .map_err(|e| {
+        db.record_request_db_metrics(
+            "change_password",
+            db_operations + 1,
+            request_started.elapsed(),
+        );
+        db_error_to_response(e)
+    })?;
+    db_operations += 1;
+    db.record_request_db_metrics(
+        "change_password",
+        db_operations,
+        request_started.elapsed(),
+    );
 
     Ok(StatusCode::OK)
 }

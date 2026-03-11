@@ -3,31 +3,141 @@
 // This module provides quota and plan management for API keys.
 
 use super::database::{AuthDatabase, DatabaseError};
+use super::database_audit::AuditLogParams;
 use super::models::{ApiKeyQuotaStatus, QuotaExtensionInfo, UsagePlan};
 use rusqlite::{OptionalExtension, params};
 use time::OffsetDateTime;
 
-const MAX_PLAN_ID_LEN: usize = 64;
-const MAX_PLAN_NAME_LEN: usize = 100;
-
 impl AuthDatabase {
+    fn map_write_error(
+        err: rusqlite::Error,
+        fallback: fn(String) -> DatabaseError,
+    ) -> DatabaseError {
+        let msg = err.to_string();
+        if msg.contains("UNIQUE") {
+            DatabaseError::Duplicate(msg)
+        } else {
+            fallback(msg)
+        }
+    }
+
     fn current_usage_month() -> String {
         let now = OffsetDateTime::now_utc();
         let month_num: u8 = now.month().into();
         format!("{:04}-{:02}", now.year(), month_num)
     }
 
-    fn validate_plan_id(plan_id: &str) -> Result<(), DatabaseError> {
+    pub(crate) fn consume_monthly_quota_with_conn(
+        conn: &rusqlite::Connection,
+        key_id: &str,
+    ) -> Result<ApiKeyQuotaStatus, DatabaseError> {
+        let usage_month = Self::current_usage_month();
+        let now = Self::now();
+
+        let is_management = Self::is_management_key_internal(conn, key_id)?;
+
+        if is_management {
+            return Ok(ApiKeyQuotaStatus {
+                api_key_id: key_id.to_string(),
+                usage_month,
+                plan_id: None,
+                plan_limit: None,
+                extensions_total: 0,
+                effective_limit: None,
+                used_events: 0,
+                remaining_events: None,
+                has_quota: false,
+            });
+        }
+
+        let plan_info = Self::get_plan_for_key_internal(conn, key_id)?;
+
+        let (
+            plan_id,
+            plan_limit,
+            extensions_total,
+            effective_limit,
+        ) = if let Some((plan_id, plan_limit)) = plan_info {
+            let extensions_total =
+                Self::get_extensions_total_internal(conn, key_id, &usage_month)?;
+            let effective_limit = plan_limit + extensions_total;
+
+            if effective_limit <= 0 {
+                return Err(DatabaseError::RateLimitExceeded(format!(
+                    "Monthly quota exceeded: month={} used={} limit={}",
+                    usage_month, 0, effective_limit
+                )));
+            }
+
+            let updated = conn
+                .execute(
+                    "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
+                     VALUES (?1, ?2, 1, ?3)
+                     ON CONFLICT(api_key_id, usage_month)
+                     DO UPDATE SET used_events = api_key_usage.used_events + 1, updated_at = excluded.updated_at
+                     WHERE api_key_usage.used_events < ?4",
+                    params![key_id, usage_month, now, effective_limit],
+                )
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            if updated == 0 {
+                let used_events =
+                    Self::get_used_events_internal(conn, key_id, &usage_month)?;
+                return Err(DatabaseError::RateLimitExceeded(format!(
+                    "Monthly quota exceeded: month={} used={} limit={}",
+                    usage_month, used_events, effective_limit
+                )));
+            }
+
+            (
+                Some(plan_id),
+                Some(plan_limit),
+                extensions_total,
+                Some(effective_limit),
+            )
+        } else {
+            conn.execute(
+                "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
+                 VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(api_key_id, usage_month)
+                 DO UPDATE SET used_events = api_key_usage.used_events + 1, updated_at = excluded.updated_at",
+                params![key_id, usage_month, now],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            (None, None, 0, None)
+        };
+
+        let used_events =
+            Self::get_used_events_internal(conn, key_id, &usage_month)?;
+        let remaining_events =
+            effective_limit.map(|limit| std::cmp::max(0, limit - used_events));
+
+        Ok(ApiKeyQuotaStatus {
+            api_key_id: key_id.to_string(),
+            usage_month,
+            plan_id,
+            plan_limit,
+            extensions_total,
+            effective_limit,
+            used_events,
+            remaining_events,
+            has_quota: plan_limit.is_some(),
+        })
+    }
+
+    fn validate_plan_id(&self, plan_id: &str) -> Result<(), DatabaseError> {
+        let max_plan_id_len = self.usage_plan_id_max_length();
         if plan_id.is_empty() {
             return Err(DatabaseError::Validation(
                 "Plan id cannot be empty".to_string(),
             ));
         }
 
-        if plan_id.len() > MAX_PLAN_ID_LEN {
+        if plan_id.len() > max_plan_id_len {
             return Err(DatabaseError::Validation(format!(
                 "Plan id must be {} characters or less",
-                MAX_PLAN_ID_LEN
+                max_plan_id_len
             )));
         }
 
@@ -44,7 +154,8 @@ impl AuthDatabase {
         Ok(())
     }
 
-    fn validate_plan_name(name: &str) -> Result<(), DatabaseError> {
+    fn validate_plan_name(&self, name: &str) -> Result<(), DatabaseError> {
+        let max_plan_name_len = self.usage_plan_name_max_length();
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err(DatabaseError::Validation(
@@ -52,10 +163,10 @@ impl AuthDatabase {
             ));
         }
 
-        if trimmed.len() > MAX_PLAN_NAME_LEN {
+        if trimmed.len() > max_plan_name_len {
             return Err(DatabaseError::Validation(format!(
                 "Plan name must be {} characters or less",
-                MAX_PLAN_NAME_LEN
+                max_plan_name_len
             )));
         }
 
@@ -199,15 +310,16 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
-    pub fn create_usage_plan(
+    fn create_usage_plan_with_conn(
         &self,
+        conn: &rusqlite::Connection,
         id: &str,
         name: &str,
         description: Option<&str>,
         monthly_events: i64,
     ) -> Result<UsagePlan, DatabaseError> {
-        Self::validate_plan_id(id)?;
-        Self::validate_plan_name(name)?;
+        self.validate_plan_id(id)?;
+        self.validate_plan_name(name)?;
 
         if monthly_events < 0 {
             return Err(DatabaseError::Validation(
@@ -215,7 +327,6 @@ impl AuthDatabase {
             ));
         }
 
-        let conn = self.lock_conn()?;
         let now = Self::now();
 
         conn.execute(
@@ -223,18 +334,35 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, name.trim(), description, monthly_events, now, now],
         )
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE") {
-                DatabaseError::Duplicate(msg)
-            } else {
-                DatabaseError::Insert(msg)
-            }
-        })?;
+        .map_err(|e| Self::map_write_error(e, DatabaseError::Insert))?;
 
-        let plan = Self::get_usage_plan_internal(&conn, id)?;
-        drop(conn);
+        Self::get_usage_plan_internal(conn, id)
+    }
 
+    pub fn create_usage_plan_transactional(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        monthly_events: i64,
+        audit: Option<AuditLogParams>,
+    ) -> Result<UsagePlan, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        let plan = self.create_usage_plan_with_conn(
+            &tx,
+            id,
+            name,
+            description,
+            monthly_events,
+        )?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
         Ok(plan)
     }
 
@@ -271,15 +399,16 @@ impl AuthDatabase {
         Ok(plans)
     }
 
-    pub fn update_usage_plan(
+    fn update_usage_plan_with_conn(
         &self,
+        conn: &rusqlite::Connection,
         id: &str,
         name: Option<&str>,
         description: Option<&str>,
         monthly_events: Option<i64>,
     ) -> Result<UsagePlan, DatabaseError> {
         if let Some(name) = name {
-            Self::validate_plan_name(name)?;
+            self.validate_plan_name(name)?;
         }
 
         if let Some(limit) = monthly_events
@@ -290,12 +419,10 @@ impl AuthDatabase {
             ));
         }
 
-        let conn = self.lock_conn()?;
-
         // Ensure plan exists before update
-        let _ = Self::get_usage_plan_internal(&conn, id)?;
+        let _ = Self::get_usage_plan_internal(conn, id)?;
 
-        let mut current = Self::get_usage_plan_internal(&conn, id)?;
+        let mut current = Self::get_usage_plan_internal(conn, id)?;
         if let Some(new_name) = name {
             current.name = new_name.trim().to_string();
         }
@@ -319,17 +446,42 @@ impl AuthDatabase {
                 id
             ],
         )
-        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        .map_err(|e| Self::map_write_error(e, DatabaseError::Update))?;
 
-        let plan = Self::get_usage_plan_internal(&conn, id)?;
-        drop(conn);
+        Self::get_usage_plan_internal(conn, id)
+    }
 
+    pub fn update_usage_plan_transactional(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        monthly_events: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<UsagePlan, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        let plan = self.update_usage_plan_with_conn(
+            &tx,
+            id,
+            name,
+            description,
+            monthly_events,
+        )?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Ok(plan)
     }
 
-    pub fn delete_usage_plan(&self, id: &str) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
+    fn delete_usage_plan_with_conn(
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<(), DatabaseError> {
         let in_use: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM api_key_plans WHERE plan_id = ?1",
@@ -359,13 +511,31 @@ impl AuthDatabase {
         Ok(())
     }
 
-    pub fn assign_api_key_plan(
+    pub fn delete_usage_plan_transactional(
         &self,
+        id: &str,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        Self::delete_usage_plan_with_conn(&tx, id)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        Ok(())
+    }
+
+    fn assign_api_key_plan_with_conn(
+        &self,
+        conn: &rusqlite::Connection,
         key_id: &str,
         plan_id: Option<&str>,
         assigned_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
         let is_management = Self::is_management_key_internal(&conn, key_id)?;
 
         if is_management && plan_id.is_some() {
@@ -376,7 +546,7 @@ impl AuthDatabase {
         }
 
         if let Some(plan_id) = plan_id {
-            Self::validate_plan_id(plan_id)?;
+            self.validate_plan_id(plan_id)?;
             let _ = Self::get_usage_plan_internal(&conn, plan_id)?;
 
             let now = Self::now();
@@ -401,8 +571,28 @@ impl AuthDatabase {
         Ok(())
     }
 
-    pub fn add_quota_extension(
+    pub fn assign_api_key_plan_transactional(
         &self,
+        key_id: &str,
+        plan_id: Option<&str>,
+        assigned_by: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        self.assign_api_key_plan_with_conn(&tx, key_id, plan_id, assigned_by)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Ok(())
+    }
+
+    fn add_quota_extension_with_conn(
+        conn: &rusqlite::Connection,
         key_id: &str,
         extra_events: i64,
         usage_month: Option<&str>,
@@ -416,8 +606,6 @@ impl AuthDatabase {
         }
 
         let usage_month = Self::resolve_usage_month(usage_month)?;
-
-        let conn = self.lock_conn()?;
         let is_management = Self::is_management_key_internal(&conn, key_id)?;
 
         if is_management {
@@ -465,6 +653,97 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(row)
+    }
+
+    pub fn add_quota_extension_transactional(
+        &self,
+        key_id: &str,
+        extra_events: i64,
+        usage_month: Option<&str>,
+        reason: Option<&str>,
+        created_by: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<QuotaExtensionInfo, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        let extension = Self::add_quota_extension_with_conn(
+            &tx,
+            key_id,
+            extra_events,
+            usage_month,
+            reason,
+            created_by,
+        )?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(extension)
+    }
+
+    pub(crate) fn transfer_api_key_quota_state_internal(
+        conn: &rusqlite::Connection,
+        source_key_id: &str,
+        target_key_id: &str,
+        assigned_by: Option<i64>,
+    ) -> Result<(), DatabaseError> {
+        if source_key_id == target_key_id {
+            return Ok(());
+        }
+
+        let now = Self::now();
+        let source_is_management =
+            Self::is_management_key_internal(conn, source_key_id)?;
+        let target_is_management =
+            Self::is_management_key_internal(conn, target_key_id)?;
+
+        if source_is_management != target_is_management {
+            return Err(DatabaseError::Validation(
+                "Cannot transfer quota state between different API key types"
+                    .to_string(),
+            ));
+        }
+
+        conn.execute(
+            "UPDATE api_key_plans
+             SET api_key_id = ?1,
+                 assigned_at = ?2,
+                 assigned_by = COALESCE(?3, assigned_by)
+             WHERE api_key_id = ?4",
+            params![target_key_id, now, assigned_by, source_key_id],
+        )
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
+             SELECT ?2, usage_month, used_events, updated_at
+             FROM api_key_usage
+             WHERE api_key_id = ?1
+             ON CONFLICT(api_key_id, usage_month) DO UPDATE SET
+               used_events = api_key_usage.used_events + excluded.used_events,
+               updated_at = MAX(api_key_usage.updated_at, excluded.updated_at)",
+            params![source_key_id, target_key_id],
+        )
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        conn.execute(
+            "DELETE FROM api_key_usage WHERE api_key_id = ?1",
+            params![source_key_id],
+        )
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+
+        conn.execute(
+            "UPDATE quota_extensions
+             SET api_key_id = ?1
+             WHERE api_key_id = ?2",
+            params![target_key_id, source_key_id],
+        )
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        Ok(())
     }
 
     pub fn get_api_key_quota_status(
@@ -533,89 +812,4 @@ impl AuthDatabase {
         })
     }
 
-    pub fn consume_monthly_quota(
-        &self,
-        key_id: &str,
-    ) -> Result<ApiKeyQuotaStatus, DatabaseError> {
-        let usage_month = Self::current_usage_month();
-        let now = Self::now();
-
-        let conn = self.lock_conn()?;
-        let is_management = Self::is_management_key_internal(&conn, key_id)?;
-
-        if is_management {
-            return Ok(ApiKeyQuotaStatus {
-                api_key_id: key_id.to_string(),
-                usage_month,
-                plan_id: None,
-                plan_limit: None,
-                extensions_total: 0,
-                effective_limit: None,
-                used_events: 0,
-                remaining_events: None,
-                has_quota: false,
-            });
-        }
-
-        let plan_info = Self::get_plan_for_key_internal(&conn, key_id)?;
-        let used_before =
-            Self::get_used_events_internal(&conn, key_id, &usage_month)?;
-
-        let (
-            plan_id,
-            plan_limit,
-            extensions_total,
-            effective_limit,
-            remaining_after,
-        ) = if let Some((plan_id, plan_limit)) = plan_info {
-            let extensions_total = Self::get_extensions_total_internal(
-                &conn,
-                key_id,
-                &usage_month,
-            )?;
-            let effective_limit = plan_limit + extensions_total;
-
-            if used_before >= effective_limit {
-                return Err(DatabaseError::RateLimitExceeded(format!(
-                    "Monthly quota exceeded: month={} used={} limit={}",
-                    usage_month, used_before, effective_limit
-                )));
-            }
-
-            let remaining_after =
-                std::cmp::max(0, effective_limit - (used_before + 1));
-            (
-                Some(plan_id),
-                Some(plan_limit),
-                extensions_total,
-                Some(effective_limit),
-                Some(remaining_after),
-            )
-        } else {
-            (None, None, 0, None, None)
-        };
-
-        conn.execute(
-            "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
-             VALUES (?1, ?2, 1, ?3)
-             ON CONFLICT(api_key_id, usage_month)
-             DO UPDATE SET used_events = api_key_usage.used_events + 1, updated_at = excluded.updated_at",
-            params![key_id, usage_month, now],
-        )
-        .map_err(|e| DatabaseError::Update(e.to_string()))?;
-
-        let used_after = used_before + 1;
-
-        Ok(ApiKeyQuotaStatus {
-            api_key_id: key_id.to_string(),
-            usage_month,
-            plan_id,
-            plan_limit,
-            extensions_total,
-            effective_limit,
-            used_events: used_after,
-            remaining_events: remaining_after,
-            has_quota: plan_limit.is_some(),
-        })
-    }
 }

@@ -4,20 +4,37 @@
 
 use crate::auth::validate_password;
 
+use super::database_audit::AuditLogParams;
 use super::crypto::hash_password;
+use super::db_runtime::{AuthDbRuntime, PooledConnection, auth_tuning_for_ram};
 use super::models::*;
-use ave_bridge::{MachineSpec, auth::AuthConfig, resolve_spec};
+use super::system_config::SystemConfigKey;
+use super::{MAINTENANCE_LIMITS, PASSWORD_POLICY, VALIDATION_LIMITS};
+use ave_bridge::{
+    MachineSpec,
+    auth::{AuthConfig, EndpointRateLimit},
+    resolve_spec,
+};
 use rand::RngExt;
-use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, params};
+use rusqlite::{
+    Connection, OptionalExtension, Result as SqliteResult,
+    TransactionBehavior, params,
+};
 use std::{
     fs,
     path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, info};
+use tokio::sync::Semaphore;
+use tracing::{debug, info, warn};
 
 const TARGET: &str = "ave::http::auth";
+const BLOCKING_TASK_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // =============================================================================
 // ERROR TYPE
@@ -72,8 +89,111 @@ pub enum DatabaseError {
 }
 
 // =============================================================================
-// DATABASE SERVICE
-// =============================================================================
+#[derive(Default)]
+struct DbMetrics {
+    primary_lock_wait_ns_total: AtomicU64,
+    primary_lock_wait_count: AtomicU64,
+    primary_lock_wait_ns_max: AtomicU64,
+    maintenance_lock_wait_ns_total: AtomicU64,
+    maintenance_lock_wait_count: AtomicU64,
+    maintenance_lock_wait_ns_max: AtomicU64,
+    transaction_duration_ns_total: AtomicU64,
+    transaction_count: AtomicU64,
+    transaction_duration_ns_max: AtomicU64,
+    blocking_queue_wait_ns_total: AtomicU64,
+    blocking_queue_wait_count: AtomicU64,
+    blocking_queue_wait_ns_max: AtomicU64,
+    blocking_rejections_total: AtomicU64,
+    blocking_task_duration_ns_total: AtomicU64,
+    blocking_task_count: AtomicU64,
+    blocking_task_duration_ns_max: AtomicU64,
+    request_db_ops_total: AtomicU64,
+    request_count: AtomicU64,
+    request_db_duration_ns_total: AtomicU64,
+    request_db_duration_ns_max: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DbMetricsSnapshot {
+    pub primary_lock_wait_count: u64,
+    pub primary_lock_wait_avg_ms: f64,
+    pub primary_lock_wait_max_ms: f64,
+    pub maintenance_lock_wait_count: u64,
+    pub maintenance_lock_wait_avg_ms: f64,
+    pub maintenance_lock_wait_max_ms: f64,
+    pub transaction_count: u64,
+    pub transaction_avg_ms: f64,
+    pub transaction_max_ms: f64,
+    pub blocking_queue_wait_count: u64,
+    pub blocking_queue_wait_avg_ms: f64,
+    pub blocking_queue_wait_max_ms: f64,
+    pub blocking_rejections_total: u64,
+    pub blocking_task_count: u64,
+    pub blocking_task_avg_ms: f64,
+    pub blocking_task_max_ms: f64,
+    pub request_count: u64,
+    pub avg_db_ops_per_request: f64,
+    pub avg_request_db_ms: f64,
+    pub max_request_db_ms: f64,
+}
+
+struct RuntimeAuthConfig {
+    api_key_default_ttl_seconds: AtomicI64,
+    api_key_max_keys_per_user: AtomicU32,
+    max_login_attempts: AtomicU32,
+    lockout_duration_seconds: AtomicI64,
+    rate_limit_enable: AtomicBool,
+    rate_limit_window_seconds: AtomicI64,
+    rate_limit_max_requests: AtomicU32,
+    rate_limit_limit_by_key: AtomicBool,
+    rate_limit_limit_by_ip: AtomicBool,
+    rate_limit_cleanup_interval_seconds: AtomicI64,
+    rate_limit_sensitive_endpoints: RwLock<Vec<EndpointRateLimit>>,
+    audit_enable: AtomicBool,
+    audit_retention_days: AtomicU32,
+    audit_max_entries: AtomicU32,
+}
+
+impl RuntimeAuthConfig {
+    fn from_config(config: &AuthConfig) -> Self {
+        Self {
+            api_key_default_ttl_seconds: AtomicI64::new(
+                config.api_key.default_ttl_seconds,
+            ),
+            api_key_max_keys_per_user: AtomicU32::new(
+                config.api_key.max_keys_per_user,
+            ),
+            max_login_attempts: AtomicU32::new(config.lockout.max_attempts),
+            lockout_duration_seconds: AtomicI64::new(
+                config.lockout.duration_seconds,
+            ),
+            rate_limit_enable: AtomicBool::new(config.rate_limit.enable),
+            rate_limit_window_seconds: AtomicI64::new(
+                config.rate_limit.window_seconds,
+            ),
+            rate_limit_max_requests: AtomicU32::new(
+                config.rate_limit.max_requests,
+            ),
+            rate_limit_limit_by_key: AtomicBool::new(
+                config.rate_limit.limit_by_key,
+            ),
+            rate_limit_limit_by_ip: AtomicBool::new(
+                config.rate_limit.limit_by_ip,
+            ),
+            rate_limit_cleanup_interval_seconds: AtomicI64::new(
+                config.rate_limit.cleanup_interval_seconds,
+            ),
+            rate_limit_sensitive_endpoints: RwLock::new(
+                config.rate_limit.sensitive_endpoints.clone(),
+            ),
+            audit_enable: AtomicBool::new(config.session.audit_enable),
+            audit_retention_days: AtomicU32::new(
+                config.session.audit_retention_days,
+            ),
+            audit_max_entries: AtomicU32::new(config.session.audit_max_entries),
+        }
+    }
+}
 
 // Dummy password hash for timing attack mitigation
 // This is a real Argon2id hash generated with the same parameters as user passwords
@@ -83,18 +203,783 @@ const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$6bLVReaW/buHRw
 /// Thread-safe database service for auth operations
 #[derive(Clone)]
 pub struct AuthDatabase {
-    pub(crate) connection: Arc<Mutex<Connection>>,
+    runtime: Arc<AuthDbRuntime>,
+    metrics: Arc<DbMetrics>,
+    blocking_task_semaphore: Arc<Semaphore>,
+    #[cfg(feature = "prometheus")]
+    prometheus: Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
+    runtime_config: Arc<RuntimeAuthConfig>,
     pub(crate) config: Arc<AuthConfig>,
 }
 
 impl AuthDatabase {
-    /// Get a locked database connection with error handling
-    pub(crate) fn lock_conn(
+    fn duration_to_ns(duration: Duration) -> u64 {
+        duration.as_nanos().min(u64::MAX as u128) as u64
+    }
+
+    fn ns_to_ms(ns: u64) -> f64 {
+        ns as f64 / 1_000_000.0
+    }
+
+    fn duration_to_seconds(duration: Duration) -> f64 {
+        duration.as_secs_f64()
+    }
+
+    fn avg_ns_to_ms(total: u64, count: u64) -> f64 {
+        if count == 0 {
+            0.0
+        } else {
+            Self::ns_to_ms(total / count)
+        }
+    }
+
+    fn update_max(target: &AtomicU64, value: u64) {
+        let mut current = target.load(Ordering::Relaxed);
+        while value > current {
+            match target.compare_exchange(
+                current,
+                value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn record_lock_wait(&self, pool_name: &'static str, elapsed: Duration) {
+        let ns = Self::duration_to_ns(elapsed);
+        let elapsed_ms = Self::ns_to_ms(ns);
+
+        match pool_name {
+            "primary" => {
+                self.metrics
+                    .primary_lock_wait_ns_total
+                    .fetch_add(ns, Ordering::Relaxed);
+                self.metrics
+                    .primary_lock_wait_count
+                    .fetch_add(1, Ordering::Relaxed);
+                Self::update_max(&self.metrics.primary_lock_wait_ns_max, ns);
+            }
+            "maintenance" => {
+                self.metrics
+                    .maintenance_lock_wait_ns_total
+                    .fetch_add(ns, Ordering::Relaxed);
+                self.metrics
+                    .maintenance_lock_wait_count
+                    .fetch_add(1, Ordering::Relaxed);
+                Self::update_max(
+                    &self.metrics.maintenance_lock_wait_ns_max,
+                    ns,
+                );
+            }
+            _ => {}
+        }
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            let elapsed_seconds = Self::duration_to_seconds(elapsed);
+            match pool_name {
+                "primary" | "maintenance" => {
+                    metrics.observe_lock_wait(pool_name, elapsed_seconds)
+                }
+                _ => {}
+            }
+        }
+
+        if elapsed >= Duration::from_millis(10) {
+            warn!(
+                target: TARGET,
+                pool = pool_name,
+                elapsed_ms,
+                "slow auth db pool wait"
+            );
+        }
+    }
+
+    pub(crate) fn record_transaction_duration(
         &self,
-    ) -> Result<MutexGuard<'_, Connection>, DatabaseError> {
-        self.connection.lock().map_err(|e| {
-            DatabaseError::Connection(format!("DB mutex poisoned: {}", e))
+        operation: &'static str,
+        elapsed: Duration,
+    ) {
+        let ns = Self::duration_to_ns(elapsed);
+        let elapsed_ms = Self::ns_to_ms(ns);
+
+        self.metrics
+            .transaction_duration_ns_total
+            .fetch_add(ns, Ordering::Relaxed);
+        self.metrics
+            .transaction_count
+            .fetch_add(1, Ordering::Relaxed);
+        Self::update_max(&self.metrics.transaction_duration_ns_max, ns);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_transaction_duration(
+                operation,
+                Self::duration_to_seconds(elapsed),
+            );
+        }
+
+        if elapsed >= Duration::from_millis(25) {
+            warn!(
+                target: TARGET,
+                operation,
+                elapsed_ms,
+                "slow auth db transaction"
+            );
+        }
+    }
+
+    fn record_blocking_queue_wait(
+        &self,
+        operation: &'static str,
+        elapsed: Duration,
+    ) {
+        let ns = Self::duration_to_ns(elapsed);
+        let elapsed_ms = Self::ns_to_ms(ns);
+
+        self.metrics
+            .blocking_queue_wait_ns_total
+            .fetch_add(ns, Ordering::Relaxed);
+        self.metrics
+            .blocking_queue_wait_count
+            .fetch_add(1, Ordering::Relaxed);
+        Self::update_max(&self.metrics.blocking_queue_wait_ns_max, ns);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_blocking_queue_wait(
+                operation,
+                Self::duration_to_seconds(elapsed),
+            );
+        }
+
+        if elapsed >= Duration::from_millis(10) {
+            warn!(
+                target: TARGET,
+                operation,
+                elapsed_ms,
+                "slow auth db blocking queue wait"
+            );
+        }
+    }
+
+    fn record_blocking_rejection(&self, operation: &'static str) {
+        self.metrics
+            .blocking_rejections_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.inc_blocking_task_rejection(operation);
+        }
+
+        warn!(
+            target: TARGET,
+            operation,
+            timeout_ms = BLOCKING_TASK_QUEUE_TIMEOUT.as_millis(),
+            "auth db blocking task rejected due to backpressure"
+        );
+    }
+
+    fn record_blocking_task_duration(
+        &self,
+        operation: &'static str,
+        elapsed: Duration,
+    ) {
+        let ns = Self::duration_to_ns(elapsed);
+        let elapsed_ms = Self::ns_to_ms(ns);
+
+        self.metrics
+            .blocking_task_duration_ns_total
+            .fetch_add(ns, Ordering::Relaxed);
+        self.metrics
+            .blocking_task_count
+            .fetch_add(1, Ordering::Relaxed);
+        Self::update_max(&self.metrics.blocking_task_duration_ns_max, ns);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_blocking_task_duration(
+                operation,
+                Self::duration_to_seconds(elapsed),
+            );
+        }
+
+        if elapsed >= Duration::from_millis(50) {
+            warn!(
+                target: TARGET,
+                operation,
+                elapsed_ms,
+                "slow auth db blocking task"
+            );
+        }
+    }
+
+    pub(crate) fn record_request_db_metrics(
+        &self,
+        request_kind: &'static str,
+        db_operations: u64,
+        elapsed: Duration,
+    ) {
+        let ns = Self::duration_to_ns(elapsed);
+        let elapsed_ms = Self::ns_to_ms(ns);
+
+        self.metrics
+            .request_db_ops_total
+            .fetch_add(db_operations, Ordering::Relaxed);
+        self.metrics.request_count.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .request_db_duration_ns_total
+            .fetch_add(ns, Ordering::Relaxed);
+        Self::update_max(&self.metrics.request_db_duration_ns_max, ns);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_request_metrics(
+                request_kind,
+                db_operations,
+                Self::duration_to_seconds(elapsed),
+            );
+        }
+
+        debug!(
+            target: TARGET,
+            request_kind,
+            db_operations,
+            elapsed_ms,
+            "auth db request metrics"
+        );
+
+        if elapsed >= Duration::from_millis(50) {
+            warn!(
+                target: TARGET,
+                request_kind,
+                db_operations,
+                elapsed_ms,
+                "slow auth db request"
+            );
+        }
+    }
+
+    pub fn metrics_snapshot(&self) -> DbMetricsSnapshot {
+        let primary_lock_wait_count =
+            self.metrics.primary_lock_wait_count.load(Ordering::Relaxed);
+        let primary_lock_wait_ns_total =
+            self.metrics.primary_lock_wait_ns_total.load(Ordering::Relaxed);
+        let primary_lock_wait_ns_max =
+            self.metrics.primary_lock_wait_ns_max.load(Ordering::Relaxed);
+
+        let maintenance_lock_wait_count =
+            self.metrics.maintenance_lock_wait_count.load(Ordering::Relaxed);
+        let maintenance_lock_wait_ns_total = self
+            .metrics
+            .maintenance_lock_wait_ns_total
+            .load(Ordering::Relaxed);
+        let maintenance_lock_wait_ns_max = self
+            .metrics
+            .maintenance_lock_wait_ns_max
+            .load(Ordering::Relaxed);
+
+        let transaction_count =
+            self.metrics.transaction_count.load(Ordering::Relaxed);
+        let transaction_duration_ns_total = self
+            .metrics
+            .transaction_duration_ns_total
+            .load(Ordering::Relaxed);
+        let transaction_duration_ns_max = self
+            .metrics
+            .transaction_duration_ns_max
+            .load(Ordering::Relaxed);
+
+        let blocking_queue_wait_count = self
+            .metrics
+            .blocking_queue_wait_count
+            .load(Ordering::Relaxed);
+        let blocking_queue_wait_ns_total = self
+            .metrics
+            .blocking_queue_wait_ns_total
+            .load(Ordering::Relaxed);
+        let blocking_queue_wait_ns_max = self
+            .metrics
+            .blocking_queue_wait_ns_max
+            .load(Ordering::Relaxed);
+        let blocking_rejections_total = self
+            .metrics
+            .blocking_rejections_total
+            .load(Ordering::Relaxed);
+
+        let blocking_task_count =
+            self.metrics.blocking_task_count.load(Ordering::Relaxed);
+        let blocking_task_duration_ns_total = self
+            .metrics
+            .blocking_task_duration_ns_total
+            .load(Ordering::Relaxed);
+        let blocking_task_duration_ns_max = self
+            .metrics
+            .blocking_task_duration_ns_max
+            .load(Ordering::Relaxed);
+
+        let request_count = self.metrics.request_count.load(Ordering::Relaxed);
+        let request_db_ops_total =
+            self.metrics.request_db_ops_total.load(Ordering::Relaxed);
+        let request_db_duration_ns_total = self
+            .metrics
+            .request_db_duration_ns_total
+            .load(Ordering::Relaxed);
+        let request_db_duration_ns_max = self
+            .metrics
+            .request_db_duration_ns_max
+            .load(Ordering::Relaxed);
+
+        DbMetricsSnapshot {
+            primary_lock_wait_count,
+            primary_lock_wait_avg_ms: Self::avg_ns_to_ms(
+                primary_lock_wait_ns_total,
+                primary_lock_wait_count,
+            ),
+            primary_lock_wait_max_ms: Self::ns_to_ms(primary_lock_wait_ns_max),
+            maintenance_lock_wait_count,
+            maintenance_lock_wait_avg_ms: Self::avg_ns_to_ms(
+                maintenance_lock_wait_ns_total,
+                maintenance_lock_wait_count,
+            ),
+            maintenance_lock_wait_max_ms: Self::ns_to_ms(
+                maintenance_lock_wait_ns_max,
+            ),
+            transaction_count,
+            transaction_avg_ms: Self::avg_ns_to_ms(
+                transaction_duration_ns_total,
+                transaction_count,
+            ),
+            transaction_max_ms: Self::ns_to_ms(transaction_duration_ns_max),
+            blocking_queue_wait_count,
+            blocking_queue_wait_avg_ms: Self::avg_ns_to_ms(
+                blocking_queue_wait_ns_total,
+                blocking_queue_wait_count,
+            ),
+            blocking_queue_wait_max_ms: Self::ns_to_ms(
+                blocking_queue_wait_ns_max,
+            ),
+            blocking_rejections_total,
+            blocking_task_count,
+            blocking_task_avg_ms: Self::avg_ns_to_ms(
+                blocking_task_duration_ns_total,
+                blocking_task_count,
+            ),
+            blocking_task_max_ms: Self::ns_to_ms(
+                blocking_task_duration_ns_max,
+            ),
+            request_count,
+            avg_db_ops_per_request: if request_count == 0 {
+                0.0
+            } else {
+                request_db_ops_total as f64 / request_count as f64
+            },
+            avg_request_db_ms: Self::avg_ns_to_ms(
+                request_db_duration_ns_total,
+                request_count,
+            ),
+            max_request_db_ms: Self::ns_to_ms(request_db_duration_ns_max),
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    pub fn register_prometheus_metrics(
+        &self,
+        registry: &mut prometheus_client::registry::Registry,
+    ) {
+        let metrics = self.prometheus.get_or_init(|| {
+            let metrics = Arc::new(super::metrics::AuthPrometheusMetrics::new());
+            metrics.register_into(registry);
+            metrics
+        });
+        let _ = metrics;
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn prometheus_metrics(
+        &self,
+    ) -> Option<&super::metrics::AuthPrometheusMetrics> {
+        self.prometheus.get().map(Arc::as_ref)
+    }
+
+    pub(crate) fn api_key_default_ttl_seconds(&self) -> i64 {
+        self.runtime_config
+            .api_key_default_ttl_seconds
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn api_key_max_keys_per_user(&self) -> u32 {
+        self.runtime_config
+            .api_key_max_keys_per_user
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn max_login_attempts(&self) -> u32 {
+        self.runtime_config
+            .max_login_attempts
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn lockout_duration_seconds(&self) -> i64 {
+        self.runtime_config
+            .lockout_duration_seconds
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn rate_limit_defaults(&self) -> (u32, i64) {
+        (
+            self.runtime_config
+                .rate_limit_max_requests
+                .load(Ordering::Relaxed),
+            self.runtime_config
+                .rate_limit_window_seconds
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn rate_limit_enabled(&self) -> bool {
+        self.runtime_config
+            .rate_limit_enable
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn rate_limit_limit_by_key(&self) -> bool {
+        self.runtime_config
+            .rate_limit_limit_by_key
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn rate_limit_limit_by_ip(&self) -> bool {
+        self.runtime_config
+            .rate_limit_limit_by_ip
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn rate_limit_cleanup_interval_seconds(&self) -> i64 {
+        self.runtime_config
+            .rate_limit_cleanup_interval_seconds
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn rate_limit_sensitive_endpoints(
+        &self,
+    ) -> Result<Vec<EndpointRateLimit>, DatabaseError> {
+        self.runtime_config
+            .rate_limit_sensitive_endpoints
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|e| {
+                DatabaseError::Query(format!(
+                    "rate limit config lock poisoned: {}",
+                    e
+                ))
+            })
+    }
+
+    pub(crate) fn audit_enabled(&self) -> bool {
+        self.runtime_config.audit_enable.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn audit_retention_days(&self) -> u32 {
+        self.runtime_config
+            .audit_retention_days
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn audit_max_entries(&self) -> u32 {
+        self.runtime_config
+            .audit_max_entries
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn password_policy(&self) -> &'static super::PasswordPolicy {
+        &PASSWORD_POLICY
+    }
+
+    pub(crate) fn role_name_max_length(&self) -> usize {
+        VALIDATION_LIMITS.role_name_max_length
+    }
+
+    pub(crate) fn role_description_max_length(&self) -> usize {
+        VALIDATION_LIMITS.role_description_max_length
+    }
+
+    pub(crate) fn usage_plan_id_max_length(&self) -> usize {
+        VALIDATION_LIMITS.usage_plan_id_max_length
+    }
+
+    pub(crate) fn usage_plan_name_max_length(&self) -> usize {
+        VALIDATION_LIMITS.usage_plan_name_max_length
+    }
+
+    pub(crate) fn users_default_limit(&self) -> i64 {
+        VALIDATION_LIMITS.users_default_limit
+    }
+
+    pub(crate) fn users_max_limit(&self) -> i64 {
+        VALIDATION_LIMITS.users_max_limit
+    }
+
+    pub(crate) fn audit_logs_default_limit(&self) -> i64 {
+        VALIDATION_LIMITS.audit_logs_default_limit
+    }
+
+    pub(crate) fn audit_logs_max_limit(&self) -> i64 {
+        VALIDATION_LIMITS.audit_logs_max_limit
+    }
+
+    pub(crate) fn audit_cleanup_batch_size(&self) -> i64 {
+        MAINTENANCE_LIMITS.audit_cleanup_batch_size
+    }
+
+    pub(crate) fn rate_limit_cleanup_batch_size(&self) -> i64 {
+        MAINTENANCE_LIMITS.rate_limit_cleanup_batch_size
+    }
+
+    pub(crate) fn expired_api_key_cleanup_batch_size(&self) -> i64 {
+        MAINTENANCE_LIMITS.expired_api_key_cleanup_batch_size
+    }
+
+    pub(crate) fn apply_runtime_system_config_value(
+        &self,
+        key: SystemConfigKey,
+        value: &super::models::SystemConfigValue,
+    ) -> Result<(), DatabaseError> {
+        match key {
+            SystemConfigKey::ApiKeyDefaultTtlSeconds => {
+                let super::models::SystemConfigValue::Integer(ttl) = value else {
+                    return Err(DatabaseError::Validation(
+                        "api_key_default_ttl_seconds expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .api_key_default_ttl_seconds
+                    .store(*ttl, Ordering::Relaxed);
+            }
+            SystemConfigKey::MaxLoginAttempts => {
+                let super::models::SystemConfigValue::Integer(attempts) = value else {
+                    return Err(DatabaseError::Validation(
+                        "max_login_attempts expects an integer".to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .max_login_attempts
+                    .store(*attempts as u32, Ordering::Relaxed);
+            }
+            SystemConfigKey::ApiKeyMaxKeysPerUser => {
+                let super::models::SystemConfigValue::Integer(max_keys) = value else {
+                    return Err(DatabaseError::Validation(
+                        "api_key_max_keys_per_user expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .api_key_max_keys_per_user
+                    .store(*max_keys as u32, Ordering::Relaxed);
+            }
+            SystemConfigKey::LockoutDurationSeconds => {
+                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                    return Err(DatabaseError::Validation(
+                        "lockout_duration_seconds expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .lockout_duration_seconds
+                    .store(*seconds, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitWindowSeconds => {
+                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_window_seconds expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_window_seconds
+                    .store(*seconds, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitEnable => {
+                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_enable expects a boolean".to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_enable
+                    .store(*enabled, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitMaxRequests => {
+                let super::models::SystemConfigValue::Integer(max_requests) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_max_requests expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_max_requests
+                    .store(*max_requests as u32, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitLimitByKey => {
+                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_limit_by_key expects a boolean"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_limit_by_key
+                    .store(*enabled, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitLimitByIp => {
+                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_limit_by_ip expects a boolean"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_limit_by_ip
+                    .store(*enabled, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitCleanupIntervalSeconds => {
+                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_cleanup_interval_seconds expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .rate_limit_cleanup_interval_seconds
+                    .store(*seconds, Ordering::Relaxed);
+            }
+            SystemConfigKey::RateLimitSensitiveEndpoints => {
+                let super::models::SystemConfigValue::EndpointRateLimits(endpoints) = value else {
+                    return Err(DatabaseError::Validation(
+                        "rate_limit_sensitive_endpoints expects an array"
+                            .to_string(),
+                    ));
+                };
+                let mut guard = self
+                    .runtime_config
+                    .rate_limit_sensitive_endpoints
+                    .write()
+                    .map_err(|e| {
+                        DatabaseError::Query(format!(
+                            "rate limit config lock poisoned: {}",
+                            e
+                        ))
+                    })?;
+                *guard = endpoints
+                    .iter()
+                    .cloned()
+                    .map(EndpointRateLimit::from)
+                    .collect();
+            }
+            SystemConfigKey::AuditEnable => {
+                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                    return Err(DatabaseError::Validation(
+                        "audit_enable expects a boolean".to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .audit_enable
+                    .store(*enabled, Ordering::Relaxed);
+            }
+            SystemConfigKey::AuditRetentionDays => {
+                let super::models::SystemConfigValue::Integer(days) = value else {
+                    return Err(DatabaseError::Validation(
+                        "audit_retention_days expects an integer"
+                            .to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .audit_retention_days
+                    .store(*days as u32, Ordering::Relaxed);
+            }
+            SystemConfigKey::AuditMaxEntries => {
+                let super::models::SystemConfigValue::Integer(entries) = value else {
+                    return Err(DatabaseError::Validation(
+                        "audit_max_entries expects an integer".to_string(),
+                    ));
+                };
+                self.runtime_config
+                    .audit_max_entries
+                    .store(*entries as u32, Ordering::Relaxed);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get a locked database connection with error handling
+    pub(super) fn lock_conn(
+        &self,
+    ) -> Result<PooledConnection, DatabaseError> {
+        let started = Instant::now();
+        let conn = self.runtime.acquire_primary()?;
+        self.record_lock_wait("primary", started.elapsed());
+        Ok(conn)
+    }
+
+    pub(super) fn lock_maintenance_conn(
+        &self,
+    ) -> Result<PooledConnection, DatabaseError> {
+        let started = Instant::now();
+        let conn = self.runtime.acquire_maintenance()?;
+        self.record_lock_wait("maintenance", started.elapsed());
+        Ok(conn)
+    }
+
+    pub async fn run_blocking<T, F>(
+        &self,
+        operation: &'static str,
+        work: F,
+    ) -> Result<T, DatabaseError>
+    where
+        T: Send + 'static,
+        F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
+    {
+        let db = self.clone();
+        let queue_started = Instant::now();
+        let permit = tokio::time::timeout(
+            BLOCKING_TASK_QUEUE_TIMEOUT,
+            self.blocking_task_semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            self.record_blocking_rejection(operation);
+            DatabaseError::Query(format!(
+                "auth database is saturated; timed out waiting for capacity for {}",
+                operation
+            ))
+        })?
+        .map_err(|_| {
+            DatabaseError::Query(
+                "auth database backpressure semaphore closed".to_string(),
+            )
+        })?;
+        self.record_blocking_queue_wait(operation, queue_started.elapsed());
+
+        let started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work(db)
         })
+            .await
+            .map_err(|e| {
+                DatabaseError::Query(format!(
+                    "blocking db task {} failed: {}",
+                    operation, e
+                ))
+            })?;
+        self.record_blocking_task_duration(operation, started.elapsed());
+        result
     }
 
     /// Create a new AuthDatabase instance
@@ -121,36 +1006,23 @@ impl AuthDatabase {
 
         let path = path.join("auth.db");
 
-        // Open connection
-        let connection = Connection::open(&path)
-            .map_err(|e| DatabaseError::Connection(e.to_string()))?;
-
         // Apply tuning PRAGMAs
         let resolved = resolve_spec(spec.as_ref());
         let tuning = auth_tuning_for_ram(resolved.ram_mb);
         let sync_mode = if config.durability { "FULL" } else { "NORMAL" };
-        connection
-            .execute_batch(&format!(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA busy_timeout=5000;
-                 PRAGMA synchronous={sync_mode};
-                 PRAGMA wal_autocheckpoint={wal};
-                 PRAGMA journal_size_limit={jsl};
-                 PRAGMA temp_store=MEMORY;
-                 PRAGMA cache_size={cache};
-                 PRAGMA mmap_size={mmap};
-                 PRAGMA foreign_keys=ON;
-                 PRAGMA optimize=0x10002;",
-                sync_mode = sync_mode,
-                wal = tuning.wal_autocheckpoint_pages,
-                jsl = tuning.journal_size_limit_bytes,
-                cache = tuning.cache_size_kb,
-                mmap = tuning.mmap_size_bytes,
-            ))
-            .map_err(|e| DatabaseError::Connection(e.to_string()))?;
+        let pool_size = AuthDbRuntime::recommended_pool_size();
+        let runtime = AuthDbRuntime::new(&path, sync_mode, &tuning, pool_size)?;
+        let blocking_capacity = pool_size.saturating_mul(2).max(4);
 
         let db = Self {
-            connection: Arc::new(Mutex::new(connection)),
+            runtime: Arc::new(runtime),
+            metrics: Arc::new(DbMetrics::default()),
+            blocking_task_semaphore: Arc::new(Semaphore::new(
+                blocking_capacity,
+            )),
+            #[cfg(feature = "prometheus")]
+            prometheus: Arc::new(std::sync::OnceLock::new()),
+            runtime_config: Arc::new(RuntimeAuthConfig::from_config(&config)),
             config: Arc::new(config),
         };
 
@@ -160,8 +1032,8 @@ impl AuthDatabase {
         // Bootstrap superadmin if needed
         db.bootstrap_superadmin(password)?;
 
-        // Sync persisted system_config with runtime configuration values
-        db.sync_system_config_with_runtime()?;
+        // Seed config keys and load any persisted runtime overrides.
+        db.initialize_runtime_system_config()?;
 
         Ok(db)
     }
@@ -196,47 +1068,47 @@ impl AuthDatabase {
         Ok(())
     }
 
-    /// Update system_config table with current runtime configuration values
-    fn sync_system_config_with_runtime(&self) -> Result<(), DatabaseError> {
+    /// Seed system_config keys from startup config and load persisted overrides.
+    fn initialize_runtime_system_config(&self) -> Result<(), DatabaseError> {
         let conn = self.lock_conn()?;
         let cfg = self.config.clone();
 
-        let updates: &[(&str, String, &str)] = &[
-            (
-                "api_key_default_ttl_seconds",
-                cfg.api_key.default_ttl_seconds.to_string(),
-                "Default API key TTL in seconds",
-            ),
-            (
-                "max_login_attempts",
-                cfg.lockout.max_attempts.to_string(),
-                "Maximum failed login attempts before account lockout",
-            ),
-            (
-                "lockout_duration_seconds",
-                cfg.lockout.duration_seconds.to_string(),
-                "Account lockout duration in seconds",
-            ),
-            (
-                "rate_limit_window_seconds",
-                cfg.rate_limit.window_seconds.to_string(),
-                "Rate limit time window in seconds",
-            ),
-            (
-                "rate_limit_max_requests",
-                cfg.rate_limit.max_requests.to_string(),
-                "Maximum requests per window",
-            ),
-        ];
-
-        for (key, value, desc) in updates {
+        for key in SystemConfigKey::ALL {
+            let startup_value = key.startup_value(&cfg)?;
+            let value = key.serialize_value(&startup_value)?;
             conn.execute(
                 "INSERT INTO system_config (key, value, description)
                  VALUES (?1, ?2, ?3)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = COALESCE(system_config.description, excluded.description)",
-                params![key, value, desc],
+                 ON CONFLICT(key) DO UPDATE SET
+                    value = CASE
+                        WHEN system_config.updated_by IS NULL THEN excluded.value
+                        ELSE system_config.value
+                    END,
+                    description = COALESCE(system_config.description, excluded.description)",
+                params![key.as_str(), value, key.description()],
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            let persisted_value: String = conn
+                .query_row(
+                    "SELECT value FROM system_config WHERE key = ?1",
+                    params![key.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            let parsed_value = key.parse_persisted_value(&persisted_value);
+            if let Err(err) = parsed_value
+                .and_then(|value| self.apply_runtime_system_config_value(key, &value))
+            {
+                warn!(
+                    target: TARGET,
+                    key = key.as_str(),
+                    value = %persisted_value,
+                    error = %err,
+                    "invalid persisted auth config override; keeping startup value"
+                );
+            }
         }
         drop(conn);
 
@@ -342,11 +1214,6 @@ impl AuthDatabase {
         )
     }
 
-    /// Override default API key TTL on an existing instance (used for tests/config reloads)
-    #[allow(dead_code)] // primarily used in tests / config reload scenarios
-    pub fn set_default_api_key_ttl(&mut self, ttl: i64) {
-        Arc::make_mut(&mut self.config).api_key.default_ttl_seconds = ttl;
-    }
 }
 
 // =============================================================================
@@ -354,18 +1221,14 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
-    /// Create a new user with explicit active flag
-    pub fn create_user(
-        &self,
+    fn create_user_with_conn(
+        conn: &Connection,
         username: &str,
-        password: &str,
+        password_hash: &str,
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
         must_change_password: Option<bool>,
     ) -> Result<User, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        // SECURITY FIX: Validate username for CRLF and other attacks
         Self::validate_username(username)?;
         let exists: bool = conn
             .query_row(
@@ -381,26 +1244,17 @@ impl AuthDatabase {
                 username
             )));
         }
-
-        // Validate password
-        validate_password(password).map_err(DatabaseError::Validation)?;
-
-        // SECURITY FIX: Enforce single superadmin rule
-        // Check if trying to assign superadmin role
         if let Some(ref roles) = role_ids {
-            // Try to get superadmin role ID - fail strictly if query fails
-            let superadmin_role_id: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM roles WHERE name = 'superadmin'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
+            let superadmin_role_id =
+                match Self::get_role_by_name_internal(conn, "superadmin") {
+                    Ok(role) => Some(role.id),
+                    Err(DatabaseError::NotFound(_)) => None,
+                    Err(err) => return Err(err),
+                };
 
             if let Some(sa_role_id) = superadmin_role_id
                 && roles.contains(&sa_role_id)
             {
-                // Use the already-acquired connection to avoid deadlock
                 let existing_count: i64 = conn
                     .query_row(
                         "SELECT COUNT(DISTINCT u.id)
@@ -420,28 +1274,32 @@ impl AuthDatabase {
 
                 if existing_count > 0 {
                     return Err(DatabaseError::Validation(
-                            "A superadmin already exists. Only one superadmin is allowed".to_string()
-                        ));
+                        "A superadmin already exists. Only one superadmin is allowed".to_string(),
+                    ));
                 }
             }
         }
 
-        // Hash password
-        let password_hash = hash_password(password).map_err(|e| {
-            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
-        })?;
-
-        // Insert user
         let must_change = must_change_password.unwrap_or(true);
         conn.execute(
             "INSERT INTO users (username, password_hash, is_active, must_change_password)
              VALUES (?1, ?2, ?3, ?4)",
             params![username, password_hash, true, must_change],
-        ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        )
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") {
+                DatabaseError::Duplicate(format!(
+                    "Username '{}' already exists",
+                    username
+                ))
+            } else {
+                DatabaseError::Insert(msg)
+            }
+        })?;
 
         let user_id = conn.last_insert_rowid();
 
-        // Assign roles if provided
         if let Some(roles) = role_ids {
             for role_id in roles {
                 conn.execute(
@@ -451,10 +1309,44 @@ impl AuthDatabase {
             }
         }
 
-        // Fetch and return the created user
-        let result = Self::get_user_by_id_internal(&conn, user_id);
-        drop(conn);
-        result
+        Self::get_user_by_id_internal(conn, user_id)
+    }
+
+    pub fn create_user_transactional(
+        &self,
+        username: &str,
+        password: &str,
+        role_ids: Option<Vec<i64>>,
+        created_by: Option<i64>,
+        must_change_password: Option<bool>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<User, DatabaseError> {
+        Self::validate_username(username)?;
+        validate_password(password, self.password_policy())
+            .map_err(DatabaseError::Validation)?;
+        let password_hash = hash_password(password).map_err(|e| {
+            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
+        })?;
+
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+
+        let user = Self::create_user_with_conn(
+            &tx,
+            username,
+            &password_hash,
+            role_ids,
+            created_by,
+            must_change_password,
+        )?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(user)
     }
 
     /// Internal: Get user by ID without acquiring lock
@@ -577,21 +1469,18 @@ impl AuthDatabase {
         Ok(result)
     }
 
-    /// Update user
-    pub fn update_user(
+    fn update_user_with_conn(
         &self,
+        conn: &Connection,
         user_id: i64,
         password: Option<&str>,
         is_active: Option<bool>,
     ) -> Result<User, DatabaseError> {
-        let conn = self.lock_conn()?;
+        let _ = Self::get_user_by_id_internal(conn, user_id)?;
 
-        // Check if user exists
-        let _ = Self::get_user_by_id_internal(&conn, user_id)?;
-
-        // Update password if provided
         if let Some(pwd) = password {
-            validate_password(pwd).map_err(DatabaseError::Validation)?;
+            validate_password(pwd, self.password_policy())
+                .map_err(DatabaseError::Validation)?;
 
             let password_hash = hash_password(pwd).map_err(|e| {
                 DatabaseError::Crypto(format!("Failed to hash password: {}", e))
@@ -603,18 +1492,14 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            // SECURITY FIX: Revoke all API keys when password is changed
-            // This prevents compromised accounts from maintaining persistent access
-            // via existing API keys after the password has been changed
             Self::revoke_user_api_keys_internal(
-                &conn,
+                conn,
                 user_id,
-                None, // Admin-initiated password change
+                None,
                 "Password changed via update_user",
             )?;
         }
 
-        // Update active status if provided
         if let Some(active) = is_active {
             conn.execute(
                 "UPDATE users SET is_active = ?1 WHERE id = ?2",
@@ -623,20 +1508,96 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
-        let result = Self::get_user_by_id_internal(&conn, user_id);
-        drop(conn);
-        result
+        Self::get_user_by_id_internal(conn, user_id)
     }
 
-    /// Delete user (soft delete)
-    pub fn delete_user(&self, user_id: i64) -> Result<(), DatabaseError> {
-        self.lock_conn()?
-            .execute(
-                "UPDATE users SET is_deleted = 1 WHERE id = ?1",
-                params![user_id],
-            )
-            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+    fn replace_user_roles_with_conn(
+        conn: &Connection,
+        user_id: i64,
+        role_ids: &[i64],
+        assigned_by: Option<i64>,
+    ) -> Result<(), DatabaseError> {
+        conn.execute(
+            "DELETE FROM user_roles WHERE user_id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
+        for role_id in role_ids {
+            conn.execute(
+                "INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by)
+                 VALUES (?1, ?2, ?3)",
+                params![user_id, role_id, assigned_by],
+            )
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        }
+
+        Self::revoke_user_api_keys_internal(
+            conn,
+            user_id,
+            assigned_by,
+            "Role changed",
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_user_with_roles_transactional(
+        &self,
+        user_id: i64,
+        password: Option<&str>,
+        is_active: Option<bool>,
+        role_ids: Option<&[i64]>,
+        assigned_by: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<User, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        let user = self.update_user_with_conn(&tx, user_id, password, is_active)?;
+
+        if let Some(role_ids) = role_ids {
+            Self::replace_user_roles_with_conn(&tx, user_id, role_ids, assigned_by)?;
+        }
+
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Ok(user)
+    }
+
+    fn delete_user_with_conn(
+        conn: &Connection,
+        user_id: i64,
+    ) -> Result<(), DatabaseError> {
+        conn.execute(
+            "UPDATE users SET is_deleted = 1 WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn delete_user_transactional(
+        &self,
+        user_id: i64,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Self::delete_user_with_conn(&tx, user_id)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Ok(())
     }
 
@@ -673,15 +1634,12 @@ impl AuthDatabase {
         Self::get_user_roles_internal(&conn, user_id)
     }
 
-    /// Assign role to user
-    pub fn assign_role_to_user(
-        &self,
+    pub(crate) fn assign_role_to_user_with_conn(
+        conn: &Connection,
         user_id: i64,
         role_id: i64,
         assigned_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
         conn.execute(
             "INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by)
              VALUES (?1, ?2, ?3)",
@@ -689,40 +1647,72 @@ impl AuthDatabase {
         )
         .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
-        // Revoke API keys
         Self::revoke_user_api_keys_internal(
-            &conn,
+            conn,
             user_id,
             assigned_by,
             "Role changed",
         )?;
-        drop(conn);
 
         Ok(())
     }
 
-    /// Remove role from user
-    pub fn remove_role_from_user(
+    pub fn assign_role_to_user_transactional(
         &self,
         user_id: i64,
         role_id: i64,
+        assigned_by: Option<i64>,
+        audit: Option<AuditLogParams>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Self::assign_role_to_user_with_conn(&tx, user_id, role_id, assigned_by)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(())
+    }
 
+    pub(crate) fn remove_role_from_user_with_conn(
+        conn: &Connection,
+        user_id: i64,
+        role_id: i64,
+    ) -> Result<(), DatabaseError> {
         conn.execute(
             "DELETE FROM user_roles WHERE user_id = ?1 AND role_id = ?2",
             params![user_id, role_id],
         )
         .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
-        // Revoke API keys
         Self::revoke_user_api_keys_internal(
-            &conn,
+            conn,
             user_id,
             None,
             "Role changed",
         )?;
-        drop(conn);
+        Ok(())
+    }
+
+    pub fn remove_role_from_user_transactional(
+        &self,
+        user_id: i64,
+        role_id: i64,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        Self::remove_role_from_user_with_conn(&tx, user_id, role_id)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Ok(())
     }
 
@@ -737,6 +1727,15 @@ impl AuthDatabase {
         password: &str,
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
+        self.verify_credentials_with_conn(&conn, username, password)
+    }
+
+    pub(crate) fn verify_credentials_with_conn(
+        &self,
+        conn: &Connection,
+        username: &str,
+        password: &str,
+    ) -> Result<User, DatabaseError> {
 
         // Try to find the user
         let user_result = conn.query_row(
@@ -818,8 +1817,8 @@ impl AuthDatabase {
             // Increment failed login attempts
             let new_attempts = user.failed_login_attempts + 1;
             let locked_until =
-                if new_attempts >= self.config.lockout.max_attempts as i32 {
-                    Some(Self::now() + self.config.lockout.duration_seconds)
+                if new_attempts >= self.max_login_attempts() as i32 {
+                    Some(Self::now() + self.lockout_duration_seconds())
                 } else {
                     None
                 };
@@ -828,7 +1827,7 @@ impl AuthDatabase {
                 "UPDATE users SET failed_login_attempts = ?1, locked_until = ?2 WHERE id = ?3",
                 params![new_attempts, locked_until, user.id],
             )
-            .ok();
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             return Err(DatabaseError::PermissionDenied(
                 "Invalid username or password".to_string(),
@@ -840,8 +1839,7 @@ impl AuthDatabase {
             "UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = ?1 WHERE id = ?2",
             params![Self::now(), user.id],
         )
-        .ok();
-        drop(conn);
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
         if user.must_change_password {
             return Err(DatabaseError::PasswordChangeRequired(
@@ -850,6 +1848,65 @@ impl AuthDatabase {
         }
 
         Ok(user)
+    }
+
+    pub fn verify_credentials_transactional(
+        &self,
+        username: &str,
+        password: &str,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<User, DatabaseError> {
+        if ip_address.is_none() && user_agent.is_none() {
+            return self.verify_credentials(username, password);
+        }
+
+        let mut conn = self.lock_conn()?;
+        let tx_started = std::time::Instant::now();
+        let result = (|| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            let user = match self.verify_credentials_with_conn(&tx, username, password) {
+                Ok(user) => user,
+                Err(err) => {
+                    let failed_details =
+                        format!("Failed login for username: {}", username);
+                    Self::create_audit_log_with_conn(
+                        &tx,
+                        self.audit_enabled(),
+                        crate::auth::database_audit::AuditLogParams {
+                            user_id: None,
+                            api_key_id: None,
+                            action_type: "login_failed",
+                            endpoint: Some("/login"),
+                            http_method: Some("POST"),
+                            ip_address,
+                            user_agent,
+                            request_id: None,
+                            details: Some(&failed_details),
+                            success: false,
+                            error_message: Some(&err.to_string()),
+                        },
+                    )?;
+
+                    tx.commit()
+                        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+                    return Err(err);
+                }
+            };
+
+            tx.commit()
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+            Ok(user)
+        })();
+        self.record_transaction_duration(
+            "verify_credentials_transactional",
+            tx_started.elapsed(),
+        );
+        result
     }
 
     /// Calculate all effective permissions for a user
@@ -967,7 +2024,8 @@ impl AuthDatabase {
         }
 
         // Validate new password
-        validate_password(new_password).map_err(DatabaseError::Validation)?;
+        validate_password(new_password, self.password_policy())
+            .map_err(DatabaseError::Validation)?;
 
         // Prevent setting the same password
         if current_password == new_password {
@@ -1009,23 +2067,20 @@ impl AuthDatabase {
         Ok(user)
     }
 
-    /// Admin resets a user's password (forces change on next login)
-    pub fn admin_reset_password(
+    fn admin_reset_password_with_conn(
         &self,
+        conn: &Connection,
         user_id: i64,
         new_password: &str,
     ) -> Result<User, DatabaseError> {
-        // Validate password
-        validate_password(new_password).map_err(DatabaseError::Validation)?;
+        validate_password(new_password, self.password_policy())
+            .map_err(DatabaseError::Validation)?;
 
         let password_hash = hash_password(new_password).map_err(|e| {
             DatabaseError::Crypto(format!("Failed to hash password: {}", e))
         })?;
 
-        let conn = self.lock_conn()?;
-
-        // Ensure user exists
-        let _ = Self::get_user_by_id_internal(&conn, user_id)?;
+        let _ = Self::get_user_by_id_internal(conn, user_id)?;
 
         conn.execute(
             "UPDATE users
@@ -1039,15 +2094,33 @@ impl AuthDatabase {
         // This prevents compromised accounts from maintaining persistent access
         // via existing API keys after the password has been changed
         Self::revoke_user_api_keys_internal(
-            &conn,
+            conn,
             user_id,
             None, // System-initiated revocation
             "Password reset by administrator",
         )?;
 
-        let result = Self::get_user_by_id_internal(&conn, user_id);
-        drop(conn);
-        result
+        Self::get_user_by_id_internal(conn, user_id)
+    }
+
+    pub fn admin_reset_password_transactional(
+        &self,
+        user_id: i64,
+        new_password: &str,
+        audit: Option<AuditLogParams>,
+    ) -> Result<User, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        let user =
+            self.admin_reset_password_with_conn(&tx, user_id, new_password)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Ok(user)
     }
 
     // =============================================================================
@@ -1144,50 +2217,5 @@ impl AuthDatabase {
         }
 
         Ok(())
-    }
-}
-
-// =============================================================================
-// SQLITE TUNING
-// =============================================================================
-
-struct AuthSqliteTuning {
-    wal_autocheckpoint_pages: i64,
-    journal_size_limit_bytes: i64,
-    cache_size_kb: i64,
-    mmap_size_bytes: i64,
-}
-
-/// Compute SQLite tuning parameters from available RAM.
-///
-/// Designed for a shared Docker container with 3 co-located SQLite instances
-/// plus a libp2p process — total DB cache footprint stays at ~6 % of host RAM.
-fn auth_tuning_for_ram(ram_mb: u64) -> AuthSqliteTuning {
-    // Cache: 2 % of RAM, floor 8 MB, cap 1 GB.
-    let cache_mb = (ram_mb * 2 / 100).clamp(8, 1024);
-    let cache_size_kb = -(cache_mb as i64 * 1024); // negative = KB in SQLite
-
-    // mmap: half of cache, hard cap 128 MB.
-    // Supplements the page cache for sequential reads; kept below cache to
-    // avoid doubling memory pressure in a shared container.
-    let mmap_size_bytes = (cache_mb as i64 / 2).min(128) * 1024 * 1024;
-
-    // WAL checkpoint: fire when WAL ≈ cache/2.
-    // pages = (cache_mb/2 MB) / (4 KB/page) = cache_mb * 128.
-    // Floor 1000 (SQLite default, prevents thrashing on tiny RAM).
-    // Cap 8000 (32 MB WAL max, bounds checkpoint stall under write bursts).
-    let wal_autocheckpoint_pages = (cache_mb as i64 * 128).clamp(1_000, 8_000);
-
-    // journal_size_limit: 3× the WAL ceiling — a safety net never reached in
-    // normal operation (checkpoints fire first); prevents runaway WAL growth
-    // if a checkpoint is delayed. Cap 256 MB to bound disk use in Docker.
-    let journal_size_limit_bytes = (wal_autocheckpoint_pages * 4096 * 3)
-        .clamp(32 * 1024 * 1024, 256 * 1024 * 1024);
-
-    AuthSqliteTuning {
-        wal_autocheckpoint_pages,
-        journal_size_limit_bytes,
-        cache_size_kb,
-        mmap_size_bytes,
     }
 }

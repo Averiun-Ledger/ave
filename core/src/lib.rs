@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
-use ave_actors::{ActorPath, ActorRef, PersistentActor};
+use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
 use ave_common::bridge::request::{
     ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery,
 };
@@ -94,6 +94,32 @@ pub struct Api {
     monitor: ActorRef<Monitor>,
     manual_dis: ActorRef<ManualDistribution>,
     tracking: ActorRef<RequestTracking>,
+}
+
+fn preserve_functional_actor_error<F>(
+    err: ActorError,
+    fallback: F,
+) -> Error
+where
+    F: FnOnce(ActorError) -> Error,
+{
+    match err {
+        ActorError::Functional { description } => Error::ActorError(description),
+        ActorError::FunctionalCritical { description } => {
+            Error::Internal(description)
+        }
+        ActorError::NotFound { path } => Error::MissingResource {
+            name: path.to_string(),
+            reason: "Actor not found".to_string(),
+        },
+        other => fallback(other),
+    }
+}
+
+fn actor_communication_error(actor: &'static str, err: ActorError) -> Error {
+    preserve_functional_actor_error(err, |_| Error::ActorCommunication {
+        actor: actor.to_string(),
+    })
 }
 
 impl Api {
@@ -292,7 +318,9 @@ impl Api {
         let response =
             self.monitor.ask(MonitorMessage::State).await.map_err(|e| {
                 warn!(error = %e, "Unable to retrieve network state");
-                Error::NetworkState(e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::NetworkState(e.to_string())
+                })
             })?;
 
         match response {
@@ -320,9 +348,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Request processing failed");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -350,9 +376,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Request processing failed");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -380,9 +404,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Request processing failed");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -410,7 +432,9 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Node was unable to sign the request");
-                Error::SigningFailed(e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::SigningFailed(e.to_string())
+                })
             })?;
 
         let signature = match response {
@@ -435,9 +459,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to send request");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -464,9 +486,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get approval request");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -492,9 +512,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get approval requests");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         match response {
@@ -529,7 +547,9 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to change approval state");
-                Error::ApprovalUpdateFailed(e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::ApprovalUpdateFailed(e.to_string())
+                })
             })?;
 
         match response {
@@ -554,9 +574,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to abort request");
-                Error::ActorCommunication {
-                    actor: "request".to_string(),
-                }
+                actor_communication_error("request", e)
             })?;
 
         Ok("Trying to abort".to_string())
@@ -574,9 +592,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get request state");
-                Error::ActorCommunication {
-                    actor: "tracking".to_string(),
-                }
+                actor_communication_error("tracking", e)
             })?;
 
         match response {
@@ -604,9 +620,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get all request states");
-                Error::ActorCommunication {
-                    actor: "tracking".to_string(),
-                }
+                actor_communication_error("tracking", e)
             })?;
 
         match response {
@@ -632,9 +646,7 @@ impl Api {
             self.node.ask(NodeMessage::PendingTransfers).await.map_err(
                 |e| {
                     warn!(error = %e, "Failed to get pending transfers");
-                    Error::ActorCommunication {
-                        actor: "node".to_string(),
-                    }
+                    actor_communication_error("node", e)
                 },
             )?;
 
@@ -666,7 +678,9 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Authentication operation failed");
-                Error::AuthOperation(e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
             })?;
 
         Ok("Ok".to_owned())
@@ -678,9 +692,7 @@ impl Api {
         let response =
             self.auth.ask(AuthMessage::GetAuths).await.map_err(|e| {
                 error!(error = %e, "Failed to get auth subjects");
-                Error::ActorCommunication {
-                    actor: "auth".to_string(),
-                }
+                actor_communication_error("auth", e)
             })?;
 
         match response {
@@ -708,9 +720,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get witnesses for subject");
-                Error::ActorCommunication {
-                    actor: "auth".to_string(),
-                }
+                actor_communication_error("auth", e)
             })?;
 
         match response {
@@ -735,7 +745,9 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to delete auth subject");
-                Error::AuthOperation(e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::AuthOperation(e.to_string())
+                })
             })?;
 
         Ok("Ok".to_owned())
@@ -754,7 +766,12 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to update subject");
-                Error::UpdateFailed(subject_id.to_string(), e.to_string())
+                preserve_functional_actor_error(e, |e| {
+                    Error::UpdateFailed(
+                        subject_id.to_string(),
+                        e.to_string(),
+                    )
+                })
             })?;
 
         match response {
@@ -782,7 +799,9 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Manual distribution failed");
-                Error::DistributionFailed(subject_id.to_string())
+                preserve_functional_actor_error(e, |_| {
+                    Error::DistributionFailed(subject_id.to_string())
+                })
             })?;
 
         Ok("Manual distribution in progress".to_owned())
@@ -800,9 +819,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get governances");
-                Error::ActorCommunication {
-                    actor: "register".to_string(),
-                }
+                actor_communication_error("register", e)
             })?;
 
         match response {
@@ -834,9 +851,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get subjects");
-                Error::ActorCommunication {
-                    actor: "register".to_string(),
-                }
+                actor_communication_error("register", e)
             })?;
 
         match response {
@@ -865,9 +880,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get events");
-                Error::ActorCommunication {
-                    actor: "query".to_string(),
-                }
+                actor_communication_error("query", e)
             })?;
 
         match response {
@@ -906,9 +919,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get aborts");
-                Error::ActorCommunication {
-                    actor: "query".to_string(),
-                }
+                actor_communication_error("query", e)
             })?;
 
         match response {
@@ -939,9 +950,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get event");
-                Error::ActorCommunication {
-                    actor: "query".to_string(),
-                }
+                actor_communication_error("query", e)
             })?;
 
         match response {
@@ -979,9 +988,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get events");
-                Error::ActorCommunication {
-                    actor: "query".to_string(),
-                }
+                actor_communication_error("query", e)
             })?;
 
         match response {
@@ -1010,9 +1017,7 @@ impl Api {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get subject state");
-                Error::ActorCommunication {
-                    actor: "query".to_string(),
-                }
+                actor_communication_error("query", e)
             })?;
 
         match response {
@@ -1029,5 +1034,42 @@ impl Api {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_actors::{ActorError, ActorPath};
+
+    #[test]
+    fn preserves_functional_actor_errors() {
+        let error = preserve_functional_actor_error(
+            ActorError::Functional {
+                description: "Is not a Creator".to_string(),
+            },
+            |_| Error::ActorCommunication {
+                actor: "request".to_string(),
+            },
+        );
+
+        assert!(matches!(error, Error::ActorError(message) if message == "Is not a Creator"));
+    }
+
+    #[test]
+    fn preserves_not_found_actor_errors() {
+        let error = preserve_functional_actor_error(
+            ActorError::NotFound {
+                path: ActorPath::from("/user/request"),
+            },
+            |_| Error::ActorCommunication {
+                actor: "request".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            error,
+            Error::MissingResource { name, .. } if name == "/user/request"
+        ));
     }
 }

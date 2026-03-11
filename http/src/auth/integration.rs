@@ -77,6 +77,32 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
             error!(target: TARGET, error = %e, "failed to get audit stats");
         }
     }
+
+    let metrics = db.metrics_snapshot();
+    info!(
+        target: TARGET,
+        primary_lock_wait_count = metrics.primary_lock_wait_count,
+        primary_lock_wait_avg_ms = metrics.primary_lock_wait_avg_ms,
+        primary_lock_wait_max_ms = metrics.primary_lock_wait_max_ms,
+        maintenance_lock_wait_count = metrics.maintenance_lock_wait_count,
+        maintenance_lock_wait_avg_ms = metrics.maintenance_lock_wait_avg_ms,
+        maintenance_lock_wait_max_ms = metrics.maintenance_lock_wait_max_ms,
+        transaction_count = metrics.transaction_count,
+        transaction_avg_ms = metrics.transaction_avg_ms,
+        transaction_max_ms = metrics.transaction_max_ms,
+        blocking_queue_wait_count = metrics.blocking_queue_wait_count,
+        blocking_queue_wait_avg_ms = metrics.blocking_queue_wait_avg_ms,
+        blocking_queue_wait_max_ms = metrics.blocking_queue_wait_max_ms,
+        blocking_rejections_total = metrics.blocking_rejections_total,
+        blocking_task_count = metrics.blocking_task_count,
+        blocking_task_avg_ms = metrics.blocking_task_avg_ms,
+        blocking_task_max_ms = metrics.blocking_task_max_ms,
+        request_count = metrics.request_count,
+        avg_db_ops_per_request = metrics.avg_db_ops_per_request,
+        avg_request_db_ms = metrics.avg_request_db_ms,
+        max_request_db_ms = metrics.max_request_db_ms,
+        "auth db metrics snapshot"
+    );
 }
 
 /// Cleanup task for old data
@@ -85,10 +111,17 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
 /// - Old audit logs
 /// - Expired rate limit entries
 pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || cleanup_old_data_blocking(&db))
+        .await
+        .map_err(|e| format!("cleanup task join error: {}", e))?
+}
+
+fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
     // Clean up old audit logs by time
-    if db.config.session.audit_retention_days > 0 {
-        match db.cleanup_old_audit_logs(db.config.session.audit_retention_days)
-        {
+    let audit_retention_days = db.audit_retention_days();
+    if audit_retention_days > 0 {
+        match db.cleanup_old_audit_logs(audit_retention_days) {
             Ok(deleted) if deleted > 0 => {
                 info!(target: TARGET, deleted, "cleaned up expired audit log entries");
             }
@@ -99,14 +132,14 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
         }
     }
 
-    if db.config.session.audit_max_entries > 0 {
-        match db.cleanup_excess_audit_logs(db.config.session.audit_max_entries)
-        {
+    let audit_max_entries = db.audit_max_entries();
+    if audit_max_entries > 0 {
+        match db.cleanup_excess_audit_logs(audit_max_entries) {
             Ok(deleted) if deleted > 0 => {
                 info!(
                     target: TARGET,
                     deleted,
-                    limit = db.config.session.audit_max_entries,
+                    limit = audit_max_entries,
                     "evicted excess audit log entries (LRU)"
                 );
             }
@@ -136,6 +169,32 @@ pub async fn cleanup_old_data(db: &AuthDatabase) -> Result<(), String> {
             error!(target: TARGET, error = %e, "failed to clean up rate limit entries");
         }
     }
+
+    let metrics = db.metrics_snapshot();
+    info!(
+        target: TARGET,
+        primary_lock_wait_count = metrics.primary_lock_wait_count,
+        primary_lock_wait_avg_ms = metrics.primary_lock_wait_avg_ms,
+        primary_lock_wait_max_ms = metrics.primary_lock_wait_max_ms,
+        maintenance_lock_wait_count = metrics.maintenance_lock_wait_count,
+        maintenance_lock_wait_avg_ms = metrics.maintenance_lock_wait_avg_ms,
+        maintenance_lock_wait_max_ms = metrics.maintenance_lock_wait_max_ms,
+        transaction_count = metrics.transaction_count,
+        transaction_avg_ms = metrics.transaction_avg_ms,
+        transaction_max_ms = metrics.transaction_max_ms,
+        blocking_queue_wait_count = metrics.blocking_queue_wait_count,
+        blocking_queue_wait_avg_ms = metrics.blocking_queue_wait_avg_ms,
+        blocking_queue_wait_max_ms = metrics.blocking_queue_wait_max_ms,
+        blocking_rejections_total = metrics.blocking_rejections_total,
+        blocking_task_count = metrics.blocking_task_count,
+        blocking_task_avg_ms = metrics.blocking_task_avg_ms,
+        blocking_task_max_ms = metrics.blocking_task_max_ms,
+        request_count = metrics.request_count,
+        avg_db_ops_per_request = metrics.avg_db_ops_per_request,
+        avg_request_db_ms = metrics.avg_request_db_ms,
+        max_request_db_ms = metrics.max_request_db_ms,
+        "auth db metrics snapshot"
+    );
 
     Ok(())
 }

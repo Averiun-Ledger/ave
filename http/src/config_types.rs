@@ -3,7 +3,8 @@
 //! These types wrap the core configuration types to provide Serialize and ToSchema support
 
 use ave_bridge::{
-    AveExternalDBConfig, AveInternalDBConfig, HttpConfig, SelfSignedCertConfig,
+    AveExternalDBConfig, AveInternalDBConfig, HttpConfig, ProxyConfig,
+    SelfSignedCertConfig,
     auth::{
         ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig,
         RateLimitConfig, SessionConfig,
@@ -97,6 +98,7 @@ impl From<AuthConfig> for AuthConfigHttp {
 pub struct ApiKeyConfigHttp {
     pub default_ttl_seconds: i64,
     pub max_keys_per_user: u32,
+    pub prefix: String,
 }
 
 impl From<ApiKeyConfig> for ApiKeyConfigHttp {
@@ -104,6 +106,7 @@ impl From<ApiKeyConfig> for ApiKeyConfigHttp {
         Self {
             default_ttl_seconds: value.default_ttl_seconds,
             max_keys_per_user: value.max_keys_per_user,
+            prefix: value.prefix,
         }
     }
 }
@@ -193,6 +196,7 @@ pub struct HttpConfigHttp {
     pub https_cert_path: Option<String>,
     pub https_private_key_path: Option<String>,
     pub enable_doc: bool,
+    pub proxy: ProxyConfigHttp,
     pub cors: CorsConfigHttp,
     pub self_signed_cert: SelfSignedCertConfigHttp,
 }
@@ -209,10 +213,28 @@ impl From<HttpConfig> for HttpConfigHttp {
                 .https_private_key_path
                 .map(|x| x.to_string_lossy().to_string()),
             enable_doc: value.enable_doc,
+            proxy: ProxyConfigHttp::from(value.proxy),
             cors: CorsConfigHttp::from(value.cors),
             self_signed_cert: SelfSignedCertConfigHttp::from(
                 value.self_signed_cert,
             ),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct ProxyConfigHttp {
+    pub trusted_proxies: Vec<String>,
+    pub trust_x_forwarded_for: bool,
+    pub trust_x_real_ip: bool,
+}
+
+impl From<ProxyConfig> for ProxyConfigHttp {
+    fn from(value: ProxyConfig) -> Self {
+        Self {
+            trusted_proxies: value.trusted_proxies,
+            trust_x_forwarded_for: value.trust_x_forwarded_for,
+            trust_x_real_ip: value.trust_x_real_ip,
         }
     }
 }

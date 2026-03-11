@@ -4,7 +4,10 @@
 
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
-use rusqlite::{OptionalExtension, Result as SqliteResult, params};
+use super::system_config::{SystemConfigKey, system_config_from_row};
+use rusqlite::{
+    OptionalExtension, Result as SqliteResult, TransactionBehavior, params,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // =============================================================================
@@ -19,6 +22,77 @@ fn sanitize_log_field(input: &str, max_length: usize) -> String {
         .filter(|c| !c.is_control() || *c == ' ')
         .take(max_length)
         .collect()
+}
+
+fn append_audit_log_filters(
+    query: &AuditLogQuery,
+    sql: &mut String,
+    params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+    if let Some(uid) = query.user_id {
+        sql.push_str(" AND user_id = ?");
+        params_vec.push(Box::new(uid));
+    }
+
+    if let Some(ref api_key_id) = query.api_key_id {
+        sql.push_str(" AND api_key_id = ?");
+        params_vec.push(Box::new(api_key_id.clone()));
+    }
+
+    if let Some(ref endpoint) = query.endpoint {
+        sql.push_str(" AND endpoint = ?");
+        params_vec.push(Box::new(endpoint.clone()));
+    }
+
+    if let Some(ref method) = query.http_method {
+        sql.push_str(" AND http_method = ?");
+        params_vec.push(Box::new(method.clone()));
+    }
+
+    if let Some(ref ip) = query.ip_address {
+        sql.push_str(" AND ip_address = ?");
+        params_vec.push(Box::new(ip.clone()));
+    }
+
+    if let Some(ref ua) = query.user_agent {
+        sql.push_str(" AND user_agent = ?");
+        params_vec.push(Box::new(ua.clone()));
+    }
+
+    if let Some(success) = query.success {
+        sql.push_str(" AND success = ?");
+        params_vec.push(Box::new(success));
+    }
+
+    if let Some(start) = query.start_timestamp {
+        sql.push_str(" AND timestamp >= ?");
+        params_vec.push(Box::new(start));
+    }
+
+    if let Some(end) = query.end_timestamp {
+        sql.push_str(" AND timestamp <= ?");
+        params_vec.push(Box::new(end));
+    }
+
+    if let Some(exclude_uid) = query.exclude_user_id {
+        sql.push_str(" AND (user_id IS NULL OR user_id != ?)");
+        params_vec.push(Box::new(exclude_uid));
+    }
+
+    if let Some(ref exclude_api_key) = query.exclude_api_key_id {
+        sql.push_str(" AND (api_key_id IS NULL OR api_key_id != ?)");
+        params_vec.push(Box::new(exclude_api_key.clone()));
+    }
+
+    if let Some(ref exclude_ip) = query.exclude_ip_address {
+        sql.push_str(" AND (ip_address IS NULL OR ip_address != ?)");
+        params_vec.push(Box::new(exclude_ip.clone()));
+    }
+
+    if let Some(ref exclude_endpoint) = query.exclude_endpoint {
+        sql.push_str(" AND (endpoint IS NULL OR endpoint != ?)");
+        params_vec.push(Box::new(exclude_endpoint.clone()));
+    }
 }
 
 // =============================================================================
@@ -52,17 +126,14 @@ pub struct ApiRequestParams<'a> {
 }
 
 impl AuthDatabase {
-    /// Create an audit log entry
-    pub fn create_audit_log(
-        &self,
+    pub(crate) fn create_audit_log_with_conn(
+        conn: &rusqlite::Connection,
+        audit_enabled: bool,
         params: AuditLogParams,
     ) -> Result<i64, DatabaseError> {
-        // Respect global audit toggle
-        if !self.config.session.audit_enable {
-            return Ok(0); // Auditing disabled
+        if !audit_enabled {
+            return Ok(0);
         }
-
-        let conn = self.lock_conn()?;
 
         // SECURITY FIX: Sanitize user-controlled fields to prevent log injection
         let sanitized_user_agent =
@@ -75,6 +146,19 @@ impl AuthDatabase {
             params.details.map(|d| sanitize_log_field(d, 2000));
         let sanitized_error =
             params.error_message.map(|e| sanitize_log_field(e, 1000));
+        let validated_api_key_id = match params.api_key_id {
+            Some(api_key_id) => {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM api_keys WHERE id = ?1)",
+                        params![api_key_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                exists.then_some(api_key_id)
+            }
+            None => None,
+        };
 
         conn.execute(
             "INSERT INTO audit_logs (
@@ -84,7 +168,7 @@ impl AuthDatabase {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 params.user_id,
-                params.api_key_id,
+                validated_api_key_id,
                 params.action_type,
                 sanitized_endpoint.as_deref(),
                 params.http_method,
@@ -99,6 +183,19 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Create an audit log entry
+    pub fn create_audit_log(
+        &self,
+        params: AuditLogParams,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.lock_conn()?;
+        Self::create_audit_log_with_conn(
+            &conn,
+            self.audit_enabled(),
+            params,
+        )
     }
 
     /// Log an API request if audit logging of requests is enabled
@@ -129,6 +226,13 @@ impl AuthDatabase {
         &self,
         query: &AuditLogQuery,
     ) -> Result<Vec<AuditLog>, DatabaseError> {
+        Ok(self.query_audit_logs_page(query)?.items)
+    }
+
+    pub fn query_audit_logs_page(
+        &self,
+        query: &AuditLogQuery,
+    ) -> Result<AuditLogPage, DatabaseError> {
         let conn = self.lock_conn()?;
 
         let mut sql = String::from(
@@ -140,81 +244,15 @@ impl AuthDatabase {
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(uid) = query.user_id {
-            sql.push_str(" AND user_id = ?");
-            params_vec.push(Box::new(uid));
-        }
-
-        if let Some(ref api_key_id) = query.api_key_id {
-            sql.push_str(" AND api_key_id = ?");
-            params_vec.push(Box::new(api_key_id.as_str()));
-        }
-
-        if let Some(ref endpoint) = query.endpoint {
-            sql.push_str(" AND endpoint = ?");
-            params_vec.push(Box::new(endpoint.clone()));
-        }
-
-        if let Some(ref method) = query.http_method {
-            sql.push_str(" AND http_method = ?");
-            params_vec.push(Box::new(method.clone()));
-        }
-
-        if let Some(ref ip) = query.ip_address {
-            sql.push_str(" AND ip_address = ?");
-            params_vec.push(Box::new(ip.clone()));
-        }
-
-        if let Some(ref ua) = query.user_agent {
-            sql.push_str(" AND user_agent = ?");
-            params_vec.push(Box::new(ua.clone()));
-        }
-
-        if let Some(success) = query.success {
-            sql.push_str(" AND success = ?");
-            params_vec.push(Box::new(success));
-        }
-
-        if let Some(start) = query.start_timestamp {
-            sql.push_str(" AND timestamp >= ?");
-            params_vec.push(Box::new(start));
-        }
-
-        if let Some(end) = query.end_timestamp {
-            sql.push_str(" AND timestamp <= ?");
-            params_vec.push(Box::new(end));
-        }
-
-        // Exclusion filters (NOT conditions)
-        if let Some(exclude_uid) = query.exclude_user_id {
-            sql.push_str(" AND (user_id IS NULL OR user_id != ?)");
-            params_vec.push(Box::new(exclude_uid));
-        }
-
-        if let Some(ref exclude_api_key) = query.exclude_api_key_id {
-            sql.push_str(" AND (api_key_id IS NULL OR api_key_id != ?)");
-            params_vec.push(Box::new(exclude_api_key.as_str()));
-        }
-
-        if let Some(ref exclude_ip) = query.exclude_ip_address {
-            sql.push_str(" AND (ip_address IS NULL OR ip_address != ?)");
-            params_vec.push(Box::new(exclude_ip.clone()));
-        }
-
-        if let Some(ref exclude_endpoint) = query.exclude_endpoint {
-            sql.push_str(" AND (endpoint IS NULL OR endpoint != ?)");
-            params_vec.push(Box::new(exclude_endpoint.clone()));
-        }
+        append_audit_log_filters(query, &mut sql, &mut params_vec);
 
         sql.push_str(" ORDER BY timestamp DESC");
 
-        // SECURITY FIX: Validate and enforce safe limits for pagination
-        const MAX_LIMIT: i64 = 1000;
-        const DEFAULT_LIMIT: i64 = 100;
+        let max_limit = self.audit_logs_max_limit();
+        let default_limit = self.audit_logs_default_limit();
 
         let limit = match query.limit {
-            Some(l) if l > 0 && l <= MAX_LIMIT => l,
+            Some(l) if l > 0 && l <= max_limit => l,
             Some(l) if l <= 0 => {
                 return Err(DatabaseError::Validation(format!(
                     "Limit must be positive (got {})",
@@ -224,10 +262,10 @@ impl AuthDatabase {
             Some(l) => {
                 return Err(DatabaseError::Validation(format!(
                     "Limit must not exceed {} (got {})",
-                    MAX_LIMIT, l
+                    max_limit, l
                 )));
             }
-            None => DEFAULT_LIMIT,
+            None => default_limit,
         };
 
         let offset = match query.offset {
@@ -249,6 +287,22 @@ impl AuthDatabase {
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut count_sql =
+            String::from("SELECT COUNT(*) FROM audit_logs WHERE 1=1");
+        let mut count_params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        append_audit_log_filters(
+            query,
+            &mut count_sql,
+            &mut count_params_vec,
+        );
+        let count_params_refs: Vec<&dyn rusqlite::ToSql> =
+            count_params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = conn
+            .query_row(&count_sql, count_params_refs.as_slice(), |row| {
+                row.get(0)
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let mut stmt = conn
             .prepare(&sql)
@@ -278,7 +332,13 @@ impl AuthDatabase {
         drop(stmt);
         drop(conn);
 
-        Ok(logs)
+        Ok(AuditLogPage {
+            has_more: offset + (logs.len() as i64) < total,
+            items: logs,
+            limit,
+            offset,
+            total,
+        })
     }
 
     /// Delete audit logs older than retention period
@@ -291,16 +351,33 @@ impl AuthDatabase {
         }
 
         let cutoff_timestamp = Self::now() - (retention_days as i64 * 86400);
+        let conn = self.lock_maintenance_conn()?;
+        let mut total_deleted = 0usize;
+        let batch_size = self.audit_cleanup_batch_size();
 
-        let deleted = self
-            .lock_conn()?
-            .execute(
-                "DELETE FROM audit_logs WHERE timestamp < ?1",
-                params![cutoff_timestamp],
-            )
-            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        loop {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM audit_logs
+                     WHERE id IN (
+                        SELECT id
+                        FROM audit_logs
+                        WHERE timestamp < ?1
+                        ORDER BY timestamp ASC
+                        LIMIT ?2
+                     )",
+                    params![cutoff_timestamp, batch_size],
+                )
+                .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
-        Ok(deleted)
+            total_deleted += deleted;
+
+            if deleted < batch_size as usize {
+                break;
+            }
+        }
+
+        Ok(total_deleted)
     }
 
     /// Delete oldest audit logs if count exceeds max_entries (LRU eviction)
@@ -312,7 +389,7 @@ impl AuthDatabase {
             return Ok(0); // Unlimited
         }
 
-        let conn = self.lock_conn()?;
+        let conn = self.lock_maintenance_conn()?;
 
         // Count current entries
         let count: i64 = conn
@@ -326,17 +403,34 @@ impl AuthDatabase {
         // Delete oldest entries to bring count down to max_entries
         let to_delete = count - max_entries as i64;
 
-        let deleted = conn
-            .execute(
-                "DELETE FROM audit_logs WHERE id IN (
-                    SELECT id FROM audit_logs ORDER BY timestamp ASC LIMIT ?1
-                )",
-                params![to_delete],
-            )
-            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
-        drop(conn);
+        let mut total_deleted = 0usize;
+        let mut remaining = to_delete;
+        let batch_limit = self.audit_cleanup_batch_size();
 
-        Ok(deleted)
+        while remaining > 0 {
+            let batch_size = remaining.min(batch_limit);
+            let deleted = conn
+                .execute(
+                    "DELETE FROM audit_logs
+                     WHERE id IN (
+                        SELECT id
+                        FROM audit_logs
+                        ORDER BY timestamp ASC
+                        LIMIT ?1
+                     )",
+                    params![batch_size],
+                )
+                .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+
+            total_deleted += deleted;
+            remaining -= deleted as i64;
+
+            if deleted == 0 {
+                break;
+            }
+        }
+
+        Ok(total_deleted)
     }
 
     /// Get audit log statistics
@@ -463,6 +557,97 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
+    pub(crate) fn check_rate_limit_with_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        api_key_id: Option<&str>, // UUID
+        ip_address: Option<&str>,
+        endpoint: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        if !self.rate_limit_enabled() {
+            return Ok(true);
+        }
+
+        let api_key_id = if self.rate_limit_limit_by_key() {
+            api_key_id
+        } else {
+            None
+        };
+        let ip_address = if self.rate_limit_limit_by_ip() {
+            ip_address
+        } else {
+            None
+        };
+
+        let (max_requests, window_seconds) =
+            self.get_endpoint_rate_limit(endpoint)?;
+
+        let now = Self::now();
+        let window_start = now - window_seconds;
+
+        let select_where = match (api_key_id, ip_address) {
+            (Some(_), Some(_)) => {
+                "WHERE api_key_id = ?1 AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4"
+            }
+            (Some(_), None) => {
+                "WHERE api_key_id = ?1 AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4"
+            }
+            (None, Some(_)) => {
+                "WHERE api_key_id IS NULL AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4"
+            }
+            (None, None) => {
+                "WHERE api_key_id IS NULL AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4"
+            }
+        };
+
+        let sum_query =
+            format!("SELECT COALESCE(SUM(request_count), 0) FROM rate_limits {}", select_where);
+        let current_count: i64 = conn
+            .query_row(
+                &sum_query,
+                params![api_key_id, ip_address, endpoint, window_start],
+                |row| row.get(0),
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if current_count >= max_requests as i64 {
+            return Err(DatabaseError::RateLimitExceeded(format!(
+                "Rate limit exceeded: {} requests in {} seconds",
+                max_requests, window_seconds
+            )));
+        }
+
+        let latest_query =
+            format!("SELECT id FROM rate_limits {} ORDER BY window_start DESC, id DESC LIMIT 1", select_where);
+        let latest_row_id: Option<i64> = conn
+            .query_row(
+                &latest_query,
+                params![api_key_id, ip_address, endpoint, window_start],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row_id) = latest_row_id {
+            conn.execute(
+                "UPDATE rate_limits
+                 SET request_count = request_count + 1, last_request_at = ?1
+                 WHERE id = ?2",
+                params![now, row_id],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        } else {
+            conn.execute(
+                "INSERT INTO rate_limits (api_key_id, ip_address, endpoint, window_start, request_count, last_request_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![api_key_id, ip_address, endpoint, now, now],
+            )
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        }
+
+        Ok(true)
+    }
+
     /// Check rate limit and record request
     pub fn check_rate_limit(
         &self,
@@ -470,204 +655,87 @@ impl AuthDatabase {
         ip_address: Option<&str>,
         endpoint: Option<&str>,
     ) -> Result<bool, DatabaseError> {
-        if !self.config.rate_limit.enable {
-            return Ok(true); // Rate limiting disabled
-        }
+        let mut conn = self.lock_conn()?;
+        let tx_started = std::time::Instant::now();
+        let result = (|| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        // Respect configuration for which dimensions participate in the limit
-        let api_key_id = if self.config.rate_limit.limit_by_key {
-            api_key_id
-        } else {
-            None
-        };
-        let ip_address = if self.config.rate_limit.limit_by_ip {
-            ip_address
-        } else {
-            None
-        };
+            let allowed = self.check_rate_limit_with_conn(
+                &tx,
+                api_key_id,
+                ip_address,
+                endpoint,
+            )?;
 
-        // SECURITY: Check if this endpoint has a specific rate limit configuration
-        let (max_requests, window_seconds) =
-            self.get_endpoint_rate_limit(endpoint);
+            tx.commit()
+                .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-        let conn = self.lock_conn()?;
-
-        let now = Self::now();
-        let window_start = now - window_seconds;
-
-        // SECURITY FIX: Build WHERE clause dynamically to avoid SQL NULL comparison issues
-        // Using IS for parameters can cause incorrect behavior with NULL values
-        let (select_where, update_where) = match (api_key_id, ip_address) {
-            (Some(_), Some(_)) => (
-                "WHERE api_key_id = ?1 AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4",
-                "WHERE api_key_id = ?2 AND ip_address = ?3 AND endpoint = ?4 AND window_start >= ?5",
-            ),
-            (Some(_), None) => (
-                "WHERE api_key_id = ?1 AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4",
-                "WHERE api_key_id = ?2 AND ip_address IS NULL AND endpoint = ?4 AND window_start >= ?5",
-            ),
-            (None, Some(_)) => (
-                "WHERE api_key_id IS NULL AND ip_address = ?2 AND endpoint = ?3 AND window_start >= ?4",
-                "WHERE api_key_id IS NULL AND ip_address = ?3 AND endpoint = ?4 AND window_start >= ?5",
-            ),
-            (None, None) => (
-                "WHERE api_key_id IS NULL AND ip_address IS NULL AND endpoint = ?3 AND window_start >= ?4",
-                "WHERE api_key_id IS NULL AND ip_address IS NULL AND endpoint = ?4 AND window_start >= ?5",
-            ),
-        };
-
-        // Try to get existing rate limit entry
-        let select_query =
-            format!("SELECT request_count FROM rate_limits {}", select_where);
-        let current_count: Option<i64> = conn
-            .query_row(
-                &select_query,
-                params![api_key_id, ip_address, endpoint, window_start],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        if let Some(count) = current_count {
-            if count >= max_requests as i64 {
-                return Err(DatabaseError::RateLimitExceeded(format!(
-                    "Rate limit exceeded: {} requests in {} seconds",
-                    max_requests, window_seconds
-                )));
-            }
-
-            // Increment counter
-            let update_query = format!(
-                "UPDATE rate_limits SET request_count = request_count + 1, last_request_at = ?1 {}",
-                update_where
-            );
-            conn.execute(
-                &update_query,
-                params![now, api_key_id, ip_address, endpoint, window_start],
-            )
-            .map_err(|e| DatabaseError::Update(e.to_string()))?;
-        } else {
-            // Create new entry
-            conn.execute(
-                "INSERT INTO rate_limits (api_key_id, ip_address, endpoint, window_start, request_count, last_request_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
-                params![api_key_id, ip_address, endpoint, now, now],
-            ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        }
-        drop(conn);
-
-        Ok(true)
+            Ok(allowed)
+        })();
+        self.record_transaction_duration("check_rate_limit", tx_started.elapsed());
+        result
     }
 
     /// Get endpoint-specific rate limit configuration
     /// Returns (max_requests, window_seconds) tuple
-    fn get_endpoint_rate_limit(&self, endpoint: Option<&str>) -> (u32, i64) {
+    fn get_endpoint_rate_limit(
+        &self,
+        endpoint: Option<&str>,
+    ) -> Result<(u32, i64), DatabaseError> {
         // If no endpoint specified, use defaults
         let Some(endpoint_path) = endpoint else {
-            return (
-                self.config.rate_limit.max_requests,
-                self.config.rate_limit.window_seconds,
-            );
+            return Ok(self.rate_limit_defaults());
         };
 
+        let (_, default_window_seconds) = self.rate_limit_defaults();
+
         // Check if this endpoint has a specific configuration
-        for endpoint_config in &self.config.rate_limit.sensitive_endpoints {
+        let sensitive_endpoints = self.rate_limit_sensitive_endpoints()?;
+        for endpoint_config in &sensitive_endpoints {
             if endpoint_config.endpoint == endpoint_path {
                 let window = endpoint_config
                     .window_seconds
-                    .unwrap_or(self.config.rate_limit.window_seconds);
-                return (endpoint_config.max_requests, window);
+                    .unwrap_or(default_window_seconds);
+                return Ok((endpoint_config.max_requests, window));
             }
         }
 
         // No specific config found, use defaults
-        (
-            self.config.rate_limit.max_requests,
-            self.config.rate_limit.window_seconds,
-        )
+        Ok(self.rate_limit_defaults())
     }
 
     /// Cleanup old rate limit entries
     pub fn cleanup_rate_limits(&self) -> Result<usize, DatabaseError> {
-        let cutoff =
-            Self::now() - self.config.rate_limit.cleanup_interval_seconds;
+        let cutoff = Self::now() - self.rate_limit_cleanup_interval_seconds();
+        let conn = self.lock_maintenance_conn()?;
+        let mut total_deleted = 0usize;
+        let batch_size = self.rate_limit_cleanup_batch_size();
 
-        let deleted = self
-            .lock_conn()?
-            .execute(
-                "DELETE FROM rate_limits WHERE window_start < ?1",
-                params![cutoff],
-            )
-            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        loop {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM rate_limits
+                     WHERE id IN (
+                        SELECT id
+                        FROM rate_limits
+                        WHERE window_start < ?1
+                        ORDER BY window_start ASC
+                        LIMIT ?2
+                     )",
+                    params![cutoff, batch_size],
+                )
+                .map_err(|e| DatabaseError::Delete(e.to_string()))?;
 
-        Ok(deleted)
-    }
+            total_deleted += deleted;
 
-    /// Get rate limit stats for a user
-    #[allow(dead_code)]
-    pub fn get_rate_limit_stats(
-        &self,
-        api_key_id: Option<&str>, // UUID
-        hours: u32,
-    ) -> Result<serde_json::Value, DatabaseError> {
-        let conn = self.lock_conn()?;
+            if deleted < batch_size as usize {
+                break;
+            }
+        }
 
-        let cutoff = Self::now() - (hours as i64 * 3600);
-
-        // SECURITY FIX: Build WHERE clause dynamically for proper NULL handling
-        let query: String = if api_key_id.is_some() {
-            "SELECT window_start, SUM(request_count) as total_requests
-             FROM rate_limits
-             WHERE api_key_id = ?1 AND window_start >= ?2
-             GROUP BY window_start
-             ORDER BY window_start DESC
-             LIMIT 100"
-                .to_string()
-        } else {
-            "SELECT window_start, SUM(request_count) as total_requests
-             FROM rate_limits
-             WHERE api_key_id IS NULL AND window_start >= ?1
-             GROUP BY window_start
-             ORDER BY window_start DESC
-             LIMIT 100"
-                .to_string()
-        };
-
-        let mut stmt = conn
-            .prepare(&query)
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let data: Vec<(i64, i64)> = if api_key_id.is_some() {
-            stmt.query_map(params![api_key_id, cutoff], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        } else {
-            stmt.query_map(params![cutoff], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        };
-
-        drop(stmt);
-        drop(conn);
-
-        let total_requests: i64 = data.iter().map(|(_, count)| count).sum();
-        let requests_per_window: Vec<(String, i64)> = data
-            .into_iter()
-            .map(|(ts, count)| (format_ts(ts), count))
-            .collect();
-
-        Ok(serde_json::json!({
-            "total_requests": total_requests,
-            "window_seconds": self.config.rate_limit.window_seconds,
-            "max_requests_per_window": self.config.rate_limit.max_requests,
-            "requests_per_window": requests_per_window,
-        }))
+        Ok(total_deleted)
     }
 
     /// Get detailed rate limit breakdown by API key, IP, and endpoint
@@ -814,10 +882,12 @@ impl AuthDatabase {
             )
             .unwrap_or(0);
 
+        let (max_requests, window_seconds) = self.rate_limit_defaults();
+
         Ok(serde_json::json!({
             "total_requests": total_requests,
-            "window_seconds": self.config.rate_limit.window_seconds,
-            "max_requests_per_window": self.config.rate_limit.max_requests,
+            "window_seconds": window_seconds,
+            "max_requests_per_window": max_requests,
             "by_api_key": by_api_key,
             "by_ip": by_ip,
             "by_endpoint": by_endpoint,
@@ -827,10 +897,13 @@ impl AuthDatabase {
 }
 
 fn format_ts(ts: i64) -> String {
-    OffsetDateTime::from_unix_timestamp(ts)
-        .ok()
-        .and_then(|dt| dt.format(&Rfc3339).ok())
-        .unwrap_or_else(|| ts.to_string())
+    match OffsetDateTime::from_unix_timestamp(ts) {
+        Ok(dt) => match dt.format(&Rfc3339) {
+            Ok(formatted) => formatted,
+            Err(_) => ts.to_string(),
+        },
+        Err(_) => ts.to_string(),
+    }
 }
 
 // =============================================================================
@@ -843,22 +916,25 @@ impl AuthDatabase {
         conn: &rusqlite::Connection,
         key: &str,
     ) -> Result<SystemConfig, DatabaseError> {
-        conn.query_row(
-            "SELECT key, value, description, updated_at, updated_by
-             FROM system_config
-             WHERE key = ?1",
-            params![key],
-            |row| {
-                Ok(SystemConfig {
-                    key: row.get(0)?,
-                    value: row.get(1)?,
-                    description: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    updated_by: row.get(4)?,
-                })
-            },
-        )
-        .map_err(|e| DatabaseError::Query(e.to_string()))
+        let row = conn
+            .query_row(
+                "SELECT key, value, description, updated_at, updated_by
+                 FROM system_config
+                 WHERE key = ?1",
+                params![key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        system_config_from_row(&row.0, &row.1, row.2, row.3, row.4)
     }
 
     /// List all system config
@@ -875,19 +951,31 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let configs = stmt
+        let rows = stmt
             .query_map([], |row| {
-                Ok(SystemConfig {
-                    key: row.get(0)?,
-                    value: row.get(1)?,
-                    description: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    updated_by: row.get(4)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
             })
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .collect::<SqliteResult<Vec<_>>>()
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let configs = rows
+            .into_iter()
+            .map(|(key, value, description, updated_at, updated_by)| {
+                system_config_from_row(
+                    &key,
+                    &value,
+                    description,
+                    updated_at,
+                    updated_by,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
         drop(conn);
 
@@ -901,91 +989,89 @@ impl AuthDatabase {
         value: &str,
         updated_by: Option<i64>,
     ) -> Result<SystemConfig, DatabaseError> {
+        let key_id = SystemConfigKey::parse(key)?;
+        let typed_value = key_id.parse_persisted_value(value)?;
+        key_id.validate_value(&typed_value)?;
+        let persisted_value = key_id.serialize_value(&typed_value)?;
+
         let conn = self.lock_conn()?;
-
-        // SECURITY: Validate specific config values
-        match key {
-            "api_key_default_ttl_seconds" => {
-                let ttl_value: i64 = value.parse().map_err(|_| {
-                    DatabaseError::Validation(
-                        "api_key_default_ttl_seconds must be a valid integer"
-                            .to_string(),
-                    )
-                })?;
-
-                if ttl_value < 0 {
-                    return Err(DatabaseError::Validation(
-                        "api_key_default_ttl_seconds must be >= 0 (0 = no expiration)".to_string()
-                    ));
-                }
-            }
-            "max_login_attempts" => {
-                let attempts: u32 = value.parse().map_err(|_| {
-                    DatabaseError::Validation(
-                        "max_login_attempts must be a valid positive integer"
-                            .to_string(),
-                    )
-                })?;
-
-                if attempts == 0 {
-                    return Err(DatabaseError::Validation(
-                        "max_login_attempts must be > 0".to_string(),
-                    ));
-                }
-            }
-            "lockout_duration_seconds" => {
-                let duration: i64 = value.parse().map_err(|_| {
-                    DatabaseError::Validation(
-                        "lockout_duration_seconds must be a valid integer"
-                            .to_string(),
-                    )
-                })?;
-
-                if duration <= 0 {
-                    return Err(DatabaseError::Validation(
-                        "lockout_duration_seconds must be > 0".to_string(),
-                    ));
-                }
-            }
-            "rate_limit_window_seconds" => {
-                let window: i64 = value.parse().map_err(|_| {
-                    DatabaseError::Validation(
-                        "rate_limit_window_seconds must be a valid integer"
-                            .to_string(),
-                    )
-                })?;
-
-                if window <= 0 {
-                    return Err(DatabaseError::Validation(
-                        "rate_limit_window_seconds must be > 0".to_string(),
-                    ));
-                }
-            }
-            "rate_limit_max_requests" => {
-                let max_requests: u32 = value.parse().map_err(|_| {
-                    DatabaseError::Validation(
-                        "rate_limit_max_requests must be a valid positive integer".to_string()
-                    )
-                })?;
-
-                if max_requests == 0 {
-                    return Err(DatabaseError::Validation(
-                        "rate_limit_max_requests must be > 0".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                // Unknown config key - allow it but no specific validation
-            }
-        }
-
         conn.execute(
             "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
-            params![value, updated_by, key],
+            params![persisted_value, updated_by, key],
         ).map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
         let result = Self::get_system_config_internal(&conn, key);
         drop(conn);
         result
+    }
+
+    pub fn update_system_config_transactional(
+        &self,
+        key: &str,
+        value: &str,
+        updated_by: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<SystemConfig, DatabaseError> {
+        if audit.is_none() {
+            return self.update_system_config(key, value, updated_by);
+        }
+
+        let key_id = SystemConfigKey::parse(key)?;
+        let typed_value = key_id.parse_persisted_value(value)?;
+        key_id.validate_value(&typed_value)?;
+        let persisted_value = key_id.serialize_value(&typed_value)?;
+
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        tx.execute(
+            "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
+            params![persisted_value, updated_by, key],
+        ).map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+
+        let result = Self::get_system_config_internal(&tx, key)?;
+
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        self.apply_runtime_system_config_value(key_id, &typed_value)?;
+
+        Ok(result)
+    }
+
+    pub fn update_system_config_typed(
+        &self,
+        key: &str,
+        value: &SystemConfigValue,
+        updated_by: Option<i64>,
+    ) -> Result<SystemConfig, DatabaseError> {
+        let key_id = SystemConfigKey::parse(key)?;
+        let persisted_value = key_id.serialize_value(value)?;
+        self.update_system_config(key, &persisted_value, updated_by)
+    }
+
+    pub fn update_system_config_typed_transactional(
+        &self,
+        key: &str,
+        value: &SystemConfigValue,
+        updated_by: Option<i64>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<SystemConfig, DatabaseError> {
+        let key_id = SystemConfigKey::parse(key)?;
+        let persisted_value = key_id.serialize_value(value)?;
+        self.update_system_config_transactional(
+            key,
+            &persisted_value,
+            updated_by,
+            audit,
+        )
     }
 }

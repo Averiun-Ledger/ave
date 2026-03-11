@@ -42,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 use utils::key_pair;
 
 pub mod config;
-pub use http::{CorsConfig, HttpConfig, SelfSignedCertConfig};
+pub use http::{CorsConfig, HttpConfig, ProxyConfig, SelfSignedCertConfig};
 pub mod conversions;
 pub mod error;
 pub mod http;
@@ -78,7 +78,7 @@ pub struct Bridge {
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
     #[cfg(feature = "prometheus")]
-    registry: std::sync::Arc<prometheus_client::registry::Registry>,
+    registry: std::sync::Arc<tokio::sync::Mutex<prometheus_client::registry::Registry>>,
 }
 
 impl Bridge {
@@ -132,7 +132,7 @@ impl Bridge {
         Self::bind_with_shutdown(graceful_token.clone());
 
         #[cfg(feature = "prometheus")]
-        let registry = std::sync::Arc::new(registry);
+        let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
 
         Ok((
             Self {
@@ -158,7 +158,7 @@ impl Bridge {
     #[cfg(feature = "prometheus")]
     pub fn registry(
         &self,
-    ) -> std::sync::Arc<prometheus_client::registry::Registry> {
+    ) -> std::sync::Arc<tokio::sync::Mutex<prometheus_client::registry::Registry>> {
         self.registry.clone()
     }
 

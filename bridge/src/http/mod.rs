@@ -10,9 +10,21 @@ pub struct HttpConfig {
     pub https_cert_path: Option<PathBuf>,
     pub https_private_key_path: Option<PathBuf>,
     pub enable_doc: bool,
+    pub proxy: ProxyConfig,
     pub cors: CorsConfig,
     /// Self-signed certificate configuration for automatic TLS
     pub self_signed_cert: SelfSignedCertConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Trusted proxy CIDRs or IPs allowed to provide forwarded client IP headers.
+    pub trusted_proxies: Vec<String>,
+    /// Trust X-Forwarded-For when the direct peer is a trusted proxy.
+    pub trust_x_forwarded_for: bool,
+    /// Trust X-Real-IP when the direct peer is a trusted proxy.
+    pub trust_x_real_ip: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,8 +84,19 @@ impl Default for HttpConfig {
             https_cert_path: Default::default(),
             https_private_key_path: Default::default(),
             enable_doc: Default::default(),
+            proxy: ProxyConfig::default(),
             cors: CorsConfig::default(),
             self_signed_cert: SelfSignedCertConfig::default(),
+        }
+    }
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            trusted_proxies: Vec::new(),
+            trust_x_forwarded_for: true,
+            trust_x_real_ip: true,
         }
     }
 }

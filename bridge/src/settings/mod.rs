@@ -360,6 +360,7 @@ durability = true
 [auth.api_key]
 default_ttl_seconds = 3600
 max_keys_per_user = 20
+prefix = "custom_prefix_"
 
 [auth.lockout]
 max_attempts = 3
@@ -389,6 +390,11 @@ https_address = "127.0.0.1:4443"
 https_cert_path = "/certs/cert.pem"
 https_private_key_path = "/certs/key.pem"
 enable_doc = true
+
+[http.proxy]
+trusted_proxies = ["10.0.0.1"]
+trust_x_forwarded_for = false
+trust_x_real_ip = false
 
 [http.cors]
 enabled = false
@@ -494,6 +500,7 @@ auth:
   api_key:
     default_ttl_seconds: 3600
     max_keys_per_user: 20
+    prefix: custom_prefix_
   lockout:
     max_attempts: 3
     duration_seconds: 600
@@ -518,6 +525,11 @@ http:
   https_cert_path: /certs/cert.pem
   https_private_key_path: /certs/key.pem
   enable_doc: true
+  proxy:
+    trusted_proxies:
+      - 10.0.0.1
+    trust_x_forwarded_for: false
+    trust_x_real_ip: false
   cors:
     enabled: false
     allow_any_origin: false
@@ -647,7 +659,8 @@ http:
     "durability": true,
     "api_key": {
       "default_ttl_seconds": 3600,
-      "max_keys_per_user": 20
+      "max_keys_per_user": 20,
+      "prefix": "custom_prefix_"
     },
     "lockout": {
       "max_attempts": 3,
@@ -676,6 +689,11 @@ http:
     "https_cert_path": "/certs/cert.pem",
     "https_private_key_path": "/certs/key.pem",
     "enable_doc": true,
+    "proxy": {
+      "trusted_proxies": ["10.0.0.1"],
+      "trust_x_forwarded_for": false,
+      "trust_x_real_ip": false
+    },
     "cors": {
       "enabled": false,
       "allow_any_origin": false,
@@ -933,6 +951,7 @@ http:
         assert_eq!(auth.superadmin, "admin:supersecret");
         assert_eq!(auth.api_key.default_ttl_seconds, 3600);
         assert_eq!(auth.api_key.max_keys_per_user, 20);
+        assert_eq!(auth.api_key.prefix, "custom_prefix_");
         assert_eq!(auth.lockout.max_attempts, 3);
         assert_eq!(auth.lockout.duration_seconds, 600);
         assert!(!auth.rate_limit.enable);
@@ -964,6 +983,9 @@ http:
             Some(PathBuf::from("/certs/key.pem").as_path())
         );
         assert!(http.enable_doc);
+        assert_eq!(http.proxy.trusted_proxies, vec!["10.0.0.1".to_owned()]);
+        assert!(!http.proxy.trust_x_forwarded_for);
+        assert!(!http.proxy.trust_x_real_ip);
         assert!(!http.cors.enabled);
         assert!(!http.cors.allow_any_origin);
         assert_eq!(http.cors.allowed_origins, vec!["https://app.example.com"]);
@@ -1039,8 +1061,18 @@ http:
         assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
         assert!(config.node.spec.is_none());
 
+        // node defaults
+        assert!(!config.node.always_accept);
+        assert!(!config.node.internal_db.durability);
+        assert!(!config.node.external_db.durability);
+        assert_eq!(
+            config.node.network.memory_limits,
+            MemoryLimitsConfig::Disabled
+        );
+
         // auth defaults
         assert!(!config.auth.durability);
+        assert_eq!(config.auth.api_key.prefix, "ave_node_");
 
         // http.cors defaults
         assert!(config.http.cors.enabled);
@@ -1048,8 +1080,21 @@ http:
         assert!(config.http.cors.allowed_origins.is_empty());
         assert!(!config.http.cors.allow_credentials);
 
+        // http.proxy defaults
+        assert!(config.http.proxy.trusted_proxies.is_empty());
+        assert!(config.http.proxy.trust_x_forwarded_for);
+        assert!(config.http.proxy.trust_x_real_ip);
+
         // http.self_signed_cert defaults
         assert!(!config.http.self_signed_cert.enabled);
+        assert_eq!(config.http.self_signed_cert.common_name, "localhost");
+        assert_eq!(
+            config.http.self_signed_cert.san,
+            vec!["127.0.0.1".to_owned(), "::1".to_owned()]
+        );
+        assert_eq!(config.http.self_signed_cert.validity_days, 365);
+        assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
+        assert_eq!(config.http.self_signed_cert.check_interval_secs, 3600);
     }
 
     #[test]

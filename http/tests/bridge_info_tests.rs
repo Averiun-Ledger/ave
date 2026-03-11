@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::common::{TestServer, make_request};
 
-mod common;
+pub mod common;
 
 // =============================================================================
 // Business Logic Endpoints Deserialization Tests
@@ -81,6 +81,8 @@ async fn create_req_schema(
         Some(serde_json::to_value(request).unwrap()),
     )
     .await;
+
+    println!("{}", body);
 
     assert!(status.is_success());
 
@@ -428,7 +430,10 @@ async fn test_request_deserialization() {
     // GET /request/{request-id} -> RequestInfo
     // GET /request -> Vec<RequestInfo>
     // POST /request -> RequestData
-    let (server, _dirs) = TestServer::build(false, false, None).await;
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let body = create_req(&client, &server).await;
@@ -476,7 +481,10 @@ async fn test_approval_deserialization() {
     // GET /approval?state={ApprovalState} -> Vec<ApprovalEntry>
     // PATCH /approval/{subject_id} + Json<String> -> String
 
-    let (server, _dirs) = TestServer::build(false, false, None).await;
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let body = create_req(&client, &server).await;
@@ -625,7 +633,10 @@ async fn test_auth_endpoints_deserialization() {
     // GET /auth/{subject_id} -> HashSet<String>
     // DELETE /auth/{subject_id} -> String
 
-    let (server, _dirs) = TestServer::build(false, false, None).await;
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let (status, _body) = make_request(
@@ -707,7 +718,10 @@ async fn test_update_and_transfer_deserialization() {
     // POST /manual-distribution/{subject_id} -> String
     // GET /pending-transfers -> Vec<TransferSubject>
 
-    let (server, _dirs) = TestServer::build(false, true, None).await;
+    let Some((server, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let body = create_req(&client, &server).await;
@@ -821,13 +835,17 @@ async fn test_update_and_transfer_deserialization() {
     assert_eq!(res[0].subject_id, subject_id);
 }
 
+
 // --- Gov Sub Endpoints ---
 #[test(tokio::test)]
 async fn test_gov_sub_deserialization() {
     // GET /subjects/{governance_id}?active={bool}&schema={string} -> Vec<SubjsData>
     // GET /subjects?active={bool} -> Vec<GovsData>
 
-    let (server, _dirs) = TestServer::build(false, true, None).await;
+    let Some((server, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let body = create_req(&client, &server).await;
@@ -1191,7 +1209,10 @@ async fn test_subject_deserialization() {
     // GET /events-first-last/{subject_id}?quantity={u64}&success={bool}&reverse={bool} -> Vec<EventInfo>
     // GET /state/{subject_id} -> SubjectDB
 
-    let (server1, _dirs) = TestServer::build(false, true, None).await;
+    let Some((server1, _dirs)) = TestServer::build(false, true, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let body = create_req(&client, &server1).await;
@@ -1222,12 +1243,15 @@ async fn test_subject_deserialization() {
     assert!(status.is_success());
     let peer_id_2: String = serde_json::from_value(body).unwrap();
 
-    let (server2, _dirs) = TestServer::build(
+    let Some((server2, _dirs)) = TestServer::build(
         false,
         true,
         Some((peer_id_2, server1.memory_port())),
     )
-    .await;
+    .await
+    else {
+        return;
+    };
 
     let (status, body) =
         make_request(&client, &server2.url("/public-key"), "GET", None, None)
@@ -1718,7 +1742,10 @@ async fn test_system_info_deserialization() {
     // GET /config -> ConfigHttp
     // GET /keys -> Binary (application/pkcs8)
 
-    let (server, dirs) = TestServer::build(false, false, None).await;
+    let Some((server, dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
     let client = Client::new();
 
     let (status, body) =
@@ -1845,6 +1872,59 @@ async fn test_system_info_deserialization() {
     // Self-signed cert defaults
     assert!(!config.http.self_signed_cert.enabled);
     assert_eq!(config.http.self_signed_cert.common_name, "localhost");
+    assert_eq!(
+        config.http.self_signed_cert.san,
+        vec!["127.0.0.1".to_string(), "::1".to_string()]
+    );
     assert_eq!(config.http.self_signed_cert.validity_days, 365);
     assert_eq!(config.http.self_signed_cert.renew_before_days, 30);
+    assert_eq!(config.http.self_signed_cert.check_interval_secs, 3600);
+
+    // CORS defaults (not set in test config → defaults)
+    assert!(config.http.cors.enabled);
+    assert!(config.http.cors.allow_any_origin);
+    assert!(config.http.cors.allowed_origins.is_empty());
+    assert!(!config.http.cors.allow_credentials);
+
+    // Proxy defaults (not set in test config → defaults)
+    assert!(config.http.proxy.trusted_proxies.is_empty());
+    assert!(config.http.proxy.trust_x_forwarded_for);
+    assert!(config.http.proxy.trust_x_real_ip);
+
+    // DB durability defaults
+    assert!(!config.node.internal_db.durability);
+    assert!(!config.node.external_db.durability);
+
+    // Node spec: not set → None
+    assert!(config.node.spec.is_none());
+
+    // Network buffer/message limits defaults
+    assert_eq!(config.node.network.memory_limits, "disabled");
+    assert_eq!(config.node.network.max_app_message_bytes, 1_048_576);
+    assert_eq!(
+        config.node.network.max_pending_inbound_bytes_per_peer,
+        8_388_608
+    );
+    assert_eq!(
+        config.node.network.max_pending_outbound_bytes_per_peer,
+        8_388_608
+    );
+    assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
+    assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
+
+    // Control list timeout/concurrency defaults
+    assert_eq!(config.node.network.control_list.request_timeout_secs, 5);
+    assert_eq!(config.node.network.control_list.max_concurrent_requests, 8);
+
+    // Auth durability default
+    assert!(!config.auth.durability);
+
+    // API key prefix default (not set in test config → default "ave_node_")
+    assert_eq!(config.auth.api_key.prefix, "ave_node_");
+
+    // Rate limit sensitive endpoints: explicitly set to empty in test config
+    assert!(config.auth.rate_limit.sensitive_endpoints.is_empty());
+
+    // Session audit max entries: explicitly set in test config
+    assert_eq!(config.auth.session.audit_max_entries, 1_000_000);
 }

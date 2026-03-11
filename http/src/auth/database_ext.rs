@@ -3,6 +3,7 @@
 // This module extends the database layer with additional operations
 
 use super::database::{AuthDatabase, DatabaseError};
+use super::database_audit::AuditLogParams;
 use super::models::*;
 use rusqlite::{OptionalExtension, Result as SqliteResult, params};
 
@@ -11,6 +12,47 @@ use rusqlite::{OptionalExtension, Result as SqliteResult, params};
 // =============================================================================
 
 impl AuthDatabase {
+    pub(crate) fn get_effective_permissions_internal(
+        conn: &rusqlite::Connection,
+        user_id: i64,
+    ) -> Result<Vec<Permission>, DatabaseError> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT res.name, act.name,
+                COALESCE(
+                    (SELECT allowed FROM user_permissions up2
+                     WHERE up2.user_id = ?1 AND up2.resource_id = res.id AND up2.action_id = act.id),
+                    (SELECT MAX(CASE WHEN rp.allowed THEN 1 ELSE 0 END)
+                     FROM role_permissions rp
+                     INNER JOIN user_roles ur ON rp.role_id = ur.role_id
+                     INNER JOIN roles r ON ur.role_id = r.id
+                     WHERE ur.user_id = ?1 AND rp.resource_id = res.id AND rp.action_id = act.id
+                       AND r.is_deleted = 0)
+                ) as allowed
+             FROM resources res
+             CROSS JOIN actions act
+             WHERE allowed IS NOT NULL
+             ORDER BY res.name, act.name"
+        ).map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let permissions = stmt
+            .query_map(params![user_id], |row| {
+                Ok(Permission {
+                    resource: row.get(0)?,
+                    action: row.get(1)?,
+                    allowed: row.get(2)?,
+                    is_system: None,
+                    source: None,
+                    role_name: None,
+                })
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .collect::<SqliteResult<Vec<_>>>()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        drop(stmt);
+
+        Ok(permissions)
+    }
+
     /// Internal: Get role by ID without acquiring lock
     pub(crate) fn get_role_by_id_internal(
         conn: &rusqlite::Connection,
@@ -74,17 +116,14 @@ impl AuthDatabase {
         })
     }
 
-    /// Create a new role
-    pub fn create_role(
+    fn create_role_with_conn(
         &self,
+        conn: &rusqlite::Connection,
         name: &str,
         description: Option<&str>,
     ) -> Result<Role, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        // SECURITY FIX: Validate role name length and characters
-        const MAX_NAME_LENGTH: usize = 100;
-        const MAX_DESC_LENGTH: usize = 500;
+        let max_name_length = self.role_name_max_length();
+        let max_desc_length = self.role_description_max_length();
 
         if name.trim().is_empty() {
             return Err(DatabaseError::Validation(
@@ -92,10 +131,10 @@ impl AuthDatabase {
             ));
         }
 
-        if name.len() > MAX_NAME_LENGTH {
+        if name.len() > max_name_length {
             return Err(DatabaseError::Validation(format!(
                 "Role name must not exceed {} characters (got {})",
-                MAX_NAME_LENGTH,
+                max_name_length,
                 name.len()
             )));
         }
@@ -109,11 +148,11 @@ impl AuthDatabase {
 
         // Validate description length
         if let Some(desc) = description
-            && desc.len() > MAX_DESC_LENGTH
+            && desc.len() > max_desc_length
         {
             return Err(DatabaseError::Validation(format!(
                 "Description must not exceed {} characters (got {})",
-                MAX_DESC_LENGTH,
+                max_desc_length,
                 desc.len()
             )));
         }
@@ -140,9 +179,26 @@ impl AuthDatabase {
         .map_err(|e| DatabaseError::Insert(e.to_string()))?;
 
         let role_id = conn.last_insert_rowid();
-        let result = Self::get_role_by_id_internal(&conn, role_id);
-        drop(conn);
-        result
+        Self::get_role_by_id_internal(conn, role_id)
+    }
+
+    pub fn create_role_transactional(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<Role, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        let role = self.create_role_with_conn(&tx, name, description)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(role)
     }
 
     /// Get role by ID
@@ -189,29 +245,26 @@ impl AuthDatabase {
         Ok(roles)
     }
 
-    /// Update role
-    pub fn update_role(
+    fn update_role_with_conn(
         &self,
+        conn: &rusqlite::Connection,
         role_id: i64,
         description: Option<&str>,
     ) -> Result<Role, DatabaseError> {
-        let conn = self.lock_conn()?;
-
-        // SECURITY FIX: Validate description length
-        const MAX_DESC_LENGTH: usize = 500;
+        let max_desc_length = self.role_description_max_length();
 
         if let Some(desc) = description
-            && desc.len() > MAX_DESC_LENGTH
+            && desc.len() > max_desc_length
         {
             return Err(DatabaseError::Validation(format!(
                 "Description must not exceed {} characters (got {})",
-                MAX_DESC_LENGTH,
+                max_desc_length,
                 desc.len()
             )));
         }
 
         // Check if role is system role
-        let role = Self::get_role_by_id_internal(&conn, role_id)?;
+        let role = Self::get_role_by_id_internal(conn, role_id)?;
         if role.is_system {
             return Err(DatabaseError::PermissionDenied(
                 "Cannot modify system role".to_string(),
@@ -226,17 +279,33 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
         }
 
-        let result = Self::get_role_by_id_internal(&conn, role_id);
-        drop(conn);
-        result
+        Self::get_role_by_id_internal(conn, role_id)
     }
 
-    /// Delete role (soft delete)
-    pub fn delete_role(&self, role_id: i64) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
+    pub fn update_role_transactional(
+        &self,
+        role_id: i64,
+        description: Option<&str>,
+        audit: Option<AuditLogParams>,
+    ) -> Result<Role, DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        let role = self.update_role_with_conn(&tx, role_id, description)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Ok(role)
+    }
 
-        // Check if role is system role
-        let role = Self::get_role_by_id_internal(&conn, role_id)?;
+    fn delete_role_with_conn(
+        conn: &rusqlite::Connection,
+        role_id: i64,
+    ) -> Result<(), DatabaseError> {
+        let role = Self::get_role_by_id_internal(conn, role_id)?;
         if role.is_system {
             return Err(DatabaseError::PermissionDenied(
                 "Cannot delete system role".to_string(),
@@ -248,8 +317,25 @@ impl AuthDatabase {
             params![role_id],
         )
         .map_err(|e| DatabaseError::Update(e.to_string()))?;
-        drop(conn);
 
+        Ok(())
+    }
+
+    pub fn delete_role_transactional(
+        &self,
+        role_id: i64,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        Self::delete_role_with_conn(&tx, role_id)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
         Ok(())
     }
 }
@@ -381,16 +467,13 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
-    /// Set role permission
-    pub fn set_role_permission(
-        &self,
+    fn set_role_permission_with_conn(
+        conn: &rusqlite::Connection,
         role_id: i64,
         resource: &str,
         action: &str,
         allowed: bool,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
         // Check if role is a system role (directly in the same connection)
         let is_system: bool = conn
             .query_row(
@@ -419,20 +502,37 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3, ?4)",
             params![role_id, resource_id, action_id, allowed],
         ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        drop(conn);
 
         Ok(())
     }
 
-    /// Remove role permission
-    pub fn remove_role_permission(
+    pub fn set_role_permission_transactional(
         &self,
         role_id: i64,
         resource: &str,
         action: &str,
+        allowed: bool,
+        audit: Option<AuditLogParams>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Self::set_role_permission_with_conn(&tx, role_id, resource, action, allowed)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(())
+    }
 
+    fn remove_role_permission_with_conn(
+        conn: &rusqlite::Connection,
+        role_id: i64,
+        resource: &str,
+        action: &str,
+    ) -> Result<(), DatabaseError> {
         // Check if role is a system role (directly in the same connection)
         let is_system: bool = conn
             .query_row(
@@ -460,8 +560,27 @@ impl AuthDatabase {
             params![role_id, resource_id, action_id],
         )
         .map_err(|e| DatabaseError::Delete(e.to_string()))?;
-        drop(conn);
 
+        Ok(())
+    }
+
+    pub fn remove_role_permission_transactional(
+        &self,
+        role_id: i64,
+        resource: &str,
+        action: &str,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        Self::remove_role_permission_with_conn(&tx, role_id, resource, action)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Ok(())
     }
 
@@ -503,20 +622,17 @@ impl AuthDatabase {
         Ok(permissions)
     }
 
-    /// Set user permission (override)
-    pub fn set_user_permission(
-        &self,
+    fn set_user_permission_with_conn(
+        conn: &rusqlite::Connection,
         user_id: i64,
         resource: &str,
         action: &str,
         allowed: bool,
         granted_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
-
         let resource_id =
-            Self::get_resource_by_name_internal(&conn, resource)?.id;
-        let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
+            Self::get_resource_by_name_internal(conn, resource)?.id;
+        let action_id = Self::get_action_by_name_internal(conn, action)?.id;
 
         // VALIDATION: Prevent redundant permissions within direct user permissions
         // This only affects direct user permissions, NOT role permissions
@@ -572,23 +688,41 @@ impl AuthDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![user_id, resource_id, action_id, allowed, granted_by],
         ).map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        drop(conn);
 
         Ok(())
     }
 
-    /// Remove user permission
-    pub fn remove_user_permission(
+    pub fn set_user_permission_transactional(
         &self,
         user_id: i64,
         resource: &str,
         action: &str,
+        allowed: bool,
+        granted_by: Option<i64>,
+        audit: Option<AuditLogParams>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Self::set_user_permission_with_conn(&tx, user_id, resource, action, allowed, granted_by)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        Ok(())
+    }
 
+    fn remove_user_permission_with_conn(
+        conn: &rusqlite::Connection,
+        user_id: i64,
+        resource: &str,
+        action: &str,
+    ) -> Result<(), DatabaseError> {
         let resource_id =
-            Self::get_resource_by_name_internal(&conn, resource)?.id;
-        let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
+            Self::get_resource_by_name_internal(conn, resource)?.id;
+        let action_id = Self::get_action_by_name_internal(conn, action)?.id;
 
         conn.execute(
             "DELETE FROM user_permissions
@@ -596,8 +730,27 @@ impl AuthDatabase {
             params![user_id, resource_id, action_id],
         )
         .map_err(|e| DatabaseError::Delete(e.to_string()))?;
-        drop(conn);
 
+        Ok(())
+    }
+
+    pub fn remove_user_permission_transactional(
+        &self,
+        user_id: i64,
+        resource: &str,
+        action: &str,
+        audit: Option<AuditLogParams>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
+        Self::remove_user_permission_with_conn(&tx, user_id, resource, action)?;
+        if let Some(audit) = audit {
+            Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Delete(e.to_string()))?;
         Ok(())
     }
 
@@ -684,45 +837,7 @@ impl AuthDatabase {
         user_id: i64,
     ) -> Result<Vec<Permission>, DatabaseError> {
         let conn = self.lock_conn()?;
-
-        // Query that combines role permissions and user overrides
-        // User permissions take precedence over role permissions
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT res.name, act.name,
-                COALESCE(
-                    (SELECT allowed FROM user_permissions up2
-                     WHERE up2.user_id = ?1 AND up2.resource_id = res.id AND up2.action_id = act.id),
-                    (SELECT MAX(CASE WHEN rp.allowed THEN 1 ELSE 0 END)
-                     FROM role_permissions rp
-                     INNER JOIN user_roles ur ON rp.role_id = ur.role_id
-                     INNER JOIN roles r ON ur.role_id = r.id
-                     WHERE ur.user_id = ?1 AND rp.resource_id = res.id AND rp.action_id = act.id
-                       AND r.is_deleted = 0)
-                ) as allowed
-             FROM resources res
-             CROSS JOIN actions act
-             WHERE allowed IS NOT NULL
-             ORDER BY res.name, act.name"
-        ).map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let permissions = stmt
-            .query_map(params![user_id], |row| {
-                Ok(Permission {
-                    resource: row.get(0)?,
-                    action: row.get(1)?,
-                    allowed: row.get(2)?,
-                    is_system: None,
-                    source: None,
-                    role_name: None,
-                })
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .collect::<SqliteResult<Vec<_>>>()
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        drop(stmt);
-        drop(conn);
-
-        Ok(permissions)
+        Self::get_effective_permissions_internal(&conn, user_id)
     }
 
     /// Get effective permissions for a user

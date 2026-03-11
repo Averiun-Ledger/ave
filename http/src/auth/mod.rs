@@ -10,12 +10,18 @@
 
 pub mod crypto;
 pub mod database;
+mod db_runtime;
 mod database_apikeys;
 pub mod database_audit;
 mod database_ext;
+mod http_api;
+#[cfg(feature = "prometheus")]
+mod metrics;
 mod database_quota;
 pub mod middleware;
 pub mod models;
+pub(crate) mod request_meta;
+mod system_config;
 
 // Handler modules
 pub mod admin_handlers;
@@ -27,7 +33,9 @@ pub mod system_handlers;
 use std::{sync::Arc, time::Duration};
 
 use ave_bridge::{
-    MachineSpec, auth::AuthConfig, settings::command::build_auth_password,
+    MachineSpec,
+    auth::AuthConfig,
+    settings::command::build_auth_password,
 };
 // Re-exports for convenience
 pub use database::AuthDatabase;
@@ -39,18 +47,68 @@ use crate::auth::integration::{
 };
 
 const TARGET: &str = "ave::http";
-const MIN_LENGTH: usize = 8;
-const MAX_LENGTH: usize = 128;
-const REQUIRE_UPPERCASE: bool = true;
-const REQUIRE_LOWERCASE: bool = true;
-const REQUIRE_DIGIT: bool = true;
-const REQUIRE_SPECIAL: bool = true;
+
+pub(crate) struct PasswordPolicy {
+    pub min_length: usize,
+    pub max_length: usize,
+    pub require_uppercase: bool,
+    pub require_lowercase: bool,
+    pub require_digit: bool,
+    pub require_special: bool,
+}
+
+pub(crate) struct ValidationLimits {
+    pub role_name_max_length: usize,
+    pub role_description_max_length: usize,
+    pub usage_plan_id_max_length: usize,
+    pub usage_plan_name_max_length: usize,
+    pub users_default_limit: i64,
+    pub users_max_limit: i64,
+    pub audit_logs_default_limit: i64,
+    pub audit_logs_max_limit: i64,
+    pub system_config_default_limit: i64,
+    pub system_config_max_limit: i64,
+}
+
+pub(crate) struct MaintenanceLimits {
+    pub audit_cleanup_batch_size: i64,
+    pub rate_limit_cleanup_batch_size: i64,
+    pub expired_api_key_cleanup_batch_size: i64,
+}
+
+pub(crate) const PASSWORD_POLICY: PasswordPolicy = PasswordPolicy {
+    min_length: 8,
+    max_length: 128,
+    require_uppercase: true,
+    require_lowercase: true,
+    require_digit: true,
+    require_special: true,
+};
+
+pub(crate) const VALIDATION_LIMITS: ValidationLimits = ValidationLimits {
+    role_name_max_length: 100,
+    role_description_max_length: 500,
+    usage_plan_id_max_length: 64,
+    usage_plan_name_max_length: 100,
+    users_default_limit: 100,
+    users_max_limit: 1000,
+    audit_logs_default_limit: 100,
+    audit_logs_max_limit: 1000,
+    system_config_default_limit: 50,
+    system_config_max_limit: 200,
+};
+
+pub(crate) const MAINTENANCE_LIMITS: MaintenanceLimits = MaintenanceLimits {
+    audit_cleanup_batch_size: 1_000,
+    rate_limit_cleanup_batch_size: 1_000,
+    expired_api_key_cleanup_batch_size: 500,
+};
 
 pub async fn build_auth(
     auth_config: &AuthConfig,
     password: &str,
     spec: Option<MachineSpec>,
-) -> Option<Arc<AuthDatabase>> {
+) -> Result<Option<Arc<AuthDatabase>>, String> {
     if auth_config.enable {
         let mut auth_password = password.to_string();
         if auth_password.is_empty() {
@@ -62,15 +120,18 @@ pub async fn build_auth(
                 target: TARGET,
                 "auth system is enabled but superadmin password is not configured"
             );
-            return None;
+            return Err(
+                "authentication is enabled but the superadmin password is not configured"
+                    .to_string(),
+            );
         }
 
         let db = initialize_auth_database(auth_config, &auth_password, spec)
             .await
             .map_err(|e| {
                 error!(target: TARGET, error = %e, "failed to initialize auth system");
-            })
-            .expect("Can not initialize auth database");
+                e
+            })?;
 
         info!(target: TARGET, "authentication system enabled");
         log_auth_statistics(&db).await;
@@ -85,45 +146,54 @@ pub async fn build_auth(
                 }
             }
         });
-        Some(db)
+        Ok(Some(db))
     } else {
-        None
+        Ok(None)
     }
 }
 
 /// Validate password against policy
-pub fn validate_password(password: &str) -> Result<(), String> {
-    if password.len() < MIN_LENGTH {
+pub(crate) fn validate_password(
+    password: &str,
+    policy: &PasswordPolicy,
+) -> Result<(), String> {
+    if password.len() < policy.min_length {
         return Err(format!(
             "Password must be at least {} characters long",
-            MIN_LENGTH
+            policy.min_length
         ));
     }
 
-    if password.len() > MAX_LENGTH {
+    if password.len() > policy.max_length {
         return Err(format!(
             "Password must be at most {} characters long",
-            MAX_LENGTH
+            policy.max_length
         ));
     }
 
-    if REQUIRE_UPPERCASE && !password.chars().any(|c| c.is_uppercase()) {
+    if policy.require_uppercase
+        && !password.chars().any(|c| c.is_uppercase())
+    {
         return Err(
             "Password must contain at least one uppercase letter".to_string()
         );
     }
 
-    if REQUIRE_LOWERCASE && !password.chars().any(|c| c.is_lowercase()) {
+    if policy.require_lowercase
+        && !password.chars().any(|c| c.is_lowercase())
+    {
         return Err(
             "Password must contain at least one lowercase letter".to_string()
         );
     }
 
-    if REQUIRE_DIGIT && !password.chars().any(|c| c.is_ascii_digit()) {
+    if policy.require_digit && !password.chars().any(|c| c.is_ascii_digit()) {
         return Err("Password must contain at least one digit".to_string());
     }
 
-    if REQUIRE_SPECIAL && !password.chars().any(|c| !c.is_alphanumeric()) {
+    if policy.require_special
+        && !password.chars().any(|c| !c.is_alphanumeric())
+    {
         return Err(
             "Password must contain at least one special character".to_string()
         );

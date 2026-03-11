@@ -25,13 +25,13 @@ fn serialize_ts_opt<S>(
 where
     S: serde::Serializer,
 {
-    let formatted = ts
-        .and_then(|v| {
-            OffsetDateTime::from_unix_timestamp(v)
-                .ok()
-                .and_then(|dt| dt.format(&Rfc3339).ok())
-        })
-        .unwrap_or_default();
+    let formatted = match ts {
+        Some(v) => match OffsetDateTime::from_unix_timestamp(*v) {
+            Ok(dt) => dt.format(&Rfc3339).unwrap_or_default(),
+            Err(_) => String::new(),
+        },
+        None => String::new(),
+    };
     serializer.serialize_str(&formatted)
 }
 
@@ -42,6 +42,12 @@ where
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PaginationQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 impl IntoResponse for ErrorResponse {
@@ -363,6 +369,15 @@ pub struct AuditLogQuery {
     pub exclude_endpoint: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuditLogPage {
+    pub items: Vec<AuditLog>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: i64,
+    pub has_more: bool,
+}
+
 // =============================================================================
 // AUTHENTICATION MODELS
 // =============================================================================
@@ -447,7 +462,8 @@ impl AuthContext {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SystemConfig {
     pub key: String,
-    pub value: String,
+    pub value_type: SystemConfigValueType,
+    pub value: SystemConfigValue,
     pub description: Option<String>,
     #[serde(serialize_with = "serialize_ts", skip_deserializing)]
     pub updated_at: i64,
@@ -456,5 +472,57 @@ pub struct SystemConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSystemConfigRequest {
-    pub value: i64,
+    pub value: SystemConfigValue,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SystemConfigPage {
+    pub items: Vec<SystemConfig>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: i64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemConfigValueType {
+    Integer,
+    Boolean,
+    EndpointRateLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SystemConfigEndpointRateLimit {
+    pub endpoint: String,
+    pub max_requests: u32,
+    pub window_seconds: Option<i64>,
+}
+
+impl From<ave_bridge::auth::EndpointRateLimit> for SystemConfigEndpointRateLimit {
+    fn from(value: ave_bridge::auth::EndpointRateLimit) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            max_requests: value.max_requests,
+            window_seconds: value.window_seconds,
+        }
+    }
+}
+
+impl From<SystemConfigEndpointRateLimit> for ave_bridge::auth::EndpointRateLimit {
+    fn from(value: SystemConfigEndpointRateLimit) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            max_requests: value.max_requests,
+            window_seconds: value.window_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum SystemConfigValue {
+    Integer(i64),
+    Boolean(bool),
+    EndpointRateLimits(Vec<SystemConfigEndpointRateLimit>),
 }

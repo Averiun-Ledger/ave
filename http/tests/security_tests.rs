@@ -2,7 +2,8 @@
 //
 // Tests for security vulnerabilities, edge cases, and error conditions
 
-mod common;
+pub mod common;
+use common::TestDbExt;
 
 use ave_http::auth::database::DatabaseError;
 use test_log::test;
@@ -18,7 +19,8 @@ use ave_http::auth::{
     },
     middleware::AuthContextExtractor,
     models::{
-        AuthContext, Permission, SetPermissionRequest, UpdateUserRequest,
+        AuthContext, Permission, SetPermissionRequest, SystemConfigValue,
+        UpdateUserRequest,
     },
 };
 use axum::{
@@ -225,8 +227,13 @@ async fn test_concurrent_api_key_verification() {
     for _ in 0..20 {
         let db_clone = db.clone();
         let key_clone = api_key.clone();
-        let handle =
-            std::thread::spawn(move || db_clone.verify_api_key(&key_clone));
+        let handle = std::thread::spawn(move || {
+            db_clone.authenticate_api_key_request(
+                &key_clone,
+                None,
+                "/peer-id",
+            )
+        });
         handles.push(handle);
     }
 
@@ -236,6 +243,26 @@ async fn test_concurrent_api_key_verification() {
     // All should succeed
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     assert_eq!(success_count, 20);
+}
+
+#[test(tokio::test)]
+async fn test_auth_metrics_are_exposed_in_prometheus() {
+    let (app, _dirs) = common::TestApp::build(true, true, None).await;
+    let api_key = common::login_app(&app, "admin", "AdminPass123!")
+        .await
+        .expect("admin login");
+
+    let (status, body) =
+        common::make_app_request_raw(&app, "/metrics", "GET", Some(&api_key), None)
+            .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("auth_db_requests_total"));
+    assert!(body.contains("auth_db_request_seconds"));
+    assert!(body.contains("auth_db_transaction_seconds"));
+    assert!(body.contains("request_kind=\"login\""));
+    assert!(body.contains("request_kind=\"api_key_auth\""));
+    assert!(body.contains("operation=\"authenticate_api_key_request\""));
 }
 
 // =============================================================================
@@ -324,11 +351,11 @@ async fn test_zero_ttl_api_key_never_expires() {
         .unwrap();
 
     // Should work immediately
-    assert!(db.verify_api_key(&api_key).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
 
     // Should still work after a delay
     std::thread::sleep(std::time::Duration::from_secs(1));
-    assert!(db.verify_api_key(&api_key).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
 }
 
 #[test(tokio::test)]
@@ -350,6 +377,7 @@ async fn test_explicit_zero_ttl_overrides_default() {
         api_key: ApiKeyConfig {
             default_ttl_seconds: 2592000, // 30 days
             max_keys_per_user: 10,
+            prefix: "ave_node_".to_string(),
         },
         lockout: LockoutConfig::default(),
         rate_limit: RateLimitConfig::default(),
@@ -374,7 +402,7 @@ async fn test_explicit_zero_ttl_overrides_default() {
     );
 
     // Verify key works
-    assert!(db.verify_api_key(&api_key_zero).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key_zero, None, "/peer-id").is_ok());
 
     // Test 2: Create key without TTL (should use default_ttl of 30 days)
     let (_api_key_default, key_info_default) = db
@@ -433,7 +461,7 @@ async fn test_inactive_user_api_keys_dont_work() {
     db.update_user(user.id, None, Some(false)).unwrap();
 
     // API key should not work
-    let result = db.verify_api_key(&api_key);
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
 }
 
@@ -452,7 +480,7 @@ async fn test_deleted_user_api_keys_dont_work() {
     db.delete_user(user.id).unwrap();
 
     // API key should not work
-    let result = db.verify_api_key(&api_key);
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(result.is_err());
 }
 
@@ -790,7 +818,7 @@ async fn test_revoked_api_key_cannot_be_used() {
         .unwrap();
 
     // Should not verify
-    let result = db.verify_api_key(&api_key);
+    let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
 }
 
@@ -964,6 +992,7 @@ async fn test_pre_auth_rate_limiting_on_login() {
         api_key: ApiKeyConfig {
             default_ttl_seconds: 0,
             max_keys_per_user: 10,
+            prefix: "ave_node_".to_string(),
         },
         lockout: LockoutConfig {
             max_attempts: 5,
@@ -2126,14 +2155,14 @@ async fn test_api_keys_revoked_on_admin_password_reset() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(auth_result.is_ok(), "API key should work before reset");
 
     // Admin resets password
     db.admin_reset_password(user.id, "NewPass123!").unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password reset"
@@ -2164,14 +2193,14 @@ async fn test_api_keys_revoked_on_user_password_change() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(auth_result.is_ok(), "API key should work before change");
 
     // User changes password via update_user (simulating authenticated password change)
     db.update_user(user.id, Some("NewPass123!"), None).unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password change"
@@ -2258,7 +2287,7 @@ async fn test_api_keys_revoked_on_update_user_password_change() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_ok(),
         "API key should work before password change"
@@ -2268,7 +2297,7 @@ async fn test_api_keys_revoked_on_update_user_password_change() {
     db.update_user(user.id, Some("NewPass123!"), None).unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password change via update_user"
@@ -2293,7 +2322,7 @@ async fn test_api_keys_blocked_when_must_change_password() {
         .unwrap();
 
     // Try to use API key - should be blocked
-    let auth_result = db.verify_api_key(&api_key);
+    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be blocked when must_change_password is set"
@@ -2320,7 +2349,7 @@ async fn test_api_keys_blocked_when_must_change_password() {
         .create_api_key(user.id, Some("valid_key"), None, None, true)
         .unwrap();
 
-    let auth_result = db.verify_api_key(&new_api_key);
+    let auth_result = db.authenticate_api_key_request(&new_api_key, None, "/peer-id");
     assert!(
         auth_result.is_ok(),
         "API key should work after password has been changed"
@@ -2364,7 +2393,7 @@ async fn test_superadmin_can_delete_own_api_keys() {
         .unwrap();
 
     // Verify key works
-    assert!(db.verify_api_key(&api_key).is_ok());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
 
     // Superadmin revokes their own key
     let result = db.revoke_api_key(
@@ -2378,7 +2407,7 @@ async fn test_superadmin_can_delete_own_api_keys() {
     );
 
     // Verify key no longer works
-    assert!(db.verify_api_key(&api_key).is_err());
+    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_err());
 }
 
 /// SECURITY TEST: Permission conflicts - user deny overrides role allow
@@ -3553,7 +3582,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("api_key_default_ttl_seconds", "3600", Some(1));
     assert!(result.is_ok(), "Valid positive TTL should be accepted");
-    assert_eq!(result.unwrap().value, "3600");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(3600));
 
     // Test 2: Zero TTL (no expiration) should be accepted
     let result =
@@ -3562,7 +3591,7 @@ async fn test_system_config_ttl_validation() {
         result.is_ok(),
         "Zero TTL (no expiration) should be accepted"
     );
-    assert_eq!(result.unwrap().value, "0");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(0));
 
     // Test 3: Negative TTL should be rejected
     let result =
@@ -3591,7 +3620,7 @@ async fn test_system_config_ttl_validation() {
         result.is_ok(),
         "Valid max_login_attempts should be accepted"
     );
-    assert_eq!(result.unwrap().value, "5");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(5));
 
     // Zero should be rejected (must be > 0)
     let result = db.update_system_config("max_login_attempts", "0", Some(1));
@@ -3620,7 +3649,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("lockout_duration_seconds", "300", Some(1));
     assert!(result.is_ok(), "Valid lockout_duration should be accepted");
-    assert_eq!(result.unwrap().value, "300");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(300));
 
     // Zero should be rejected (must be > 0)
     let result =
@@ -3647,7 +3676,7 @@ async fn test_system_config_ttl_validation() {
     let result =
         db.update_system_config("rate_limit_window_seconds", "60", Some(1));
     assert!(result.is_ok(), "Valid rate_limit_window should be accepted");
-    assert_eq!(result.unwrap().value, "60");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(60));
 
     // Zero should be rejected (must be > 0)
     let result =
@@ -3677,7 +3706,7 @@ async fn test_system_config_ttl_validation() {
         result.is_ok(),
         "Valid rate_limit_max_requests should be accepted"
     );
-    assert_eq!(result.unwrap().value, "100");
+    assert_eq!(result.unwrap().value, SystemConfigValue::Integer(100));
 
     // Zero should be rejected (must be > 0)
     let result =
