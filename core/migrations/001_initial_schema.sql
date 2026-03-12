@@ -63,6 +63,40 @@ DROP INDEX IF EXISTS idx_aborts_subject_sn_request_id;
 
 CREATE INDEX IF NOT EXISTS idx_aborts_subject_sn_request_id
 ON aborts(subject_id, COALESCE(sn, -1), request_id);
+
+-- =============================================================================
+-- REGISTER TABLES
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS register_govs (
+    governance_id TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    name TEXT,
+    description TEXT,
+    PRIMARY KEY (governance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_register_govs_active_governance_id
+ON register_govs(active, governance_id);
+
+CREATE TABLE IF NOT EXISTS register_subjects (
+    governance_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    schema_id TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    namespace TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    PRIMARY KEY (governance_id, subject_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_register_subjects_governance_active_subject
+ON register_subjects(governance_id, active, subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_register_subjects_governance_schema_subject
+ON register_subjects(governance_id, schema_id, subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_register_subjects_governance_active_schema_subject
+ON register_subjects(governance_id, active, schema_id, subject_id);
 -- =============================================================================
 -- END OF MIGRATION
 -- =============================================================================

@@ -117,12 +117,6 @@ pub async fn cert_needs_renewal(
                     return true;
                 }
 
-                let days_until_expiry = (expiry - now).whole_days();
-                info!(
-                    target: TARGET,
-                    "Certificate valid for {} more days",
-                    days_until_expiry
-                );
                 false
             }
             None => {

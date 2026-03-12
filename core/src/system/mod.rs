@@ -105,19 +105,24 @@ pub async fn system(
         .await
         .map_err(|e| SystemError::RootActorCreation(e.to_string()))?;
 
-    let ext_db = ExternalDB::build(
+    let ext_db = Arc::new(
+        ExternalDB::build(
         config.external_db.db,
         config.external_db.durability,
         db_manager_actor,
         config.spec.clone(),
     )
     .await
-    .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?;
+    .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
+    );
 
-    system.add_helper("ext_db", Arc::new(ext_db)).await;
+    system.add_helper("ext_db", Arc::clone(&ext_db)).await;
 
     let runner = tokio::spawn(async move {
         runner.run().await;
+        if let Err(e) = ext_db.shutdown().await {
+            error!(error = %e, "Failed to stop external db");
+        };
         if let Err(e) = db.stop() {
             error!(error = %e, "Failed to stop db");
         };

@@ -564,15 +564,26 @@ impl Actor for Node {
             });
         };
 
-        if let Err(e) =
-            ctx.create_child("register", Register::initial(())).await
-        {
-            error!(
-                error = %e,
-                "Failed to create register child"
-            );
-            return Err(e);
-        }
+        let register_actor = match ctx.create_child("register", Register).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(error = %e, "Failed to create register child");
+                return Err(e);
+            }
+        };
+
+        let Some(ext_db): Option<Arc<ExternalDB>> =
+            ctx.system().get_helper("ext_db").await
+        else {
+            error!("External DB helper not found");
+            return Err(ActorError::Helper {
+                name: "ext_db".to_string(),
+                reason: "Not found".to_string(),
+            });
+        };
+
+        let sink = Sink::new(register_actor.subscribe(), ext_db.get_register());
+        ctx.system().run_sink(sink).await;
 
         if let Err(e) = ctx
             .create_child(

@@ -10,9 +10,10 @@ use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
-    AbortDB, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
-    RequestEventDB, SubjectDB, TimeRange,
+    AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
+    RequestEventDB, SubjectDB, SubjsData, TimeRange,
 };
+use ave_common::SchemaType;
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
     registry::Registry,
@@ -22,14 +23,16 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task;
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::task::{self, JoinHandle};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use super::{DatabaseError, DbMetricsSnapshot, ReadStore};
 use crate::config::{MachineSpec, resolve_spec};
 use crate::external_db::{DBManager, DBManagerMessage};
+use crate::node::register::RegisterEvent;
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
 use crate::subject::{Metadata, SignedLedger};
@@ -280,6 +283,92 @@ const SQL_UPSERT_ABORT: &str = r#"
         abort_type = excluded.abort_type
 "#;
 
+const SQL_UPSERT_REGISTER_GOV: &str = r#"
+    INSERT INTO register_govs (
+        governance_id, active, name, description
+    ) VALUES (
+        ?1, ?2, ?3, ?4
+    )
+    ON CONFLICT(governance_id) DO UPDATE SET
+        active = excluded.active,
+        name = excluded.name,
+        description = excluded.description
+"#;
+
+const SQL_EOL_REGISTER_GOV: &str = r#"
+    UPDATE register_govs
+    SET active = 0
+    WHERE governance_id = ?1
+"#;
+
+const SQL_UPSERT_REGISTER_SUBJECT: &str = r#"
+    INSERT INTO register_subjects (
+        governance_id, subject_id, schema_id, active, namespace, name, description
+    ) VALUES (
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7
+    )
+    ON CONFLICT(governance_id, subject_id) DO UPDATE SET
+        schema_id = excluded.schema_id,
+        active = excluded.active,
+        namespace = excluded.namespace,
+        name = excluded.name,
+        description = excluded.description
+"#;
+
+const SQL_EOL_REGISTER_SUBJECT: &str = r#"
+    UPDATE register_subjects
+    SET active = 0
+    WHERE governance_id = ?1 AND subject_id = ?2
+"#;
+
+const SQL_GET_REGISTER_GOVS: &str = r#"
+    SELECT governance_id, active, name, description
+    FROM register_govs
+    ORDER BY governance_id ASC
+"#;
+
+const SQL_GET_REGISTER_GOVS_BY_ACTIVE: &str = r#"
+    SELECT governance_id, active, name, description
+    FROM register_govs
+    WHERE active = ?1
+    ORDER BY governance_id ASC
+"#;
+
+const SQL_GET_REGISTER_SUBJECTS: &str = r#"
+    SELECT subject_id, schema_id, active, namespace, name, description
+    FROM register_subjects
+    WHERE governance_id = ?1
+    ORDER BY subject_id ASC
+"#;
+
+const SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE: &str = r#"
+    SELECT subject_id, schema_id, active, namespace, name, description
+    FROM register_subjects
+    WHERE governance_id = ?1 AND active = ?2
+    ORDER BY subject_id ASC
+"#;
+
+const SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA: &str = r#"
+    SELECT subject_id, schema_id, active, namespace, name, description
+    FROM register_subjects
+    WHERE governance_id = ?1 AND schema_id = ?2
+    ORDER BY subject_id ASC
+"#;
+
+const SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA: &str = r#"
+    SELECT subject_id, schema_id, active, namespace, name, description
+    FROM register_subjects
+    WHERE governance_id = ?1 AND active = ?2 AND schema_id = ?3
+    ORDER BY subject_id ASC
+"#;
+
+const SQL_REGISTER_GOV_EXISTS: &str = r#"
+    SELECT 1
+    FROM register_govs
+    WHERE governance_id = ?1
+    LIMIT 1
+"#;
+
 /// Serializes an `EventRequestType` to its serde string representation.
 fn event_request_type_to_string(
     et: &EventRequestType,
@@ -322,9 +411,15 @@ struct SqliteReadStore {
 
 #[derive(Clone)]
 pub struct SqliteWriteStore {
+    inner: Arc<SqliteWriteStoreInner>,
+}
+
+struct SqliteWriteStoreInner {
     manager: ActorRef<DBManager>,
     metrics: Arc<SqliteMetrics>,
     sender: mpsc::Sender<WriteJob>,
+    shutdown: CancellationToken,
+    worker: AsyncMutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -351,11 +446,22 @@ enum WriteCommand {
     SignedLedger(Box<SignedLedger>),
     SubjectState(Metadata),
     Abort(RequestTrackingEvent),
+    Register(RegisterEvent),
 }
 
 struct WriteJob {
     command: WriteCommand,
     response: oneshot::Sender<Result<(), DatabaseError>>,
+}
+
+struct RegisterSubjectRow<'a> {
+    governance_id: &'a str,
+    subject_id: &'a str,
+    schema_id: &'a SchemaType,
+    active: bool,
+    namespace: &'a str,
+    name: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Default)]
@@ -903,6 +1009,24 @@ impl ReadStore for SqliteLocal {
         self.reader.get_subject_state(subject_id).await
     }
 
+    async fn get_governances(
+        &self,
+        active: Option<bool>,
+    ) -> Result<Vec<GovsData>, DatabaseError> {
+        self.reader.get_governances(active).await
+    }
+
+    async fn get_subjects(
+        &self,
+        governance_id: &str,
+        active: Option<bool>,
+        schema_id: Option<String>,
+    ) -> Result<Vec<SubjsData>, DatabaseError> {
+        self.reader
+            .get_subjects(governance_id, active, schema_id)
+            .await
+    }
+
     async fn get_events(
         &self,
         subject_id: &str,
@@ -956,6 +1080,28 @@ impl ReadStore for SqliteReadStore {
 
         self.with_reader(move |conn| {
             get_subject_state_from_conn(conn, &subject_id)
+        })
+        .await
+    }
+
+    async fn get_governances(
+        &self,
+        active: Option<bool>,
+    ) -> Result<Vec<GovsData>, DatabaseError> {
+        self.with_reader(move |conn| get_governances_from_conn(conn, active))
+            .await
+    }
+
+    async fn get_subjects(
+        &self,
+        governance_id: &str,
+        active: Option<bool>,
+        schema_id: Option<String>,
+    ) -> Result<Vec<SubjsData>, DatabaseError> {
+        let governance_id = governance_id.to_owned();
+
+        self.with_reader(move |conn| {
+            get_subjects_from_conn(conn, &governance_id, active, schema_id)
         })
         .await
     }
@@ -1050,6 +1196,15 @@ impl SqliteLocal {
             .metrics
             .register_prometheus_metrics(registry);
     }
+
+    pub async fn shutdown(&self) -> Result<(), DatabaseError> {
+        self.writer.shutdown().await?;
+
+        let runtime = Arc::clone(&self.reader.runtime);
+        task::spawn_blocking(move || runtime.run_shutdown_maintenance())
+            .await
+            .map_err(|e| DatabaseError::BlockingTask(e.to_string()))?
+    }
 }
 
 impl SqliteReadStore {
@@ -1077,11 +1232,17 @@ impl SqliteWriteStore {
     fn new(manager: ActorRef<DBManager>, runtime: Arc<SqliteRuntime>) -> Self {
         let (sender, receiver) = mpsc::channel(WRITE_QUEUE_CAPACITY);
         let metrics = Arc::clone(&runtime.metrics);
-        spawn_write_worker(Arc::clone(&runtime), receiver);
+        let shutdown = CancellationToken::new();
+        let worker =
+            spawn_write_worker(Arc::clone(&runtime), receiver, shutdown.clone());
         Self {
-            manager,
-            metrics,
-            sender,
+            inner: Arc::new(SqliteWriteStoreInner {
+                manager,
+                metrics,
+                sender,
+                shutdown,
+                worker: AsyncMutex::new(Some(worker)),
+            }),
         }
     }
 
@@ -1107,20 +1268,28 @@ impl SqliteWriteStore {
         self.enqueue(WriteCommand::Abort(event)).await
     }
 
+    async fn persist_register(
+        &self,
+        event: RegisterEvent,
+    ) -> Result<(), DatabaseError> {
+        self.enqueue(WriteCommand::Register(event)).await
+    }
+
     async fn enqueue(
         &self,
         command: WriteCommand,
     ) -> Result<(), DatabaseError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.metrics.record_writer_enqueue();
-        self.sender
+        self.inner.metrics.record_writer_enqueue();
+        self.inner
+            .sender
             .send(WriteJob {
                 command,
                 response: response_tx,
             })
             .await
             .map_err(|_| {
-                self.metrics.record_writer_send_failure();
+                self.inner.metrics.record_writer_send_failure();
                 DatabaseError::Pool("write worker is not available".to_owned())
             })?;
 
@@ -1128,14 +1297,48 @@ impl SqliteWriteStore {
             DatabaseError::Pool("write worker stopped before ack".to_owned())
         })?
     }
+
+    async fn shutdown(&self) -> Result<(), DatabaseError> {
+        self.inner.shutdown.cancel();
+
+        let mut worker = self.inner.worker.lock().await;
+        let Some(handle) = worker.take() else {
+            return Ok(());
+        };
+        drop(worker);
+
+        handle
+            .await
+            .map_err(|e| DatabaseError::BlockingTask(e.to_string()))
+    }
 }
 
 fn spawn_write_worker(
     runtime: Arc<SqliteRuntime>,
     mut receiver: mpsc::Receiver<WriteJob>,
-) {
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(first_job) = receiver.recv().await {
+        let mut shutting_down = false;
+
+        loop {
+            let next_job = if shutting_down {
+                receiver.recv().await
+            } else {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        receiver.close();
+                        shutting_down = true;
+                        receiver.recv().await
+                    }
+                    job = receiver.recv() => job,
+                }
+            };
+
+            let Some(first_job) = next_job else {
+                break;
+            };
+
             let mut jobs = vec![first_job];
             let batch_window_started = Instant::now();
 
@@ -1143,7 +1346,7 @@ fn spawn_write_worker(
                 match receiver.try_recv() {
                     Ok(job) => jobs.push(job),
                     Err(mpsc::error::TryRecvError::Empty) => {
-                        if jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW {
+                        if shutting_down || jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW {
                             break;
                         }
 
@@ -1153,13 +1356,28 @@ fn spawn_write_worker(
                             break;
                         };
 
-                        match timeout(remaining, receiver.recv()).await {
-                            Ok(Some(job)) => jobs.push(job),
-                            Ok(None) => break,
-                            Err(_) => break,
+                        tokio::select! {
+                            _ = shutdown.cancelled() => {
+                                receiver.close();
+                                shutting_down = true;
+                                break;
+                            }
+                            result = timeout(remaining, receiver.recv()) => {
+                                match result {
+                                    Ok(Some(job)) => jobs.push(job),
+                                    Ok(None) => {
+                                        shutting_down = true;
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                         }
                     }
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        shutting_down = true;
+                        break;
+                    }
                 }
             }
 
@@ -1177,7 +1395,7 @@ fn spawn_write_worker(
                 break;
             }
         }
-    });
+    })
 }
 
 fn execute_write_batch(
@@ -1240,6 +1458,18 @@ fn persist_write_batch(
     let mut upsert_abort_stmt = tx
         .prepare_cached(SQL_UPSERT_ABORT)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut upsert_register_gov_stmt = tx
+        .prepare_cached(SQL_UPSERT_REGISTER_GOV)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut eol_register_gov_stmt = tx
+        .prepare_cached(SQL_EOL_REGISTER_GOV)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut upsert_register_subject_stmt = tx
+        .prepare_cached(SQL_UPSERT_REGISTER_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut eol_register_subject_stmt = tx
+        .prepare_cached(SQL_EOL_REGISTER_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     for job in jobs {
         match &job.command {
@@ -1264,9 +1494,53 @@ fn persist_write_batch(
                 event.who.clone(),
                 event.abort_type.clone(),
             )?,
+            WriteCommand::Register(event) => match event {
+                RegisterEvent::RegisterGov { gov_id, data } => {
+                    upsert_register_governance_with_stmt(
+                        &mut upsert_register_gov_stmt,
+                        gov_id,
+                        data.active,
+                        data.name.clone(),
+                        data.description.clone(),
+                    )?
+                }
+                RegisterEvent::EOLGov { gov_id } => {
+                    eol_register_governance_with_stmt(
+                        &mut eol_register_gov_stmt,
+                        gov_id,
+                    )?
+                }
+                RegisterEvent::RegisterSubj {
+                    gov_id,
+                    subject_id,
+                    data,
+                } => upsert_register_subject_with_stmt(
+                    &mut upsert_register_subject_stmt,
+                    RegisterSubjectRow {
+                        governance_id: gov_id,
+                        subject_id,
+                        schema_id: &data.schema_id,
+                        active: data.active,
+                        namespace: &data.namespace,
+                        name: data.name.clone(),
+                        description: data.description.clone(),
+                    },
+                )?,
+                RegisterEvent::EOLSubj { gov_id, subj_id } => {
+                    eol_register_subject_with_stmt(
+                        &mut eol_register_subject_stmt,
+                        gov_id,
+                        subj_id,
+                    )?
+                }
+            },
         }
     }
 
+    drop(eol_register_subject_stmt);
+    drop(upsert_register_subject_stmt);
+    drop(eol_register_gov_stmt);
+    drop(upsert_register_gov_stmt);
     drop(upsert_abort_stmt);
     drop(upsert_subject_stmt);
     drop(insert_event_stmt);
@@ -1387,6 +1661,12 @@ impl SqliteRuntime {
         if let Ok(mut cache) = self.page_cache.lock() {
             cache.bump_subject_generation(subject_id);
         }
+    }
+
+    fn run_shutdown_maintenance(&self) -> Result<(), DatabaseError> {
+        let conn = self.lock_writer()?;
+        conn.execute_batch("PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 }
 
@@ -1694,6 +1974,84 @@ fn get_subject_state_from_conn(
         }
         _ => DatabaseError::Query(e.to_string()),
     })
+}
+
+fn get_governances_from_conn(
+    conn: &Connection,
+    active: Option<bool>,
+) -> Result<Vec<GovsData>, DatabaseError> {
+    let mut stmt = conn
+        .prepare_cached(match active {
+            Some(_) => SQL_GET_REGISTER_GOVS_BY_ACTIVE,
+            None => SQL_GET_REGISTER_GOVS,
+        })
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    let rows = match active {
+        Some(active) => stmt
+            .query_map(params![if active { 1 } else { 0 }], map_governance_row)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        None => stmt
+            .query_map([], map_governance_row)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+    };
+
+    rows.map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+        .collect()
+}
+
+fn get_subjects_from_conn(
+    conn: &Connection,
+    governance_id: &str,
+    active: Option<bool>,
+    schema_id: Option<String>,
+) -> Result<Vec<SubjsData>, DatabaseError> {
+    let mut stmt = conn
+        .prepare_cached(match (active, schema_id.as_ref()) {
+            (None, None) => SQL_GET_REGISTER_SUBJECTS,
+            (Some(_), None) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE,
+            (None, Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA,
+            (Some(_), Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA,
+        })
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    let rows = match (active, schema_id.as_ref()) {
+        (None, None) => stmt
+            .query_map(params![governance_id], map_register_subject_row)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        (Some(active), None) => stmt
+            .query_map(
+                params![governance_id, if active { 1 } else { 0 }],
+                map_register_subject_row,
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        (None, Some(schema_id)) => stmt
+            .query_map(
+                params![governance_id, schema_id],
+                map_register_subject_row,
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        (Some(active), Some(schema_id)) => stmt
+            .query_map(
+                params![
+                    governance_id,
+                    if active { 1 } else { 0 },
+                    schema_id
+                ],
+                map_register_subject_row,
+            )
+            .map_err(|e| DatabaseError::Query(e.to_string()))?,
+    };
+
+    let subjects = rows
+        .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    if !subjects.is_empty() || register_governance_exists(conn, governance_id)? {
+        Ok(subjects)
+    } else {
+        Err(DatabaseError::GovernanceNotFound(governance_id.to_owned()))
+    }
 }
 
 fn get_events_from_conn(
@@ -2816,6 +3174,52 @@ fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerDB> {
     })
 }
 
+fn map_governance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GovsData> {
+    Ok(GovsData {
+        governance_id: row.get(0)?,
+        active: row.get::<usize, i64>(1)? != 0,
+        name: row.get(2)?,
+        description: row.get(3)?,
+    })
+}
+
+fn map_register_subject_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SubjsData> {
+    let schema_id: String = row.get(1)?;
+    let schema_id = schema_id.parse::<SchemaType>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
+
+    Ok(SubjsData {
+        subject_id: row.get(0)?,
+        schema_id,
+        active: row.get::<usize, i64>(2)? != 0,
+        namespace: row.get(3)?,
+        name: row.get(4)?,
+        description: row.get(5)?,
+    })
+}
+
+fn register_governance_exists(
+    conn: &Connection,
+    governance_id: &str,
+) -> Result<bool, DatabaseError> {
+    let mut stmt = conn
+        .prepare_cached(SQL_REGISTER_GOV_EXISTS)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    match stmt.query_row(params![governance_id], |_row| Ok(())) {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(DatabaseError::Query(e.to_string())),
+    }
+}
+
 fn insert_event_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
     event: &SignedLedger,
@@ -2963,6 +3367,63 @@ fn upsert_abort_with_stmt(
     Ok(())
 }
 
+fn upsert_register_governance_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    governance_id: &str,
+    active: bool,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![
+        governance_id,
+        if active { 1 } else { 0 },
+        name,
+        description
+    ])
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
+fn eol_register_governance_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    governance_id: &str,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![governance_id])
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
+fn upsert_register_subject_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    row: RegisterSubjectRow<'_>,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![
+        row.governance_id,
+        row.subject_id,
+        row.schema_id.to_string(),
+        if row.active { 1 } else { 0 },
+        row.namespace,
+        row.name,
+        row.description
+    ])
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
+fn eol_register_subject_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    governance_id: &str,
+    subject_id: &str,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![governance_id, subject_id])
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteWriteStore {
     async fn notify(&self, event: SignedLedger) {
@@ -2976,7 +3437,11 @@ impl Subscriber<SignedLedger> for SqliteWriteStore {
                 error = %e,
                 "Failed to save signed ledger to SQLite"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e))
+                .await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3012,7 +3477,11 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save subject state to SQLite"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e))
+                .await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3047,7 +3516,11 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
-            if let Err(e) = self.manager.tell(DBManagerMessage::Error(e)).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e))
+                .await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3065,6 +3538,28 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 who = %who,
                 "Abort record saved to SQLite successfully"
             );
+        }
+    }
+}
+
+#[async_trait]
+impl Subscriber<RegisterEvent> for SqliteWriteStore {
+    async fn notify(&self, event: RegisterEvent) {
+        if let Err(e) = self.persist_register(event.clone()).await {
+            error!(error = %e, event = ?event, "Failed to save register event to SQLite");
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e))
+                .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to notify DBManager about register save error"
+                );
+            }
+        } else {
+            debug!(event = ?event, "Register event saved to SQLite successfully");
         }
     }
 }

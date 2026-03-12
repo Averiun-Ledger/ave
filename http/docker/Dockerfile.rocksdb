@@ -1,13 +1,24 @@
 # Dockerfile optimizado con cross-compilation nativa
 # Este Dockerfile usa cross-compilation en lugar de emulación para ARM64
 
+ARG RUST_IMAGE=rust:1.94.0-slim-trixie
+
 # ============================================================================
 # Etapa base común para ambas arquitecturas
 # ============================================================================
-FROM rust:1.91-slim-bullseye AS base
+FROM ${RUST_IMAGE} AS base
 RUN apt-get update && apt-get install --no-install-recommends -y \
-    build-essential cmake pkg-config libssl-dev \
-    clang libclang-dev llvm-dev libc6-dev gcc libsqlite3-dev curl \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    gcc \
+    libclang-dev \
+    libc6-dev \
+    libssl-dev \
+    llvm-dev \
+    pkg-config \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,7 +31,6 @@ RUN rustup target add x86_64-unknown-linux-gnu
 ARG FEATURES=""
 ENV CARGO_FEATURES=$FEATURES
 
-# Copiar archivos de configuración primero para aprovechar el cache de Docker
 COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
 COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
 COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
@@ -28,14 +38,20 @@ COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
 COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
+COPY ./ave/Cargo.lock ./ave/Cargo.lock
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
 COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/README.md ./ave-actors/databases/rocksdb_db/README.md
 COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/README.md ./ave-actors/databases/sqlite_db/README.md
 COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
 COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
+COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
+COPY ./ave-actors/README.md ./ave-actors/README.md
 
-# Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
@@ -55,22 +71,18 @@ WORKDIR /ave/http
 RUN cargo build --target x86_64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
 
 # ============================================================================
-# Etapa de compilación para ARM64 (cross-compilation NATIVA)
+# Etapa de compilación para ARM64 (cross-compilation nativa)
 # ============================================================================
 FROM base AS builder-arm64
-
-# Instalar herramientas de cross-compilation para ARM64
 RUN dpkg --add-architecture arm64 && \
     apt-get update && apt-get install --no-install-recommends -y \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
     libssl-dev:arm64 \
-    libclang-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Configurar el linker para ARM64
 RUN rustup target add aarch64-unknown-linux-gnu && \
     mkdir -p ~/.cargo && \
     echo '[target.aarch64-unknown-linux-gnu]' > ~/.cargo/config.toml && \
@@ -80,23 +92,17 @@ RUN rustup target add aarch64-unknown-linux-gnu && \
 ARG FEATURES=""
 ENV CARGO_FEATURES=$FEATURES
 
-# Variables de entorno para cross-compilation
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
 ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-
-# Variables para OpenSSL ARM64
 ENV PKG_CONFIG_ALLOW_CROSS=1
 ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
 ENV OPENSSL_DIR=/usr
 ENV OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
 ENV OPENSSL_INCLUDE_DIR=/usr/include
-
-# Variables para bindgen (RocksDB necesita esto)
 ENV BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/usr/aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
 
-# Copiar archivos de configuración primero
 COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
 COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
 COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
@@ -104,14 +110,20 @@ COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
 COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
+COPY ./ave/Cargo.lock ./ave/Cargo.lock
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
 COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/README.md ./ave-actors/databases/rocksdb_db/README.md
 COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/README.md ./ave-actors/databases/sqlite_db/README.md
 COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
 COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
+COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
+COPY ./ave-actors/README.md ./ave-actors/README.md
 
-# Copiar archivos fuente
 COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/identity/src ./ave/identity/src
@@ -133,18 +145,22 @@ RUN cargo build --target aarch64-unknown-linux-gnu --release --no-default-featur
 # ============================================================================
 # Imágenes finales
 # ============================================================================
-FROM --platform=linux/amd64 rust:1.91-slim-bullseye AS amd64
-RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
+FROM --platform=linux/amd64 ${RUST_IMAGE} AS amd64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    ca-certificates \
+    libssl3t64 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 RUN rustup target add wasm32-unknown-unknown
+COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 CMD ["ave-http"]
 
-FROM --platform=linux/arm64 rust:1.91-slim-bullseye AS arm64
-RUN apt-get update && apt-get install --no-install-recommends -y libsqlite3-dev \
+FROM --platform=linux/arm64 ${RUST_IMAGE} AS arm64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    ca-certificates \
+    libssl3t64 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 RUN rustup target add wasm32-unknown-unknown
+COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
 CMD ["ave-http"]

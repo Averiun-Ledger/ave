@@ -2,6 +2,7 @@ mod error;
 
 use crate::{
     external_db::DBManager,
+    node::register::RegisterEvent,
     request::tracking::RequestTrackingEvent,
     subject::{SignedLedger, sinkdata::SinkDataEvent},
 };
@@ -14,14 +15,18 @@ use prometheus_client::registry::Registry;
 
 use ave_common::{
     bridge::request::{AbortsQuery, EventRequestType, EventsQuery},
-    response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB},
+    response::{
+        GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB,
+        SubjsData,
+    },
 };
 pub use error::DatabaseError;
 #[cfg(feature = "ext-sqlite")]
 use sqlite::SqliteLocal;
 use std::path::Path;
 use tokio::fs;
-use tracing::{debug, error};
+use tracing::error;
+use tracing::debug;
 #[cfg(feature = "ext-sqlite")]
 mod sqlite;
 
@@ -61,6 +66,18 @@ pub trait ReadStore {
         &self,
         subject_id: &str,
     ) -> Result<SubjectDB, DatabaseError>;
+
+    async fn get_governances(
+        &self,
+        active: Option<bool>,
+    ) -> Result<Vec<GovsData>, DatabaseError>;
+
+    async fn get_subjects(
+        &self,
+        governance_id: &str,
+        active: Option<bool>,
+        schema_id: Option<String>,
+    ) -> Result<Vec<SubjsData>, DatabaseError>;
 }
 
 pub trait Querys: ReadStore {}
@@ -152,6 +169,13 @@ impl ExternalDB {
         }
     }
 
+    pub fn get_register(&self) -> impl Subscriber<RegisterEvent> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
+        }
+    }
+
     pub fn metrics_snapshot(&self) -> DbMetricsSnapshot {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -165,6 +189,13 @@ impl ExternalDB {
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.register_prometheus_metrics(registry)
             }
+        }
+    }
+
+    pub async fn shutdown(&self) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => sqlite_local.shutdown().await,
         }
     }
 }
@@ -236,6 +267,34 @@ impl ReadStore for ExternalDB {
                     .get_first_or_end_events(
                         subject_id, quantity, reverse, event_type,
                     )
+                    .await
+            }
+        }
+    }
+
+    async fn get_governances(
+        &self,
+        active: Option<bool>,
+    ) -> Result<Vec<GovsData>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.get_governances(active).await
+            }
+        }
+    }
+
+    async fn get_subjects(
+        &self,
+        governance_id: &str,
+        active: Option<bool>,
+        schema_id: Option<String>,
+    ) -> Result<Vec<SubjsData>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local
+                    .get_subjects(governance_id, active, schema_id)
                     .await
             }
         }

@@ -559,7 +559,7 @@ impl Handler<Self> for Validation {
 #[cfg(test)]
 pub mod tests {
     use core::panic;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tempfile::TempDir;
     use test_log::test;
 
@@ -597,8 +597,29 @@ pub mod tests {
     async fn get_subject_state(
         db: &Arc<ExternalDB>,
         subject_id: &DigestIdentifier,
+        expected_sn: u64,
     ) -> ave_common::response::SubjectDB {
-        db.get_subject_state(&subject_id.to_string()).await.unwrap()
+        let started = tokio::time::Instant::now();
+        loop {
+            match db.get_subject_state(&subject_id.to_string()).await {
+                Ok(state) if state.sn >= expected_sn => return state,
+                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(state) => {
+                    panic!(
+                        "subject state not updated in time for {}: expected sn >= {}, got {}",
+                        subject_id, expected_sn, state.sn
+                    );
+                }
+                Err(error) => {
+                    panic!(
+                        "subject state not available in time for {}: {}",
+                        subject_id, error
+                    );
+                }
+            }
+        }
     }
 
     async fn get_event_sn(
@@ -606,7 +627,21 @@ pub mod tests {
         subject_id: &DigestIdentifier,
         sn: u64,
     ) -> ave_common::response::LedgerDB {
-        db.get_event_sn(&subject_id.to_string(), sn).await.unwrap()
+        let started = tokio::time::Instant::now();
+        loop {
+            match db.get_event_sn(&subject_id.to_string(), sn).await {
+                Ok(event) => return event,
+                Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    panic!(
+                        "event {} for {} not available in time: {}",
+                        sn, subject_id, error
+                    );
+                }
+            }
+        }
     }
 
     pub async fn create_gov() -> (
@@ -710,7 +745,7 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
-        let subject_data = get_subject_state(&ext_db, &owned_subj).await;
+        let subject_data = get_subject_state(&ext_db, &owned_subj, 0).await;
         let event = get_event_sn(&ext_db, &owned_subj, 0).await;
 
         let RequestEventDB::Create {
@@ -846,7 +881,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::EOL = event.event else {

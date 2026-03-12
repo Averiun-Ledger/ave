@@ -644,8 +644,29 @@ pub mod tests {
     async fn get_subject_state(
         db: &Arc<ExternalDB>,
         subject_id: &DigestIdentifier,
+        expected_sn: u64,
     ) -> ave_common::response::SubjectDB {
-        db.get_subject_state(&subject_id.to_string()).await.unwrap()
+        let started = tokio::time::Instant::now();
+        loop {
+            match db.get_subject_state(&subject_id.to_string()).await {
+                Ok(state) if state.sn >= expected_sn => return state,
+                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(state) => {
+                    panic!(
+                        "subject state not updated in time for {}: expected sn >= {}, got {}",
+                        subject_id, expected_sn, state.sn
+                    );
+                }
+                Err(error) => {
+                    panic!(
+                        "subject state not available in time for {}: {}",
+                        subject_id, error
+                    );
+                }
+            }
+        }
     }
 
     async fn get_event_sn(
@@ -653,7 +674,21 @@ pub mod tests {
         subject_id: &DigestIdentifier,
         sn: u64,
     ) -> ave_common::response::LedgerDB {
-        db.get_event_sn(&subject_id.to_string(), sn).await.unwrap()
+        let started = tokio::time::Instant::now();
+        loop {
+            match db.get_event_sn(&subject_id.to_string(), sn).await {
+                Ok(event) => return event,
+                Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    panic!(
+                        "event {} for {} not available in time: {}",
+                        sn, subject_id, error
+                    );
+                }
+            }
+        }
     }
 
     pub async fn emit_request(
@@ -793,7 +828,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::GovernanceFact {
@@ -911,7 +946,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::GovernanceFact {
@@ -1068,7 +1103,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 2).await;
         let event = get_event_sn(&db, &subject_id, 2).await;
 
         let RequestEventDB::Transfer {
@@ -1247,7 +1282,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 2).await;
         let event = get_event_sn(&db, &subject_id, 2).await;
 
         let RequestEventDB::Transfer {
@@ -1469,7 +1504,7 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
 
         assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
@@ -1596,7 +1631,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 0).await;
         let event = get_event_sn(&db, &subject_id, 0).await;
 
         let RequestEventDB::Create {
@@ -1723,7 +1758,7 @@ pub mod tests {
         };
 
         let subject_data =
-            get_subject_state(&db, &request_data.subject_id).await;
+            get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {
@@ -1832,7 +1867,7 @@ pub mod tests {
         };
 
         let subject_data =
-            get_subject_state(&db, &request_data.subject_id).await;
+            get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {
@@ -1941,7 +1976,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::Transfer {
@@ -2075,7 +2110,7 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &subject_id).await;
+        let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::Transfer {

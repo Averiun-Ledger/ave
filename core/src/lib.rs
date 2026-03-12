@@ -46,7 +46,6 @@ use network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
 };
 
-use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
 use request::{
@@ -91,7 +90,6 @@ pub struct Api {
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
     auth: ActorRef<Auth>,
-    register: ActorRef<Register>,
     monitor: ActorRef<Monitor>,
     manual_dis: ActorRef<ManualDistribution>,
     tracking: ActorRef<RequestTracking>,
@@ -215,14 +213,6 @@ impl Api {
                 }
             })?;
 
-        let register_actor: ActorRef<Register> = system
-            .get_actor(&ActorPath::from("/user/node/register"))
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to get register actor");
-                e
-            })?;
-
         let manual_dis_actor: ActorRef<ManualDistribution> = system
             .get_actor(&ActorPath::from("/user/node/manual_distribution"))
             .await
@@ -285,7 +275,6 @@ impl Api {
                 request: request_actor,
                 auth: auth_actor,
                 node: node_actor,
-                register: register_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
                 tracking: tracking_actor,
@@ -805,26 +794,10 @@ impl Api {
         &self,
         active: Option<bool>,
     ) -> Result<Vec<GovsData>, Error> {
-        let response = self
-            .register
-            .ask(RegisterMessage::GetGovs { active })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get governances");
-                actor_communication_error("register", e)
-            })?;
-
-        match response {
-            RegisterResponse::Govs { governances } => Ok(governances),
-            _ => {
-                warn!("Unexpected response from register");
-                Err(Error::UnexpectedResponse {
-                    actor: "register".to_string(),
-                    expected: "Govs".to_string(),
-                    received: "other".to_string(),
-                })
-            }
-        }
+        self.db.get_governances(active).await.map_err(|e| {
+            warn!(error = %e, "Failed to get governances");
+            Error::QueryFailed(e.to_string())
+        })
     }
 
     pub async fn all_subjs(
@@ -833,28 +806,19 @@ impl Api {
         active: Option<bool>,
         schema_id: Option<String>,
     ) -> Result<Vec<SubjsData>, Error> {
-        let response = self
-            .register
-            .ask(RegisterMessage::GetSubj {
-                gov_id: governance_id.to_string(),
-                active,
-                schema_id,
-            })
+        let governance_id = governance_id.to_string();
+        match self
+            .db
+            .get_subjects(&governance_id, active, schema_id)
             .await
-            .map_err(|e| {
+        {
+            Ok(subjects) => Ok(subjects),
+            Err(ExternalDatabaseError::GovernanceNotFound(_)) => {
+                Err(Error::GovernanceNotFound(governance_id))
+            }
+            Err(e) => {
                 warn!(error = %e, "Failed to get subjects");
-                actor_communication_error("register", e)
-            })?;
-
-        match response {
-            RegisterResponse::Subjs { subjects } => Ok(subjects),
-            _ => {
-                warn!("Unexpected response from register");
-                Err(Error::UnexpectedResponse {
-                    actor: "register".to_string(),
-                    expected: "Subjs".to_string(),
-                    received: "other".to_string(),
-                })
+                Err(Error::QueryFailed(e.to_string()))
             }
         }
     }

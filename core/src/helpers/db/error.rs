@@ -46,6 +46,10 @@ pub enum DatabaseError {
     #[error("subject not found: {0}")]
     SubjectNotFound(String),
 
+    /// Governance not found in register projection.
+    #[error("governance not found: {0}")]
+    GovernanceNotFound(String),
+
     /// Event not found in database.
     #[error("event not found for subject {subject_id} at sn {sn}")]
     EventNotFound { subject_id: String, sn: u64 },
