@@ -687,18 +687,7 @@ pub async fn get_aborts(
     Path(subject_id): Path<String>,
     Query(parameters): Query<AbortsQuery>,
 ) -> Result<Json<PaginatorAborts>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_aborts(
-                subject_id,
-                parameters.request_id,
-                parameters.sn,
-                parameters.quantity,
-                parameters.page,
-                parameters.reverse,
-            )
-            .await?,
-    ))
+    Ok(Json(bridge.get_aborts(subject_id, parameters).await?))
 }
 
 /// Get event by sequence number

@@ -1,6 +1,6 @@
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    bridge::request::ApprovalStateRes,
+    bridge::request::{AbortsQuery, ApprovalStateRes},
     identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey, Signature, Signed, keys::{Ed25519Signer, KeyPair}
     },
@@ -355,14 +355,13 @@ pub async fn get_abort_request(
 ) -> Result<PaginatorAborts, Box<dyn std::error::Error>> {
     loop {
         if let Ok(state) = node
-            .get_aborts(
-                subject_id.clone(),
-                Some(request_id.clone()),
-                None,
-                None,
-                None,
-                None,
-            )
+            .get_aborts(subject_id.clone(), AbortsQuery {
+                request_id: Some(request_id.to_string()),
+                sn: None,
+                quantity: None,
+                page: None,
+                reverse: None,
+            })
             .await
         {
             return Ok(state);

@@ -60,7 +60,15 @@ pub enum SnRegisterMessage {
     },
 }
 
-impl Message for SnRegisterMessage {}
+impl Message for SnRegisterMessage {
+    fn is_critical(&self) -> bool {
+        if let SnRegisterMessage::RegisterSn { .. }= self {
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnLimit {

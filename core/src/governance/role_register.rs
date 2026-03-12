@@ -145,7 +145,16 @@ pub enum RoleRegisterMessage {
         remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
 }
-impl Message for RoleRegisterMessage {}
+impl Message for RoleRegisterMessage {
+    fn is_critical(&self) -> bool {
+        match self {
+            RoleRegisterMessage::UpdateVersion { .. }
+            | RoleRegisterMessage::UpdateFact { .. }
+            | RoleRegisterMessage::UpdateConfirm { .. } => true,
+            _ => false
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum RoleRegisterResponse {

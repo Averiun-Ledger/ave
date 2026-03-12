@@ -125,7 +125,17 @@ pub enum SubjectRegisterMessage {
     },
 }
 
-impl Message for SubjectRegisterMessage {}
+impl Message for SubjectRegisterMessage {
+    fn is_critical(&self) -> bool {
+        match self {
+            
+            SubjectRegisterMessage::RegisterData { .. }
+            | SubjectRegisterMessage::CreateSubject { .. }
+            | SubjectRegisterMessage::UpdateSubject { .. } => true,
+            SubjectRegisterMessage::Check { .. } => false,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterResponse {

@@ -286,7 +286,15 @@ pub enum ApprPersistMessage {
     }, // Necesito poder emitir un evento de aprobación, no solo el automático
 }
 
-impl Message for ApprPersistMessage {}
+impl Message for ApprPersistMessage {
+    fn is_critical(&self) -> bool {
+        if let ApprPersistMessage::MakeObsolete = self {
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,

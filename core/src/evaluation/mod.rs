@@ -606,7 +606,7 @@ impl Handler<Self> for Evaluation {
 
 #[cfg(test)]
 pub mod tests {
-    use std::{str::FromStr, time::Duration};
+    use std::{str::FromStr, sync::Arc, time::Duration};
 
     use ave_actors::{ActorPath, ActorRef, SystemRef};
     use ave_common::{
@@ -626,9 +626,9 @@ pub mod tests {
             Governance, GovernanceMessage, GovernanceResponse,
             data::GovernanceData,
         },
+        helpers::db::{ExternalDB, ReadStore},
         model::common::node::SignTypesNode,
         node::Node,
-        query::{Query, QueryMessage, QueryResponse},
         request::{
             RequestData, RequestHandler, RequestHandlerMessage,
             RequestHandlerResponse,
@@ -640,6 +640,21 @@ pub mod tests {
         tracker::{Tracker, TrackerMessage, TrackerResponse},
         validation::tests::create_gov,
     };
+
+    async fn get_subject_state(
+        db: &Arc<ExternalDB>,
+        subject_id: &DigestIdentifier,
+    ) -> ave_common::response::SubjectDB {
+        db.get_subject_state(&subject_id.to_string()).await.unwrap()
+    }
+
+    async fn get_event_sn(
+        db: &Arc<ExternalDB>,
+        subject_id: &DigestIdentifier,
+        sn: u64,
+    ) -> ave_common::response::LedgerDB {
+        db.get_event_sn(&subject_id.to_string(), sn).await.unwrap()
+    }
 
     pub async fn emit_request(
         request: EventRequest,
@@ -705,7 +720,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -778,26 +793,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::GovernanceFact {
             payload: request_payload,
@@ -875,7 +872,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -914,26 +911,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::GovernanceFact {
             payload: request_payload,
@@ -1015,7 +994,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1089,26 +1068,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 2,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 2).await;
 
         let RequestEventDB::Transfer {
             evaluation_error,
@@ -1212,7 +1173,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1286,26 +1247,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 2,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 2).await;
 
         let RequestEventDB::Transfer {
             evaluation_error,
@@ -1382,7 +1325,7 @@ pub mod tests {
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
-        ActorRef<Query>,
+        Arc<ExternalDB>,
         ActorRef<Governance>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
@@ -1392,7 +1335,7 @@ pub mod tests {
             system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1526,15 +1469,7 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
 
         assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
@@ -1591,7 +1526,7 @@ pub mod tests {
             system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1608,7 +1543,7 @@ pub mod tests {
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
-        ActorRef<Query>,
+        Arc<ExternalDB>,
         ActorRef<Tracker>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
@@ -1619,7 +1554,7 @@ pub mod tests {
             system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             _subject_actor,
             tracking,
             gov_id,
@@ -1661,26 +1596,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 0,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 0).await;
 
         let RequestEventDB::Create {
             name,
@@ -1749,7 +1666,7 @@ pub mod tests {
             system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             request_data.subject_id,
@@ -1769,7 +1686,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1805,26 +1722,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: request_data.subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &request_data.subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {
             payload: payload_db,
@@ -1895,7 +1794,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -1931,26 +1830,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: request_data.subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &request_data.subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {
             payload: payload_db,
@@ -2025,7 +1906,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -2058,26 +1939,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::Transfer {
             evaluation_error,
@@ -2177,7 +2040,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -2210,26 +2073,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::Transfer {
             evaluation_error,

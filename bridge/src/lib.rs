@@ -4,8 +4,8 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
-        ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery,
+        AbortsQuery, ApprovalState, ApprovalStateRes,
+        BridgeSignedEventRequest, EventRequestType, EventsQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -443,28 +443,12 @@ impl Bridge {
     pub async fn get_aborts(
         &self,
         subject_id: String,
-        request_id: Option<String>,
-        sn: Option<u64>,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
+        query: AbortsQuery,
     ) -> Result<PaginatorAborts, BridgeError> {
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
-        let request_id =
-            if let Some(request_id) = request_id {
-                Some(DigestIdentifier::from_str(&request_id).map_err(|e| {
-                    BridgeError::InvalidRequestId(e.to_string())
-                })?)
-            } else {
-                None
-            };
-
-        Ok(self
-            .api
-            .get_aborts(subject_id, request_id, sn, quantity, page, reverse)
-            .await?)
+        Ok(self.api.get_aborts(subject_id, query).await?)
     }
 
     pub async fn get_event_sn(

@@ -10,6 +10,10 @@ pub enum DatabaseError {
     #[error("failed to lock database connection")]
     MutexLock,
 
+    /// Database pool or connection coordination failed.
+    #[error("database pool error: {0}")]
+    Pool(String),
+
     /// Failed to open database connection.
     #[error("failed to open database connection: {0}")]
     ConnectionOpen(String),
@@ -53,4 +57,12 @@ pub enum DatabaseError {
     /// Failed to parse date/time string.
     #[error("date/time parse failed: {0}")]
     DateTimeParse(String),
+
+    /// Invalid pagination cursor.
+    #[error("invalid pagination cursor: {0}")]
+    InvalidCursor(String),
+
+    /// Failed to execute SQLite work in a blocking task.
+    #[error("database blocking task failed: {0}")]
+    BlockingTask(String),
 }

@@ -467,7 +467,17 @@ pub enum NodeMessage {
     },
 }
 
-impl Message for NodeMessage {}
+impl Message for NodeMessage {
+    fn is_critical(&self) -> bool {
+        match self {
+            NodeMessage::TransferSubject(..)
+            | NodeMessage::RejectTransfer(..)
+            | NodeMessage::ConfirmTransfer(..)
+            | NodeMessage::EOLSubject { .. } => true,
+            _ => false
+        }
+    }
+}
 
 /// Node response.
 #[derive(Clone, Debug, Serialize, Deserialize)]

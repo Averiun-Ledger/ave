@@ -19,6 +19,7 @@ use crate::{db::Storable, model::common::emit_fail};
 pub struct RegisterDataSubj {
     pub schema_id: SchemaType,
     pub active: bool,
+    pub namespace: String,
     pub name: Option<String>,
     pub description: Option<String>,
 }
@@ -68,6 +69,7 @@ pub enum RegisterMessage {
         gov_id: String,
         subject_id: String,
         schema_id: SchemaType,
+        namespace: String,
         name: Option<String>,
         description: Option<String>,
     },
@@ -77,7 +79,17 @@ pub enum RegisterMessage {
     },
 }
 
-impl Message for RegisterMessage {}
+impl Message for RegisterMessage {
+    fn is_critical(&self) -> bool {
+        match self {
+            RegisterMessage::RegisterGov { .. }
+            | RegisterMessage::EOLGov { .. }
+            | RegisterMessage::RegisterSubj { .. }
+            | RegisterMessage::EOLSubj {.. } => true,
+            _ => false
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum RegisterResponse {
@@ -207,6 +219,7 @@ impl Handler<Self> for Register {
                             schema_id: data.schema_id.clone(),
                             subject_id: subject_id.clone(),
                             active: data.active,
+                            namespace: data.namespace.clone(),
                             name: data.name.clone(),
                             description: data.description.clone(),
                         });
@@ -277,6 +290,7 @@ impl Handler<Self> for Register {
                 gov_id,
                 subject_id,
                 schema_id,
+                namespace,
                 name,
                 description,
             } => {
@@ -287,6 +301,7 @@ impl Handler<Self> for Register {
                         data: RegisterDataSubj {
                             schema_id: schema_id.clone(),
                             active: true,
+                            namespace,
                             name,
                             description,
                         },

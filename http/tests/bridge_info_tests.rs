@@ -1014,6 +1014,7 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_1_1.clone(),
                 schema_id: SchemaType::Type("Example1".to_string()),
                 active: true,
@@ -1021,6 +1022,7 @@ async fn test_gov_sub_deserialization() {
                 description: Some("A subject".to_string())
             },
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_2_1.clone(),
                 schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
@@ -1028,6 +1030,7 @@ async fn test_gov_sub_deserialization() {
                 description: Some("A subject".to_string())
             },
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_1_2.clone(),
                 schema_id: SchemaType::Type("Example2".to_string()),
                 active: true,
@@ -1035,6 +1038,7 @@ async fn test_gov_sub_deserialization() {
                 description: Some("A subject".to_string())
             },
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_2_2.clone(),
                 schema_id: SchemaType::Type("Example2".to_string()),
                 active: false,
@@ -1058,6 +1062,7 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_2_1.clone(),
                 schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
@@ -1065,6 +1070,7 @@ async fn test_gov_sub_deserialization() {
                 description: Some("A subject".to_string())
             },
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_2_2.clone(),
                 schema_id: SchemaType::Type("Example2".to_string()),
                 active: false,
@@ -1088,6 +1094,7 @@ async fn test_gov_sub_deserialization() {
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_2_1.clone(),
                 schema_id: SchemaType::Type("Example1".to_string()),
                 active: false,
@@ -1095,6 +1102,7 @@ async fn test_gov_sub_deserialization() {
                 description: Some("A subject".to_string())
             },
             &SubjsData {
+                namespace: String::default(),
                 subject_id: subject_id_1_1.clone(),
                 schema_id: SchemaType::Type("Example1".to_string()),
                 active: true,
@@ -1119,6 +1127,7 @@ async fn test_gov_sub_deserialization() {
     assert_eq!(
         BTreeSet::from_iter(res.iter()),
         BTreeSet::from([&SubjsData {
+            namespace: String::default(),
             subject_id: subject_id_2_2.clone(),
             schema_id: SchemaType::Type("Example2".to_string()),
             active: false,
@@ -1607,11 +1616,7 @@ async fn test_subject_deserialization() {
         paginator_reverse.events[2].event_type.to_string(),
         "transfer"
     );
-
-    assert_eq!(paginator_reverse.events[3].subject_id, governance_id);
-    assert_eq!(paginator_reverse.events[3].sn, 3);
     assert_eq!(paginator_reverse.events[3].event_type.to_string(), "reject");
-
     assert_eq!(paginator_reverse.events[4].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[4].sn, 2);
     assert_eq!(

@@ -581,10 +581,12 @@ pub mod tests {
             Governance, GovernanceMessage, GovernanceResponse,
             data::GovernanceData,
         },
-        helpers::{db::ExternalDB, network::service::NetworkSender},
+        helpers::{
+            db::{ExternalDB, ReadStore},
+            network::service::NetworkSender,
+        },
         model::common::node::SignTypesNode,
         node::InitParamsNode,
-        query::{Query, QueryMessage, QueryResponse},
         request::{
             RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
             tracking::RequestTracking,
@@ -592,11 +594,26 @@ pub mod tests {
         system::tests::create_system,
     };
 
+    async fn get_subject_state(
+        db: &Arc<ExternalDB>,
+        subject_id: &DigestIdentifier,
+    ) -> ave_common::response::SubjectDB {
+        db.get_subject_state(&subject_id.to_string()).await.unwrap()
+    }
+
+    async fn get_event_sn(
+        db: &Arc<ExternalDB>,
+        subject_id: &DigestIdentifier,
+        sn: u64,
+    ) -> ave_common::response::LedgerDB {
+        db.get_event_sn(&subject_id.to_string(), sn).await.unwrap()
+    }
+
     pub async fn create_gov() -> (
         SystemRef,
         ActorRef<Node>,
         ActorRef<RequestHandler>,
-        ActorRef<Query>,
+        Arc<ExternalDB>,
         ActorRef<Governance>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
@@ -637,11 +654,6 @@ pub mod tests {
 
         let ext_db = system
             .get_helper::<Arc<ExternalDB>>("ext_db")
-            .await
-            .unwrap();
-
-        let query_actor = system
-            .create_root_actor("query", Query::new(ext_db))
             .await
             .unwrap();
 
@@ -698,26 +710,8 @@ pub mod tests {
         else {
             panic!("Invalid response")
         };
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: owned_subj.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: owned_subj.clone(),
-                sn: 0,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&ext_db, &owned_subj).await;
+        let event = get_event_sn(&ext_db, &owned_subj, 0).await;
 
         let RequestEventDB::Create {
             name,
@@ -790,7 +784,7 @@ pub mod tests {
             system,
             node_actor,
             request_actor,
-            query_actor,
+            ext_db,
             subject_actor,
             tracking,
             metadata.subject_id,
@@ -809,7 +803,7 @@ pub mod tests {
             _system,
             node_actor,
             request_actor,
-            query_actor,
+            db,
             subject_actor,
             tracking,
             subject_id,
@@ -852,26 +846,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let QueryResponse::Subject(subject_data) = query_actor
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        let QueryResponse::Event(event) = query_actor
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn: 1,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let subject_data = get_subject_state(&db, &subject_id).await;
+        let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::EOL = event.event else {
             panic!()

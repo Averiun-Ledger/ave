@@ -13,7 +13,6 @@ pub mod helpers;
 pub mod manual_distribution;
 pub mod model;
 pub mod node;
-pub mod query;
 pub mod request;
 pub mod subject;
 pub mod system;
@@ -22,12 +21,14 @@ pub mod update;
 pub mod validation;
 
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
 use ave_common::bridge::request::{
-    ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery,
+    AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
+    EventsQuery,
 };
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
@@ -49,7 +50,6 @@ use network::{
 use node::register::{Register, RegisterMessage, RegisterResponse};
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
 use prometheus_client::registry::Registry;
-use query::{Query, QueryMessage, QueryResponse};
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
 };
@@ -61,7 +61,9 @@ use validation::{Validation, ValidationMessage};
 
 use crate::approval::request::ApprovalReq;
 use crate::config::SinkAuth;
-use crate::helpers::db::ExternalDB;
+use crate::helpers::db::{
+    DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
+};
 use crate::model::common::node::SignTypesNode;
 use crate::node::InitParamsNode;
 use crate::request::tracking::{
@@ -86,25 +88,24 @@ compile_error!(
 pub struct Api {
     peer_id: String,
     public_key: String,
+    db: Arc<ExternalDB>,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
     auth: ActorRef<Auth>,
-    query: ActorRef<Query>,
     register: ActorRef<Register>,
     monitor: ActorRef<Monitor>,
     manual_dis: ActorRef<ManualDistribution>,
     tracking: ActorRef<RequestTracking>,
 }
 
-fn preserve_functional_actor_error<F>(
-    err: ActorError,
-    fallback: F,
-) -> Error
+fn preserve_functional_actor_error<F>(err: ActorError, fallback: F) -> Error
 where
     F: FnOnce(ActorError) -> Error,
 {
     match err {
-        ActorError::Functional { description } => Error::ActorError(description),
+        ActorError::Functional { description } => {
+            Error::ActorError(description)
+        }
         ActorError::FunctionalCritical { description } => {
             Error::Internal(description)
         }
@@ -135,13 +136,18 @@ impl Api {
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
         debug!("Creating Api");
 
-        let (system, runner) =
-            system(config.clone(), sink_auth, password, graceful_token.clone(), crash_token.clone())
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to create system");
-                    e
-                })?;
+        let (system, runner) = system(
+            config.clone(),
+            sink_auth,
+            password,
+            graceful_token.clone(),
+            crash_token.clone(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to create system");
+            e
+        })?;
 
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
@@ -268,17 +274,7 @@ impl Api {
             });
         };
 
-        let query = Query::new(ext_db);
-        let query_actor = system
-            .create_root_actor("query", query)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Init system, can not create query actor");
-                Error::ActorCreation {
-                    actor: "query".to_string(),
-                    reason: e.to_string(),
-                }
-            })?;
+        ext_db.register_prometheus_metrics(registry);
 
         let tasks = Vec::from([runner, worker_runner]);
 
@@ -286,10 +282,10 @@ impl Api {
             Self {
                 public_key: keys.public_key().to_string(),
                 peer_id,
+                db: ext_db,
                 request: request_actor,
                 auth: auth_actor,
                 node: node_actor,
-                query: query_actor,
                 register: register_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
@@ -767,10 +763,7 @@ impl Api {
             .map_err(|e| {
                 warn!(error = %e, "Failed to update subject");
                 preserve_functional_actor_error(e, |e| {
-                    Error::UpdateFailed(
-                        subject_id.to_string(),
-                        e.to_string(),
-                    )
+                    Error::UpdateFailed(subject_id.to_string(), e.to_string())
                 })
             })?;
 
@@ -874,25 +867,16 @@ impl Api {
         subject_id: DigestIdentifier,
         query: EventsQuery,
     ) -> Result<PaginatorEvents, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetEvents { subject_id, query })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get events");
-                actor_communication_error("query", e)
-            })?;
+        let subject_id_str = subject_id.to_string();
 
-        match response {
-            QueryResponse::PagEvents(data) => Ok(data),
-            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
-            _ => {
-                warn!("Unexpected response from query");
-                Err(Error::UnexpectedResponse {
-                    actor: "query".to_string(),
-                    expected: "PagEvents".to_string(),
-                    received: "other".to_string(),
-                })
+        match self.db.get_events(&subject_id_str, query).await {
+            Ok(data) => Ok(data),
+            Err(ExternalDatabaseError::NoEvents(_)) => {
+                Err(Error::NoEventsFound(subject_id_str))
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to get events");
+                Err(Error::QueryFailed(e.to_string()))
             }
         }
     }
@@ -900,40 +884,33 @@ impl Api {
     pub async fn get_aborts(
         &self,
         subject_id: DigestIdentifier,
-        request_id: Option<DigestIdentifier>,
-        sn: Option<u64>,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
+        query: AbortsQuery,
     ) -> Result<PaginatorAborts, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetAborts {
-                subject_id,
-                request_id,
-                sn,
-                quantity,
-                page,
-                reverse,
-            })
+        let subject_id_str = subject_id.to_string();
+        let request_id = if let Some(request_id) = query.request_id.as_ref() {
+            Some(
+                DigestIdentifier::from_str(request_id)
+                    .map_err(|e| Error::InvalidQueryParams(e.to_string()))?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let query = AbortsQuery {
+            request_id,
+            sn: query.sn,
+            quantity: query.quantity,
+            page: query.page,
+            reverse: query.reverse,
+        };
+
+        self.db
+            .get_aborts(&subject_id_str, query)
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to get aborts");
-                actor_communication_error("query", e)
-            })?;
-
-        match response {
-            QueryResponse::PagAborts(data) => Ok(data),
-            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
-            _ => {
-                warn!("Unexpected response from query");
-                Err(Error::UnexpectedResponse {
-                    actor: "query".to_string(),
-                    expected: "PagAborts".to_string(),
-                    received: "other".to_string(),
-                })
-            }
-        }
+                Error::QueryFailed(e.to_string())
+            })
     }
 
     pub async fn get_event_sn(
@@ -941,31 +918,19 @@ impl Api {
         subject_id: DigestIdentifier,
         sn: u64,
     ) -> Result<LedgerDB, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetEventSn {
-                subject_id: subject_id.clone(),
-                sn,
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get event");
-                actor_communication_error("query", e)
-            })?;
+        let subject_id_str = subject_id.to_string();
 
-        match response {
-            QueryResponse::Event(data) => Ok(data),
-            QueryResponse::Error(_e) => Err(Error::EventNotFound {
-                subject: subject_id.to_string(),
-                sn,
-            }),
-            _ => {
-                warn!("Unexpected response from query");
-                Err(Error::UnexpectedResponse {
-                    actor: "query".to_string(),
-                    expected: "Event".to_string(),
-                    received: "other".to_string(),
+        match self.db.get_event_sn(&subject_id_str, sn).await {
+            Ok(data) => Ok(data),
+            Err(ExternalDatabaseError::EventNotFound { .. }) => {
+                Err(Error::EventNotFound {
+                    subject: subject_id_str,
+                    sn,
                 })
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to get event");
+                Err(Error::QueryFailed(e.to_string()))
             }
         }
     }
@@ -977,30 +942,25 @@ impl Api {
         reverse: Option<bool>,
         event_type: Option<EventRequestType>,
     ) -> Result<Vec<LedgerDB>, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetFirstOrEndEvents {
-                subject_id,
+        let subject_id_str = subject_id.to_string();
+
+        match self
+            .db
+            .get_first_or_end_events(
+                &subject_id_str,
                 quantity,
                 reverse,
                 event_type,
-            })
+            )
             .await
-            .map_err(|e| {
+        {
+            Ok(data) => Ok(data),
+            Err(ExternalDatabaseError::NoEvents(_)) => {
+                Err(Error::NoEventsFound(subject_id_str))
+            }
+            Err(e) => {
                 warn!(error = %e, "Failed to get events");
-                actor_communication_error("query", e)
-            })?;
-
-        match response {
-            QueryResponse::Events(data) => Ok(data),
-            QueryResponse::Error(e) => Err(Error::QueryFailed(e)),
-            _ => {
-                warn!("Unexpected response from query");
-                Err(Error::UnexpectedResponse {
-                    actor: "query".to_string(),
-                    expected: "Events".to_string(),
-                    received: "other".to_string(),
-                })
+                Err(Error::QueryFailed(e.to_string()))
             }
         }
     }
@@ -1009,29 +969,16 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<SubjectDB, Error> {
-        let response = self
-            .query
-            .ask(QueryMessage::GetSubject {
-                subject_id: subject_id.clone(),
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to get subject state");
-                actor_communication_error("query", e)
-            })?;
+        let subject_id_str = subject_id.to_string();
 
-        match response {
-            QueryResponse::Subject(data) => Ok(data),
-            QueryResponse::Error(_e) => {
-                Err(Error::SubjectNotFound(subject_id.to_string()))
+        match self.db.get_subject_state(&subject_id_str).await {
+            Ok(data) => Ok(data),
+            Err(ExternalDatabaseError::SubjectNotFound(_)) => {
+                Err(Error::SubjectNotFound(subject_id_str))
             }
-            _ => {
-                warn!("Unexpected response from query");
-                Err(Error::UnexpectedResponse {
-                    actor: "query".to_string(),
-                    expected: "Subject".to_string(),
-                    received: "other".to_string(),
-                })
+            Err(e) => {
+                warn!(error = %e, "Failed to get subject state");
+                Err(Error::QueryFailed(e.to_string()))
             }
         }
     }
@@ -1053,7 +1000,9 @@ mod tests {
             },
         );
 
-        assert!(matches!(error, Error::ActorError(message) if message == "Is not a Creator"));
+        assert!(
+            matches!(error, Error::ActorError(message) if message == "Is not a Creator")
+        );
     }
 
     #[test]

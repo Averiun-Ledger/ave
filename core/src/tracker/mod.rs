@@ -513,6 +513,7 @@ impl Tracker {
                     gov_id: self.governance_id.to_string(),
                     subject_id: self.subject_metadata.subject_id.to_string(),
                     schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
                     name: self.subject_metadata.name.clone(),
                     description: self.subject_metadata.description.clone(),
                 },

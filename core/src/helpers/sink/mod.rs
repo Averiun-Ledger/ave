@@ -1317,8 +1317,10 @@ mod tests {
     use ave_common::{DataToSinkEvent, SchemaType};
     use axum::{
         Json, Router,
-        extract::Path,
+        extract::{Path, Request},
         http::{HeaderMap, StatusCode},
+        middleware::{self, Next},
+        response::Response,
         routing::post,
     };
     use serde_json::json;
@@ -1450,20 +1452,75 @@ mod tests {
         AveSink::new(sinks, token, auth_url, "user-1", "pass-1", None)
     }
 
-    async fn wait_until<F>(mut condition: F)
+    const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+    const TEST_POLL_INTERVAL: Duration = Duration::from_millis(20);
+    const TEST_STABLE_POLLS: usize = 5;
+
+    async fn wait_until<F>(description: &str, mut condition: F)
     where
         F: FnMut() -> bool,
     {
-        timeout(Duration::from_secs(2), async {
+        timeout(TEST_WAIT_TIMEOUT, async {
             loop {
                 if condition() {
                     break;
                 }
-                sleep(Duration::from_millis(10)).await;
+                sleep(TEST_POLL_INTERVAL).await;
             }
         })
         .await
-        .expect("condition not met in time");
+        .unwrap_or_else(|error| panic!("{description}: {error}"));
+    }
+
+    async fn wait_for_counter_at_least(
+        counter: &AtomicUsize,
+        minimum: usize,
+        description: &str,
+    ) {
+        wait_until(description, || counter.load(Ordering::SeqCst) >= minimum)
+            .await;
+    }
+
+    async fn wait_for_counter_stable(
+        counter: &AtomicUsize,
+        minimum: usize,
+        description: &str,
+    ) -> usize {
+        timeout(TEST_WAIT_TIMEOUT, async {
+            let mut last_seen = counter.load(Ordering::SeqCst);
+            let mut stable_polls = 0usize;
+
+            loop {
+                let current = counter.load(Ordering::SeqCst);
+                if current >= minimum {
+                    if current == last_seen {
+                        stable_polls += 1;
+                    } else {
+                        stable_polls = 0;
+                    }
+
+                    if stable_polls >= TEST_STABLE_POLLS {
+                        return current;
+                    }
+                } else {
+                    stable_polls = 0;
+                }
+
+                last_seen = current;
+                sleep(TEST_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{description}: {error}"))
+    }
+
+    async fn count_requests(
+        counter: Arc<AtomicUsize>,
+        request: Request,
+        next: Next,
+    ) -> Response {
+        counter.fetch_add(1, Ordering::SeqCst);
+        next.run(request).await
     }
 
     #[test]
@@ -1710,28 +1767,37 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 2).await;
-        assert_eq!(sink_calls.load(Ordering::SeqCst), 2);
+        let attempts = wait_for_counter_stable(
+            sink_calls.as_ref(),
+            2,
+            "sink retries did not stabilize after max_retries",
+        )
+        .await;
+        assert_eq!(attempts, 2);
     }
 
     #[tokio::test]
     async fn notify_honors_configured_request_timeout() {
         let sink_calls = Arc::new(AtomicUsize::new(0));
-        let server = TestServer::spawn(Router::new().route(
-            "/sink/{subject_id}/{schema_id}",
-            post({
-                let sink_calls = Arc::clone(&sink_calls);
-                move |_path: Path<(String, String)>,
-                      Json(_payload): Json<DataToSink>| {
+        let server = TestServer::spawn(
+            Router::new()
+                .route(
+                    "/sink/{subject_id}/{schema_id}",
+                    post(
+                        move |_path: Path<(String, String)>,
+                              Json(_payload): Json<DataToSink>| async move {
+                            sleep(Duration::from_millis(150)).await;
+                            StatusCode::OK
+                        },
+                    ),
+                )
+                .layer(middleware::from_fn({
                     let sink_calls = Arc::clone(&sink_calls);
-                    async move {
-                        sink_calls.fetch_add(1, Ordering::SeqCst);
-                        sleep(Duration::from_millis(150)).await;
-                        StatusCode::OK
+                    move |request: Request, next: Next| {
+                        count_requests(Arc::clone(&sink_calls), request, next)
                     }
-                }
-            }),
-        ))
+                })),
+        )
         .await;
 
         let sink = build_sink_with_servers(
@@ -1760,8 +1826,13 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 2).await;
-        assert_eq!(sink_calls.load(Ordering::SeqCst), 2);
+        let attempts = wait_for_counter_stable(
+            sink_calls.as_ref(),
+            2,
+            "sink timeout retries did not stabilize",
+        )
+        .await;
+        assert_eq!(attempts, 2);
     }
 
     #[tokio::test]
@@ -1844,8 +1915,18 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(first))).await;
         sink.notify(SinkDataEvent::Event(Box::new(second))).await;
 
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 2).await;
-        wait_until(|| max_active.load(Ordering::SeqCst) >= 2).await;
+        wait_for_counter_at_least(
+            sink_calls.as_ref(),
+            2,
+            "parallel sink deliveries were not observed",
+        )
+        .await;
+        wait_for_counter_at_least(
+            max_active.as_ref(),
+            2,
+            "parallel sink concurrency did not increase",
+        )
+        .await;
         assert!(max_active.load(Ordering::SeqCst) >= 2);
     }
 
@@ -1925,10 +2006,20 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| auth_calls.load(Ordering::SeqCst) == 1).await;
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 1).await;
-        assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sink_calls.load(Ordering::SeqCst), 1);
+        let auth_attempts = wait_for_counter_stable(
+            auth_calls.as_ref(),
+            1,
+            "auth bootstrap call did not complete",
+        )
+        .await;
+        let sink_attempts = wait_for_counter_stable(
+            sink_calls.as_ref(),
+            1,
+            "sink bootstrap delivery did not complete",
+        )
+        .await;
+        assert_eq!(auth_attempts, 1);
+        assert_eq!(sink_attempts, 1);
         assert_eq!(
             seen_auth.lock().await.as_slice(),
             &[Some("Bearer fresh-token".to_owned())]
@@ -2004,8 +2095,13 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| auth_calls.load(Ordering::SeqCst) == 1).await;
-        assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
+        let auth_attempts = wait_for_counter_stable(
+            auth_calls.as_ref(),
+            1,
+            "token refresh did not complete",
+        )
+        .await;
+        assert_eq!(auth_attempts, 1);
         assert_eq!(
             seen_auth.lock().await.as_slice(),
             &[Some("Bearer refreshed-token".to_owned())]
@@ -2091,10 +2187,20 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| auth_calls.load(Ordering::SeqCst) == 1).await;
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 2).await;
-        assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sink_calls.load(Ordering::SeqCst), 2);
+        let auth_attempts = wait_for_counter_stable(
+            auth_calls.as_ref(),
+            1,
+            "401 token refresh did not complete",
+        )
+        .await;
+        let sink_attempts = wait_for_counter_stable(
+            sink_calls.as_ref(),
+            2,
+            "401 retry sequence did not stabilize",
+        )
+        .await;
+        assert_eq!(auth_attempts, 1);
+        assert_eq!(sink_attempts, 2);
         assert_eq!(
             seen_auth.lock().await.as_slice(),
             &[
@@ -2145,7 +2251,12 @@ mod tests {
         ))))
         .await;
 
-        wait_until(|| sink_calls.load(Ordering::SeqCst) == 3).await;
-        assert_eq!(sink_calls.load(Ordering::SeqCst), 3);
+        let attempts = wait_for_counter_stable(
+            sink_calls.as_ref(),
+            3,
+            "transient sink retries did not stabilize",
+        )
+        .await;
+        assert_eq!(attempts, 3);
     }
 }

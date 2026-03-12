@@ -58,8 +58,11 @@ CREATE TABLE IF NOT EXISTS aborts (
     PRIMARY KEY (request_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_aborts_subject_sn
-ON aborts(subject_id, sn);
+DROP INDEX IF EXISTS idx_aborts_subject_sn;
+DROP INDEX IF EXISTS idx_aborts_subject_sn_request_id;
+
+CREATE INDEX IF NOT EXISTS idx_aborts_subject_sn_request_id
+ON aborts(subject_id, COALESCE(sn, -1), request_id);
 -- =============================================================================
 -- END OF MIGRATION
 -- =============================================================================

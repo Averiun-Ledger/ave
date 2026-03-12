@@ -36,6 +36,7 @@ pub struct SubjsData {
     pub subject_id: String,
     pub schema_id: SchemaType,
     pub active: bool,
+    pub namespace: String,
     pub name: Option<String>,
     pub description: Option<String>,
 }

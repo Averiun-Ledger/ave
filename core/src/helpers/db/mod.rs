@@ -10,9 +10,10 @@ use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
+use prometheus_client::registry::Registry;
 
 use ave_common::{
-    bridge::request::{EventRequestType, EventsQuery},
+    bridge::request::{AbortsQuery, EventRequestType, EventsQuery},
     response::{LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB},
 };
 pub use error::DatabaseError;
@@ -25,7 +26,7 @@ use tracing::{debug, error};
 mod sqlite;
 
 #[async_trait]
-pub trait Querys {
+pub trait ReadStore {
     // events
     async fn get_events(
         &self,
@@ -36,11 +37,7 @@ pub trait Querys {
     async fn get_aborts(
         &self,
         subject_id: &str,
-        request_id: Option<String>,
-        sn: Option<u64>,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
+        query: AbortsQuery,
     ) -> Result<PaginatorAborts, DatabaseError>;
 
     // events sn
@@ -64,6 +61,29 @@ pub trait Querys {
         &self,
         subject_id: &str,
     ) -> Result<SubjectDB, DatabaseError>;
+}
+
+pub trait Querys: ReadStore {}
+
+impl<T> Querys for T where T: ReadStore + ?Sized {}
+
+#[derive(Debug, Clone)]
+pub struct DbMetricsSnapshot {
+    pub reader_wait_count: u64,
+    pub reader_wait_avg_ms: f64,
+    pub reader_wait_max_ms: f64,
+    pub writer_queue_depth: usize,
+    pub writer_queue_depth_max: usize,
+    pub writer_batch_count: u64,
+    pub writer_batch_avg_size: f64,
+    pub writer_batch_max_size: usize,
+    pub writer_retry_count: u64,
+    pub writer_retry_max_attempt: usize,
+    pub page_anchor_hit_count: u64,
+    pub page_anchor_miss_count: u64,
+    pub pages_walked_from_anchor: u64,
+    pub count_query_avg_ms: f64,
+    pub count_query_max_ms: f64,
 }
 
 #[derive(Clone)]
@@ -112,14 +132,14 @@ impl ExternalDB {
     pub fn get_subject(&self) -> impl Subscriber<SignedLedger> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
         }
     }
 
     pub fn get_sink_data(&self) -> impl Subscriber<SinkDataEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
         }
     }
 
@@ -128,30 +148,38 @@ impl ExternalDB {
     ) -> impl Subscriber<RequestTrackingEvent> {
         match self {
             #[cfg(feature = "ext-sqlite")]
-            Self::SqliteLocal(sqlite_local) => sqlite_local.clone(),
+            Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),
+        }
+    }
+
+    pub fn metrics_snapshot(&self) -> DbMetricsSnapshot {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => sqlite_local.metrics_snapshot(),
+        }
+    }
+
+    pub fn register_prometheus_metrics(&self, registry: &mut Registry) {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.register_prometheus_metrics(registry)
+            }
         }
     }
 }
 
 #[async_trait]
-impl Querys for ExternalDB {
+impl ReadStore for ExternalDB {
     async fn get_aborts(
         &self,
         subject_id: &str,
-        request_id: Option<String>,
-        sn: Option<u64>,
-        quantity: Option<u64>,
-        page: Option<u64>,
-        reverse: Option<bool>,
+        query: AbortsQuery,
     ) -> Result<PaginatorAborts, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
-                sqlite_local
-                    .get_aborts(
-                        subject_id, request_id, sn, quantity, page, reverse,
-                    )
-                    .await
+                sqlite_local.get_aborts(subject_id, query).await
             }
         }
     }

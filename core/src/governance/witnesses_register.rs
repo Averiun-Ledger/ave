@@ -151,7 +151,25 @@ pub enum WitnessesRegisterMessage {
     },
 }
 
-impl Message for WitnessesRegisterMessage {}
+impl Message for WitnessesRegisterMessage {
+    fn is_critical(&self) -> bool {
+        match self {
+            WitnessesRegisterMessage::UpdateCreatorsWitnessesFact {
+                ..
+            }
+            | WitnessesRegisterMessage::UpdateCreatorsWitnessesConfirm {
+                ..
+            }
+            | WitnessesRegisterMessage::UpdateSn { .. }
+            | WitnessesRegisterMessage::UpdateSnGov { .. }
+            | WitnessesRegisterMessage::Create { .. }
+            | WitnessesRegisterMessage::Transfer { .. }
+            | WitnessesRegisterMessage::Confirm { .. }
+            | WitnessesRegisterMessage::Reject { .. } => true,
+            _ => false,
+        }
+    }
+}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -1016,17 +1034,11 @@ impl PersistentActor for WitnessesRegister {
                     // encontrarla con get_mut.
                     let creator_entry = self
                         .witnesses_creator
-                        .entry((
-                            creator.clone(),
-                            ns.clone(),
-                            schema_id.clone(),
-                        ))
+                        .entry((creator.clone(), ns.clone(), schema_id.clone()))
                         .or_default();
                     for witness in witnesses.iter() {
-                        creator_entry
-                            .entry(witness.clone())
-                            .or_default()
-                            .1 = Some(*version);
+                        creator_entry.entry(witness.clone()).or_default().1 =
+                            Some(*version);
                     }
                 }
 
