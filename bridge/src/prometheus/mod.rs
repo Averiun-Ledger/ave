@@ -9,7 +9,7 @@ pub async fn handler_prometheus_data(
 ) -> impl IntoResponse {
     let mut body = String::new();
     let registry = state.lock().await;
-    if let Err(e) = encode(&mut body, &*registry) {
+    if let Err(e) = encode(&mut body, &registry) {
         return (
             [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
             format!("Error encoding Prometheus metrics: {}", e),

@@ -25,13 +25,12 @@ fn serialize_ts_opt<S>(
 where
     S: serde::Serializer,
 {
-    let formatted = match ts {
-        Some(v) => match OffsetDateTime::from_unix_timestamp(*v) {
-            Ok(dt) => dt.format(&Rfc3339).unwrap_or_default(),
-            Err(_) => String::new(),
-        },
-        None => String::new(),
-    };
+    let formatted = ts.as_ref().map_or_else(String::new, |v| {
+        OffsetDateTime::from_unix_timestamp(*v).map_or_else(
+            |_| String::new(),
+            |dt| dt.format(&Rfc3339).unwrap_or_default(),
+        )
+    });
     serializer.serialize_str(&formatted)
 }
 
@@ -492,7 +491,7 @@ pub enum SystemConfigValueType {
     EndpointRateLimits,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct SystemConfigEndpointRateLimit {
     pub endpoint: String,
     pub max_requests: u32,
@@ -523,7 +522,7 @@ impl From<SystemConfigEndpointRateLimit>
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum SystemConfigValue {
     Integer(i64),

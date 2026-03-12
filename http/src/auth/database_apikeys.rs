@@ -10,6 +10,16 @@ use rusqlite::{
     OptionalExtension, Result as SqliteResult, TransactionBehavior, params,
 };
 
+pub struct RotateApiKeyParams<'a> {
+    pub key_id: &'a str,
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub expires_in_seconds: Option<i64>,
+    pub revoked_by: Option<i64>,
+    pub reason: Option<&'a str>,
+    pub audit: Option<AuditLogParams<'a>>,
+}
+
 // =============================================================================
 // API KEY OPERATIONS
 // =============================================================================
@@ -444,14 +454,17 @@ impl AuthDatabase {
 
     pub fn rotate_api_key_transactional(
         &self,
-        key_id: &str,
-        name: Option<&str>,
-        description: Option<&str>,
-        expires_in_seconds: Option<i64>,
-        revoked_by: Option<i64>,
-        reason: Option<&str>,
-        audit: Option<AuditLogParams>,
+        params: RotateApiKeyParams<'_>,
     ) -> Result<(String, ApiKeyInfo), DatabaseError> {
+        let RotateApiKeyParams {
+            key_id,
+            name,
+            description,
+            expires_in_seconds,
+            revoked_by,
+            reason,
+            audit,
+        } = params;
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
         let result = (|| {
@@ -777,7 +790,7 @@ impl AuthDatabase {
         }
 
         // Get user
-        let user = Self::get_user_by_id_internal(&conn, user_id)?;
+        let user = Self::get_user_by_id_internal(conn, user_id)?;
 
         // Check if user is active
         if !user.is_active {
@@ -805,7 +818,7 @@ impl AuthDatabase {
         }
 
         // Get user roles
-        let roles = Self::get_user_roles_internal(&conn, user_id)?;
+        let roles = Self::get_user_roles_internal(conn, user_id)?;
 
         let now = Self::now();
         conn.execute(

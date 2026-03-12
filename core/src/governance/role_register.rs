@@ -147,12 +147,12 @@ pub enum RoleRegisterMessage {
 }
 impl Message for RoleRegisterMessage {
     fn is_critical(&self) -> bool {
-        match self {
-            RoleRegisterMessage::UpdateVersion { .. }
-            | RoleRegisterMessage::UpdateFact { .. }
-            | RoleRegisterMessage::UpdateConfirm { .. } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::UpdateVersion { .. }
+                | Self::UpdateFact { .. }
+                | Self::UpdateConfirm { .. }
+        )
     }
 }
 

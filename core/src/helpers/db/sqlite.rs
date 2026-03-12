@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard,
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -348,7 +348,7 @@ struct CursorAbortsQuery {
 }
 
 enum WriteCommand {
-    SignedLedger(SignedLedger),
+    SignedLedger(Box<SignedLedger>),
     SubjectState(Metadata),
     Abort(RequestTrackingEvent),
 }
@@ -758,7 +758,7 @@ impl CursorAbortsQuery {
 }
 
 impl PageAnchorCache {
-    fn next_clock(&mut self) -> u64 {
+    const fn next_clock(&mut self) -> u64 {
         self.access_clock = self.access_clock.saturating_add(1);
         self.access_clock
     }
@@ -1011,7 +1011,7 @@ impl ReadStore for SqliteReadStore {
 
 impl SqliteLocal {
     pub async fn new(
-        path: &PathBuf,
+        path: &Path,
         manager: ActorRef<DBManager>,
         durability: bool,
         spec: Option<MachineSpec>,
@@ -1020,7 +1020,7 @@ impl SqliteLocal {
         let tuning = tuning_for_ram(resolved.ram_mb);
         let sync_mode = if durability { "FULL" } else { "NORMAL" };
 
-        let runtime = SqliteRuntime::new(path.as_path(), sync_mode, &tuning)?;
+        let runtime = SqliteRuntime::new(path, sync_mode, &tuning)?;
         let runtime = Arc::new(runtime);
 
         debug!(
@@ -1053,7 +1053,7 @@ impl SqliteLocal {
 }
 
 impl SqliteReadStore {
-    fn new(runtime: Arc<SqliteRuntime>) -> Self {
+    const fn new(runtime: Arc<SqliteRuntime>) -> Self {
         Self { runtime }
     }
 
@@ -1089,7 +1089,8 @@ impl SqliteWriteStore {
         &self,
         event: SignedLedger,
     ) -> Result<(), DatabaseError> {
-        self.enqueue(WriteCommand::SignedLedger(event)).await
+        self.enqueue(WriteCommand::SignedLedger(Box::new(event)))
+            .await
     }
 
     async fn persist_subject_state(
@@ -1272,6 +1273,7 @@ fn persist_write_batch(
 
     tx.commit()
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    drop(conn);
 
     touched_subjects.sort();
     touched_subjects.dedup();
@@ -1282,11 +1284,11 @@ fn persist_write_batch(
     Ok(())
 }
 
-fn is_retryable_write_error(error: &DatabaseError) -> bool {
+const fn is_retryable_write_error(error: &DatabaseError) -> bool {
     matches!(error, DatabaseError::Query(_))
 }
 
-fn retry_backoff(attempt: usize) -> Duration {
+const fn retry_backoff(attempt: usize) -> Duration {
     let multiplier = match attempt {
         0 | 1 => 1,
         2 => 2,
@@ -1394,7 +1396,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn new(connections: Vec<Connection>) -> Self {
+    const fn new(connections: Vec<Connection>) -> Self {
         Self {
             connections: Mutex::new(connections),
             available: Condvar::new(),
@@ -1749,7 +1751,7 @@ fn get_event_sn_from_conn(
         .prepare_cached(SQL_GET_EVENT_SN)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    stmt.query_row(params![subject_id, sn_i64], |row| map_event_row(row))
+    stmt.query_row(params![subject_id, sn_i64], map_event_row)
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
                 DatabaseError::EventNotFound {
@@ -1798,14 +1800,14 @@ fn get_first_or_end_events_from_conn(
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>(),
         None => stmt
-            .query_map(params![subject_id, limit_i64], |row| map_event_row(row))
+            .query_map(params![subject_id, limit_i64], map_event_row)
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>(),
     }
 }
 
-fn build_page_paginator(page: u64, pages: u64) -> Paginator {
+const fn build_page_paginator(page: u64, pages: u64) -> Paginator {
     let prev = if page <= 1 { None } else { Some(page - 1) };
     let next = if page < pages { Some(page + 1) } else { None };
 
@@ -1872,10 +1874,10 @@ fn parse_abort_cursor(cursor: &str) -> Result<(i64, String), DatabaseError> {
 }
 
 fn encode_abort_cursor(sn: Option<u64>, request_id: &str) -> String {
-    match sn {
-        Some(sn) => format!("{sn}|{request_id}"),
-        None => format!("|{request_id}"),
-    }
+    sn.map_or_else(
+        || format!("|{request_id}"),
+        |sn| format!("{sn}|{request_id}"),
+    )
 }
 
 fn count_aborts_from_conn(
@@ -1981,15 +1983,15 @@ fn resolve_abort_page_from_anchors(
         let offset = page_offset(page, query.quantity)?;
         let aborts =
             fetch_aborts_with_offset(conn, subject_id, &query, offset)?;
-        if page < pages {
-            if let Some(last) = aborts.last() {
-                runtime.store_page_anchor(
-                    cache_key.to_owned(),
-                    subject_id,
-                    page + 1,
-                    encode_abort_cursor(last.sn, &last.request_id),
-                );
-            }
+        if page < pages
+            && let Some(last) = aborts.last()
+        {
+            runtime.store_page_anchor(
+                cache_key.to_owned(),
+                subject_id,
+                page + 1,
+                encode_abort_cursor(last.sn, &last.request_id),
+            );
         }
         return Ok(aborts);
     }
@@ -2007,15 +2009,15 @@ fn resolve_abort_page_from_anchors(
             return Ok(aborts);
         }
 
-        if current_page < pages {
-            if let Some(last) = aborts.last() {
-                runtime.store_page_anchor(
-                    cache_key.to_owned(),
-                    subject_id,
-                    current_page + 1,
-                    encode_abort_cursor(last.sn, &last.request_id),
-                );
-            }
+        if current_page < pages
+            && let Some(last) = aborts.last()
+        {
+            runtime.store_page_anchor(
+                cache_key.to_owned(),
+                subject_id,
+                current_page + 1,
+                encode_abort_cursor(last.sn, &last.request_id),
+            );
         }
 
         if current_page == page {
@@ -2102,7 +2104,7 @@ fn fetch_aborts_with_cursor(
         .prepare(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    stmt.query_map(params_refs.as_slice(), |row| map_abort_row(row))
+    stmt.query_map(params_refs.as_slice(), map_abort_row)
         .map_err(|e| DatabaseError::Query(e.to_string()))?
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()
@@ -2133,7 +2135,7 @@ fn fetch_subject_only_aborts_with_cursor(
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(
                 params![subject_id, cursor_sn, cursor_request_id, limit_i64],
-                |row| map_abort_row(row),
+                map_abort_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
@@ -2157,7 +2159,7 @@ fn fetch_subject_only_aborts_with_cursor(
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(
                 params![subject_id, cursor_sn, cursor_request_id, limit_i64],
-                |row| map_abort_row(row),
+                map_abort_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
@@ -2246,7 +2248,7 @@ fn fetch_aborts_with_offset(
         .prepare(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    stmt.query_map(params_refs.as_slice(), |row| map_abort_row(row))
+    stmt.query_map(params_refs.as_slice(), map_abort_row)
         .map_err(|e| DatabaseError::Query(e.to_string()))?
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()
@@ -2362,15 +2364,15 @@ fn resolve_event_page_from_anchors(
         if events.is_empty() {
             return Err(DatabaseError::NoEvents(subject_id.to_owned()));
         }
-        if page < pages {
-            if let Some(last) = events.last() {
-                runtime.store_page_anchor(
-                    cache_key.to_owned(),
-                    subject_id,
-                    page + 1,
-                    encode_event_cursor(last.sn),
-                );
-            }
+        if page < pages
+            && let Some(last) = events.last()
+        {
+            runtime.store_page_anchor(
+                cache_key.to_owned(),
+                subject_id,
+                page + 1,
+                encode_event_cursor(last.sn),
+            );
         }
         return Ok(events);
     }
@@ -2388,15 +2390,15 @@ fn resolve_event_page_from_anchors(
             return Err(DatabaseError::NoEvents(subject_id.to_owned()));
         }
 
-        if current_page < pages {
-            if let Some(last) = events.last() {
-                runtime.store_page_anchor(
-                    cache_key.to_owned(),
-                    subject_id,
-                    current_page + 1,
-                    encode_event_cursor(last.sn),
-                );
-            }
+        if current_page < pages
+            && let Some(last) = events.last()
+        {
+            runtime.store_page_anchor(
+                cache_key.to_owned(),
+                subject_id,
+                current_page + 1,
+                encode_event_cursor(last.sn),
+            );
         }
 
         if current_page == page {
@@ -2476,7 +2478,7 @@ fn fetch_events_with_cursor(
         .prepare(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    stmt.query_map(params_refs.as_slice(), |row| map_event_row(row))
+    stmt.query_map(params_refs.as_slice(), map_event_row)
         .map_err(|e| DatabaseError::Query(e.to_string()))?
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()
@@ -2506,7 +2508,7 @@ fn fetch_subject_only_events_with_cursor(
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(
                 params![subject_id, parse_event_cursor(cursor)?, limit_i64],
-                |row| map_event_row(row),
+                map_event_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
@@ -2529,7 +2531,7 @@ fn fetch_subject_only_events_with_cursor(
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             stmt.query_map(
                 params![subject_id, parse_event_cursor(cursor)?, limit_i64],
-                |row| map_event_row(row),
+                map_event_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
@@ -2622,7 +2624,7 @@ fn fetch_events_with_offset(
         .prepare(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    stmt.query_map(params_refs.as_slice(), |row| map_event_row(row))
+    stmt.query_map(params_refs.as_slice(), map_event_row)
         .map_err(|e| DatabaseError::Query(e.to_string()))?
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()
@@ -2721,14 +2723,13 @@ fn build_aborts_count_cache_key(
 }
 
 fn format_time_range(range: Option<&TimeRange>) -> String {
-    match range {
-        Some(range) => format!(
+    range.map_or_else(String::new, |range| {
+        format!(
             "{}..{}",
             range.from.as_deref().unwrap_or_default(),
             range.to.as_deref().unwrap_or_default()
-        ),
-        None => String::new(),
-    }
+        )
+    })
 }
 
 fn map_abort_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AbortDB> {

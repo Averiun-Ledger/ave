@@ -17,7 +17,7 @@ use crate::common::create_test_db;
 use ave_bridge::auth::{
     ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, SessionConfig,
 };
-use ave_http::auth::database::AuthDatabase;
+use ave_http::auth::{RotateApiKeyParams, database::AuthDatabase};
 use tempfile::TempDir;
 
 async fn create_test_db_with_rate_limit(
@@ -202,6 +202,28 @@ async fn test_delete_user() {
     // Should not be able to get deleted user
     let result = db.get_user_by_id(user.id);
     assert!(matches!(result, Err(DatabaseError::NotFound(_))));
+}
+
+#[test(tokio::test)]
+async fn test_recreate_username_after_soft_delete() {
+    let (db, _dirs) = create_test_db();
+
+    let deleted_user = db
+        .create_user("reusable_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    db.delete_user(deleted_user.id).unwrap();
+
+    let recreated_user = db
+        .create_user("reusable_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    assert_ne!(recreated_user.id, deleted_user.id);
+    assert_eq!(recreated_user.username, "reusable_user");
+    assert!(matches!(
+        db.get_user_by_id(deleted_user.id),
+        Err(DatabaseError::NotFound(_))
+    ));
 }
 
 // =============================================================================
@@ -786,15 +808,15 @@ async fn test_rotate_api_key_rolls_back_on_error() {
         .create_api_key(user.id, Some("rotate_me"), None, None, false)
         .unwrap();
 
-    let result = db.rotate_api_key_transactional(
-        &old_key_info.id,
-        Some("invalid/name"),
-        None,
-        None,
-        Some(user.id),
-        Some("test rollback"),
-        None,
-    );
+    let result = db.rotate_api_key_transactional(RotateApiKeyParams {
+        key_id: &old_key_info.id,
+        name: Some("invalid/name"),
+        description: None,
+        expires_in_seconds: None,
+        revoked_by: Some(user.id),
+        reason: Some("test rollback"),
+        audit: None,
+    });
     assert!(matches!(result, Err(DatabaseError::Validation(_))));
 
     let old_key_info = db.get_api_key_info(&old_key_info.id).unwrap();
@@ -820,14 +842,14 @@ async fn test_rotate_api_key_transactional_writes_audit() {
         .unwrap();
 
     let (_new_api_key, new_key_info) = db
-        .rotate_api_key_transactional(
-            &old_key_info.id,
-            None,
-            None,
-            None,
-            Some(user.id),
-            Some("test rotate"),
-            Some(ave_http::auth::database_audit::AuditLogParams {
+        .rotate_api_key_transactional(RotateApiKeyParams {
+            key_id: &old_key_info.id,
+            name: None,
+            description: None,
+            expires_in_seconds: None,
+            revoked_by: Some(user.id),
+            reason: Some("test rotate"),
+            audit: Some(ave_http::auth::database_audit::AuditLogParams {
                 user_id: Some(user.id),
                 api_key_id: Some(&old_key_info.id),
                 action_type: "api_key_rotated",
@@ -840,7 +862,7 @@ async fn test_rotate_api_key_transactional_writes_audit() {
                 success: true,
                 error_message: None,
             }),
-        )
+        })
         .unwrap();
 
     assert_ne!(new_key_info.id, old_key_info.id);
@@ -1207,15 +1229,15 @@ async fn test_transfer_api_key_quota_state_moves_plan_usage_and_extensions() {
         .unwrap();
 
     let (_new_api_key, new_key_info) = db
-        .rotate_api_key_transactional(
-            &old_key_info.id,
-            Some("new_rotation_key"),
-            None,
-            None,
-            Some(1),
-            Some("rotation"),
-            None,
-        )
+        .rotate_api_key_transactional(RotateApiKeyParams {
+            key_id: &old_key_info.id,
+            name: Some("new_rotation_key"),
+            description: None,
+            expires_in_seconds: None,
+            revoked_by: Some(1),
+            reason: Some("rotation"),
+            audit: None,
+        })
         .unwrap();
 
     let new_status =

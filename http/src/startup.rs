@@ -743,8 +743,8 @@ pub async fn run() -> Result<(), StartupError> {
     }
 
     if let Some(https_address) = config.http.https_address.clone() {
-        serve_https(
-            &config,
+        serve_https(HttpsServeArgs {
+            config: &config,
             listener_http,
             cors,
             bridge,
@@ -753,7 +753,7 @@ pub async fn run() -> Result<(), StartupError> {
             https_address,
             #[cfg(feature = "prometheus")]
             registry,
-        )
+        })
         .await?;
     } else {
         serve_http(
@@ -776,18 +776,33 @@ pub async fn run() -> Result<(), StartupError> {
     Ok(())
 }
 
-async fn serve_https(
-    config: &BridgeConfig,
+struct HttpsServeArgs<'a> {
+    config: &'a BridgeConfig,
     listener_http: TcpListener,
     cors: Option<CorsLayer>,
     bridge: Bridge,
     auth_db: Option<Arc<AuthDatabase>>,
     runners: Vec<tokio::task::JoinHandle<()>>,
     https_address: String,
-    #[cfg(feature = "prometheus")] registry: std::sync::Arc<
+    #[cfg(feature = "prometheus")]
+    registry: std::sync::Arc<
         tokio::sync::Mutex<prometheus_client::registry::Registry>,
     >,
-) -> Result<(), StartupError> {
+}
+
+async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
+    let HttpsServeArgs {
+        config,
+        listener_http,
+        cors,
+        bridge,
+        auth_db,
+        runners,
+        https_address,
+        #[cfg(feature = "prometheus")]
+        registry,
+    } = args;
+
     let https_socket =
         https_address.parse::<SocketAddr>().map_err(|error| {
             StartupError::HttpsAddress {

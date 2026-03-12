@@ -69,7 +69,7 @@ impl AuthDbRuntime {
 }
 
 impl ConnectionPool {
-    fn new(connections: Vec<Connection>) -> Self {
+    const fn new(connections: Vec<Connection>) -> Self {
         Self {
             connections: Mutex::new(connections),
             available: Condvar::new(),

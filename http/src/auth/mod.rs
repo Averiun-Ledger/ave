@@ -37,6 +37,7 @@ use ave_bridge::{
 };
 // Re-exports for convenience
 pub use database::AuthDatabase;
+pub use database_apikeys::RotateApiKeyParams;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 

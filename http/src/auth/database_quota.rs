@@ -538,7 +538,7 @@ impl AuthDatabase {
         plan_id: Option<&str>,
         assigned_by: Option<i64>,
     ) -> Result<(), DatabaseError> {
-        let is_management = Self::is_management_key_internal(&conn, key_id)?;
+        let is_management = Self::is_management_key_internal(conn, key_id)?;
 
         if is_management && plan_id.is_some() {
             return Err(DatabaseError::Validation(
@@ -549,7 +549,7 @@ impl AuthDatabase {
 
         if let Some(plan_id) = plan_id {
             self.validate_plan_id(plan_id)?;
-            let _ = Self::get_usage_plan_internal(&conn, plan_id)?;
+            let _ = Self::get_usage_plan_internal(conn, plan_id)?;
 
             let now = Self::now();
             conn.execute(
@@ -608,7 +608,7 @@ impl AuthDatabase {
         }
 
         let usage_month = Self::resolve_usage_month(usage_month)?;
-        let is_management = Self::is_management_key_internal(&conn, key_id)?;
+        let is_management = Self::is_management_key_internal(conn, key_id)?;
 
         if is_management {
             return Err(DatabaseError::Validation(
@@ -617,7 +617,7 @@ impl AuthDatabase {
             ));
         }
 
-        if Self::get_plan_for_key_internal(&conn, key_id)?.is_none() {
+        if Self::get_plan_for_key_internal(conn, key_id)?.is_none() {
             return Err(DatabaseError::Validation(
                 "Cannot add quota extension to an API key without an assigned plan"
                     .to_string(),

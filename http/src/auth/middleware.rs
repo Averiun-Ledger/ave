@@ -57,10 +57,7 @@ where
         let api_key = parts
             .headers
             .get("X-API-Key")
-            .and_then(|v| match v.to_str() {
-                Ok(s) => Some(s),
-                Err(_) => None,
-            })
+            .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
                 (
                     StatusCode::UNAUTHORIZED,

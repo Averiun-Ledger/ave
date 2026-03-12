@@ -81,13 +81,13 @@ pub enum RegisterMessage {
 
 impl Message for RegisterMessage {
     fn is_critical(&self) -> bool {
-        match self {
-            RegisterMessage::RegisterGov { .. }
-            | RegisterMessage::EOLGov { .. }
-            | RegisterMessage::RegisterSubj { .. }
-            | RegisterMessage::EOLSubj { .. } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::RegisterGov { .. }
+                | Self::EOLGov { .. }
+                | Self::RegisterSubj { .. }
+                | Self::EOLSubj { .. }
+        )
     }
 }
 

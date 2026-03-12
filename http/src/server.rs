@@ -1158,7 +1158,7 @@ pub fn build_routes(
             .layer(
                 ServiceBuilder::new()
                     .layer(Extension(db))
-                    .layer(Extension(proxy.clone())),
+                    .layer(Extension(proxy)),
             )
             .merge(authed);
 

@@ -128,10 +128,10 @@ pub enum SubjectRegisterMessage {
 impl Message for SubjectRegisterMessage {
     fn is_critical(&self) -> bool {
         match self {
-            SubjectRegisterMessage::RegisterData { .. }
-            | SubjectRegisterMessage::CreateSubject { .. }
-            | SubjectRegisterMessage::UpdateSubject { .. } => true,
-            SubjectRegisterMessage::Check { .. } => false,
+            Self::RegisterData { .. }
+            | Self::CreateSubject { .. }
+            | Self::UpdateSubject { .. } => true,
+            Self::Check { .. } => false,
         }
     }
 }

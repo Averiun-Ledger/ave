@@ -112,6 +112,32 @@ struct SinkWorker {
     max_retries: usize,
 }
 
+struct TransientRetryRequest<'a> {
+    destination: &'a str,
+    client: &'a Client,
+    url: &'a str,
+    data: &'a DataToSink,
+    auth_header: Option<(&'a str, &'a str)>,
+    logs: &'a SinkLogState,
+    shutdown: &'a CancellationToken,
+    request_timeout: Duration,
+    max_retries: usize,
+    idempotency_key: &'a str,
+}
+
+struct RetryOn401Request<'a> {
+    shared: &'a SinkSharedState,
+    destination: &'a str,
+    client: &'a Client,
+    url: &'a str,
+    event: &'a DataToSink,
+    server_requires_auth: bool,
+    logs: &'a SinkLogState,
+    request_timeout: Duration,
+    max_retries: usize,
+    idempotency_key: &'a str,
+}
+
 struct SinkQueue {
     sender: mpsc::Sender<QueuedSinkEvent>,
     receiver: Mutex<mpsc::Receiver<QueuedSinkEvent>>,
@@ -182,7 +208,7 @@ struct CompiledUrlTemplate {
 }
 
 impl CircuitBreakerState {
-    fn register_success(&mut self) {
+    const fn register_success(&mut self) {
         self.mode = CircuitBreakerMode::Closed;
         self.consecutive_transient_failures = 0;
     }
@@ -290,6 +316,7 @@ impl SinkQueue {
             result = receiver.recv() => result,
             _ = shutdown.cancelled() => None,
         };
+        drop(receiver);
         if event.is_some() {
             self.queued_events.fetch_sub(1, Ordering::Relaxed);
         }
@@ -319,24 +346,28 @@ impl SinkBreaker {
             let wait_for = {
                 let mut state = self.state.lock().await;
                 match &mut state.mode {
-                    CircuitBreakerMode::Closed => return,
+                    CircuitBreakerMode::Closed => {
+                        drop(state);
+                        return;
+                    }
                     CircuitBreakerMode::OpenUntil(until) => {
-                        if let Some(wait_for) =
-                            until.checked_duration_since(Instant::now())
-                        {
-                            Some(wait_for)
-                        } else {
+                        let wait_for =
+                            until.checked_duration_since(Instant::now());
+                        if wait_for.is_none() {
                             state.mode = CircuitBreakerMode::HalfOpen {
                                 probe_in_flight: false,
                             };
-                            None
                         }
+                        drop(state);
+                        wait_for
                     }
                     CircuitBreakerMode::HalfOpen { probe_in_flight } => {
                         if *probe_in_flight {
+                            drop(state);
                             None
                         } else {
                             *probe_in_flight = true;
+                            drop(state);
                             return;
                         }
                     }
@@ -412,10 +443,12 @@ impl RateLimitedCounter {
         let now = Instant::now();
         let mut last_emit = self.last_emit.lock().await;
         if now.duration_since(*last_emit) < LOG_AGGREGATION_WINDOW {
+            drop(last_emit);
             return None;
         }
 
         *last_emit = now;
+        drop(last_emit);
         Some(self.count.swap(0, Ordering::Relaxed))
     }
 }
@@ -590,10 +623,10 @@ impl SinkSharedState {
     ) -> Option<String> {
         let _refresh_guard = self.token_refresh_lock.lock().await;
 
-        if let Some(current_header) = self.current_fresh_auth_header().await {
-            if stale_header.is_none_or(|stale| stale != current_header) {
-                return Some(current_header);
-            }
+        if let Some(current_header) = self.current_fresh_auth_header().await
+            && stale_header.is_none_or(|stale| stale != current_header)
+        {
+            return Some(current_header);
         }
 
         let new_token = self.refresh_token().await?;
@@ -879,17 +912,20 @@ impl AveSink {
     }
 
     async fn send_with_transient_retry(
-        destination: &str,
-        client: &Client,
-        url: &str,
-        data: &DataToSink,
-        auth_header: Option<(&str, &str)>,
-        logs: &SinkLogState,
-        shutdown: &CancellationToken,
-        request_timeout: Duration,
-        max_retries: usize,
-        idempotency_key: &str,
+        request: TransientRetryRequest<'_>,
     ) -> Result<(), SinkError> {
+        let TransientRetryRequest {
+            destination,
+            client,
+            url,
+            data,
+            auth_header,
+            logs,
+            shutdown,
+            request_timeout,
+            max_retries,
+            idempotency_key,
+        } = request;
         let mut attempt = 0;
 
         loop {
@@ -1005,17 +1041,20 @@ impl AveSink {
     }
 
     async fn send_with_retry_on_401(
-        shared: &SinkSharedState,
-        destination: &str,
-        client: &Client,
-        url: &str,
-        event: &DataToSink,
-        server_requires_auth: bool,
-        logs: &SinkLogState,
-        request_timeout: Duration,
-        max_retries: usize,
-        idempotency_key: &str,
+        request: RetryOn401Request<'_>,
     ) -> Result<(), SinkError> {
+        let RetryOn401Request {
+            shared,
+            destination,
+            client,
+            url,
+            event,
+            server_requires_auth,
+            logs,
+            request_timeout,
+            max_retries,
+            idempotency_key,
+        } = request;
         if shared.shutdown.is_cancelled() {
             return Err(SinkError::Shutdown);
         }
@@ -1046,18 +1085,18 @@ impl AveSink {
 
         let header_ref = header.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
 
-        match Self::send_with_transient_retry(
+        match Self::send_with_transient_retry(TransientRetryRequest {
             destination,
             client,
             url,
-            event,
-            header_ref,
+            data: event,
+            auth_header: header_ref,
             logs,
-            &shared.shutdown,
+            shutdown: &shared.shutdown,
             request_timeout,
             max_retries,
             idempotency_key,
-        )
+        })
         .await
         {
             Ok(_) => {
@@ -1097,16 +1136,18 @@ impl AveSink {
                     debug!(target: TARGET, "Token refreshed, retrying request");
 
                     match Self::send_with_transient_retry(
-                        destination,
-                        client,
-                        url,
-                        event,
-                        Some(("Authorization", &new_header)),
-                        logs,
-                        &shared.shutdown,
-                        request_timeout,
-                        max_retries,
-                        idempotency_key,
+                        TransientRetryRequest {
+                            destination,
+                            client,
+                            url,
+                            data: event,
+                            auth_header: Some(("Authorization", &new_header)),
+                            logs,
+                            shutdown: &shared.shutdown,
+                            request_timeout,
+                            max_retries,
+                            idempotency_key,
+                        },
                     )
                     .await
                     {
@@ -1188,18 +1229,18 @@ impl AveSink {
                 let idempotency_key =
                     Self::idempotency_key(queued_event.data.as_ref());
 
-                match Self::send_with_retry_on_401(
-                    worker.shared.as_ref(),
-                    worker.destination.as_ref(),
-                    &worker.client,
-                    &url,
-                    queued_event.data.as_ref(),
-                    worker.requires_auth,
-                    worker.logs.as_ref(),
-                    worker.request_timeout,
-                    worker.max_retries,
-                    &idempotency_key,
-                )
+                match Self::send_with_retry_on_401(RetryOn401Request {
+                    shared: worker.shared.as_ref(),
+                    destination: worker.destination.as_ref(),
+                    client: &worker.client,
+                    url: &url,
+                    event: queued_event.data.as_ref(),
+                    server_requires_auth: worker.requires_auth,
+                    logs: worker.logs.as_ref(),
+                    request_timeout: worker.request_timeout,
+                    max_retries: worker.max_retries,
+                    idempotency_key: &idempotency_key,
+                })
                 .await
                 {
                     Ok(()) => worker.breaker.register_success().await,
@@ -1638,18 +1679,18 @@ mod tests {
             let shared = Arc::clone(&shared);
             let url = format!("{}/sink", server.base_url);
             async move {
-                AveSink::send_with_transient_retry(
-                    "test-sink|schema=schema-a|url=http://localhost/sink",
-                    &client,
-                    &url,
-                    &data,
-                    None,
-                    &logs,
-                    &shared.shutdown,
-                    Duration::from_secs(10),
-                    3,
-                    "idempotency-key",
-                )
+                AveSink::send_with_transient_retry(TransientRetryRequest {
+                    destination: "test-sink|schema=schema-a|url=http://localhost/sink",
+                    client: &client,
+                    url: &url,
+                    data: &data,
+                    auth_header: None,
+                    logs: &logs,
+                    shutdown: &shared.shutdown,
+                    request_timeout: Duration::from_secs(10),
+                    max_retries: 3,
+                    idempotency_key: "idempotency-key",
+                })
                 .await
             }
         });

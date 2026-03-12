@@ -153,21 +153,17 @@ pub enum WitnessesRegisterMessage {
 
 impl Message for WitnessesRegisterMessage {
     fn is_critical(&self) -> bool {
-        match self {
-            WitnessesRegisterMessage::UpdateCreatorsWitnessesFact {
-                ..
-            }
-            | WitnessesRegisterMessage::UpdateCreatorsWitnessesConfirm {
-                ..
-            }
-            | WitnessesRegisterMessage::UpdateSn { .. }
-            | WitnessesRegisterMessage::UpdateSnGov { .. }
-            | WitnessesRegisterMessage::Create { .. }
-            | WitnessesRegisterMessage::Transfer { .. }
-            | WitnessesRegisterMessage::Confirm { .. }
-            | WitnessesRegisterMessage::Reject { .. } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::UpdateCreatorsWitnessesFact { .. }
+                | Self::UpdateCreatorsWitnessesConfirm { .. }
+                | Self::UpdateSn { .. }
+                | Self::UpdateSnGov { .. }
+                | Self::Create { .. }
+                | Self::Transfer { .. }
+                | Self::Confirm { .. }
+                | Self::Reject { .. }
+        )
     }
 }
 

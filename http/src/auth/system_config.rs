@@ -370,7 +370,7 @@ impl SystemConfigKey {
         Ok(())
     }
 
-    fn value_type_name(self) -> &'static str {
+    const fn value_type_name(self) -> &'static str {
         match self.value_type() {
             SystemConfigValueType::Integer => "integer",
             SystemConfigValueType::Boolean => "boolean",

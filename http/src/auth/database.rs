@@ -222,7 +222,7 @@ impl AuthDatabase {
         ns as f64 / 1_000_000.0
     }
 
-    fn duration_to_seconds(duration: Duration) -> f64 {
+    const fn duration_to_seconds(duration: Duration) -> f64 {
         duration.as_secs_f64()
     }
 
@@ -702,51 +702,53 @@ impl AuthDatabase {
             .load(Ordering::Relaxed)
     }
 
-    pub(crate) fn password_policy(&self) -> &'static super::PasswordPolicy {
+    pub(crate) const fn password_policy(
+        &self,
+    ) -> &'static super::PasswordPolicy {
         &PASSWORD_POLICY
     }
 
-    pub(crate) fn role_name_max_length(&self) -> usize {
+    pub(crate) const fn role_name_max_length(&self) -> usize {
         VALIDATION_LIMITS.role_name_max_length
     }
 
-    pub(crate) fn role_description_max_length(&self) -> usize {
+    pub(crate) const fn role_description_max_length(&self) -> usize {
         VALIDATION_LIMITS.role_description_max_length
     }
 
-    pub(crate) fn usage_plan_id_max_length(&self) -> usize {
+    pub(crate) const fn usage_plan_id_max_length(&self) -> usize {
         VALIDATION_LIMITS.usage_plan_id_max_length
     }
 
-    pub(crate) fn usage_plan_name_max_length(&self) -> usize {
+    pub(crate) const fn usage_plan_name_max_length(&self) -> usize {
         VALIDATION_LIMITS.usage_plan_name_max_length
     }
 
-    pub(crate) fn users_default_limit(&self) -> i64 {
+    pub(crate) const fn users_default_limit(&self) -> i64 {
         VALIDATION_LIMITS.users_default_limit
     }
 
-    pub(crate) fn users_max_limit(&self) -> i64 {
+    pub(crate) const fn users_max_limit(&self) -> i64 {
         VALIDATION_LIMITS.users_max_limit
     }
 
-    pub(crate) fn audit_logs_default_limit(&self) -> i64 {
+    pub(crate) const fn audit_logs_default_limit(&self) -> i64 {
         VALIDATION_LIMITS.audit_logs_default_limit
     }
 
-    pub(crate) fn audit_logs_max_limit(&self) -> i64 {
+    pub(crate) const fn audit_logs_max_limit(&self) -> i64 {
         VALIDATION_LIMITS.audit_logs_max_limit
     }
 
-    pub(crate) fn audit_cleanup_batch_size(&self) -> i64 {
+    pub(crate) const fn audit_cleanup_batch_size(&self) -> i64 {
         MAINTENANCE_LIMITS.audit_cleanup_batch_size
     }
 
-    pub(crate) fn rate_limit_cleanup_batch_size(&self) -> i64 {
+    pub(crate) const fn rate_limit_cleanup_batch_size(&self) -> i64 {
         MAINTENANCE_LIMITS.rate_limit_cleanup_batch_size
     }
 
-    pub(crate) fn expired_api_key_cleanup_batch_size(&self) -> i64 {
+    pub(crate) const fn expired_api_key_cleanup_batch_size(&self) -> i64 {
         MAINTENANCE_LIMITS.expired_api_key_cleanup_batch_size
     }
 
@@ -961,7 +963,7 @@ impl AuthDatabase {
     ) -> Result<T, DatabaseError>
     where
         T: Send + 'static,
-        F: FnOnce(AuthDatabase) -> Result<T, DatabaseError> + Send + 'static,
+        F: FnOnce(Self) -> Result<T, DatabaseError> + Send + 'static,
     {
         let db = self.clone();
         let queue_started = Instant::now();
@@ -1238,6 +1240,21 @@ impl AuthDatabase {
 // =============================================================================
 
 impl AuthDatabase {
+    fn release_deleted_username_with_conn(
+        conn: &Connection,
+        username: &str,
+    ) -> Result<(), DatabaseError> {
+        conn.execute(
+            "UPDATE users
+             SET username = printf('%s#deleted#%lld', username, id)
+             WHERE username = ?1 AND is_deleted = 1",
+            params![username],
+        )
+        .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        Ok(())
+    }
+
     fn create_user_with_conn(
         conn: &Connection,
         username: &str,
@@ -1247,6 +1264,8 @@ impl AuthDatabase {
         must_change_password: Option<bool>,
     ) -> Result<User, DatabaseError> {
         Self::validate_username(username)?;
+        Self::release_deleted_username_with_conn(conn, username)?;
+
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1 AND is_deleted = 0)",
@@ -1598,7 +1617,10 @@ impl AuthDatabase {
         user_id: i64,
     ) -> Result<(), DatabaseError> {
         conn.execute(
-            "UPDATE users SET is_deleted = 1 WHERE id = ?1",
+            "UPDATE users
+             SET is_deleted = 1,
+                 username = printf('%s#deleted#%lld', username, id)
+             WHERE id = ?1 AND is_deleted = 0",
             params![user_id],
         )
         .map_err(|e| DatabaseError::Update(e.to_string()))?;

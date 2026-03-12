@@ -360,14 +360,14 @@ pub async fn rotate_api_key(
     let req_reason = req.and_then(|r| r.reason.clone());
     let rotate_endpoint = format!("/admin/api-keys/{}/rotate", id);
     let (api_key, key_info) = run_db(&db, "rotate_api_key", move |db| {
-        db.rotate_api_key_transactional(
-            &existing_id,
-            req_name.as_deref(),
-            req_description.as_deref(),
-            req_expires,
-            Some(auth_ctx_for_db.user_id),
-            req_reason.as_deref(),
-            Some(crate::auth::database_audit::AuditLogParams {
+        db.rotate_api_key_transactional(crate::auth::RotateApiKeyParams {
+            key_id: &existing_id,
+            name: req_name.as_deref(),
+            description: req_description.as_deref(),
+            expires_in_seconds: req_expires,
+            revoked_by: Some(auth_ctx_for_db.user_id),
+            reason: req_reason.as_deref(),
+            audit: Some(crate::auth::database_audit::AuditLogParams {
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
                 action_type: "api_key_rotated",
@@ -380,7 +380,7 @@ pub async fn rotate_api_key(
                 success: true,
                 error_message: None,
             }),
-        )
+        })
     })
     .await?;
 

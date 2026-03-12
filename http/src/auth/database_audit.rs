@@ -427,7 +427,6 @@ impl AuthDatabase {
 
     /// Get audit log statistics
     // conn is captured by the top_n closure, so it cannot be dropped early
-    #[allow(clippy::significant_drop_tightening)]
     pub fn get_audit_stats(
         &self,
         days: u32,
@@ -736,7 +735,6 @@ impl AuthDatabase {
 
     /// Get detailed rate limit breakdown by API key, IP, and endpoint
     // Multiple stmt rebindings prevent early conn drop without major restructuring
-    #[allow(clippy::significant_drop_tightening)]
     pub fn get_rate_limit_details(
         &self,
         hours: u32,
@@ -893,13 +891,10 @@ impl AuthDatabase {
 }
 
 fn format_ts(ts: i64) -> String {
-    match OffsetDateTime::from_unix_timestamp(ts) {
-        Ok(dt) => match dt.format(&Rfc3339) {
-            Ok(formatted) => formatted,
-            Err(_) => ts.to_string(),
-        },
-        Err(_) => ts.to_string(),
-    }
+    OffsetDateTime::from_unix_timestamp(ts).map_or_else(
+        |_| ts.to_string(),
+        |dt| dt.format(&Rfc3339).unwrap_or_else(|_| ts.to_string()),
+    )
 }
 
 // =============================================================================

@@ -288,11 +288,7 @@ pub enum ApprPersistMessage {
 
 impl Message for ApprPersistMessage {
     fn is_critical(&self) -> bool {
-        if let ApprPersistMessage::MakeObsolete = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::MakeObsolete)
     }
 }
 

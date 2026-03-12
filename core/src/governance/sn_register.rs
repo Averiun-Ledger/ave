@@ -62,11 +62,7 @@ pub enum SnRegisterMessage {
 
 impl Message for SnRegisterMessage {
     fn is_critical(&self) -> bool {
-        if let SnRegisterMessage::RegisterSn { .. } = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::RegisterSn { .. })
     }
 }
 

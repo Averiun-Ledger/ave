@@ -493,8 +493,8 @@ impl AuthDatabase {
 
         // Get resource and action IDs
         let resource_id =
-            Self::get_resource_by_name_internal(&conn, resource)?.id;
-        let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
+            Self::get_resource_by_name_internal(conn, resource)?.id;
+        let action_id = Self::get_action_by_name_internal(conn, action)?.id;
 
         // Insert or replace permission
         conn.execute(
@@ -553,8 +553,8 @@ impl AuthDatabase {
         }
 
         let resource_id =
-            Self::get_resource_by_name_internal(&conn, resource)?.id;
-        let action_id = Self::get_action_by_name_internal(&conn, action)?.id;
+            Self::get_resource_by_name_internal(conn, resource)?.id;
+        let action_id = Self::get_action_by_name_internal(conn, action)?.id;
 
         conn.execute(
             "DELETE FROM role_permissions
