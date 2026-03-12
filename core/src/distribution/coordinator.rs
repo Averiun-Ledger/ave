@@ -136,13 +136,12 @@ impl Handler<Self> for DistriCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
-                let retry_actor =
-                    RetryActor::new_with_parent_message::<Self>(
-                        target,
-                        message,
-                        strategy,
-                        DistriCoordinatorMessage::EndRetry,
-                    );
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(
+                    target,
+                    message,
+                    strategy,
+                    DistriCoordinatorMessage::EndRetry,
+                );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(

@@ -29,7 +29,10 @@ async fn test_api_keys_revoked_when_role_added() {
         .unwrap();
 
     // Verify key works
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 
     let role = db.create_role_transactional("editor", None, None).unwrap();
     db.assign_role_to_user_transactional(user.id, role.id, None, None)
@@ -56,7 +59,10 @@ async fn test_api_keys_revoked_when_role_removed() {
         .unwrap();
 
     // Verify key works
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 
     // Remove role from user
     db.remove_role_from_user(user.id, role.id).unwrap();

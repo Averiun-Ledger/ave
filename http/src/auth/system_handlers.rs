@@ -2,13 +2,11 @@
 //
 // Endpoints for resources, actions, audit logs, and user introspection
 
+use super::VALIDATION_LIMITS;
 use super::database::AuthDatabase;
-use super::http_api::{
-    DatabaseErrorMapping, HttpErrorResponse, run_db,
-};
+use super::http_api::{DatabaseErrorMapping, HttpErrorResponse, run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
-use super::VALIDATION_LIMITS;
 use axum::{
     Extension, Json,
     extract::{Path, Query},
@@ -353,11 +351,8 @@ pub async fn get_me(
     Extension(db): Extension<Arc<AuthDatabase>>,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
     let user_id = auth_ctx.user_id;
-    let user_info = run_db(
-        &db,
-        "get_me",
-        DatabaseErrorMapping::admin(),
-        move |db| {
+    let user_info =
+        run_db(&db, "get_me", DatabaseErrorMapping::admin(), move |db| {
             let user = db.get_user_by_id(user_id)?;
             let roles = db.get_user_roles(user_id)?;
 
@@ -372,9 +367,8 @@ pub async fn get_me(
                 created_at: user.created_at,
                 roles,
             })
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     Ok(Json(user_info))
 }

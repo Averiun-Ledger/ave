@@ -6310,8 +6310,6 @@ async fn test_more_cases_2() {
     );
 }
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // BLOQUE 14 — Tests para bugs nuevos (A, B, C)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6427,7 +6425,7 @@ async fn test_more_cases_3() {
         .await
         .unwrap();
 
-        let json = json!({
+    let json = json!({
         "ModOne": {
             "data": 100,
         }
@@ -6437,7 +6435,7 @@ async fn test_more_cases_3() {
         .await
         .unwrap();
 
-        let json = json!({
+    let json = json!({
         "ModOne": {
             "data": 100,
         }
@@ -6513,7 +6511,6 @@ async fn test_more_cases_3() {
     emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
-
 
     let json = json!({
         "ModOne": {

@@ -3,9 +3,7 @@
 // REST API endpoints for user, role, permission, and API key management
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{
-    DatabaseErrorMapping, run_db as shared_run_db,
-};
+use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use axum::{
@@ -788,7 +786,8 @@ pub async fn list_roles(
 ) -> Result<Json<Vec<RoleInfo>>, (StatusCode, Json<ErrorResponse>)> {
     // Check permission
     check_permission(&auth_ctx, "admin_roles", "get")?;
-    let roles = run_db(&db, "admin_list_roles", move |db| db.list_roles()).await?;
+    let roles =
+        run_db(&db, "admin_list_roles", move |db| db.list_roles()).await?;
 
     Ok(Json(roles))
 }
@@ -1009,7 +1008,10 @@ pub async fn set_role_permission(
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
                 action_type: "permission_set",
-                endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
+                endpoint: Some(&format!(
+                    "/admin/roles/{}/permissions",
+                    role_id
+                )),
                 http_method: Some("POST"),
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
@@ -1119,7 +1121,10 @@ pub async fn set_user_permission(
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
                 action_type: "user_permission_set",
-                endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
+                endpoint: Some(&format!(
+                    "/admin/users/{}/permissions",
+                    user_id
+                )),
                 http_method: Some("POST"),
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
@@ -1196,7 +1201,10 @@ pub async fn remove_user_permission(
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
                 action_type: "user_permission_removed",
-                endpoint: Some(&format!("/admin/users/{}/permissions", user_id)),
+                endpoint: Some(&format!(
+                    "/admin/users/{}/permissions",
+                    user_id
+                )),
                 http_method: Some("DELETE"),
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
@@ -1265,7 +1273,10 @@ pub async fn remove_role_permission(
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
                 action_type: "permission_removed",
-                endpoint: Some(&format!("/admin/roles/{}/permissions", role_id)),
+                endpoint: Some(&format!(
+                    "/admin/roles/{}/permissions",
+                    role_id
+                )),
                 http_method: Some("DELETE"),
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,

@@ -2,7 +2,9 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::{AbortsQuery, ApprovalStateRes},
     identity::{
-        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey, Signature, Signed, keys::{Ed25519Signer, KeyPair}
+        DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
+        Signature, Signed,
+        keys::{Ed25519Signer, KeyPair},
     },
     request::{
         ConfirmRequest, CreateRequest, EventRequest, FactRequest,
@@ -15,7 +17,7 @@ use ave_core::{
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
         AveInternalDBFeatureConfig, Config, SinkAuth,
-    }
+    },
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
@@ -103,7 +105,7 @@ pub async fn create_node(
         &mut registry,
         "ave",
         graceful_token.clone(),
-        crash_token
+        crash_token,
     )
     .await
     .unwrap();
@@ -355,13 +357,16 @@ pub async fn get_abort_request(
 ) -> Result<PaginatorAborts, Box<dyn std::error::Error>> {
     loop {
         if let Ok(state) = node
-            .get_aborts(subject_id.clone(), AbortsQuery {
-                request_id: Some(request_id.to_string()),
-                sn: None,
-                quantity: None,
-                page: None,
-                reverse: None,
-            })
+            .get_aborts(
+                subject_id.clone(),
+                AbortsQuery {
+                    request_id: Some(request_id.to_string()),
+                    sn: None,
+                    quantity: None,
+                    page: None,
+                    reverse: None,
+                },
+            )
             .await
         {
             return Ok(state);

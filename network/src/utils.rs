@@ -313,7 +313,10 @@ async fn request_peer_lists(
     crash_token: CancellationToken,
     list_kind: &'static str,
 ) -> (Vec<String>, u16) {
-    if services.is_empty() || graceful_token.is_cancelled() || crash_token.is_cancelled() {
+    if services.is_empty()
+        || graceful_token.is_cancelled()
+        || crash_token.is_cancelled()
+    {
         return (vec![], 0);
     }
 
@@ -321,7 +324,7 @@ async fn request_peer_lists(
         let client = client.clone();
         let graceful_token = graceful_token.clone();
         let crash_token = crash_token.clone();
-        
+
         async move {
             request_peer_list(
                 client.clone(),

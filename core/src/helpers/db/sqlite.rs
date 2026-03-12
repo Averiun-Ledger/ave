@@ -420,8 +420,8 @@ impl DbPrometheusMetrics {
     fn new() -> Self {
         Self {
             reader_wait_seconds: Histogram::new(vec![
-                0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
-                0.25, 0.5, 1.0,
+                0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                0.5, 1.0,
             ]),
             writer_queue_depth: Gauge::default(),
             writer_queue_depth_max: Gauge::default(),
@@ -435,8 +435,8 @@ impl DbPrometheusMetrics {
             page_anchor_miss_total: Counter::default(),
             pages_walked_from_anchor_total: Counter::default(),
             count_query_duration_seconds: Histogram::new(vec![
-                0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
-                0.25, 0.5, 1.0,
+                0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                0.5, 1.0,
             ]),
         }
     }
@@ -557,9 +557,7 @@ impl SqliteMetrics {
         self.reader_wait_count.fetch_add(1, Ordering::Relaxed);
         Self::update_max_u64(&self.reader_wait_ns_max, ns);
         if let Some(metrics) = self.prometheus.get() {
-            metrics
-                .reader_wait_seconds
-                .observe(Self::ns_to_seconds(ns));
+            metrics.reader_wait_seconds.observe(Self::ns_to_seconds(ns));
         }
     }
 
@@ -599,9 +597,9 @@ impl SqliteMetrics {
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_queue_depth.set(depth as i64);
             metrics.writer_batch_size.observe(size as f64);
-            metrics.writer_batch_size_max.set(
-                self.writer_batch_size_max.load(Ordering::Relaxed) as i64,
-            );
+            metrics
+                .writer_batch_size_max
+                .set(self.writer_batch_size_max.load(Ordering::Relaxed) as i64);
         }
     }
 
@@ -610,9 +608,10 @@ impl SqliteMetrics {
         Self::update_max_usize(&self.writer_retry_attempt_max, attempt);
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_batch_retries_total.inc();
-            metrics.writer_retry_attempt_max.set(
-                self.writer_retry_attempt_max.load(Ordering::Relaxed) as i64,
-            );
+            metrics
+                .writer_retry_attempt_max
+                .set(self.writer_retry_attempt_max.load(Ordering::Relaxed)
+                    as i64);
         }
     }
 
@@ -662,7 +661,8 @@ impl SqliteMetrics {
         let writer_batch_total =
             self.writer_batch_size_total.load(Ordering::Relaxed);
         let count_query_count = self.count_query_count.load(Ordering::Relaxed);
-        let count_query_total = self.count_query_ns_total.load(Ordering::Relaxed);
+        let count_query_total =
+            self.count_query_ns_total.load(Ordering::Relaxed);
 
         DbMetricsSnapshot {
             reader_wait_count,
@@ -688,9 +688,7 @@ impl SqliteMetrics {
             writer_batch_max_size: self
                 .writer_batch_size_max
                 .load(Ordering::Relaxed),
-            writer_retry_count: self
-                .writer_retry_count
-                .load(Ordering::Relaxed),
+            writer_retry_count: self.writer_retry_count.load(Ordering::Relaxed),
             writer_retry_max_attempt: self
                 .writer_retry_attempt_max
                 .load(Ordering::Relaxed),
@@ -714,22 +712,22 @@ impl SqliteMetrics {
     }
 
     fn register_prometheus_metrics(&self, registry: &mut Registry) {
-        let metrics = self.prometheus.get_or_init(|| {
-            Arc::new(DbPrometheusMetrics::new())
-        });
+        let metrics = self
+            .prometheus
+            .get_or_init(|| Arc::new(DbPrometheusMetrics::new()));
         metrics.register_into(registry);
         metrics.writer_queue_depth.set(
             self.writer_queue_depth_current.load(Ordering::Relaxed) as i64,
         );
-        metrics.writer_queue_depth_max.set(
-            self.writer_queue_depth_max.load(Ordering::Relaxed) as i64,
-        );
-        metrics.writer_batch_size_max.set(
-            self.writer_batch_size_max.load(Ordering::Relaxed) as i64,
-        );
-        metrics.writer_retry_attempt_max.set(
-            self.writer_retry_attempt_max.load(Ordering::Relaxed) as i64,
-        );
+        metrics
+            .writer_queue_depth_max
+            .set(self.writer_queue_depth_max.load(Ordering::Relaxed) as i64);
+        metrics
+            .writer_batch_size_max
+            .set(self.writer_batch_size_max.load(Ordering::Relaxed) as i64);
+        metrics
+            .writer_retry_attempt_max
+            .set(self.writer_retry_attempt_max.load(Ordering::Relaxed) as i64);
     }
 }
 
@@ -766,7 +764,10 @@ impl PageAnchorCache {
     }
 
     fn current_subject_generation(&self, subject_id: &str) -> u64 {
-        self.subject_generations.get(subject_id).copied().unwrap_or(0)
+        self.subject_generations
+            .get(subject_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn lookup_anchor(
@@ -776,8 +777,10 @@ impl PageAnchorCache {
         target_page: u64,
     ) -> Option<(u64, String)> {
         let subject_generation = self.current_subject_generation(subject_id);
-        let entry_generation =
-            self.query_entries.get(key).map(|entry| entry.subject_generation)?;
+        let entry_generation = self
+            .query_entries
+            .get(key)
+            .map(|entry| entry.subject_generation)?;
         if entry_generation != subject_generation {
             self.query_entries.remove(key);
             return None;
@@ -837,8 +840,10 @@ impl PageAnchorCache {
 
     fn lookup_count(&mut self, key: &str, subject_id: &str) -> Option<u64> {
         let subject_generation = self.current_subject_generation(subject_id);
-        let entry_generation =
-            self.count_entries.get(key).map(|entry| entry.subject_generation)?;
+        let entry_generation = self
+            .count_entries
+            .get(key)
+            .map(|entry| entry.subject_generation)?;
         if entry_generation != subject_generation {
             self.count_entries.remove(key);
             return None;
@@ -940,7 +945,7 @@ impl ReadStore for SqliteReadStore {
         self.with_reader(move |conn| {
             get_aborts_from_conn(conn, runtime.as_ref(), &subject_id, query)
         })
-            .await
+        .await
     }
 
     async fn get_subject_state(
@@ -1040,7 +1045,10 @@ impl SqliteLocal {
     }
 
     pub fn register_prometheus_metrics(&self, registry: &mut Registry) {
-        self.reader.runtime.metrics.register_prometheus_metrics(registry);
+        self.reader
+            .runtime
+            .metrics
+            .register_prometheus_metrics(registry);
     }
 }
 
@@ -1235,9 +1243,8 @@ fn persist_write_batch(
     for job in jobs {
         match &job.command {
             WriteCommand::SignedLedger(event) => {
-                touched_subjects.push(
-                    event.content().get_subject_id().to_string(),
-                );
+                touched_subjects
+                    .push(event.content().get_subject_id().to_string());
                 insert_event_with_stmt(&mut insert_event_stmt, event)?
             }
             WriteCommand::SubjectState(metadata) => {
@@ -1344,10 +1351,9 @@ impl SqliteRuntime {
         subject_id: &str,
         target_page: u64,
     ) -> Option<(u64, String)> {
-        self.page_cache
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.lookup_anchor(key, subject_id, target_page))
+        self.page_cache.lock().ok().and_then(|mut cache| {
+            cache.lookup_anchor(key, subject_id, target_page)
+        })
     }
 
     fn store_page_anchor(
@@ -1497,9 +1503,7 @@ fn open_writer_connection(
         DatabaseError::Migration(e.to_string())
     })?;
 
-    conn.set_prepared_statement_cache_capacity(
-        WRITER_STATEMENT_CACHE_CAPACITY,
-    );
+    conn.set_prepared_statement_cache_capacity(WRITER_STATEMENT_CACHE_CAPACITY);
 
     Ok(conn)
 }
@@ -1534,9 +1538,7 @@ fn open_reader_connection(
         DatabaseError::ConnectionOpen(e.to_string())
     })?;
 
-    conn.set_prepared_statement_cache_capacity(
-        READER_STATEMENT_CACHE_CAPACITY,
-    );
+    conn.set_prepared_statement_cache_capacity(READER_STATEMENT_CACHE_CAPACITY);
 
     Ok(conn)
 }
@@ -1773,12 +1775,14 @@ fn get_first_or_end_events_from_conn(
     let (sql, event_type_param) = match (reverse, event_type) {
         (false, None) => (SQL_GET_FIRST_EVENTS, None),
         (true, None) => (SQL_GET_LAST_EVENTS, None),
-        (false, Some(et)) => {
-            (SQL_GET_FIRST_EVENTS_BY_TYPE, Some(event_request_type_to_string(&et)?))
-        }
-        (true, Some(et)) => {
-            (SQL_GET_LAST_EVENTS_BY_TYPE, Some(event_request_type_to_string(&et)?))
-        }
+        (false, Some(et)) => (
+            SQL_GET_FIRST_EVENTS_BY_TYPE,
+            Some(event_request_type_to_string(&et)?),
+        ),
+        (true, Some(et)) => (
+            SQL_GET_LAST_EVENTS_BY_TYPE,
+            Some(event_request_type_to_string(&et)?),
+        ),
     };
 
     let mut stmt = conn
@@ -1794,9 +1798,7 @@ fn get_first_or_end_events_from_conn(
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>(),
         None => stmt
-            .query_map(params![subject_id, limit_i64], |row| {
-                map_event_row(row)
-            })
+            .query_map(params![subject_id, limit_i64], |row| map_event_row(row))
             .map_err(|e| DatabaseError::Query(e.to_string()))?
             .map(|r| r.map_err(|e| DatabaseError::Query(e.to_string())))
             .collect::<Result<Vec<_>, DatabaseError>>(),
@@ -1883,7 +1885,9 @@ fn count_aborts_from_conn(
     query: &AbortsQuery,
 ) -> Result<u64, DatabaseError> {
     let count_cache_key = build_aborts_count_cache_key(subject_id, query);
-    if let Some(total) = runtime.lookup_count_cache(&count_cache_key, subject_id) {
+    if let Some(total) =
+        runtime.lookup_count_cache(&count_cache_key, subject_id)
+    {
         return Ok(total);
     }
 
@@ -1900,7 +1904,9 @@ fn count_aborts_from_conn(
                 "COUNT(*) returned invalid value".to_owned(),
             )
         })?;
-        runtime.metrics.record_count_query_duration(started.elapsed());
+        runtime
+            .metrics
+            .record_count_query_duration(started.elapsed());
         runtime.store_count_cache(count_cache_key, subject_id, total);
         return Ok(total);
     }
@@ -1937,7 +1943,9 @@ fn count_aborts_from_conn(
             "COUNT(*) returned invalid value".to_owned(),
         )
     })?;
-    runtime.metrics.record_count_query_duration(started.elapsed());
+    runtime
+        .metrics
+        .record_count_query_duration(started.elapsed());
     runtime.store_count_cache(count_cache_key, subject_id, total);
     Ok(total)
 }
@@ -1968,7 +1976,8 @@ fn resolve_abort_page_from_anchors(
         }
     }
 
-    if page > current_page && (page - current_page) > PAGE_ANCHOR_WALK_THRESHOLD {
+    if page > current_page && (page - current_page) > PAGE_ANCHOR_WALK_THRESHOLD
+    {
         let offset = page_offset(page, query.quantity)?;
         let aborts =
             fetch_aborts_with_offset(conn, subject_id, &query, offset)?;
@@ -1992,7 +2001,8 @@ fn resolve_abort_page_from_anchors(
     }
 
     loop {
-        let aborts = fetch_aborts_with_cursor(conn, subject_id, &current_query)?;
+        let aborts =
+            fetch_aborts_with_cursor(conn, subject_id, &current_query)?;
         if aborts.is_empty() {
             return Ok(aborts);
         }
@@ -2109,10 +2119,12 @@ fn fetch_subject_only_aborts_with_cursor(
             let mut stmt = conn
                 .prepare_cached(SQL_GET_ABORTS_SUBJECT_ONLY_ASC)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            stmt.query_map(params![subject_id, limit_i64], |row| map_abort_row(row))
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
-                .collect::<Result<Vec<_>, DatabaseError>>()
+            stmt.query_map(params![subject_id, limit_i64], |row| {
+                map_abort_row(row)
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()
         }
         (false, Some(cursor)) => {
             let (cursor_sn, cursor_request_id) = parse_abort_cursor(cursor)?;
@@ -2131,10 +2143,12 @@ fn fetch_subject_only_aborts_with_cursor(
             let mut stmt = conn
                 .prepare_cached(SQL_GET_ABORTS_SUBJECT_ONLY_DESC)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            stmt.query_map(params![subject_id, limit_i64], |row| map_abort_row(row))
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
-                .collect::<Result<Vec<_>, DatabaseError>>()
+            stmt.query_map(params![subject_id, limit_i64], |row| {
+                map_abort_row(row)
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()
         }
         (true, Some(cursor)) => {
             let (cursor_sn, cursor_request_id) = parse_abort_cursor(cursor)?;
@@ -2245,7 +2259,9 @@ fn count_events_from_conn(
     query: &EventsQuery,
 ) -> Result<u64, DatabaseError> {
     let count_cache_key = build_events_count_cache_key(subject_id, query)?;
-    if let Some(total) = runtime.lookup_count_cache(&count_cache_key, subject_id) {
+    if let Some(total) =
+        runtime.lookup_count_cache(&count_cache_key, subject_id)
+    {
         return Ok(total);
     }
 
@@ -2266,7 +2282,9 @@ fn count_events_from_conn(
                 "COUNT(*) returned invalid value".to_owned(),
             )
         })?;
-        runtime.metrics.record_count_query_duration(started.elapsed());
+        runtime
+            .metrics
+            .record_count_query_duration(started.elapsed());
         runtime.store_count_cache(count_cache_key, subject_id, total);
         return Ok(total);
     }
@@ -2303,7 +2321,9 @@ fn count_events_from_conn(
             "COUNT(*) returned invalid value".to_owned(),
         )
     })?;
-    runtime.metrics.record_count_query_duration(started.elapsed());
+    runtime
+        .metrics
+        .record_count_query_duration(started.elapsed());
     runtime.store_count_cache(count_cache_key, subject_id, total);
     Ok(total)
 }
@@ -2334,7 +2354,8 @@ fn resolve_event_page_from_anchors(
         }
     }
 
-    if page > current_page && (page - current_page) > PAGE_ANCHOR_WALK_THRESHOLD {
+    if page > current_page && (page - current_page) > PAGE_ANCHOR_WALK_THRESHOLD
+    {
         let offset = page_offset(page, query.quantity)?;
         let events =
             fetch_events_with_offset(conn, subject_id, &query, offset)?;
@@ -2361,7 +2382,8 @@ fn resolve_event_page_from_anchors(
     }
 
     loop {
-        let events = fetch_events_with_cursor(conn, subject_id, &current_query)?;
+        let events =
+            fetch_events_with_cursor(conn, subject_id, &current_query)?;
         if events.is_empty() {
             return Err(DatabaseError::NoEvents(subject_id.to_owned()));
         }
@@ -2471,10 +2493,12 @@ fn fetch_subject_only_events_with_cursor(
             let mut stmt = conn
                 .prepare_cached(SQL_GET_EVENTS_SUBJECT_ONLY_ASC)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            stmt.query_map(params![subject_id, limit_i64], |row| map_event_row(row))
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
-                .collect::<Result<Vec<_>, DatabaseError>>()
+            stmt.query_map(params![subject_id, limit_i64], |row| {
+                map_event_row(row)
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()
         }
         (false, Some(cursor)) => {
             let mut stmt = conn
@@ -2492,10 +2516,12 @@ fn fetch_subject_only_events_with_cursor(
             let mut stmt = conn
                 .prepare_cached(SQL_GET_EVENTS_SUBJECT_ONLY_DESC)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            stmt.query_map(params![subject_id, limit_i64], |row| map_event_row(row))
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
-                .collect::<Result<Vec<_>, DatabaseError>>()
+            stmt.query_map(params![subject_id, limit_i64], |row| {
+                map_event_row(row)
+            })
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
+            .collect::<Result<Vec<_>, DatabaseError>>()
         }
         (true, Some(cursor)) => {
             let mut stmt = conn
@@ -2670,27 +2696,27 @@ fn build_events_count_cache_key(
     ))
 }
 
-fn build_aborts_page_cache_key(subject_id: &str, query: &AbortsQuery) -> String {
+fn build_aborts_page_cache_key(
+    subject_id: &str,
+    query: &AbortsQuery,
+) -> String {
     format!(
         "aborts|subject={subject_id}|request_id={}|sn={}|quantity={}|reverse={}",
         query.request_id.as_deref().unwrap_or_default(),
-        query
-            .sn
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
+        query.sn.map(|value| value.to_string()).unwrap_or_default(),
         query.quantity.unwrap_or(50).max(1),
         query.reverse.unwrap_or(false),
     )
 }
 
-fn build_aborts_count_cache_key(subject_id: &str, query: &AbortsQuery) -> String {
+fn build_aborts_count_cache_key(
+    subject_id: &str,
+    query: &AbortsQuery,
+) -> String {
     format!(
         "aborts-count|subject={subject_id}|request_id={}|sn={}",
         query.request_id.as_deref().unwrap_or_default(),
-        query
-            .sn
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
+        query.sn.map(|value| value.to_string()).unwrap_or_default(),
     )
 }
 
@@ -2928,8 +2954,10 @@ fn upsert_abort_with_stmt(
         None
     };
 
-    stmt.execute(params![request_id, subject_id, sn_i64, error, who, abort_type])
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    stmt.execute(params![
+        request_id, subject_id, sn_i64, error, who, abort_type
+    ])
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     Ok(())
 }

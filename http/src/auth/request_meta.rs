@@ -1,7 +1,10 @@
 use ave_bridge::ProxyConfig;
 use axum::http::HeaderMap;
 use ip_network::IpNetwork;
-use std::{net::{IpAddr, SocketAddr}, str::FromStr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestMeta {
@@ -17,9 +20,9 @@ pub fn extract_request_meta(
     RequestMeta {
         ip_address: resolve_client_ip(headers, addr, proxy)
             .map(|ip| ip.to_string()),
-        user_agent: headers.get("User-Agent").and_then(|value| {
-            value.to_str().ok().map(ToOwned::to_owned)
-        }),
+        user_agent: headers
+            .get("User-Agent")
+            .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
     }
 }
 

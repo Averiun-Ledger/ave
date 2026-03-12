@@ -228,11 +228,7 @@ async fn test_concurrent_api_key_verification() {
         let db_clone = db.clone();
         let key_clone = api_key.clone();
         let handle = std::thread::spawn(move || {
-            db_clone.authenticate_api_key_request(
-                &key_clone,
-                None,
-                "/peer-id",
-            )
+            db_clone.authenticate_api_key_request(&key_clone, None, "/peer-id")
         });
         handles.push(handle);
     }
@@ -252,9 +248,14 @@ async fn test_auth_metrics_are_exposed_in_prometheus() {
         .await
         .expect("admin login");
 
-    let (status, body) =
-        common::make_app_request_raw(&app, "/metrics", "GET", Some(&api_key), None)
-            .await;
+    let (status, body) = common::make_app_request_raw(
+        &app,
+        "/metrics",
+        "GET",
+        Some(&api_key),
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("auth_db_requests_total"));
@@ -351,11 +352,17 @@ async fn test_zero_ttl_api_key_never_expires() {
         .unwrap();
 
     // Should work immediately
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 
     // Should still work after a delay
     std::thread::sleep(std::time::Duration::from_secs(1));
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]
@@ -402,7 +409,10 @@ async fn test_explicit_zero_ttl_overrides_default() {
     );
 
     // Verify key works
-    assert!(db.authenticate_api_key_request(&api_key_zero, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key_zero, None, "/peer-id")
+            .is_ok()
+    );
 
     // Test 2: Create key without TTL (should use default_ttl of 30 days)
     let (_api_key_default, key_info_default) = db
@@ -2155,14 +2165,16 @@ async fn test_api_keys_revoked_on_admin_password_reset() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(auth_result.is_ok(), "API key should work before reset");
 
     // Admin resets password
     db.admin_reset_password(user.id, "NewPass123!").unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password reset"
@@ -2193,14 +2205,16 @@ async fn test_api_keys_revoked_on_user_password_change() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(auth_result.is_ok(), "API key should work before change");
 
     // User changes password via update_user (simulating authenticated password change)
     db.update_user(user.id, Some("NewPass123!"), None).unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password change"
@@ -2287,7 +2301,8 @@ async fn test_api_keys_revoked_on_update_user_password_change() {
         .unwrap();
 
     // Verify the key works
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_ok(),
         "API key should work before password change"
@@ -2297,7 +2312,8 @@ async fn test_api_keys_revoked_on_update_user_password_change() {
     db.update_user(user.id, Some("NewPass123!"), None).unwrap();
 
     // Verify the key is now revoked
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be revoked after password change via update_user"
@@ -2322,7 +2338,8 @@ async fn test_api_keys_blocked_when_must_change_password() {
         .unwrap();
 
     // Try to use API key - should be blocked
-    let auth_result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&api_key, None, "/peer-id");
     assert!(
         auth_result.is_err(),
         "API key should be blocked when must_change_password is set"
@@ -2349,7 +2366,8 @@ async fn test_api_keys_blocked_when_must_change_password() {
         .create_api_key(user.id, Some("valid_key"), None, None, true)
         .unwrap();
 
-    let auth_result = db.authenticate_api_key_request(&new_api_key, None, "/peer-id");
+    let auth_result =
+        db.authenticate_api_key_request(&new_api_key, None, "/peer-id");
     assert!(
         auth_result.is_ok(),
         "API key should work after password has been changed"
@@ -2393,7 +2411,10 @@ async fn test_superadmin_can_delete_own_api_keys() {
         .unwrap();
 
     // Verify key works
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 
     // Superadmin revokes their own key
     let result = db.revoke_api_key(
@@ -2407,7 +2428,10 @@ async fn test_superadmin_can_delete_own_api_keys() {
     );
 
     // Verify key no longer works
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_err());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_err()
+    );
 }
 
 /// SECURITY TEST: Permission conflicts - user deny overrides role allow

@@ -3,8 +3,8 @@
 // This module provides database operations for API keys
 
 use super::crypto::{extract_key_prefix, generate_api_key, hash_api_key};
-use super::database_audit::AuditLogParams;
 use super::database::{AuthDatabase, DatabaseError};
+use super::database_audit::AuditLogParams;
 use super::models::*;
 use rusqlite::{
     OptionalExtension, Result as SqliteResult, TransactionBehavior, params,
@@ -109,7 +109,8 @@ impl AuthDatabase {
         let api_key = generate_api_key(&self.config.api_key.prefix);
 
         // Extract visible prefix
-        let key_prefix = extract_key_prefix(&api_key, &self.config.api_key.prefix);
+        let key_prefix =
+            extract_key_prefix(&api_key, &self.config.api_key.prefix);
 
         // Hash the key for storage
         let key_hash = hash_api_key(&api_key);

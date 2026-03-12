@@ -2,8 +2,8 @@
 //
 // Shared utilities and helpers for all auth tests
 
-use std::net::SocketAddr;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::sync::{
     Arc,
     atomic::{AtomicU16, Ordering},
@@ -40,14 +40,20 @@ pub trait TestDbExt {
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
         must_change_password: Option<bool>,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn update_user(
         &self,
         user_id: i64,
         password: Option<&str>,
         is_active: Option<bool>,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn delete_user(
         &self,
@@ -71,19 +77,28 @@ pub trait TestDbExt {
         &self,
         user_id: i64,
         new_password: &str,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn create_role(
         &self,
         name: &str,
         description: Option<&str>,
-    ) -> Result<ave_http::auth::models::Role, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::Role,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn update_role(
         &self,
         role_id: i64,
         description: Option<&str>,
-    ) -> Result<ave_http::auth::models::Role, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::Role,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn delete_role(
         &self,
@@ -127,7 +142,10 @@ pub trait TestDbExt {
         name: &str,
         description: Option<&str>,
         monthly_events: i64,
-    ) -> Result<ave_http::auth::models::UsagePlan, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::UsagePlan,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn update_usage_plan(
         &self,
@@ -135,7 +153,10 @@ pub trait TestDbExt {
         name: Option<&str>,
         description: Option<&str>,
         monthly_events: Option<i64>,
-    ) -> Result<ave_http::auth::models::UsagePlan, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::UsagePlan,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn delete_usage_plan(
         &self,
@@ -156,7 +177,10 @@ pub trait TestDbExt {
         usage_month: Option<&str>,
         reason: Option<&str>,
         created_by: Option<i64>,
-    ) -> Result<ave_http::auth::models::QuotaExtensionInfo, ave_http::auth::database::DatabaseError>;
+    ) -> Result<
+        ave_http::auth::models::QuotaExtensionInfo,
+        ave_http::auth::database::DatabaseError,
+    >;
 
     fn revoke_api_key(
         &self,
@@ -174,7 +198,10 @@ impl TestDbExt for AuthDatabase {
         role_ids: Option<Vec<i64>>,
         created_by: Option<i64>,
         must_change_password: Option<bool>,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.create_user_transactional(
             username,
             password,
@@ -190,14 +217,12 @@ impl TestDbExt for AuthDatabase {
         user_id: i64,
         password: Option<&str>,
         is_active: Option<bool>,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.update_user_with_roles_transactional(
-            user_id,
-            password,
-            is_active,
-            None,
-            None,
-            None,
+            user_id, password, is_active, None, None, None,
         )
     }
 
@@ -214,7 +239,12 @@ impl TestDbExt for AuthDatabase {
         role_id: i64,
         assigned_by: Option<i64>,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
-        self.assign_role_to_user_transactional(user_id, role_id, assigned_by, None)
+        self.assign_role_to_user_transactional(
+            user_id,
+            role_id,
+            assigned_by,
+            None,
+        )
     }
 
     fn remove_role_from_user(
@@ -229,7 +259,10 @@ impl TestDbExt for AuthDatabase {
         &self,
         user_id: i64,
         new_password: &str,
-    ) -> Result<ave_http::auth::models::User, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::User,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.admin_reset_password_transactional(user_id, new_password, None)
     }
 
@@ -237,7 +270,10 @@ impl TestDbExt for AuthDatabase {
         &self,
         name: &str,
         description: Option<&str>,
-    ) -> Result<ave_http::auth::models::Role, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::Role,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.create_role_transactional(name, description, None)
     }
 
@@ -245,7 +281,10 @@ impl TestDbExt for AuthDatabase {
         &self,
         role_id: i64,
         description: Option<&str>,
-    ) -> Result<ave_http::auth::models::Role, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::Role,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.update_role_transactional(role_id, description, None)
     }
 
@@ -263,7 +302,9 @@ impl TestDbExt for AuthDatabase {
         action: &str,
         allowed: bool,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
-        self.set_role_permission_transactional(role_id, resource, action, allowed, None)
+        self.set_role_permission_transactional(
+            role_id, resource, action, allowed, None,
+        )
     }
 
     fn remove_role_permission(
@@ -272,7 +313,9 @@ impl TestDbExt for AuthDatabase {
         resource: &str,
         action: &str,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
-        self.remove_role_permission_transactional(role_id, resource, action, None)
+        self.remove_role_permission_transactional(
+            role_id, resource, action, None,
+        )
     }
 
     fn set_user_permission(
@@ -284,12 +327,7 @@ impl TestDbExt for AuthDatabase {
         granted_by: Option<i64>,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
         self.set_user_permission_transactional(
-            user_id,
-            resource,
-            action,
-            allowed,
-            granted_by,
-            None,
+            user_id, resource, action, allowed, granted_by, None,
         )
     }
 
@@ -299,7 +337,9 @@ impl TestDbExt for AuthDatabase {
         resource: &str,
         action: &str,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
-        self.remove_user_permission_transactional(user_id, resource, action, None)
+        self.remove_user_permission_transactional(
+            user_id, resource, action, None,
+        )
     }
 
     fn create_usage_plan(
@@ -308,8 +348,17 @@ impl TestDbExt for AuthDatabase {
         name: &str,
         description: Option<&str>,
         monthly_events: i64,
-    ) -> Result<ave_http::auth::models::UsagePlan, ave_http::auth::database::DatabaseError> {
-        self.create_usage_plan_transactional(id, name, description, monthly_events, None)
+    ) -> Result<
+        ave_http::auth::models::UsagePlan,
+        ave_http::auth::database::DatabaseError,
+    > {
+        self.create_usage_plan_transactional(
+            id,
+            name,
+            description,
+            monthly_events,
+            None,
+        )
     }
 
     fn update_usage_plan(
@@ -318,8 +367,17 @@ impl TestDbExt for AuthDatabase {
         name: Option<&str>,
         description: Option<&str>,
         monthly_events: Option<i64>,
-    ) -> Result<ave_http::auth::models::UsagePlan, ave_http::auth::database::DatabaseError> {
-        self.update_usage_plan_transactional(id, name, description, monthly_events, None)
+    ) -> Result<
+        ave_http::auth::models::UsagePlan,
+        ave_http::auth::database::DatabaseError,
+    > {
+        self.update_usage_plan_transactional(
+            id,
+            name,
+            description,
+            monthly_events,
+            None,
+        )
     }
 
     fn delete_usage_plan(
@@ -335,7 +393,12 @@ impl TestDbExt for AuthDatabase {
         plan_id: Option<&str>,
         assigned_by: Option<i64>,
     ) -> Result<(), ave_http::auth::database::DatabaseError> {
-        self.assign_api_key_plan_transactional(key_id, plan_id, assigned_by, None)
+        self.assign_api_key_plan_transactional(
+            key_id,
+            plan_id,
+            assigned_by,
+            None,
+        )
     }
 
     fn add_quota_extension(
@@ -345,7 +408,10 @@ impl TestDbExt for AuthDatabase {
         usage_month: Option<&str>,
         reason: Option<&str>,
         created_by: Option<i64>,
-    ) -> Result<ave_http::auth::models::QuotaExtensionInfo, ave_http::auth::database::DatabaseError> {
+    ) -> Result<
+        ave_http::auth::models::QuotaExtensionInfo,
+        ave_http::auth::database::DatabaseError,
+    > {
         self.add_quota_extension_transactional(
             key_id,
             extra_events,
@@ -454,7 +520,8 @@ async fn build_test_router(
     let ave_db_path = ave_db_temp_dir.path().to_string_lossy().to_string();
     let external_db_path =
         external_db_temp_dir.path().to_string_lossy().to_string();
-    let contracts_path = contracts_temp_dir.path().to_string_lossy().to_string();
+    let contracts_path =
+        contracts_temp_dir.path().to_string_lossy().to_string();
     let keys_path = keys_dir.path().to_string_lossy().to_string();
     let auth_path = auth_dir.path().to_string_lossy().to_string();
 
@@ -545,9 +612,10 @@ async fn build_test_router(
         serde_json::from_str(&bridge_config_json)
             .expect("Failed to parse bridge config");
 
-    let (bridge, runners) = Bridge::build(&bridge_config, "test", "", "", None, None)
-        .await
-        .expect("Failed to create bridge");
+    let (bridge, runners) =
+        Bridge::build(&bridge_config, "test", "", "", None, None)
+            .await
+            .expect("Failed to create bridge");
 
     let auth_db: Option<Arc<AuthDatabase>> =
         build_auth(&bridge_config.auth, "AdminPass123!", None)
@@ -595,9 +663,12 @@ impl TestServer {
 
         // Spawn the server
         let handle = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .expect("Can not run axum server");
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("Can not run axum server");
         });
 
         // Give the server a moment to start

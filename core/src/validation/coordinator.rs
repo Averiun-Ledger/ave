@@ -62,7 +62,7 @@ pub enum ValiCoordinatorMessage {
         version: u64,
         sender: PublicKey,
     },
-    EndRetry
+    EndRetry,
 }
 
 impl Message for ValiCoordinatorMessage {}
@@ -133,7 +133,7 @@ impl Handler<Self> for ValiCoordinator {
                 }
 
                 ctx.stop(None).await;
-            },
+            }
             ValiCoordinatorMessage::NetworkValidation {
                 validation_req,
                 node_key,
@@ -174,7 +174,12 @@ impl Handler<Self> for ValiCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
 
-                let retry_actor = RetryActor::new_with_parent_message::<Self>(target, message, strategy, ValiCoordinatorMessage::EndRetry);
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(
+                    target,
+                    message,
+                    strategy,
+                    ValiCoordinatorMessage::EndRetry,
+                );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(

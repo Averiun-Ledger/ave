@@ -44,7 +44,8 @@ pub async fn system(
     crash_token: CancellationToken,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
     // Create de actor system.
-    let (system, mut runner) = ActorSystem::create(graceful_token.clone(), crash_token.clone());
+    let (system, mut runner) =
+        ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
     system
         .add_helper("config", ConfigHelper::from(config.clone()))

@@ -870,8 +870,10 @@ impl RouteMethodSpec {
 }
 
 fn path_matches_template(template: &str, path: &str) -> bool {
-    let mut template_segments = template.split('/').filter(|segment| !segment.is_empty());
-    let mut path_segments = path.split('/').filter(|segment| !segment.is_empty());
+    let mut template_segments =
+        template.split('/').filter(|segment| !segment.is_empty());
+    let mut path_segments =
+        path.split('/').filter(|segment| !segment.is_empty());
 
     loop {
         match (template_segments.next(), path_segments.next()) {
@@ -1009,58 +1011,98 @@ macro_rules! append_public_route {
 
 macro_rules! match_catalog_route {
     ($method:expr, $path:expr, get, $template:literal, $handler:path, allow_any) => {
-        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
+        if RouteMethodSpec::Get.matches($method)
+            && path_matches_template($template, $path)
+        {
             return Some(PermissionResult::AllowAny);
         }
     };
     ($method:expr, $path:expr, post, $template:literal, $handler:path, allow_any) => {
-        if RouteMethodSpec::Post.matches($method) && path_matches_template($template, $path) {
+        if RouteMethodSpec::Post.matches($method)
+            && path_matches_template($template, $path)
+        {
             return Some(PermissionResult::AllowAny);
         }
     };
     ($method:expr, $path:expr, put, $template:literal, $handler:path, allow_any) => {
-        if RouteMethodSpec::Put.matches($method) && path_matches_template($template, $path) {
+        if RouteMethodSpec::Put.matches($method)
+            && path_matches_template($template, $path)
+        {
             return Some(PermissionResult::AllowAny);
         }
     };
     ($method:expr, $path:expr, patch, $template:literal, $handler:path, allow_any) => {
-        if RouteMethodSpec::Patch.matches($method) && path_matches_template($template, $path) {
+        if RouteMethodSpec::Patch.matches($method)
+            && path_matches_template($template, $path)
+        {
             return Some(PermissionResult::AllowAny);
         }
     };
     ($method:expr, $path:expr, delete, $template:literal, $handler:path, allow_any) => {
-        if RouteMethodSpec::Delete.matches($method) && path_matches_template($template, $path) {
+        if RouteMethodSpec::Delete.matches($method)
+            && path_matches_template($template, $path)
+        {
             return Some(PermissionResult::AllowAny);
         }
     };
     ($method:expr, $path:expr, get, $template:literal, $handler:path, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Get.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
     ($method:expr, $path:expr, post, $template:literal, $handler:path, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Post.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Post.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
     ($method:expr, $path:expr, put, $template:literal, $handler:path, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Put.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Put.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
     ($method:expr, $path:expr, patch, $template:literal, $handler:path, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Patch.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Patch.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
     ($method:expr, $path:expr, delete, $template:literal, $handler:path, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Delete.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Delete.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
     ($method:expr, $path:expr, external_get, $template:literal, $handler:ident, require $resource:ident $action:ident) => {
-        if RouteMethodSpec::Get.matches($method) && path_matches_template($template, $path) {
-            return Some(PermissionResult::Require(Resource::$resource, Action::$action));
+        if RouteMethodSpec::Get.matches($method)
+            && path_matches_template($template, $path)
+        {
+            return Some(PermissionResult::Require(
+                Resource::$resource,
+                Action::$action,
+            ));
         }
     };
 }
@@ -1229,8 +1271,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<PermissionResult> {
 mod tests {
     use super::*;
     use ave_bridge::auth::{
-        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig,
-        SessionConfig,
+        ApiKeyConfig, AuthConfig, LockoutConfig, RateLimitConfig, SessionConfig,
     };
     use axum::{
         Router,

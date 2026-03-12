@@ -474,7 +474,7 @@ impl Message for NodeMessage {
             | NodeMessage::RejectTransfer(..)
             | NodeMessage::ConfirmTransfer(..)
             | NodeMessage::EOLSubject { .. } => true,
-            _ => false
+            _ => false,
         }
     }
 }

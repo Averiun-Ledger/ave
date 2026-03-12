@@ -52,24 +52,23 @@ impl AuthDatabase {
 
         let plan_info = Self::get_plan_for_key_internal(conn, key_id)?;
 
-        let (
-            plan_id,
-            plan_limit,
-            extensions_total,
-            effective_limit,
-        ) = if let Some((plan_id, plan_limit)) = plan_info {
-            let extensions_total =
-                Self::get_extensions_total_internal(conn, key_id, &usage_month)?;
-            let effective_limit = plan_limit + extensions_total;
+        let (plan_id, plan_limit, extensions_total, effective_limit) =
+            if let Some((plan_id, plan_limit)) = plan_info {
+                let extensions_total = Self::get_extensions_total_internal(
+                    conn,
+                    key_id,
+                    &usage_month,
+                )?;
+                let effective_limit = plan_limit + extensions_total;
 
-            if effective_limit <= 0 {
-                return Err(DatabaseError::RateLimitExceeded(format!(
-                    "Monthly quota exceeded: month={} used={} limit={}",
-                    usage_month, 0, effective_limit
-                )));
-            }
+                if effective_limit <= 0 {
+                    return Err(DatabaseError::RateLimitExceeded(format!(
+                        "Monthly quota exceeded: month={} used={} limit={}",
+                        usage_month, 0, effective_limit
+                    )));
+                }
 
-            let updated = conn
+                let updated = conn
                 .execute(
                     "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
                      VALUES (?1, ?2, 1, ?3)
@@ -80,23 +79,26 @@ impl AuthDatabase {
                 )
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            if updated == 0 {
-                let used_events =
-                    Self::get_used_events_internal(conn, key_id, &usage_month)?;
-                return Err(DatabaseError::RateLimitExceeded(format!(
-                    "Monthly quota exceeded: month={} used={} limit={}",
-                    usage_month, used_events, effective_limit
-                )));
-            }
+                if updated == 0 {
+                    let used_events = Self::get_used_events_internal(
+                        conn,
+                        key_id,
+                        &usage_month,
+                    )?;
+                    return Err(DatabaseError::RateLimitExceeded(format!(
+                        "Monthly quota exceeded: month={} used={} limit={}",
+                        usage_month, used_events, effective_limit
+                    )));
+                }
 
-            (
-                Some(plan_id),
-                Some(plan_limit),
-                extensions_total,
-                Some(effective_limit),
-            )
-        } else {
-            conn.execute(
+                (
+                    Some(plan_id),
+                    Some(plan_limit),
+                    extensions_total,
+                    Some(effective_limit),
+                )
+            } else {
+                conn.execute(
                 "INSERT INTO api_key_usage (api_key_id, usage_month, used_events, updated_at)
                  VALUES (?1, ?2, 1, ?3)
                  ON CONFLICT(api_key_id, usage_month)
@@ -105,8 +107,8 @@ impl AuthDatabase {
             )
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            (None, None, 0, None)
-        };
+                (None, None, 0, None)
+            };
 
         let used_events =
             Self::get_used_events_internal(conn, key_id, &usage_month)?;
@@ -811,5 +813,4 @@ impl AuthDatabase {
             has_quota: plan_limit.is_some(),
         })
     }
-
 }

@@ -17,8 +17,8 @@ use axum::{
 };
 use rand::RngExt;
 use std::fmt::Display;
-use std::{net::SocketAddr, sync::Arc};
 use std::time::Instant;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::{error, warn};
 
 const TARGET: &str = "ave::http::auth";
@@ -300,30 +300,29 @@ pub async fn audit_log_middleware(
 
     // SECURITY FIX: Get IP from socket address only, ignore client headers
     // X-Forwarded-For and X-Real-IP can be spoofed
-    let request_meta = match (
-        req.extensions().get::<ConnectInfo<SocketAddr>>(),
-        req.extensions().get::<Arc<ProxyConfig>>(),
-    ) {
-        (Some(conn), Some(proxy)) => request_meta::extract_request_meta(
-            req.headers(),
-            conn.0,
-            proxy.as_ref(),
-        ),
-        (Some(conn), None) => request_meta::RequestMeta {
-            ip_address: Some(conn.0.ip().to_string()),
-            user_agent: req
-                .headers()
-                .get("User-Agent")
-                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
-        },
-        _ => request_meta::RequestMeta {
-            ip_address: None,
-            user_agent: req
-                .headers()
-                .get("User-Agent")
-                .and_then(|value| value.to_str().ok().map(ToOwned::to_owned)),
-        },
-    };
+    let request_meta =
+        match (
+            req.extensions().get::<ConnectInfo<SocketAddr>>(),
+            req.extensions().get::<Arc<ProxyConfig>>(),
+        ) {
+            (Some(conn), Some(proxy)) => request_meta::extract_request_meta(
+                req.headers(),
+                conn.0,
+                proxy.as_ref(),
+            ),
+            (Some(conn), None) => request_meta::RequestMeta {
+                ip_address: Some(conn.0.ip().to_string()),
+                user_agent: req.headers().get("User-Agent").and_then(|value| {
+                    value.to_str().ok().map(ToOwned::to_owned)
+                }),
+            },
+            _ => request_meta::RequestMeta {
+                ip_address: None,
+                user_agent: req.headers().get("User-Agent").and_then(|value| {
+                    value.to_str().ok().map(ToOwned::to_owned)
+                }),
+            },
+        };
     let ip_address = request_meta.ip_address;
     let user_agent = request_meta.user_agent;
 

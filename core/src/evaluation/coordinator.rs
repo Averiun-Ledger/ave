@@ -176,13 +176,12 @@ impl Handler<Self> for EvalCoordinator {
                     FixedIntervalStrategy::new(3, Duration::from_secs(60)),
                 );
 
-                let retry_actor =
-                    RetryActor::new_with_parent_message::<Self>(
-                        target,
-                        message,
-                        strategy,
-                        EvalCoordinatorMessage::EndRetry,
-                    );
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(
+                    target,
+                    message,
+                    strategy,
+                    EvalCoordinatorMessage::EndRetry,
+                );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(

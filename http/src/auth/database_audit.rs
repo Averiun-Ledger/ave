@@ -191,11 +191,7 @@ impl AuthDatabase {
         params: AuditLogParams,
     ) -> Result<i64, DatabaseError> {
         let conn = self.lock_conn()?;
-        Self::create_audit_log_with_conn(
-            &conn,
-            self.audit_enabled(),
-            params,
-        )
+        Self::create_audit_log_with_conn(&conn, self.audit_enabled(), params)
     }
 
     /// Log an API request if audit logging of requests is enabled
@@ -291,11 +287,7 @@ impl AuthDatabase {
         let mut count_sql =
             String::from("SELECT COUNT(*) FROM audit_logs WHERE 1=1");
         let mut count_params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        append_audit_log_filters(
-            query,
-            &mut count_sql,
-            &mut count_params_vec,
-        );
+        append_audit_log_filters(query, &mut count_sql, &mut count_params_vec);
         let count_params_refs: Vec<&dyn rusqlite::ToSql> =
             count_params_vec.iter().map(|p| p.as_ref()).collect();
         let total: i64 = conn
@@ -600,8 +592,10 @@ impl AuthDatabase {
             }
         };
 
-        let sum_query =
-            format!("SELECT COALESCE(SUM(request_count), 0) FROM rate_limits {}", select_where);
+        let sum_query = format!(
+            "SELECT COALESCE(SUM(request_count), 0) FROM rate_limits {}",
+            select_where
+        );
         let current_count: i64 = conn
             .query_row(
                 &sum_query,
@@ -617,8 +611,10 @@ impl AuthDatabase {
             )));
         }
 
-        let latest_query =
-            format!("SELECT id FROM rate_limits {} ORDER BY window_start DESC, id DESC LIMIT 1", select_where);
+        let latest_query = format!(
+            "SELECT id FROM rate_limits {} ORDER BY window_start DESC, id DESC LIMIT 1",
+            select_where
+        );
         let latest_row_id: Option<i64> = conn
             .query_row(
                 &latest_query,
@@ -663,10 +659,7 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             let allowed = self.check_rate_limit_with_conn(
-                &tx,
-                api_key_id,
-                ip_address,
-                endpoint,
+                &tx, api_key_id, ip_address, endpoint,
             )?;
 
             tx.commit()
@@ -674,7 +667,10 @@ impl AuthDatabase {
 
             Ok(allowed)
         })();
-        self.record_transaction_duration("check_rate_limit", tx_started.elapsed());
+        self.record_transaction_duration(
+            "check_rate_limit",
+            tx_started.elapsed(),
+        );
         result
     }
 

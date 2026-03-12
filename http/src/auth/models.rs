@@ -499,7 +499,9 @@ pub struct SystemConfigEndpointRateLimit {
     pub window_seconds: Option<i64>,
 }
 
-impl From<ave_bridge::auth::EndpointRateLimit> for SystemConfigEndpointRateLimit {
+impl From<ave_bridge::auth::EndpointRateLimit>
+    for SystemConfigEndpointRateLimit
+{
     fn from(value: ave_bridge::auth::EndpointRateLimit) -> Self {
         Self {
             endpoint: value.endpoint,
@@ -509,7 +511,9 @@ impl From<ave_bridge::auth::EndpointRateLimit> for SystemConfigEndpointRateLimit
     }
 }
 
-impl From<SystemConfigEndpointRateLimit> for ave_bridge::auth::EndpointRateLimit {
+impl From<SystemConfigEndpointRateLimit>
+    for ave_bridge::auth::EndpointRateLimit
+{
     fn from(value: SystemConfigEndpointRateLimit) -> Self {
         Self {
             endpoint: value.endpoint,

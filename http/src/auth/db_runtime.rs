@@ -38,8 +38,7 @@ impl AuthDbRuntime {
         for _ in 0..pool_size {
             connections.push(open_connection(path, sync_mode, tuning)?);
         }
-        let maintenance_connection =
-            open_connection(path, sync_mode, tuning)?;
+        let maintenance_connection = open_connection(path, sync_mode, tuning)?;
 
         Ok(Self {
             primary: Arc::new(ConnectionPool::new(connections)),
@@ -49,7 +48,9 @@ impl AuthDbRuntime {
         })
     }
 
-    pub(super) fn acquire_primary(&self) -> Result<PooledConnection, DatabaseError> {
+    pub(super) fn acquire_primary(
+        &self,
+    ) -> Result<PooledConnection, DatabaseError> {
         self.primary.acquire()
     }
 

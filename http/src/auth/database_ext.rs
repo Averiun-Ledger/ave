@@ -518,7 +518,9 @@ impl AuthDatabase {
         let tx = conn
             .transaction()
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        Self::set_role_permission_with_conn(&tx, role_id, resource, action, allowed)?;
+        Self::set_role_permission_with_conn(
+            &tx, role_id, resource, action, allowed,
+        )?;
         if let Some(audit) = audit {
             Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
         }
@@ -705,7 +707,9 @@ impl AuthDatabase {
         let tx = conn
             .transaction()
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        Self::set_user_permission_with_conn(&tx, user_id, resource, action, allowed, granted_by)?;
+        Self::set_user_permission_with_conn(
+            &tx, user_id, resource, action, allowed, granted_by,
+        )?;
         if let Some(audit) = audit {
             Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
         }

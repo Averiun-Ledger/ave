@@ -408,7 +408,8 @@ async fn test_management_key_does_not_count_toward_service_key_limit() {
         .unwrap();
     assert!(management_info.is_management);
 
-    let service_key = db.create_api_key(user.id, Some("service_key_1"), None, None, false);
+    let service_key =
+        db.create_api_key(user.id, Some("service_key_1"), None, None, false);
     assert!(
         service_key.is_ok(),
         "service key quota should ignore active management keys"
@@ -426,7 +427,9 @@ async fn test_verify_api_key_success() {
         .create_api_key(user.id, Some("key_verify"), None, None, false)
         .unwrap();
 
-    let context = db.authenticate_api_key_request(&api_key, None, "/peer-id").unwrap();
+    let context = db
+        .authenticate_api_key_request(&api_key, None, "/peer-id")
+        .unwrap();
 
     assert_eq!(context.username, "testuser");
     assert_eq!(context.user_id, user.id);
@@ -436,7 +439,8 @@ async fn test_verify_api_key_success() {
 async fn test_verify_api_key_invalid() {
     let (db, _dirs) = create_test_db();
 
-    let result = db.authenticate_api_key_request("invalid_key_12345", None, "/peer-id");
+    let result =
+        db.authenticate_api_key_request("invalid_key_12345", None, "/peer-id");
 
     assert!(matches!(result, Err(DatabaseError::PermissionDenied(_))));
 }
@@ -455,14 +459,18 @@ async fn test_api_key_expiration() {
         .unwrap();
 
     // Should work immediately
-    assert!(db.authenticate_api_key_request(&api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&api_key, None, "/peer-id")
+            .is_ok()
+    );
 
     // Wait for expiration
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     loop {
-        let result = db.authenticate_api_key_request(&api_key, None, "/peer-id");
+        let result =
+            db.authenticate_api_key_request(&api_key, None, "/peer-id");
 
         if matches!(result, Err(DatabaseError::PermissionDenied(_))) {
             break;
@@ -561,7 +569,8 @@ async fn test_update_system_config_applies_api_key_ttl_immediately() {
 }
 
 #[test(tokio::test)]
-async fn test_update_system_config_applies_legacy_api_key_ttl_backfill_immediately() {
+async fn test_update_system_config_applies_legacy_api_key_ttl_backfill_immediately()
+ {
     let tmp_dir = tempfile::tempdir().unwrap();
     let mut config = AuthConfig::default();
     config.enable = true;
@@ -690,11 +699,15 @@ async fn test_management_key_creation_rolls_back_on_error() {
         !old_key_info.revoked,
         "existing management key should remain active after rollback"
     );
-    assert!(db.authenticate_api_key_request(&old_api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&old_api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]
-async fn test_issue_management_key_transactional_writes_audit_and_replaces_key() {
+async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
+{
     let (db, _dirs) = create_test_db();
 
     let user = db
@@ -727,7 +740,10 @@ async fn test_issue_management_key_transactional_writes_audit_and_replaces_key()
         .unwrap();
 
     assert_ne!(new_key_info.id, old_key_info.id);
-    assert!(db.authenticate_api_key_request(&new_api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&new_api_key, None, "/peer-id")
+            .is_ok()
+    );
     assert!(matches!(
         db.authenticate_api_key_request(&old_api_key, None, "/peer-id"),
         Err(DatabaseError::PermissionDenied(_))
@@ -786,7 +802,10 @@ async fn test_rotate_api_key_rolls_back_on_error() {
         !old_key_info.revoked,
         "original key should remain active after failed rotation"
     );
-    assert!(db.authenticate_api_key_request(&old_api_key, None, "/peer-id").is_ok());
+    assert!(
+        db.authenticate_api_key_request(&old_api_key, None, "/peer-id")
+            .is_ok()
+    );
 }
 
 #[test(tokio::test)]
@@ -882,7 +901,8 @@ async fn test_api_key_last_used_tracking() {
     assert!(key_info.last_used_at.is_none());
 
     // Use the key
-    db.authenticate_api_key_request(&api_key, None, "/peer-id").unwrap();
+    db.authenticate_api_key_request(&api_key, None, "/peer-id")
+        .unwrap();
 
     // Check it was tracked
     let keys = db.list_user_api_keys(user.id, false).unwrap();
@@ -948,8 +968,8 @@ async fn test_apply_ttl_to_legacy_api_keys() {
         },
     };
 
-    let db = AuthDatabase::new(base_config.clone(), "AdminPass123!", None)
-        .unwrap();
+    let db =
+        AuthDatabase::new(base_config.clone(), "AdminPass123!", None).unwrap();
 
     let user = db
         .create_user("testuser", "TestPass123!", None, None, Some(false))
@@ -967,8 +987,7 @@ async fn test_apply_ttl_to_legacy_api_keys() {
     // Re-open the same database with a runtime default TTL so cleanup backfills
     let mut cleanup_config = base_config;
     cleanup_config.api_key.default_ttl_seconds = 100;
-    let db =
-        AuthDatabase::new(cleanup_config, "AdminPass123!", None).unwrap();
+    let db = AuthDatabase::new(cleanup_config, "AdminPass123!", None).unwrap();
     let _ = db.cleanup_expired_api_keys().unwrap();
     let info = db.get_api_key_info(&key_info.id).unwrap();
 
@@ -1071,10 +1090,7 @@ async fn test_monthly_quota_concurrent_requests_respect_limit() {
         match handle.join().unwrap() {
             Ok(_) => allowed += 1,
             Err(DatabaseError::RateLimitExceeded(_)) => rejected += 1,
-            other => panic!(
-                "unexpected concurrent quota result: {:?}",
-                other
-            ),
+            other => panic!("unexpected concurrent quota result: {:?}", other),
         }
     }
 
@@ -1192,15 +1208,15 @@ async fn test_transfer_api_key_quota_state_moves_plan_usage_and_extensions() {
 
     let (_new_api_key, new_key_info) = db
         .rotate_api_key_transactional(
-        &old_key_info.id,
-        Some("new_rotation_key"),
-        None,
-        None,
-        Some(1),
-        Some("rotation"),
-        None,
-    )
-    .unwrap();
+            &old_key_info.id,
+            Some("new_rotation_key"),
+            None,
+            None,
+            Some(1),
+            Some("rotation"),
+            None,
+        )
+        .unwrap();
 
     let new_status =
         db.get_api_key_quota_status(&new_key_info.id, None).unwrap();
@@ -1447,10 +1463,9 @@ async fn test_rate_limit_concurrent_requests_respect_limit() {
         match handle.join().unwrap() {
             Ok(true) => allowed += 1,
             Err(DatabaseError::RateLimitExceeded(_)) => rejected += 1,
-            other => panic!(
-                "unexpected concurrent rate limit result: {:?}",
-                other
-            ),
+            other => {
+                panic!("unexpected concurrent rate limit result: {:?}", other)
+            }
         }
     }
 

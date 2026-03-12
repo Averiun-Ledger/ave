@@ -67,18 +67,11 @@ async fn test_login_nonexistent_user() {
 #[test(tokio::test)]
 async fn test_list_users() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/users",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/users", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(!body.as_array().unwrap().is_empty());
@@ -87,9 +80,7 @@ async fn test_list_users() {
 #[test(tokio::test)]
 async fn test_create_user() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let username =
         format!("testuser_{}", chrono::Utc::now().timestamp_millis());
@@ -121,9 +112,7 @@ async fn test_create_user() {
 #[test(tokio::test)]
 async fn test_create_user_duplicate() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let username =
         format!("duplicate_{}", chrono::Utc::now().timestamp_millis());
@@ -156,9 +145,7 @@ async fn test_create_user_duplicate() {
 #[test(tokio::test)]
 async fn test_create_user_weak_password() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -183,19 +170,12 @@ async fn test_create_user_weak_password() {
 #[test(tokio::test)]
 async fn test_get_user_by_id() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Get admin user (ID 1)
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/users/1",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/users/1", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
@@ -212,9 +192,7 @@ async fn test_get_user_by_id() {
 #[test(tokio::test)]
 async fn test_update_user() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user
     let username =
@@ -246,9 +224,7 @@ async fn test_update_user() {
 #[test(tokio::test)]
 async fn test_delete_user() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user
     let username =
@@ -294,18 +270,11 @@ async fn test_delete_user() {
 #[test(tokio::test)]
 async fn test_list_roles() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/roles",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/roles", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().is_some());
@@ -314,9 +283,7 @@ async fn test_list_roles() {
 #[test(tokio::test)]
 async fn test_create_role() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let rolename =
         format!("testrole_{}", chrono::Utc::now().timestamp_millis());
@@ -336,9 +303,7 @@ async fn test_create_role() {
 #[test(tokio::test)]
 async fn test_create_role_duplicate() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let rolename = format!("duprole_{}", chrono::Utc::now().timestamp_millis());
 
@@ -369,9 +334,7 @@ async fn test_create_role_duplicate() {
 #[test(tokio::test)]
 async fn test_get_role() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create role
     let rolename = format!("getrole_{}", chrono::Utc::now().timestamp_millis());
@@ -402,9 +365,7 @@ async fn test_get_role() {
 #[test(tokio::test)]
 async fn test_update_role() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create role
     let rolename =
@@ -436,9 +397,7 @@ async fn test_update_role() {
 #[test(tokio::test)]
 async fn test_delete_role() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create role
     let rolename =
@@ -473,18 +432,11 @@ async fn test_delete_role() {
 #[test(tokio::test)]
 async fn test_list_resources() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/resources",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/resources", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(!body.as_array().unwrap().is_empty());
@@ -493,18 +445,11 @@ async fn test_list_resources() {
 #[test(tokio::test)]
 async fn test_list_actions() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/actions",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/actions", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(!body.as_array().unwrap().is_empty());
@@ -513,9 +458,7 @@ async fn test_list_actions() {
 #[test(tokio::test)]
 async fn test_set_role_permission() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create role
     let rolename =
@@ -546,9 +489,7 @@ async fn test_set_role_permission() {
 #[test(tokio::test)]
 async fn test_get_role_permissions() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create role
     let rolename =
@@ -584,18 +525,11 @@ async fn test_get_role_permissions() {
 #[test(tokio::test)]
 async fn test_list_all_api_keys() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/api-keys",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/api-keys", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().is_some());
@@ -604,9 +538,7 @@ async fn test_list_all_api_keys() {
 #[test(tokio::test)]
 async fn test_create_api_key_for_user() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user first
     let username =
@@ -639,9 +571,7 @@ async fn test_create_api_key_for_user() {
 #[test(tokio::test)]
 async fn test_get_api_key_info() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user and API key
     let username = format!("keyinfo_{}", chrono::Utc::now().timestamp_millis());
@@ -682,9 +612,7 @@ async fn test_get_api_key_info() {
 #[test(tokio::test)]
 async fn test_revoke_api_key() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user and API key
     let username =
@@ -725,9 +653,7 @@ async fn test_revoke_api_key() {
 #[test(tokio::test)]
 async fn test_rotate_api_key() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     // Create user and API key
     let username =
@@ -775,13 +701,10 @@ async fn test_rotate_api_key() {
 #[test(tokio::test)]
 async fn test_get_me() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) =
-        make_app_request(&app, "/me", "GET", Some(&api_key), None)
-            .await;
+        make_app_request(&app, "/me", "GET", Some(&api_key), None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["username"], "admin");
@@ -798,18 +721,11 @@ async fn test_get_me() {
 #[test(tokio::test)]
 async fn test_get_my_permissions() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/me/permissions",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/me/permissions", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().is_some());
@@ -818,9 +734,7 @@ async fn test_get_my_permissions() {
 #[test(tokio::test)]
 async fn test_get_my_permissions_detailed() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -843,9 +757,7 @@ async fn test_get_my_permissions_detailed() {
 #[test(tokio::test)]
 async fn test_query_audit_logs() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -867,9 +779,7 @@ async fn test_query_audit_logs() {
 #[test(tokio::test)]
 async fn test_get_audit_stats() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -887,9 +797,7 @@ async fn test_get_audit_stats() {
 #[test(tokio::test)]
 async fn test_get_rate_limit_stats() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -912,18 +820,11 @@ async fn test_get_rate_limit_stats() {
 #[test(tokio::test)]
 async fn test_list_system_config() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
-    let (status, body) = make_app_request(
-        &app,
-        "/admin/config",
-        "GET",
-        Some(&api_key),
-        None,
-    )
-    .await;
+    let (status, body) =
+        make_app_request(&app, "/admin/config", "GET", Some(&api_key), None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body["items"].as_array().is_some());
@@ -936,9 +837,7 @@ async fn test_list_system_config() {
 #[test(tokio::test)]
 async fn test_update_system_config() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, _) = make_app_request(
         &app,
@@ -961,8 +860,7 @@ async fn test_protected_endpoint_without_auth() {
     let (app, _dir) = TestApp::build(true, true, None).await;
 
     let (status, body) =
-        make_app_request(&app, "/admin/users", "GET", None, None)
-            .await;
+        make_app_request(&app, "/admin/users", "GET", None, None).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(body["error"].as_str().is_some());
@@ -988,9 +886,7 @@ async fn test_invalid_api_key() {
 #[test(tokio::test)]
 async fn test_get_nonexistent_user() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -1008,9 +904,7 @@ async fn test_get_nonexistent_user() {
 #[test(tokio::test)]
 async fn test_create_user_empty_username() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,
@@ -1028,9 +922,7 @@ async fn test_create_user_empty_username() {
 #[test(tokio::test)]
 async fn test_create_role_empty_name() {
     let (app, _dir) = TestApp::build(true, true, None).await;
-    let api_key = login_app(&app, "admin", "AdminPass123!")
-        .await
-        .unwrap();
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
 
     let (status, body) = make_app_request(
         &app,

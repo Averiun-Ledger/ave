@@ -4,8 +4,8 @@
 
 use crate::auth::validate_password;
 
-use super::database_audit::AuditLogParams;
 use super::crypto::hash_password;
+use super::database_audit::AuditLogParams;
 use super::db_runtime::{AuthDbRuntime, PooledConnection, auth_tuning_for_ram};
 use super::models::*;
 use super::system_config::SystemConfigKey;
@@ -17,8 +17,8 @@ use ave_bridge::{
 };
 use rand::RngExt;
 use rusqlite::{
-    Connection, OptionalExtension, Result as SqliteResult,
-    TransactionBehavior, params,
+    Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
+    params,
 };
 use std::{
     fs,
@@ -207,7 +207,8 @@ pub struct AuthDatabase {
     metrics: Arc<DbMetrics>,
     blocking_task_semaphore: Arc<Semaphore>,
     #[cfg(feature = "prometheus")]
-    prometheus: Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
+    prometheus:
+        Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
     runtime_config: Arc<RuntimeAuthConfig>,
     pub(crate) config: Arc<AuthConfig>,
 }
@@ -467,13 +468,19 @@ impl AuthDatabase {
     pub fn metrics_snapshot(&self) -> DbMetricsSnapshot {
         let primary_lock_wait_count =
             self.metrics.primary_lock_wait_count.load(Ordering::Relaxed);
-        let primary_lock_wait_ns_total =
-            self.metrics.primary_lock_wait_ns_total.load(Ordering::Relaxed);
-        let primary_lock_wait_ns_max =
-            self.metrics.primary_lock_wait_ns_max.load(Ordering::Relaxed);
+        let primary_lock_wait_ns_total = self
+            .metrics
+            .primary_lock_wait_ns_total
+            .load(Ordering::Relaxed);
+        let primary_lock_wait_ns_max = self
+            .metrics
+            .primary_lock_wait_ns_max
+            .load(Ordering::Relaxed);
 
-        let maintenance_lock_wait_count =
-            self.metrics.maintenance_lock_wait_count.load(Ordering::Relaxed);
+        let maintenance_lock_wait_count = self
+            .metrics
+            .maintenance_lock_wait_count
+            .load(Ordering::Relaxed);
         let maintenance_lock_wait_ns_total = self
             .metrics
             .maintenance_lock_wait_ns_total
@@ -569,9 +576,7 @@ impl AuthDatabase {
                 blocking_task_duration_ns_total,
                 blocking_task_count,
             ),
-            blocking_task_max_ms: Self::ns_to_ms(
-                blocking_task_duration_ns_max,
-            ),
+            blocking_task_max_ms: Self::ns_to_ms(blocking_task_duration_ns_max),
             request_count,
             avg_db_ops_per_request: if request_count == 0 {
                 0.0
@@ -592,7 +597,8 @@ impl AuthDatabase {
         registry: &mut prometheus_client::registry::Registry,
     ) {
         let metrics = self.prometheus.get_or_init(|| {
-            let metrics = Arc::new(super::metrics::AuthPrometheusMetrics::new());
+            let metrics =
+                Arc::new(super::metrics::AuthPrometheusMetrics::new());
             metrics.register_into(registry);
             metrics
         });
@@ -751,7 +757,8 @@ impl AuthDatabase {
     ) -> Result<(), DatabaseError> {
         match key {
             SystemConfigKey::ApiKeyDefaultTtlSeconds => {
-                let super::models::SystemConfigValue::Integer(ttl) = value else {
+                let super::models::SystemConfigValue::Integer(ttl) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "api_key_default_ttl_seconds expects an integer"
                             .to_string(),
@@ -762,7 +769,8 @@ impl AuthDatabase {
                     .store(*ttl, Ordering::Relaxed);
             }
             SystemConfigKey::MaxLoginAttempts => {
-                let super::models::SystemConfigValue::Integer(attempts) = value else {
+                let super::models::SystemConfigValue::Integer(attempts) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "max_login_attempts expects an integer".to_string(),
                     ));
@@ -772,7 +780,8 @@ impl AuthDatabase {
                     .store(*attempts as u32, Ordering::Relaxed);
             }
             SystemConfigKey::ApiKeyMaxKeysPerUser => {
-                let super::models::SystemConfigValue::Integer(max_keys) = value else {
+                let super::models::SystemConfigValue::Integer(max_keys) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "api_key_max_keys_per_user expects an integer"
                             .to_string(),
@@ -783,7 +792,8 @@ impl AuthDatabase {
                     .store(*max_keys as u32, Ordering::Relaxed);
             }
             SystemConfigKey::LockoutDurationSeconds => {
-                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                let super::models::SystemConfigValue::Integer(seconds) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "lockout_duration_seconds expects an integer"
                             .to_string(),
@@ -794,7 +804,8 @@ impl AuthDatabase {
                     .store(*seconds, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitWindowSeconds => {
-                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                let super::models::SystemConfigValue::Integer(seconds) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "rate_limit_window_seconds expects an integer"
                             .to_string(),
@@ -805,7 +816,8 @@ impl AuthDatabase {
                     .store(*seconds, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitEnable => {
-                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                let super::models::SystemConfigValue::Boolean(enabled) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "rate_limit_enable expects a boolean".to_string(),
                     ));
@@ -815,7 +827,9 @@ impl AuthDatabase {
                     .store(*enabled, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitMaxRequests => {
-                let super::models::SystemConfigValue::Integer(max_requests) = value else {
+                let super::models::SystemConfigValue::Integer(max_requests) =
+                    value
+                else {
                     return Err(DatabaseError::Validation(
                         "rate_limit_max_requests expects an integer"
                             .to_string(),
@@ -826,10 +840,10 @@ impl AuthDatabase {
                     .store(*max_requests as u32, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitLimitByKey => {
-                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                let super::models::SystemConfigValue::Boolean(enabled) = value
+                else {
                     return Err(DatabaseError::Validation(
-                        "rate_limit_limit_by_key expects a boolean"
-                            .to_string(),
+                        "rate_limit_limit_by_key expects a boolean".to_string(),
                     ));
                 };
                 self.runtime_config
@@ -837,10 +851,10 @@ impl AuthDatabase {
                     .store(*enabled, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitLimitByIp => {
-                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                let super::models::SystemConfigValue::Boolean(enabled) = value
+                else {
                     return Err(DatabaseError::Validation(
-                        "rate_limit_limit_by_ip expects a boolean"
-                            .to_string(),
+                        "rate_limit_limit_by_ip expects a boolean".to_string(),
                     ));
                 };
                 self.runtime_config
@@ -848,7 +862,8 @@ impl AuthDatabase {
                     .store(*enabled, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitCleanupIntervalSeconds => {
-                let super::models::SystemConfigValue::Integer(seconds) = value else {
+                let super::models::SystemConfigValue::Integer(seconds) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "rate_limit_cleanup_interval_seconds expects an integer"
                             .to_string(),
@@ -859,7 +874,10 @@ impl AuthDatabase {
                     .store(*seconds, Ordering::Relaxed);
             }
             SystemConfigKey::RateLimitSensitiveEndpoints => {
-                let super::models::SystemConfigValue::EndpointRateLimits(endpoints) = value else {
+                let super::models::SystemConfigValue::EndpointRateLimits(
+                    endpoints,
+                ) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "rate_limit_sensitive_endpoints expects an array"
                             .to_string(),
@@ -882,7 +900,8 @@ impl AuthDatabase {
                     .collect();
             }
             SystemConfigKey::AuditEnable => {
-                let super::models::SystemConfigValue::Boolean(enabled) = value else {
+                let super::models::SystemConfigValue::Boolean(enabled) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "audit_enable expects a boolean".to_string(),
                     ));
@@ -892,10 +911,10 @@ impl AuthDatabase {
                     .store(*enabled, Ordering::Relaxed);
             }
             SystemConfigKey::AuditRetentionDays => {
-                let super::models::SystemConfigValue::Integer(days) = value else {
+                let super::models::SystemConfigValue::Integer(days) = value
+                else {
                     return Err(DatabaseError::Validation(
-                        "audit_retention_days expects an integer"
-                            .to_string(),
+                        "audit_retention_days expects an integer".to_string(),
                     ));
                 };
                 self.runtime_config
@@ -903,7 +922,8 @@ impl AuthDatabase {
                     .store(*days as u32, Ordering::Relaxed);
             }
             SystemConfigKey::AuditMaxEntries => {
-                let super::models::SystemConfigValue::Integer(entries) = value else {
+                let super::models::SystemConfigValue::Integer(entries) = value
+                else {
                     return Err(DatabaseError::Validation(
                         "audit_max_entries expects an integer".to_string(),
                     ));
@@ -918,9 +938,7 @@ impl AuthDatabase {
     }
 
     /// Get a locked database connection with error handling
-    pub(super) fn lock_conn(
-        &self,
-    ) -> Result<PooledConnection, DatabaseError> {
+    pub(super) fn lock_conn(&self) -> Result<PooledConnection, DatabaseError> {
         let started = Instant::now();
         let conn = self.runtime.acquire_primary()?;
         self.record_lock_wait("primary", started.elapsed());
@@ -971,13 +989,13 @@ impl AuthDatabase {
             let _permit = permit;
             work(db)
         })
-            .await
-            .map_err(|e| {
-                DatabaseError::Query(format!(
-                    "blocking db task {} failed: {}",
-                    operation, e
-                ))
-            })?;
+        .await
+        .map_err(|e| {
+            DatabaseError::Query(format!(
+                "blocking db task {} failed: {}",
+                operation, e
+            ))
+        })?;
         self.record_blocking_task_duration(operation, started.elapsed());
         result
     }
@@ -1098,9 +1116,9 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             let parsed_value = key.parse_persisted_value(&persisted_value);
-            if let Err(err) = parsed_value
-                .and_then(|value| self.apply_runtime_system_config_value(key, &value))
-            {
+            if let Err(err) = parsed_value.and_then(|value| {
+                self.apply_runtime_system_config_value(key, &value)
+            }) {
                 warn!(
                     target: TARGET,
                     key = key.as_str(),
@@ -1213,7 +1231,6 @@ impl AuthDatabase {
             rng.random::<u64>() & 0xFFFF_FFFF_FFFF,
         )
     }
-
 }
 
 // =============================================================================
@@ -1555,10 +1572,16 @@ impl AuthDatabase {
         let tx = conn
             .transaction()
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
-        let user = self.update_user_with_conn(&tx, user_id, password, is_active)?;
+        let user =
+            self.update_user_with_conn(&tx, user_id, password, is_active)?;
 
         if let Some(role_ids) = role_ids {
-            Self::replace_user_roles_with_conn(&tx, user_id, role_ids, assigned_by)?;
+            Self::replace_user_roles_with_conn(
+                &tx,
+                user_id,
+                role_ids,
+                assigned_by,
+            )?;
         }
 
         if let Some(audit) = audit {
@@ -1668,7 +1691,12 @@ impl AuthDatabase {
         let tx = conn
             .transaction()
             .map_err(|e| DatabaseError::Insert(e.to_string()))?;
-        Self::assign_role_to_user_with_conn(&tx, user_id, role_id, assigned_by)?;
+        Self::assign_role_to_user_with_conn(
+            &tx,
+            user_id,
+            role_id,
+            assigned_by,
+        )?;
         if let Some(audit) = audit {
             Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
         }
@@ -1736,7 +1764,6 @@ impl AuthDatabase {
         username: &str,
         password: &str,
     ) -> Result<User, DatabaseError> {
-
         // Try to find the user
         let user_result = conn.query_row(
             "SELECT id, username, password_hash, is_active, is_deleted,
@@ -1868,7 +1895,9 @@ impl AuthDatabase {
                 .transaction()
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            let user = match self.verify_credentials_with_conn(&tx, username, password) {
+            let user = match self
+                .verify_credentials_with_conn(&tx, username, password)
+            {
                 Ok(user) => user,
                 Err(err) => {
                     let failed_details =

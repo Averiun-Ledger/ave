@@ -23,14 +23,13 @@ use ave_bridge::{
     },
 };
 use axum::{
-    BoxError,
+    BoxError, Router,
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header,
         uri::{Authority, Scheme},
     },
     response::{IntoResponse, Redirect},
     routing::any,
-    Router,
 };
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use futures::future::join_all;
@@ -701,12 +700,13 @@ pub async fn run() -> Result<(), StartupError> {
 
     log_effective_configuration(&config_path, &config, &secrets);
 
-    let listener_http = tokio::net::TcpListener::bind(&config.http.http_address)
-        .await
-        .map_err(|error| StartupError::HttpBind {
-            address: config.http.http_address.clone(),
-            message: error.to_string(),
-        })?;
+    let listener_http =
+        tokio::net::TcpListener::bind(&config.http.http_address)
+            .await
+            .map_err(|error| StartupError::HttpBind {
+                address: config.http.http_address.clone(),
+                message: error.to_string(),
+            })?;
     let cors = build_cors_layer(&config.http.cors)?;
 
     let auth_db: Option<Arc<AuthDatabase>> = auth::build_auth(
@@ -789,12 +789,12 @@ async fn serve_https(
     >,
 ) -> Result<(), StartupError> {
     let https_socket =
-        https_address
-            .parse::<SocketAddr>()
-            .map_err(|error| StartupError::HttpsAddress {
+        https_address.parse::<SocketAddr>().map_err(|error| {
+            StartupError::HttpsAddress {
                 address: https_address.clone(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
 
     tokio::spawn(async move {
         if let Err(error) =
@@ -842,7 +842,10 @@ async fn serve_https(
 
     if self_signed_config.enabled {
         let tls_clone = tls.clone();
-        let paths = CertPaths { cert_path, key_path };
+        let paths = CertPaths {
+            cert_path,
+            key_path,
+        };
         tokio::spawn(cert_renewal_task(self_signed_config, paths, tls_clone));
     }
 
@@ -988,24 +991,27 @@ async fn redirect_http_to_https(
             .to_string(),
     };
 
-    let app = Router::new().fallback(any(move |headers: HeaderMap, uri: Uri| {
-        let ports = ports.clone();
-        async move {
-            let host = headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
-            match make_https(host, uri, ports) {
-                Ok(uri) => Redirect::permanent(&uri.to_string()).into_response(),
-                Err(error) => (
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid redirect target: {error}"),
-                )
-                    .into_response(),
+    let app =
+        Router::new().fallback(any(move |headers: HeaderMap, uri: Uri| {
+            let ports = ports.clone();
+            async move {
+                let host = headers
+                    .get(header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                match make_https(host, uri, ports) {
+                    Ok(uri) => {
+                        Redirect::permanent(&uri.to_string()).into_response()
+                    }
+                    Err(error) => (
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid redirect target: {error}"),
+                    )
+                        .into_response(),
+                }
             }
-        }
-    }));
+        }));
     axum::serve(listener_http, app)
         .await
         .map_err(|error| StartupError::RedirectServer(error.to_string()))

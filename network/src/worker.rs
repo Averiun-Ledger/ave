@@ -1880,7 +1880,16 @@ mod tests {
         );
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-        NetworkWorker::new(&keys, config, None, graceful_token, crash_token, None, None).unwrap()
+        NetworkWorker::new(
+            &keys,
+            config,
+            None,
+            graceful_token,
+            crash_token,
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     // Create a config

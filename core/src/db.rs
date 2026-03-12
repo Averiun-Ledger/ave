@@ -139,7 +139,10 @@ impl Collection for DbCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) ->  Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
+        StoreError,
+    > {
         match self {
             #[cfg(feature = "rocksdb")]
             DbCollection::RocksDb(store) => Collection::iter(store, reverse),

@@ -106,16 +106,10 @@ impl SystemConfigKey {
                 "Account lockout duration in seconds"
             }
             Self::RateLimitEnable => "Enable rate limiting",
-            Self::RateLimitWindowSeconds => {
-                "Rate limit time window in seconds"
-            }
+            Self::RateLimitWindowSeconds => "Rate limit time window in seconds",
             Self::RateLimitMaxRequests => "Maximum requests per window",
-            Self::RateLimitLimitByKey => {
-                "Enable rate limiting by API key"
-            }
-            Self::RateLimitLimitByIp => {
-                "Enable rate limiting by IP address"
-            }
+            Self::RateLimitLimitByKey => "Enable rate limiting by API key",
+            Self::RateLimitLimitByIp => "Enable rate limiting by IP address",
             Self::RateLimitCleanupIntervalSeconds => {
                 "Delete stale rate limit rows older than this interval"
             }
@@ -153,9 +147,9 @@ impl SystemConfigKey {
             Self::ApiKeyDefaultTtlSeconds => {
                 SystemConfigValue::Integer(config.api_key.default_ttl_seconds)
             }
-            Self::ApiKeyMaxKeysPerUser => {
-                SystemConfigValue::Integer(config.api_key.max_keys_per_user as i64)
-            }
+            Self::ApiKeyMaxKeysPerUser => SystemConfigValue::Integer(
+                config.api_key.max_keys_per_user as i64,
+            ),
             Self::MaxLoginAttempts => {
                 SystemConfigValue::Integer(config.lockout.max_attempts as i64)
             }
@@ -168,18 +162,20 @@ impl SystemConfigKey {
             Self::RateLimitWindowSeconds => {
                 SystemConfigValue::Integer(config.rate_limit.window_seconds)
             }
-            Self::RateLimitMaxRequests => {
-                SystemConfigValue::Integer(config.rate_limit.max_requests as i64)
-            }
+            Self::RateLimitMaxRequests => SystemConfigValue::Integer(
+                config.rate_limit.max_requests as i64,
+            ),
             Self::RateLimitLimitByKey => {
                 SystemConfigValue::Boolean(config.rate_limit.limit_by_key)
             }
             Self::RateLimitLimitByIp => {
                 SystemConfigValue::Boolean(config.rate_limit.limit_by_ip)
             }
-            Self::RateLimitCleanupIntervalSeconds => SystemConfigValue::Integer(
-                config.rate_limit.cleanup_interval_seconds,
-            ),
+            Self::RateLimitCleanupIntervalSeconds => {
+                SystemConfigValue::Integer(
+                    config.rate_limit.cleanup_interval_seconds,
+                )
+            }
             Self::RateLimitSensitiveEndpoints => {
                 SystemConfigValue::EndpointRateLimits(
                     config
@@ -194,12 +190,12 @@ impl SystemConfigKey {
             Self::AuditEnable => {
                 SystemConfigValue::Boolean(config.session.audit_enable)
             }
-            Self::AuditRetentionDays => {
-                SystemConfigValue::Integer(config.session.audit_retention_days as i64)
-            }
-            Self::AuditMaxEntries => {
-                SystemConfigValue::Integer(config.session.audit_max_entries as i64)
-            }
+            Self::AuditRetentionDays => SystemConfigValue::Integer(
+                config.session.audit_retention_days as i64,
+            ),
+            Self::AuditMaxEntries => SystemConfigValue::Integer(
+                config.session.audit_max_entries as i64,
+            ),
         })
     }
 
@@ -230,15 +226,14 @@ impl SystemConfigKey {
                         .collect(),
                 ))
             }
-            _ => raw
-                .parse::<i64>()
-                .map(SystemConfigValue::Integer)
-                .map_err(|_| {
+            _ => raw.parse::<i64>().map(SystemConfigValue::Integer).map_err(
+                |_| {
                     DatabaseError::Validation(format!(
                         "{} must be a valid integer",
                         self.as_str()
                     ))
-                }),
+                },
+            ),
         }
     }
 
@@ -256,7 +251,10 @@ impl SystemConfigKey {
                 | Self::AuditEnable,
                 SystemConfigValue::Boolean(value),
             ) => Ok(value.to_string()),
-            (Self::RateLimitSensitiveEndpoints, SystemConfigValue::EndpointRateLimits(value)) => {
+            (
+                Self::RateLimitSensitiveEndpoints,
+                SystemConfigValue::EndpointRateLimits(value),
+            ) => {
                 let endpoints: Vec<EndpointRateLimit> = value
                     .iter()
                     .cloned()
@@ -279,7 +277,10 @@ impl SystemConfigKey {
         value: &SystemConfigValue,
     ) -> Result<(), DatabaseError> {
         match (self, value) {
-            (Self::ApiKeyDefaultTtlSeconds, SystemConfigValue::Integer(ttl_value)) => {
+            (
+                Self::ApiKeyDefaultTtlSeconds,
+                SystemConfigValue::Integer(ttl_value),
+            ) => {
                 if *ttl_value < 0 {
                     return Err(DatabaseError::Validation(
                         "api_key_default_ttl_seconds must be >= 0 (0 = no expiration)".to_string(),
@@ -333,7 +334,10 @@ impl SystemConfigKey {
                 | Self::AuditEnable,
                 SystemConfigValue::Boolean(_),
             ) => {}
-            (Self::RateLimitSensitiveEndpoints, SystemConfigValue::EndpointRateLimits(endpoints)) => {
+            (
+                Self::RateLimitSensitiveEndpoints,
+                SystemConfigValue::EndpointRateLimits(endpoints),
+            ) => {
                 for endpoint in endpoints {
                     if endpoint.endpoint.trim().is_empty() {
                         return Err(DatabaseError::Validation(

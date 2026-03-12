@@ -33,7 +33,10 @@ use crate::{
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject, SubjectMetadata, error::SubjectError, sinkdata::{SinkData, SinkDataMessage}
+        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject,
+        SubjectMetadata,
+        error::SubjectError,
+        sinkdata::{SinkData, SinkDataMessage},
     },
     system::ConfigHelper,
     validation::{
@@ -1662,7 +1665,10 @@ impl Governance {
                         .timestamp
                         .as_nanos(),
                     gov_version: first.content().gov_version,
-                    event_data_ledger: EventLedgerDataForSink::build(&first.content().protocols, &self.properties.to_value_wrapper().0)
+                    event_data_ledger: EventLedgerDataForSink::build(
+                        &first.content().protocols,
+                        &self.properties.to_value_wrapper().0,
+                    ),
                 },
                 first.content().event_request.content(),
             )
@@ -1777,7 +1783,10 @@ impl Governance {
                             .timestamp
                             .as_nanos(),
                         gov_version: event.content().gov_version,
-                        event_data_ledger: EventLedgerDataForSink::build(&event.content().protocols, &self.properties.to_value_wrapper().0)
+                        event_data_ledger: EventLedgerDataForSink::build(
+                            &event.content().protocols,
+                            &self.properties.to_value_wrapper().0,
+                        ),
                     },
                     event.content().event_request.content(),
                 )

@@ -146,7 +146,7 @@ impl Handler<Self> for ApprLight {
                 }
 
                 ctx.stop(None).await;
-            },
+            }
             ApprLightMessage::NetworkApproval { approval_req } => {
                 // Solo admitimos eventos FACT
                 let subject_id = approval_req.content().subject_id.clone();
@@ -174,7 +174,12 @@ impl Handler<Self> for ApprLight {
                     ])),
                 );
 
-                let retry_actor = RetryActor::new_with_parent_message::<Self>(target, message, strategy, ApprLightMessage::EndRetry);
+                let retry_actor = RetryActor::new_with_parent_message::<Self>(
+                    target,
+                    message,
+                    strategy,
+                    ApprLightMessage::EndRetry,
+                );
 
                 let retry = match ctx
                     .create_child::<RetryActor<RetryNetwork>, _>(

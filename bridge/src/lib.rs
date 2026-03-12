@@ -4,8 +4,8 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalState, ApprovalStateRes,
-        BridgeSignedEventRequest, EventRequestType, EventsQuery,
+        AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
+        EventRequestType, EventsQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -79,7 +79,9 @@ pub struct Bridge {
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
     #[cfg(feature = "prometheus")]
-    registry: std::sync::Arc<tokio::sync::Mutex<prometheus_client::registry::Registry>>,
+    registry: std::sync::Arc<
+        tokio::sync::Mutex<prometheus_client::registry::Registry>,
+    >,
 }
 
 impl Bridge {
@@ -125,8 +127,7 @@ impl Bridge {
             &mut registry,
             password,
             graceful_token.clone(),
-            crash_token.clone()
-
+            crash_token.clone(),
         )
         .await?;
 
@@ -152,14 +153,15 @@ impl Bridge {
         &self.graceful_token
     }
 
-        pub const fn crash_token(&self) -> &CancellationToken {
+    pub const fn crash_token(&self) -> &CancellationToken {
         &self.crash_token
     }
 
     #[cfg(feature = "prometheus")]
     pub fn registry(
         &self,
-    ) -> std::sync::Arc<tokio::sync::Mutex<prometheus_client::registry::Registry>> {
+    ) -> std::sync::Arc<tokio::sync::Mutex<prometheus_client::registry::Registry>>
+    {
         self.registry.clone()
     }
 

@@ -835,7 +835,6 @@ async fn test_update_and_transfer_deserialization() {
     assert_eq!(res[0].subject_id, subject_id);
 }
 
-
 // --- Gov Sub Endpoints ---
 #[test(tokio::test)]
 async fn test_gov_sub_deserialization() {

@@ -1722,7 +1722,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &request_data.subject_id).await;
+        let subject_data =
+            get_subject_state(&db, &request_data.subject_id).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {
@@ -1830,7 +1831,8 @@ pub mod tests {
             panic!("Invalid response")
         };
 
-        let subject_data = get_subject_state(&db, &request_data.subject_id).await;
+        let subject_data =
+            get_subject_state(&db, &request_data.subject_id).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
         let RequestEventDB::TrackerFact {

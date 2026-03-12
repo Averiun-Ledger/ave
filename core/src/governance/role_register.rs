@@ -151,7 +151,7 @@ impl Message for RoleRegisterMessage {
             RoleRegisterMessage::UpdateVersion { .. }
             | RoleRegisterMessage::UpdateFact { .. }
             | RoleRegisterMessage::UpdateConfirm { .. } => true,
-            _ => false
+            _ => false,
         }
     }
 }

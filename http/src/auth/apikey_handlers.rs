@@ -3,9 +3,7 @@
 // REST API endpoints for API key management
 
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::{
-    DatabaseErrorMapping, run_db as shared_run_db,
-};
+use super::http_api::{DatabaseErrorMapping, run_db as shared_run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use axum::{
@@ -83,29 +81,30 @@ pub async fn create_api_key_for_user(
     let actor_ip_address = auth_ctx.ip_address.clone();
     let endpoint = format!("/admin/api-keys/user/{}", user_id);
     let audit_details = serde_json::to_string(&req).unwrap_or_default();
-    let (api_key, key_info) = run_db(&db, "create_api_key_for_user", move |db| {
-        db.create_api_key_transactional(
-            user_id,
-            Some(&name),
-            description.as_deref(),
-            expires_in_seconds,
-            false,
-            Some(crate::auth::database_audit::AuditLogParams {
-                user_id: Some(actor_user_id),
-                api_key_id: Some(&actor_api_key_id),
-                action_type: "api_key_created",
-                endpoint: Some(&endpoint),
-                http_method: Some("POST"),
-                ip_address: actor_ip_address.as_deref(),
-                user_agent: None,
-                request_id: None,
-                details: Some(&audit_details),
-                success: true,
-                error_message: None,
-            }),
-        )
-    })
-    .await?;
+    let (api_key, key_info) =
+        run_db(&db, "create_api_key_for_user", move |db| {
+            db.create_api_key_transactional(
+                user_id,
+                Some(&name),
+                description.as_deref(),
+                expires_in_seconds,
+                false,
+                Some(crate::auth::database_audit::AuditLogParams {
+                    user_id: Some(actor_user_id),
+                    api_key_id: Some(&actor_api_key_id),
+                    action_type: "api_key_created",
+                    endpoint: Some(&endpoint),
+                    http_method: Some("POST"),
+                    ip_address: actor_ip_address.as_deref(),
+                    user_agent: None,
+                    request_id: None,
+                    details: Some(&audit_details),
+                    success: true,
+                    error_message: None,
+                }),
+            )
+        })
+        .await?;
 
     let response = CreateApiKeyResponse { api_key, key_info };
 
@@ -463,7 +462,8 @@ pub async fn list_usage_plans(
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
     let plans =
-        run_db(&db, "list_usage_plans", move |db| db.list_usage_plans()).await?;
+        run_db(&db, "list_usage_plans", move |db| db.list_usage_plans())
+            .await?;
     Ok(Json(plans))
 }
 
@@ -591,7 +591,9 @@ pub async fn delete_usage_plan(
                 ip_address: auth_ctx_for_db.ip_address.as_deref(),
                 user_agent: None,
                 request_id: None,
-                details: Some(&serde_json::json!({ "plan_id": plan_id }).to_string()),
+                details: Some(
+                    &serde_json::json!({ "plan_id": plan_id }).to_string(),
+                ),
                 success: true,
                 error_message: None,
             }),

@@ -2,11 +2,7 @@ use std::sync::Arc;
 
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{
-        counter::Counter,
-        family::Family,
-        histogram::Histogram,
-    },
+    metrics::{counter::Counter, family::Family, histogram::Histogram},
     registry::Registry,
 };
 
@@ -46,35 +42,35 @@ impl AuthPrometheusMetrics {
         Self {
             lock_wait_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                    0.5, 1.0, 2.0, 5.0,
+                    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                    1.0, 2.0, 5.0,
                 ])
             }),
             transaction_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
-                    2.0, 5.0, 10.0,
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+                    5.0, 10.0,
                 ])
             }),
             blocking_queue_wait_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                    0.5, 1.0, 2.0, 5.0,
+                    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                    1.0, 2.0, 5.0,
                 ])
             }),
             blocking_task_duration_seconds: Family::new_with_constructor(
                 || {
                     Histogram::new(vec![
-                        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-                        1.0, 2.0, 5.0, 10.0,
+                        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+                        2.0, 5.0, 10.0,
                     ])
                 },
             ),
             blocking_task_rejections_total: Family::default(),
             request_db_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
-                    2.0, 5.0, 10.0,
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+                    5.0, 10.0,
                 ])
             }),
             request_db_ops_total: Family::default(),

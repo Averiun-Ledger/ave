@@ -16,7 +16,10 @@ use crate::{
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject, SubjectMetadata, error::SubjectError, sinkdata::{SinkData, SinkDataMessage}
+        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject,
+        SubjectMetadata,
+        error::SubjectError,
+        sinkdata::{SinkData, SinkDataMessage},
     },
     validation::request::LastData,
 };
@@ -546,7 +549,10 @@ impl Tracker {
                         .timestamp
                         .as_nanos(),
                     gov_version: first.content().gov_version,
-                    event_data_ledger: EventLedgerDataForSink::build(&first.content().protocols, &self.properties.0)
+                    event_data_ledger: EventLedgerDataForSink::build(
+                        &first.content().protocols,
+                        &self.properties.0,
+                    ),
                 },
                 first.content().event_request.content(),
             )
@@ -675,7 +681,10 @@ impl Tracker {
                             .timestamp
                             .as_nanos(),
                         gov_version: event.content().gov_version,
-                        event_data_ledger: EventLedgerDataForSink::build(&event.content().protocols, &self.properties.0)
+                        event_data_ledger: EventLedgerDataForSink::build(
+                            &event.content().protocols,
+                            &self.properties.0,
+                        ),
                     },
                     event.content().event_request.content(),
                 )

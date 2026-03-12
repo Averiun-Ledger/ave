@@ -150,7 +150,9 @@ enum CircuitBreakerMode {
     #[default]
     Closed,
     OpenUntil(Instant),
-    HalfOpen { probe_in_flight: bool },
+    HalfOpen {
+        probe_in_flight: bool,
+    },
 }
 
 struct SinkBreaker {
@@ -258,14 +260,19 @@ impl SinkQueue {
 
                         match self.sender.try_send(event) {
                             Ok(()) => {
-                                self.queued_events.fetch_add(1, Ordering::Relaxed);
-                                QueuePushOutcome::DroppedOldest { dropped_count }
+                                self.queued_events
+                                    .fetch_add(1, Ordering::Relaxed);
+                                QueuePushOutcome::DroppedOldest {
+                                    dropped_count,
+                                }
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => {
                                 QueuePushOutcome::Closed { dropped_count }
                             }
                             Err(mpsc::error::TrySendError::Full(_)) => {
-                                QueuePushOutcome::DroppedNewest { dropped_count }
+                                QueuePushOutcome::DroppedNewest {
+                                    dropped_count,
+                                }
                             }
                         }
                     }
@@ -319,8 +326,9 @@ impl SinkBreaker {
                         {
                             Some(wait_for)
                         } else {
-                            state.mode =
-                                CircuitBreakerMode::HalfOpen { probe_in_flight: false };
+                            state.mode = CircuitBreakerMode::HalfOpen {
+                                probe_in_flight: false,
+                            };
                             None
                         }
                     }
@@ -613,15 +621,19 @@ impl CompiledUrlTemplate {
             let subject_pos = rest.find("{{subject-id}}");
             let schema_pos = rest.find("{{schema-id}}");
             let next = match (subject_pos, schema_pos) {
-                (Some(subject), Some(schema)) if subject <= schema => {
-                    Some((subject, "{{subject-id}}", UrlTemplatePart::SubjectId))
-                }
+                (Some(subject), Some(schema)) if subject <= schema => Some((
+                    subject,
+                    "{{subject-id}}",
+                    UrlTemplatePart::SubjectId,
+                )),
                 (Some(_), Some(schema)) => {
                     Some((schema, "{{schema-id}}", UrlTemplatePart::SchemaId))
                 }
-                (Some(subject), None) => {
-                    Some((subject, "{{subject-id}}", UrlTemplatePart::SubjectId))
-                }
+                (Some(subject), None) => Some((
+                    subject,
+                    "{{subject-id}}",
+                    UrlTemplatePart::SubjectId,
+                )),
                 (None, Some(schema)) => {
                     Some((schema, "{{schema-id}}", UrlTemplatePart::SchemaId))
                 }
@@ -680,18 +692,22 @@ impl AveSink {
                 let logs = Arc::new(SinkLogState::new());
                 let breaker = Arc::new(SinkBreaker::new());
                 let client = Client::builder()
-                    .connect_timeout(Duration::from_millis(server.connect_timeout_ms))
+                    .connect_timeout(Duration::from_millis(
+                        server.connect_timeout_ms,
+                    ))
                     .build()
                     .unwrap_or_else(|_| Client::new());
-                let template = Arc::new(CompiledUrlTemplate::compile(&server.url));
-                let queues: Vec<Arc<SinkQueue>> = (0..server.concurrency.max(1))
-                    .map(|_| {
-                        Arc::new(SinkQueue::new(
-                            server.queue_capacity,
-                            server.queue_policy.clone(),
-                        ))
-                    })
-                    .collect();
+                let template =
+                    Arc::new(CompiledUrlTemplate::compile(&server.url));
+                let queues: Vec<Arc<SinkQueue>> =
+                    (0..server.concurrency.max(1))
+                        .map(|_| {
+                            Arc::new(SinkQueue::new(
+                                server.queue_capacity,
+                                server.queue_policy.clone(),
+                            ))
+                        })
+                        .collect();
                 let queues: Arc<[Arc<SinkQueue>]> = queues.into();
 
                 routes.push(SinkRoute {
@@ -736,11 +752,7 @@ impl AveSink {
         api_key: Option<String>,
     ) -> Self {
         let shared = Arc::new(SinkSharedState::new(
-            token,
-            auth,
-            username,
-            password,
-            api_key,
+            token, auth, username, password, api_key,
         ));
         let (routes, workers) = Self::build_routes(sinks, &shared);
         let sink = Self(Arc::new(AveSinkInner {
@@ -789,7 +801,9 @@ impl AveSink {
         CompiledUrlTemplate::compile(template).render(subject_id, schema_id)
     }
 
-    fn event_id_components(data: &DataToSink) -> (&'static str, &str, String, u64) {
+    fn event_id_components(
+        data: &DataToSink,
+    ) -> (&'static str, &str, String, u64) {
         match &data.event {
             ave_common::DataToSinkEvent::Create {
                 subject_id,
@@ -895,10 +909,7 @@ impl AveSink {
                 _ = shutdown.cancelled() => Err(SinkError::Shutdown),
             } {
                 Ok(()) => return Ok(()),
-                Err(error)
-                    if error.is_transient()
-                        && attempt < max_retries =>
-                {
+                Err(error) if error.is_transient() && attempt < max_retries => {
                     let retry_in_ms = Self::jittered_retry_delay_ms(attempt);
                     attempt += 1;
                     logs.log_retry(destination, retry_in_ms, &error).await;
@@ -920,9 +931,7 @@ impl AveSink {
         base_delay.saturating_add(jitter)
     }
 
-    async fn read_limited_error_body(
-        mut res: reqwest::Response,
-    ) -> String {
+    async fn read_limited_error_body(mut res: reqwest::Response) -> String {
         let mut body = Vec::new();
         let mut truncated = false;
 
@@ -1084,8 +1093,7 @@ impl AveSink {
                         header.as_ref().map(|(_, value)| value.as_str()),
                     ) => result,
                     _ = shared.shutdown.cancelled() => return Err(SinkError::Shutdown),
-                }
-                {
+                } {
                     debug!(target: TARGET, "Token refreshed, retrying request");
 
                     match Self::send_with_transient_retry(
@@ -1174,26 +1182,25 @@ impl AveSink {
                     break;
                 }
 
-                let url = worker.url_template.render(
-                    &queued_event.subject_id,
-                    &queued_event.schema_id,
-                );
+                let url = worker
+                    .url_template
+                    .render(&queued_event.subject_id, &queued_event.schema_id);
                 let idempotency_key =
                     Self::idempotency_key(queued_event.data.as_ref());
 
                 match Self::send_with_retry_on_401(
-                        worker.shared.as_ref(),
-                        worker.destination.as_ref(),
-                        &worker.client,
-                        &url,
-                        queued_event.data.as_ref(),
-                        worker.requires_auth,
-                        worker.logs.as_ref(),
-                        worker.request_timeout,
-                        worker.max_retries,
-                        &idempotency_key,
-                    )
-                    .await
+                    worker.shared.as_ref(),
+                    worker.destination.as_ref(),
+                    &worker.client,
+                    &url,
+                    queued_event.data.as_ref(),
+                    worker.requires_auth,
+                    worker.logs.as_ref(),
+                    worker.request_timeout,
+                    worker.max_retries,
+                    &idempotency_key,
+                )
+                .await
                 {
                     Ok(()) => worker.breaker.register_success().await,
                     Err(SinkError::Shutdown) => {
@@ -1395,7 +1402,18 @@ mod tests {
         auth: bool,
         events: impl IntoIterator<Item = SinkTypes>,
     ) -> SinkServer {
-        sample_server_with(url, auth, events, 1, 32, SinkQueuePolicy::DropNewest, SinkRoutingStrategy::OrderedBySubject, 2_000, 10_000, 3)
+        sample_server_with(
+            url,
+            auth,
+            events,
+            1,
+            32,
+            SinkQueuePolicy::DropNewest,
+            SinkRoutingStrategy::OrderedBySubject,
+            2_000,
+            10_000,
+            3,
+        )
     }
 
     fn sample_server_with(
@@ -1545,7 +1563,9 @@ mod tests {
     #[test]
     fn route_queue_index_round_robin_ignores_subject() {
         let route = SinkRoute {
-            destination: Arc::from("test-sink|schema=schema-a|url=http://localhost"),
+            destination: Arc::from(
+                "test-sink|schema=schema-a|url=http://localhost",
+            ),
             events: BTreeSet::from([SinkTypes::All]),
             queues: vec![
                 Arc::new(SinkQueue::new(4, SinkQueuePolicy::DropNewest)),
@@ -1592,7 +1612,9 @@ mod tests {
         drop(receiver);
 
         let push = futures::executor::block_on(queue.push(QueuedSinkEvent {
-            data: Arc::new(sample_data(SchemaType::Type("schema-a".to_owned()))),
+            data: Arc::new(sample_data(SchemaType::Type(
+                "schema-a".to_owned(),
+            ))),
             subject_id: "subject-1".to_owned(),
             schema_id: "schema-a".to_owned(),
         }));
@@ -1602,13 +1624,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_cancels_retry_backoff() {
-        let shared = Arc::new(SinkSharedState::new(
-            None,
-            "",
-            "",
-            "",
-            None,
-        ));
+        let shared = Arc::new(SinkSharedState::new(None, "", "", "", None));
         let logs = SinkLogState::new();
         let client = Client::new();
         let server = TestServer::spawn(Router::new().route(
@@ -1907,7 +1923,9 @@ mod tests {
             *subject_id = "subject-1".to_owned();
         }
         let mut second = sample_data(SchemaType::Type("schema-a".to_owned()));
-        if let DataToSinkEvent::Create { subject_id, sn, .. } = &mut second.event {
+        if let DataToSinkEvent::Create { subject_id, sn, .. } =
+            &mut second.event
+        {
             *subject_id = "subject-2".to_owned();
             *sn = 2;
         }

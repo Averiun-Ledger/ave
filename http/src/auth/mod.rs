@@ -10,14 +10,14 @@
 
 pub mod crypto;
 pub mod database;
-mod db_runtime;
 mod database_apikeys;
 pub mod database_audit;
 mod database_ext;
+mod database_quota;
+mod db_runtime;
 mod http_api;
 #[cfg(feature = "prometheus")]
 mod metrics;
-mod database_quota;
 pub mod middleware;
 pub mod models;
 pub(crate) mod request_meta;
@@ -33,9 +33,7 @@ pub mod system_handlers;
 use std::{sync::Arc, time::Duration};
 
 use ave_bridge::{
-    MachineSpec,
-    auth::AuthConfig,
-    settings::command::build_auth_password,
+    MachineSpec, auth::AuthConfig, settings::command::build_auth_password,
 };
 // Re-exports for convenience
 pub use database::AuthDatabase;
@@ -171,17 +169,13 @@ pub(crate) fn validate_password(
         ));
     }
 
-    if policy.require_uppercase
-        && !password.chars().any(|c| c.is_uppercase())
-    {
+    if policy.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
         return Err(
             "Password must contain at least one uppercase letter".to_string()
         );
     }
 
-    if policy.require_lowercase
-        && !password.chars().any(|c| c.is_lowercase())
-    {
+    if policy.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
         return Err(
             "Password must contain at least one lowercase letter".to_string()
         );
@@ -191,8 +185,7 @@ pub(crate) fn validate_password(
         return Err("Password must contain at least one digit".to_string());
     }
 
-    if policy.require_special
-        && !password.chars().any(|c| !c.is_alphanumeric())
+    if policy.require_special && !password.chars().any(|c| !c.is_alphanumeric())
     {
         return Err(
             "Password must contain at least one special character".to_string()

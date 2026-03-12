@@ -85,8 +85,8 @@ impl Message for RegisterMessage {
             RegisterMessage::RegisterGov { .. }
             | RegisterMessage::EOLGov { .. }
             | RegisterMessage::RegisterSubj { .. }
-            | RegisterMessage::EOLSubj {.. } => true,
-            _ => false
+            | RegisterMessage::EOLSubj { .. } => true,
+            _ => false,
         }
     }
 }

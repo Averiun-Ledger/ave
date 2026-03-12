@@ -541,7 +541,8 @@ impl NetworkMetrics {
 
     pub(crate) fn inc_outbound_queue_bytes_drop_per_peer_by(&self, count: u64) {
         if count > 0 {
-            self.dropped_outbound_queue_bytes_limit_per_peer.inc_by(count);
+            self.dropped_outbound_queue_bytes_limit_per_peer
+                .inc_by(count);
             self.dropped_outbound_queue_bytes_limit.inc_by(count);
         }
     }
@@ -555,7 +556,8 @@ impl NetworkMetrics {
 
     pub(crate) fn inc_inbound_queue_bytes_drop_per_peer_by(&self, count: u64) {
         if count > 0 {
-            self.dropped_inbound_queue_bytes_limit_per_peer.inc_by(count);
+            self.dropped_inbound_queue_bytes_limit_per_peer
+                .inc_by(count);
             self.dropped_inbound_queue_bytes_limit.inc_by(count);
         }
     }

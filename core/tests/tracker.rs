@@ -4,7 +4,9 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
-    identity::{HashAlgorithm, KeyPair, PublicKey, hash_borsh, keys::Ed25519Signer},
+    identity::{
+        HashAlgorithm, KeyPair, PublicKey, hash_borsh, keys::Ed25519Signer,
+    },
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
 };
@@ -17,7 +19,9 @@ use common::{
 use serde_json::json;
 use test_log::test;
 
-use crate::common::{emit_fact_signed, get_abort_request, wait_request, wait_request_state};
+use crate::common::{
+    emit_fact_signed, get_abort_request, wait_request, wait_request_state,
+};
 
 #[test(tokio::test)]
 // El issuer es any
@@ -127,10 +131,15 @@ async fn test_issuer_any() {
 
     let issuer_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
 
-    emit_fact_signed(emit_events, &issuer_keys, subject_id_1.clone(), json, true)
-        .await
-        .unwrap();
-
+    emit_fact_signed(
+        emit_events,
+        &issuer_keys,
+        subject_id_1.clone(),
+        json,
+        true,
+    )
+    .await
+    .unwrap();
 
     let state = get_subject(emit_events, subject_id_1.clone(), Some(1))
         .await
@@ -173,7 +182,6 @@ async fn test_issuer_any() {
         })
     );
 }
-
 
 #[test(tokio::test)]
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY

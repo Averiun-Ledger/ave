@@ -9,14 +9,10 @@ use super::http_api::{
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
 use ave_bridge::ProxyConfig;
-use axum::{
-    Extension, Json,
-    extract::ConnectInfo,
-    http::StatusCode,
-};
+use axum::{Extension, Json, extract::ConnectInfo, http::StatusCode};
 use serde::Deserialize;
-use std::{net::SocketAddr, sync::Arc};
 use std::time::Instant;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::warn;
 
 const TARGET: &str = "ave::http::auth";
@@ -54,7 +50,8 @@ pub async fn login(
     headers: axum::http::HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let request_meta = request_meta::extract_request_meta(&headers, addr, &proxy);
+    let request_meta =
+        request_meta::extract_request_meta(&headers, addr, &proxy);
     let ip_address = request_meta.ip_address;
     let user_agent = request_meta.user_agent;
     let request_started = Instant::now();
@@ -64,11 +61,7 @@ pub async fn login(
     // This prevents brute force attacks by limiting requests per IP
     let pre_auth_ip = ip_address.clone();
     db.run_blocking("login_pre_auth_rate_limit", move |db| {
-        db.check_rate_limit(
-            None,
-            pre_auth_ip.as_deref(),
-            Some("/login"),
-        )
+        db.check_rate_limit(None, pre_auth_ip.as_deref(), Some("/login"))
     })
     .await
     .map_err(|e| {
@@ -103,25 +96,26 @@ pub async fn login(
             let session_name = format!("{}_session", user.username);
             let audit_details =
                 format!("User {} logged in successfully", user.username);
-            let (api_key, _key_info) = db.issue_management_api_key_transactional(
-                user.id,
-                Some(&session_name),
-                None,
-                None,
-                Some(crate::auth::database_audit::AuditLogParams {
-                    user_id: Some(user.id),
-                    api_key_id: None,
-                    action_type: "login_success",
-                    endpoint: Some("/login"),
-                    http_method: Some("POST"),
-                    ip_address: login_ip.as_deref(),
-                    user_agent: login_user_agent.as_deref(),
-                    request_id: None,
-                    details: Some(&audit_details),
-                    success: true,
-                    error_message: None,
-                }),
-            )?;
+            let (api_key, _key_info) = db
+                .issue_management_api_key_transactional(
+                    user.id,
+                    Some(&session_name),
+                    None,
+                    None,
+                    Some(crate::auth::database_audit::AuditLogParams {
+                        user_id: Some(user.id),
+                        api_key_id: None,
+                        action_type: "login_success",
+                        endpoint: Some("/login"),
+                        http_method: Some("POST"),
+                        ip_address: login_ip.as_deref(),
+                        user_agent: login_user_agent.as_deref(),
+                        request_id: None,
+                        details: Some(&audit_details),
+                        success: true,
+                        error_message: None,
+                    }),
+                )?;
 
             Ok((user, roles, permissions, api_key))
         })
@@ -142,7 +136,11 @@ pub async fn login(
             db_error_to_response(e)
         })?;
     db_operations += 1;
-    db.record_request_db_metrics("login", db_operations, request_started.elapsed());
+    db.record_request_db_metrics(
+        "login",
+        db_operations,
+        request_started.elapsed(),
+    );
 
     // Build user info
     let user_info = UserInfo {
@@ -192,7 +190,8 @@ pub async fn change_password(
     headers: axum::http::HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let request_meta = request_meta::extract_request_meta(&headers, addr, &proxy);
+    let request_meta =
+        request_meta::extract_request_meta(&headers, addr, &proxy);
     let ip_address = request_meta.ip_address;
     let request_started = Instant::now();
     let mut db_operations = 0u64;

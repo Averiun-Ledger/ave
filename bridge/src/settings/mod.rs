@@ -79,7 +79,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     }
 
     if network.max_pending_outbound_bytes_total > 0
-        && network.max_pending_outbound_bytes_total < network.max_app_message_bytes
+        && network.max_pending_outbound_bytes_total
+            < network.max_app_message_bytes
     {
         let msg = format!(
             "network.max_pending_outbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
@@ -91,7 +92,8 @@ fn validate_network_config(config: &BridgeConfig) -> Result<(), BridgeError> {
     }
 
     if network.max_pending_inbound_bytes_total > 0
-        && network.max_pending_inbound_bytes_total < network.max_app_message_bytes
+        && network.max_pending_inbound_bytes_total
+            < network.max_app_message_bytes
     {
         let msg = format!(
             "network.max_pending_inbound_bytes_total ({}) must be >= network.max_app_message_bytes ({})",
