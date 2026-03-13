@@ -1,6 +1,6 @@
 {
   "name": "ave-types",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "TypeScript types for the Averiun Ledger API",
   "types": "src/index.ts",
   "exports": {
@@ -14,6 +14,7 @@
   ],
   "scripts": {
     "generate": "bash generate.sh",
+    "check:published": "bash check-published.sh",
     "release:patch": "bash generate.sh && npm version patch && npm publish --access public",
     "release:minor": "bash generate.sh && npm version minor && npm publish --access public",
     "release:major": "bash generate.sh && npm version major && npm publish --access public"

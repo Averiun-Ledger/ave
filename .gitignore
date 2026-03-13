@@ -28,6 +28,6 @@ coverage
 *.db
 
 # TypeScript bindings (generated)
-common/bindings/
+common/ts/src/
 
 todo.txt
