@@ -25,7 +25,7 @@ use std::{
 
 use crate::{NodeType, utils::LimitsConfig};
 
-#[cfg(not(feature = "test"))]
+#[cfg(not(any(test, feature = "test")))]
 use crate::utils::{is_dns, is_global, is_loop_back, is_private, is_tcp};
 
 /// The discovery behaviour.
@@ -197,7 +197,7 @@ impl Behaviour {
     }
 
     pub fn is_invalid_address(&self, addr: &Multiaddr) -> bool {
-        #[cfg(not(feature = "test"))]
+        #[cfg(not(any(test, feature = "test")))]
         {
             // Our transport is TPC only
             if !is_tcp(addr) {
@@ -219,7 +219,7 @@ impl Behaviour {
             !is_global(addr)
         }
 
-        #[cfg(feature = "test")]
+        #[cfg(any(test, feature = "test"))]
         return false;
     }
 

@@ -49,7 +49,6 @@ libp2p = { workspace = true, default-features = false, features = [
 	"plaintext"
 ] }
 libp2p-swarm-test = { workspace = true }
-network = { package = "ave-network", path = ".", version = "0.8.0", features = ["test"] }
 serial_test = { workspace = true }
 
 [features]

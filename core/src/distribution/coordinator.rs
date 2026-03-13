@@ -127,11 +127,11 @@ impl Handler<Self> for DistriCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(feature = "test")]
+                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(2, Duration::from_secs(2)),
                 );
-                #[cfg(not(feature = "test"))]
+                #[cfg(not(any(test, feature = "test")))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );

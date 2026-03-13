@@ -18,10 +18,10 @@ use libp2p::{
     noise, yamux,
 };
 
-#[cfg(feature = "test")]
+#[cfg(any(test, feature = "test"))]
 use libp2p::core::transport::memory;
 
-#[cfg(not(feature = "test"))]
+#[cfg(not(any(test, feature = "test")))]
 use libp2p::{
     dns,
     tcp::{self, Config},
@@ -55,7 +55,7 @@ pub fn build_transport(
     let mut binding = yamux::Config::default();
     let yamux = binding.set_max_num_streams(limits.yamux_max_num_streams);
 
-    #[cfg(not(feature = "test"))]
+    #[cfg(not(any(test, feature = "test")))]
     let transport = {
         let tcp = tcp::tokio::Transport::new(
             Config::default()
@@ -72,7 +72,7 @@ pub fn build_transport(
             .map_err(|e| Error::DnsBuild(e.to_string()))?
     };
 
-    #[cfg(feature = "test")]
+    #[cfg(any(test, feature = "test"))]
     let transport = memory::MemoryTransport::default()
         .upgrade(Version::V1Lazy)
         .authenticate(noise)

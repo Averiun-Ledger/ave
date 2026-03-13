@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-#[cfg(not(feature = "test"))]
+#[cfg(not(any(test, feature = "test")))]
 use crate::MemoryLimitsConfig;
 
 use libp2p::{
@@ -114,11 +114,11 @@ impl Behaviour {
                 limits.conn_limmits_max_established_per_peer,
             );
 
-        #[cfg(feature = "test")]
+        #[cfg(any(test, feature = "test"))]
         let mem_limits =
             Toggle::from(None::<memory_connection_limits::Behaviour>);
 
-        #[cfg(not(feature = "test"))]
+        #[cfg(not(any(test, feature = "test")))]
         let mem_limits = match &config.memory_limits {
             MemoryLimitsConfig::Disabled => Toggle::from(None),
             MemoryLimitsConfig::Percentage { value } => Toggle::from(Some(

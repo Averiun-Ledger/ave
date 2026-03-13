@@ -167,11 +167,11 @@ impl Handler<Self> for EvalCoordinator {
                 let target = RetryNetwork::new(self.network.clone());
 
                 // TODO, la evaluación, si hay compilación podría tardar más
-                #[cfg(feature = "test")]
+                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(1, Duration::from_secs(20)),
                 );
-                #[cfg(not(feature = "test"))]
+                #[cfg(not(any(test, feature = "test")))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(3, Duration::from_secs(60)),
                 );

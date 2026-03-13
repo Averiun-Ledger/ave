@@ -165,11 +165,11 @@ impl Handler<Self> for ValiCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(feature = "test")]
+                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(1, Duration::from_secs(10)),
                 );
-                #[cfg(not(feature = "test"))]
+                #[cfg(not(any(test, feature = "test")))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(3, Duration::from_secs(30)),
                 );
