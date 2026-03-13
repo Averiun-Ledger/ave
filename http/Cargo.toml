@@ -1,10 +1,10 @@
 [package]
 name = "ave-http"
-version.workspace = true
+version = "0.8.0"
 edition.workspace = true
 authors.workspace = true
-description.workspace = true
-readme.workspace = true
+description = "HTTP API server for the Ave runtime, auth system, and admin surface"
+readme = "README.md"
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ave-bridge = { path = "../bridge", default-features = false, features = ["openapi"] }
+ave-bridge = { path = "../bridge", version = "0.8.0", default-features = false, features = ["openapi"] }
 prometheus-client = { workspace = true, optional = true }
 
 tokio = {  workspace = true }
@@ -27,11 +27,10 @@ file-rotate = {  workspace = true }
 futures = { workspace = true }
 
 reqwest = {  workspace = true }
-rustls = { version = "0.23.36", features = ["ring"] }
+rustls = { version = "0.23.37", features = ["ring"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { workspace = true }
 ip_network = { workspace = true }
-axum-extra = "0.12.5"
 serde_qs = { version = "1.0", features = ["axum"] }
 tower = "0.5.3"
 tower-http = {version = "0.6.8", features = ["trace", "metrics", "cors", "set-header"]}
@@ -56,7 +55,7 @@ x509-parser = "0.18"
 test-log = { workspace = true } 
 tempfile = { workspace = true }
 chrono = "0.4.44"
-ave-bridge = { path = "../bridge", default-features = false, features = ["openapi", "test"] }
+ave-bridge = { path = "../bridge", version = "0.8.0", default-features = false, features = ["openapi", "test"] }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

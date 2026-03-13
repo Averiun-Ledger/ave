@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 FROM base AS builder-amd64
 RUN rustup target add x86_64-unknown-linux-gnu
 
+ARG CARGO_PROFILE=release
 ARG FEATURES=""
+ENV CARGO_PROFILE=$CARGO_PROFILE
 ENV CARGO_FEATURES=$FEATURES
 
 COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
@@ -68,7 +70,7 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target x86_64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
+RUN cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$CARGO_FEATURES"
 
 # ============================================================================
 # Etapa de compilación para ARM64 (cross-compilation nativa)
@@ -89,7 +91,9 @@ RUN rustup target add aarch64-unknown-linux-gnu && \
     echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml && \
     echo 'rustflags = ["-C", "link-arg=-lgcc"]' >> ~/.cargo/config.toml
 
+ARG CARGO_PROFILE=release
 ARG FEATURES=""
+ENV CARGO_PROFILE=$CARGO_PROFILE
 ENV CARGO_FEATURES=$FEATURES
 
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
@@ -140,27 +144,29 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target aarch64-unknown-linux-gnu --release --no-default-features --features "$CARGO_FEATURES"
+RUN cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$CARGO_FEATURES"
 
 # ============================================================================
 # Imágenes finales
 # ============================================================================
 FROM --platform=linux/amd64 ${RUST_IMAGE} AS amd64
+ARG CARGO_PROFILE=release
 RUN apt-get update && apt-get install --no-install-recommends -y \
     ca-certificates \
     libssl3t64 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
-COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
+COPY --from=builder-amd64 ./ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
 CMD ["ave-http"]
 
 FROM --platform=linux/arm64 ${RUST_IMAGE} AS arm64
+ARG CARGO_PROFILE=release
 RUN apt-get update && apt-get install --no-install-recommends -y \
     ca-certificates \
     libssl3t64 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
-COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/release/ave-http /usr/local/bin/ave-http
+COPY --from=builder-arm64 ./ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
 CMD ["ave-http"]

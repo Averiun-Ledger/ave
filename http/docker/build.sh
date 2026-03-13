@@ -84,6 +84,7 @@ build_image() {
     local tag="$2"
     local dockerfile="$3"
     local features="$4"
+    local cargo_profile="$5"
 
     local image_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${arch}-${tag}"
     local no_cache_args=()
@@ -94,8 +95,10 @@ build_image() {
 
     echo ""
     echo "Building ${arch^^} with features: $features..."
+    echo "Cargo profile: $cargo_profile"
 
     docker build \
+        --build-arg CARGO_PROFILE="$cargo_profile" \
         --build-arg FEATURES="$features" \
         --target "$arch" \
         --tag "$image_tag" \
@@ -146,6 +149,8 @@ case "$ENV_CHOICE" in
 esac
 
 if [ "$ENVIRONMENT" = "development" ]; then
+    CARGO_PROFILE="experimental"
+
     echo ""
     echo "Architecture selection for development:"
     echo "1) AMD64 only"
@@ -220,6 +225,7 @@ if [ "$ENVIRONMENT" = "development" ]; then
     echo ""
     echo "Development mode enabled:"
     echo "  - Tag suffix: -exp"
+    echo "  - Cargo profile: $CARGO_PROFILE"
     echo "  - Skip Docker Hub push: yes"
     echo "  - Skip manifest creation: yes"
     echo "  - Build AMD64: $BUILD_AMD64"
@@ -227,6 +233,7 @@ if [ "$ENVIRONMENT" = "development" ]; then
     echo "  - Build SQLite: $BUILD_SQLITE"
     echo "  - Build RocksDB: $BUILD_ROCKSDB"
 else
+    CARGO_PROFILE="release"
     BUILD_AMD64=true
     BUILD_ARM64=true
     BUILD_SQLITE=true
@@ -238,6 +245,7 @@ else
 
     echo ""
     echo "Production mode enabled:"
+    echo "  - Cargo profile: $CARGO_PROFILE"
     echo "  - Full build for both architectures (AMD64 + ARM64)"
     echo "  - Full build for both databases (SQLite + RocksDB)"
     echo "  - Push to Docker Hub: yes"
@@ -267,11 +275,11 @@ for i in "${!FEATURES_ARRAY[@]}"; do
     echo "######################################################################"
 
     if [ "$BUILD_ARM64" = true ]; then
-        build_image "arm64" "$TAG" "$DOCKERFILE" "$FEATURES"
+        build_image "arm64" "$TAG" "$DOCKERFILE" "$FEATURES" "$CARGO_PROFILE"
     fi
 
     if [ "$BUILD_AMD64" = true ]; then
-        build_image "amd64" "$TAG" "$DOCKERFILE" "$FEATURES"
+        build_image "amd64" "$TAG" "$DOCKERFILE" "$FEATURES" "$CARGO_PROFILE"
     fi
 
     if [ "$SKIP_PUSH" = false ]; then

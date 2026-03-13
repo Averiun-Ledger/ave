@@ -127,7 +127,7 @@ impl Auth {
                     let gov = get_gov(ctx, subject_id).await?;
                     let witnesses =
                         gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
-                            error!(
+                            warn!(
                                 subject_id = %subject_id,
                                 error = %e,
                                 "Failed to get witnesses for governance"
@@ -335,7 +335,7 @@ impl Handler<Self> for Auth {
                 };
 
                 if witnesses.is_empty() {
-                    error!(
+                    warn!(
                         msg_type = "Update",
                         subject_id = %subject_id,
                         "Subject has no witnesses to ask for update"

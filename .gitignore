@@ -29,3 +29,5 @@ coverage
 
 # TypeScript bindings (generated)
 common/bindings/
+
+todo.txt

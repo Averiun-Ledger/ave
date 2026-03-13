@@ -1365,19 +1365,56 @@ mod tests {
     use ave_common::{DataToSinkEvent, SchemaType};
     use axum::{
         Json, Router,
-        extract::{Path, Request},
+        extract::Path,
         http::{HeaderMap, StatusCode},
-        middleware::{self, Next},
-        response::Response,
         routing::post,
     };
     use serde_json::json;
     use tokio::{
         net::TcpListener,
-        sync::Mutex,
-        task::JoinHandle,
-        time::{sleep, timeout},
+        sync::{Barrier, Mutex},
+        task::{JoinHandle, yield_now},
+        time::advance,
     };
+
+    struct TestCounter {
+        value: AtomicUsize,
+        notify: Notify,
+    }
+
+    impl TestCounter {
+        fn new() -> Self {
+            Self {
+                value: AtomicUsize::new(0),
+                notify: Notify::new(),
+            }
+        }
+
+        fn increment(&self) -> usize {
+            let current = self.value.fetch_add(1, Ordering::SeqCst) + 1;
+            self.notify.notify_waiters();
+            current
+        }
+
+        fn load(&self) -> usize {
+            self.value.load(Ordering::SeqCst)
+        }
+
+        async fn wait_for_at_least(
+            &self,
+            minimum: usize,
+            _description: &str,
+        ) -> usize {
+            loop {
+                let notified = self.notify.notified();
+                let current = self.load();
+                if current >= minimum {
+                    return current;
+                }
+                notified.await;
+            }
+        }
+    }
 
     struct TestServer {
         base_url: String,
@@ -1390,14 +1427,25 @@ mod tests {
                 .await
                 .expect("bind test listener");
             let addr = listener.local_addr().expect("get test listener addr");
+            let base_url = format!("http://{addr}");
             let task = tokio::spawn(async move {
                 axum::serve(listener, router)
                     .await
                     .expect("run test server");
             });
 
+            let mut ready = false;
+            for _ in 0..256 {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    ready = true;
+                    break;
+                }
+                yield_now().await;
+            }
+            assert!(ready, "test server did not become ready");
+
             Self {
-                base_url: format!("http://{addr}"),
+                base_url,
                 task,
             }
         }
@@ -1511,75 +1559,15 @@ mod tests {
         AveSink::new(sinks, token, auth_url, "user-1", "pass-1", None)
     }
 
-    const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-    const TEST_POLL_INTERVAL: Duration = Duration::from_millis(20);
-    const TEST_STABLE_POLLS: usize = 5;
-
-    async fn wait_until<F>(description: &str, mut condition: F)
-    where
-        F: FnMut() -> bool,
-    {
-        timeout(TEST_WAIT_TIMEOUT, async {
-            loop {
-                if condition() {
-                    break;
-                }
-                sleep(TEST_POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|error| panic!("{description}: {error}"));
+    fn max_retry_delay_ms(attempt: usize) -> u64 {
+        let base_delay = TRANSIENT_RETRY_BASE_DELAY_MS
+            .saturating_mul(1_u64 << attempt.min(20));
+        base_delay.saturating_add(base_delay / 2)
     }
 
-    async fn wait_for_counter_at_least(
-        counter: &AtomicUsize,
-        minimum: usize,
-        description: &str,
-    ) {
-        wait_until(description, || counter.load(Ordering::SeqCst) >= minimum)
-            .await;
-    }
-
-    async fn wait_for_counter_stable(
-        counter: &AtomicUsize,
-        minimum: usize,
-        description: &str,
-    ) -> usize {
-        timeout(TEST_WAIT_TIMEOUT, async {
-            let mut last_seen = counter.load(Ordering::SeqCst);
-            let mut stable_polls = 0usize;
-
-            loop {
-                let current = counter.load(Ordering::SeqCst);
-                if current >= minimum {
-                    if current == last_seen {
-                        stable_polls += 1;
-                    } else {
-                        stable_polls = 0;
-                    }
-
-                    if stable_polls >= TEST_STABLE_POLLS {
-                        return current;
-                    }
-                } else {
-                    stable_polls = 0;
-                }
-
-                last_seen = current;
-                sleep(TEST_POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|error| panic!("{description}: {error}"))
-    }
-
-    async fn count_requests(
-        counter: Arc<AtomicUsize>,
-        request: Request,
-        next: Next,
-    ) -> Response {
-        counter.fetch_add(1, Ordering::SeqCst);
-        next.run(request).await
+    async fn advance_retry_delay(attempt: usize) {
+        advance(Duration::from_millis(max_retry_delay_ms(attempt) + 1)).await;
+        yield_now().await;
     }
 
     #[test]
@@ -1634,12 +1622,10 @@ mod tests {
             tokio::spawn(async move { queue.pop(&shutdown).await })
         };
 
-        sleep(Duration::from_millis(20)).await;
         shutdown.cancel();
 
-        let result = timeout(Duration::from_secs(1), waiter)
+        let result = waiter
             .await
-            .expect("queue waiter should wake up")
             .expect("queue waiter task should finish");
         assert!(result.is_none());
     }
@@ -1668,9 +1654,19 @@ mod tests {
         let shared = Arc::new(SinkSharedState::new(None, "", "", "", None));
         let logs = SinkLogState::new();
         let client = Client::new();
+        let sink_calls = Arc::new(TestCounter::new());
         let server = TestServer::spawn(Router::new().route(
             "/sink",
-            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            post({
+                let sink_calls = Arc::clone(&sink_calls);
+                move || {
+                    let sink_calls = Arc::clone(&sink_calls);
+                    async move {
+                        sink_calls.increment();
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
         ))
         .await;
         let data = sample_data(SchemaType::Type("schema-a".to_owned()));
@@ -1695,12 +1691,13 @@ mod tests {
             }
         });
 
-        sleep(Duration::from_millis(20)).await;
+        sink_calls
+            .wait_for_at_least(1, "transient retry did not perform first attempt")
+            .await;
         shared.shutdown.cancel();
 
-        let result = timeout(Duration::from_secs(1), retry)
+        let result = retry
             .await
-            .expect("retry loop should stop on shutdown")
             .expect("retry task should finish");
         assert!(matches!(result, Err(SinkError::Shutdown)));
     }
@@ -1779,9 +1776,10 @@ mod tests {
         assert_eq!(seen_idempotency.lock().await.as_slice(), &[Some(key)]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn notify_honors_configured_max_retries() {
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        tokio::time::pause();
+        let sink_calls = Arc::new(TestCounter::new());
         let server = TestServer::spawn(Router::new().route(
             "/sink/{subject_id}/{schema_id}",
             post({
@@ -1790,7 +1788,7 @@ mod tests {
                       Json(_payload): Json<DataToSink>| {
                     let sink_calls = Arc::clone(&sink_calls);
                     async move {
-                        sink_calls.fetch_add(1, Ordering::SeqCst);
+                        sink_calls.increment();
                         StatusCode::SERVICE_UNAVAILABLE
                     }
                 }
@@ -1824,36 +1822,39 @@ mod tests {
         ))))
         .await;
 
-        let attempts = wait_for_counter_stable(
-            sink_calls.as_ref(),
-            2,
-            "sink retries did not stabilize after max_retries",
-        )
-        .await;
+        sink_calls
+            .wait_for_at_least(1, "sink did not perform the initial retryable request")
+            .await;
+        advance_retry_delay(0).await;
+        let attempts = sink_calls
+            .wait_for_at_least(2, "sink did not perform the configured retry")
+            .await;
         assert_eq!(attempts, 2);
     }
 
     #[tokio::test]
     async fn notify_honors_configured_request_timeout() {
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = Arc::new(TestCounter::new());
+        let release_requests = Arc::new(Notify::new());
         let server = TestServer::spawn(
             Router::new()
                 .route(
                     "/sink/{subject_id}/{schema_id}",
-                    post(
+                    post({
+                        let sink_calls = Arc::clone(&sink_calls);
+                        let release_requests = Arc::clone(&release_requests);
                         move |_path: Path<(String, String)>,
-                              Json(_payload): Json<DataToSink>| async move {
-                            sleep(Duration::from_millis(150)).await;
-                            StatusCode::OK
-                        },
-                    ),
-                )
-                .layer(middleware::from_fn({
-                    let sink_calls = Arc::clone(&sink_calls);
-                    move |request: Request, next: Next| {
-                        count_requests(Arc::clone(&sink_calls), request, next)
-                    }
-                })),
+                              Json(_payload): Json<DataToSink>| {
+                            let sink_calls = Arc::clone(&sink_calls);
+                            let release_requests = Arc::clone(&release_requests);
+                            async move {
+                                sink_calls.increment();
+                                release_requests.notified().await;
+                                StatusCode::OK
+                            }
+                        }
+                    }),
+                ),
         )
         .await;
 
@@ -1883,12 +1884,10 @@ mod tests {
         ))))
         .await;
 
-        let attempts = wait_for_counter_stable(
-            sink_calls.as_ref(),
-            2,
-            "sink timeout retries did not stabilize",
-        )
-        .await;
+        let attempts = sink_calls
+            .wait_for_at_least(2, "sink timeout test did not perform the retry request")
+            .await;
+        release_requests.notify_waiters();
         assert_eq!(attempts, 2);
     }
 
@@ -1896,7 +1895,9 @@ mod tests {
     async fn notify_round_robin_allows_parallel_delivery() {
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = Arc::new(TestCounter::new());
+        let handlers_ready = Arc::new(Barrier::new(3));
+        let release_handlers = Arc::new(Notify::new());
 
         let server = TestServer::spawn(Router::new().route(
             "/sink/{subject_id}/{schema_id}",
@@ -1904,13 +1905,17 @@ mod tests {
                 let active = Arc::clone(&active);
                 let max_active = Arc::clone(&max_active);
                 let sink_calls = Arc::clone(&sink_calls);
+                let handlers_ready = Arc::clone(&handlers_ready);
+                let release_handlers = Arc::clone(&release_handlers);
                 move |_path: Path<(String, String)>,
                       Json(_payload): Json<DataToSink>| {
                     let active = Arc::clone(&active);
                     let max_active = Arc::clone(&max_active);
                     let sink_calls = Arc::clone(&sink_calls);
+                    let handlers_ready = Arc::clone(&handlers_ready);
+                    let release_handlers = Arc::clone(&release_handlers);
                     async move {
-                        sink_calls.fetch_add(1, Ordering::SeqCst);
+                        sink_calls.increment();
                         let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                         loop {
                             let observed = max_active.load(Ordering::SeqCst);
@@ -1929,7 +1934,8 @@ mod tests {
                                 break;
                             }
                         }
-                        sleep(Duration::from_millis(100)).await;
+                        handlers_ready.wait().await;
+                        release_handlers.notified().await;
                         active.fetch_sub(1, Ordering::SeqCst);
                         StatusCode::OK
                     }
@@ -1974,25 +1980,16 @@ mod tests {
         sink.notify(SinkDataEvent::Event(Box::new(first))).await;
         sink.notify(SinkDataEvent::Event(Box::new(second))).await;
 
-        wait_for_counter_at_least(
-            sink_calls.as_ref(),
-            2,
-            "parallel sink deliveries were not observed",
-        )
-        .await;
-        wait_for_counter_at_least(
-            max_active.as_ref(),
-            2,
-            "parallel sink concurrency did not increase",
-        )
-        .await;
+        handlers_ready.wait().await;
+        assert_eq!(sink_calls.load(), 2);
         assert!(max_active.load(Ordering::SeqCst) >= 2);
+        release_handlers.notify_waiters();
     }
 
     #[tokio::test]
     async fn notify_bootstraps_token_when_missing() {
-        let auth_calls = Arc::new(AtomicUsize::new(0));
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        let auth_calls = Arc::new(TestCounter::new());
+        let sink_calls = Arc::new(TestCounter::new());
         let seen_auth = Arc::new(Mutex::new(Vec::new()));
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
 
@@ -2005,7 +2002,7 @@ mod tests {
                         move || {
                             let auth_calls = Arc::clone(&auth_calls);
                             async move {
-                                auth_calls.fetch_add(1, Ordering::SeqCst);
+                                auth_calls.increment();
                                 Json(json!({
                                     "access_token": "fresh-token",
                                     "token_type": "Bearer",
@@ -2030,7 +2027,7 @@ mod tests {
                             let seen_auth = Arc::clone(&seen_auth);
                             let seen_paths = Arc::clone(&seen_paths);
                             async move {
-                                sink_calls.fetch_add(1, Ordering::SeqCst);
+                                sink_calls.increment();
                                 seen_auth.lock().await.push(
                                     headers
                                         .get("authorization")
@@ -2065,18 +2062,12 @@ mod tests {
         ))))
         .await;
 
-        let auth_attempts = wait_for_counter_stable(
-            auth_calls.as_ref(),
-            1,
-            "auth bootstrap call did not complete",
-        )
-        .await;
-        let sink_attempts = wait_for_counter_stable(
-            sink_calls.as_ref(),
-            1,
-            "sink bootstrap delivery did not complete",
-        )
-        .await;
+        let auth_attempts = auth_calls
+            .wait_for_at_least(1, "auth bootstrap call did not complete")
+            .await;
+        let sink_attempts = sink_calls
+            .wait_for_at_least(1, "sink bootstrap delivery did not complete")
+            .await;
         assert_eq!(auth_attempts, 1);
         assert_eq!(sink_attempts, 1);
         assert_eq!(
@@ -2091,7 +2082,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_refreshes_expiring_token_before_send() {
-        let auth_calls = Arc::new(AtomicUsize::new(0));
+        let auth_calls = Arc::new(TestCounter::new());
+        let sink_calls = Arc::new(TestCounter::new());
         let seen_auth = Arc::new(Mutex::new(Vec::new()));
 
         let server = TestServer::spawn(
@@ -2103,7 +2095,7 @@ mod tests {
                         move || {
                             let auth_calls = Arc::clone(&auth_calls);
                             async move {
-                                auth_calls.fetch_add(1, Ordering::SeqCst);
+                                auth_calls.increment();
                                 Json(json!({
                                     "access_token": "refreshed-token",
                                     "token_type": "Bearer",
@@ -2118,12 +2110,15 @@ mod tests {
                 .route(
                     "/sink/{subject_id}/{schema_id}",
                     post({
+                        let sink_calls = Arc::clone(&sink_calls);
                         let seen_auth = Arc::clone(&seen_auth);
                         move |_path: Path<(String, String)>,
                               headers: HeaderMap,
                               Json(_payload): Json<DataToSink>| {
+                            let sink_calls = Arc::clone(&sink_calls);
                             let seen_auth = Arc::clone(&seen_auth);
                             async move {
+                                sink_calls.increment();
                                 seen_auth.lock().await.push(
                                     headers
                                         .get("authorization")
@@ -2154,13 +2149,14 @@ mod tests {
         ))))
         .await;
 
-        let auth_attempts = wait_for_counter_stable(
-            auth_calls.as_ref(),
-            1,
-            "token refresh did not complete",
-        )
-        .await;
+        let auth_attempts = auth_calls
+            .wait_for_at_least(1, "token refresh did not complete")
+            .await;
+        let sink_attempts = sink_calls
+            .wait_for_at_least(1, "refreshed token was not used to send the sink request")
+            .await;
         assert_eq!(auth_attempts, 1);
+        assert_eq!(sink_attempts, 1);
         assert_eq!(
             seen_auth.lock().await.as_slice(),
             &[Some("Bearer refreshed-token".to_owned())]
@@ -2169,8 +2165,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_refreshes_after_401_and_retries() {
-        let auth_calls = Arc::new(AtomicUsize::new(0));
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        let auth_calls = Arc::new(TestCounter::new());
+        let sink_calls = Arc::new(TestCounter::new());
         let seen_auth = Arc::new(Mutex::new(Vec::new()));
 
         let server = TestServer::spawn(
@@ -2182,7 +2178,7 @@ mod tests {
                         move || {
                             let auth_calls = Arc::clone(&auth_calls);
                             async move {
-                                auth_calls.fetch_add(1, Ordering::SeqCst);
+                                auth_calls.increment();
                                 Json(json!({
                                     "access_token": "fresh-after-401",
                                     "token_type": "Bearer",
@@ -2205,9 +2201,7 @@ mod tests {
                             let sink_calls = Arc::clone(&sink_calls);
                             let seen_auth = Arc::clone(&seen_auth);
                             async move {
-                                let attempt =
-                                    sink_calls.fetch_add(1, Ordering::SeqCst)
-                                        + 1;
+                                let attempt = sink_calls.increment();
                                 let header = headers
                                     .get("authorization")
                                     .and_then(|value| value.to_str().ok())
@@ -2246,18 +2240,12 @@ mod tests {
         ))))
         .await;
 
-        let auth_attempts = wait_for_counter_stable(
-            auth_calls.as_ref(),
-            1,
-            "401 token refresh did not complete",
-        )
-        .await;
-        let sink_attempts = wait_for_counter_stable(
-            sink_calls.as_ref(),
-            2,
-            "401 retry sequence did not stabilize",
-        )
-        .await;
+        let auth_attempts = auth_calls
+            .wait_for_at_least(1, "401 token refresh did not complete")
+            .await;
+        let sink_attempts = sink_calls
+            .wait_for_at_least(2, "401 retry sequence did not complete")
+            .await;
         assert_eq!(auth_attempts, 1);
         assert_eq!(sink_attempts, 2);
         assert_eq!(
@@ -2269,9 +2257,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn notify_retries_transient_sink_errors() {
-        let sink_calls = Arc::new(AtomicUsize::new(0));
+        tokio::time::pause();
+        let sink_calls = Arc::new(TestCounter::new());
 
         let server = TestServer::spawn(Router::new().route(
             "/sink/{subject_id}/{schema_id}",
@@ -2281,8 +2270,7 @@ mod tests {
                       Json(_payload): Json<DataToSink>| {
                     let sink_calls = Arc::clone(&sink_calls);
                     async move {
-                        let attempt =
-                            sink_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        let attempt = sink_calls.increment();
                         if attempt < 3 {
                             StatusCode::SERVICE_UNAVAILABLE
                         } else {
@@ -2310,12 +2298,26 @@ mod tests {
         ))))
         .await;
 
-        let attempts = wait_for_counter_stable(
-            sink_calls.as_ref(),
-            3,
-            "transient sink retries did not stabilize",
-        )
-        .await;
+        sink_calls
+            .wait_for_at_least(
+                1,
+                "transient sink retries did not perform the first request",
+            )
+            .await;
+        advance_retry_delay(0).await;
+        sink_calls
+            .wait_for_at_least(
+                2,
+                "transient sink retries did not perform the second request",
+            )
+            .await;
+        advance_retry_delay(1).await;
+        let attempts = sink_calls
+            .wait_for_at_least(
+                3,
+                "transient sink retries did not perform the final request",
+            )
+            .await;
         assert_eq!(attempts, 3);
     }
 }
