@@ -36,6 +36,7 @@ COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 COPY ./ave/Cargo.lock ./ave/Cargo.lock
+COPY ./ave/README.md ./ave/README.md
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
 COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
@@ -51,6 +52,7 @@ COPY ./ave-actors/README.md ./ave-actors/README.md
 
 COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
+COPY ./ave/src ./ave/src
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
 COPY ./ave/core/migrations ./ave/core/migrations
@@ -109,6 +111,7 @@ COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
 COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
 COPY ./ave/Cargo.toml ./ave/Cargo.toml
 COPY ./ave/Cargo.lock ./ave/Cargo.lock
+COPY ./ave/README.md ./ave/README.md
 
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
 COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
@@ -124,6 +127,7 @@ COPY ./ave-actors/README.md ./ave-actors/README.md
 
 COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
+COPY ./ave/src ./ave/src
 COPY ./ave/identity/src ./ave/identity/src
 COPY ./ave/core/src ./ave/core/src
 COPY ./ave/core/migrations ./ave/core/migrations
