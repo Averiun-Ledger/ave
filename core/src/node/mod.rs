@@ -44,6 +44,7 @@ use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 
 pub mod register;
+pub mod subject_manager;
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
