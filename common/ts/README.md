@@ -159,6 +159,25 @@ This will:
 3. Generate a barrel `index.ts` that re-exports all types
 4. Use `TS_RS_LARGE_INT=number` to map Rust u64/i64 to TypeScript number
 
+### Checking for Drift Without Committing Generated Files
+
+If you do not want to version `src/**/*.ts`, compare a fresh local generation against the currently published npm package:
+
+```bash
+npm run check:published
+
+# Optional: print normalized diffs for real API changes
+bash check-published.sh --full
+```
+
+That command:
+1. Generates bindings in a temporary directory
+2. Downloads `ave-types@<package.json version>` from npm
+3. Groups drift into `API changes` vs `docs/comment changes only`
+4. Fails if the published package differs from the current Rust type surface
+
+This keeps the repository clean while still telling you when the TypeScript package is stale.
+
 ### Publishing Updates
 
 When Rust types are modified:
