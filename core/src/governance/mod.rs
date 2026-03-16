@@ -204,7 +204,8 @@ impl Subject for Governance {
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let node = ctx.get_parent::<Node>().await?;
+        let node_path = ActorPath::from("/user/node");
+        let node = ctx.system().get_actor::<Node>(&node_path).await?;
         node.tell(NodeMessage::EOLSubject {
             subject_id: self.subject_metadata.subject_id.clone(),
             i_owner: *self.our_key == self.subject_metadata.owner,
@@ -217,7 +218,8 @@ impl Subject for Governance {
         ctx: &mut ActorContext<Self>,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
-        let node = ctx.get_parent::<Node>().await?;
+        let node_path = ActorPath::from("/user/node");
+        let node = ctx.system().get_actor::<Node>(&node_path).await?;
         node.tell(NodeMessage::RejectTransfer(
             self.subject_metadata.subject_id.clone(),
         ))
@@ -230,7 +232,8 @@ impl Subject for Governance {
         _new_owner: PublicKey,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
-        let node = ctx.get_parent::<Node>().await?;
+        let node_path = ActorPath::from("/user/node");
+        let node = ctx.system().get_actor::<Node>(&node_path).await?;
         node.tell(NodeMessage::ConfirmTransfer(
             self.subject_metadata.subject_id.clone(),
         ))
@@ -243,7 +246,8 @@ impl Subject for Governance {
         new_owner: PublicKey,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
-        let node = ctx.get_parent::<Node>().await?;
+        let node_path = ActorPath::from("/user/node");
+        let node = ctx.system().get_actor::<Node>(&node_path).await?;
         node.tell(NodeMessage::TransferSubject(TransferSubject {
             name: self.subject_metadata.name.clone(),
             subject_id: self.subject_metadata.subject_id.clone(),

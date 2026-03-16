@@ -33,8 +33,8 @@ use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
-    finish_subject, get_gov, get_gov_sn, get_last_ledger_event,
-    get_metadata, make_obsolete, up_subject, update_ledger,
+    acquire_subject, create_subject, get_gov, get_gov_sn,
+    get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
 };
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -218,19 +218,16 @@ impl RequestManager {
             }
         };
 
-        let subject_up = if self.needs_subject_manager() {
-            up_subject(ctx, &self.subject_id, self.requester_id(), None)
-                .await?;
-            true
-        } else {
-            false
-        };
+        let lease = acquire_subject(
+            ctx,
+            &self.subject_id,
+            self.requester_id(),
+            None,
+            self.needs_subject_manager(),
+        )
+        .await?;
         let metadata = get_metadata(ctx, &subject_id).await;
-
-        if subject_up {
-            finish_subject(ctx, &self.subject_id, self.requester_id()).await?;
-        }
-
+        lease.finish(ctx).await?;
         let metadata = metadata?;
 
         if confirm && !metadata.schema_id.is_gov() {
@@ -676,40 +673,24 @@ impl RequestManager {
                     (ActualProtocols::None, governance_data.version, None)
                 };
 
-            let subject_up = if self.needs_subject_manager() {
-                up_subject(ctx, &self.subject_id, self.requester_id(), None)
-                    .await?;
-                true
-            } else {
-                false
-            };
+            let lease = acquire_subject(
+                ctx,
+                &self.subject_id,
+                self.requester_id(),
+                None,
+                self.needs_subject_manager(),
+            )
+            .await?;
             let metadata = get_metadata(ctx, &self.subject_id).await;
             let last_ledger_event = match metadata {
                 Ok(metadata) => {
                     let last_ledger_event =
                         get_last_ledger_event(ctx, &self.subject_id).await;
-
-                    if subject_up {
-                        finish_subject(
-                            ctx,
-                            &self.subject_id,
-                            self.requester_id(),
-                        )
-                        .await?;
-                    }
-
+                    lease.finish(ctx).await?;
                     (metadata, last_ledger_event?)
                 }
                 Err(error) => {
-                    if subject_up {
-                        finish_subject(
-                            ctx,
-                            &self.subject_id,
-                            self.requester_id(),
-                        )
-                        .await?;
-                    }
-
+                    lease.finish(ctx).await?;
                     return Err(error.into());
                 }
             };
@@ -876,41 +857,24 @@ impl RequestManager {
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
         if ledger.content().event_request.content().is_create_event() {
-            let should_finish = match up_subject(
+            if let Err(e) = create_subject(ctx, ledger.clone()).await {
+                if let ActorError::Functional { .. } = e {
+                    return Err(RequestManagerError::CheckLimit);
+                }
+                return Err(e.into());
+            }
+        } else {
+            let lease = acquire_subject(
                 ctx,
                 &self.subject_id,
                 self.requester_id(),
-                Some(ledger.clone()),
+                None,
+                self.needs_subject_manager(),
             )
-            .await
-            {
-                Ok(()) => self.needs_subject_manager(),
-                Err(ActorError::Functional { .. }) => {
-                    return Err(RequestManagerError::CheckLimit);
-                }
-                Err(error) => return Err(error.into()),
-            };
-
-            if should_finish {
-                finish_subject(ctx, &self.subject_id, self.requester_id())
-                    .await?;
-            }
-        } else {
-            let subject_up = if self.needs_subject_manager() {
-                up_subject(ctx, &self.subject_id, self.requester_id(), None)
-                    .await?;
-                true
-            } else {
-                false
-            };
+            .await?;
             let update_result =
                 update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await;
-
-            if subject_up {
-                finish_subject(ctx, &self.subject_id, self.requester_id())
-                    .await?;
-            }
-
+            lease.finish(ctx).await?;
             update_result?;
         }
 

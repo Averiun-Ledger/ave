@@ -23,7 +23,10 @@ use crate::{
         common::{
             check_witness_access, emit_fail,
             node::{get_subject_data, i_owner_new_owner, try_to_update},
-            subject::{create_subject, get_gov, get_gov_sn, update_ledger},
+            subject::{
+                acquire_subject, create_subject, get_gov, get_gov_sn,
+                update_ledger,
+            },
         },
         event::Ledger,
     },
@@ -42,17 +45,27 @@ pub struct DistriWorker {
 }
 
 impl DistriWorker {
-    async fn down_tracker(
-        &self,
-        ctx: &ActorContext<Self>,
+    fn requester_id(
+        kind: &str,
         subject_id: &DigestIdentifier,
-    ) -> Result<(), ActorError> {
-        let subject_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        info: &ComunicateInfo,
+        sender: &PublicKey,
+    ) -> String {
+        format!(
+            "{kind}:{subject_id}:{sender}:{}:{}",
+            info.request_id, info.version
+        )
+    }
 
-        let subject_actor =
-            ctx.system().get_actor::<Tracker>(&subject_path).await?;
-        subject_actor.ask_stop().await
+    fn should_keep_tracker_up(
+        &self,
+        owner: &PublicKey,
+        new_owner: &Option<PublicKey>,
+    ) -> bool {
+        *owner == *self.our_key
+            || new_owner
+                .as_ref()
+                .is_some_and(|new_owner| *new_owner == *self.our_key)
     }
 
     async fn get_ledger(
@@ -83,26 +96,20 @@ impl DistriWorker {
                 }),
             }
         } else {
-            let response = if let Ok(tracker_actor) =
-                ctx.system().get_actor::<Tracker>(&path).await
-            {
-                tracker_actor
-                    .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
-                    .await?
-            } else {
-                Self::up_tracker(ctx, subject_id, true).await?;
-
-                let tracker_actor =
-                    ctx.system().get_actor::<Tracker>(&path).await?;
-
-                let response = tracker_actor
-                    .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
-                    .await?;
-
-                tracker_actor.ask_stop().await?;
-
-                response
-            };
+            let lease = acquire_subject(
+                ctx,
+                subject_id,
+                format!("send_distribution:{subject_id}"),
+                None,
+                true,
+            )
+            .await?;
+            let tracker_actor = ctx.system().get_actor::<Tracker>(&path).await?;
+            let response = tracker_actor
+                .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
+                .await;
+            lease.finish(ctx).await?;
+            let response = response?;
 
             match response {
                 TrackerResponse::Ledger { ledger, is_all } => {
@@ -298,30 +305,6 @@ impl DistriWorker {
         }
     }
 
-    pub async fn up_tracker(
-        ctx: &mut ActorContext<Self>,
-        subject_id: &DigestIdentifier,
-        light: bool,
-    ) -> Result<(), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
-
-        // We obtain the validator
-        let response = node_actor
-            .ask(NodeMessage::UpSubject {
-                subject_id: subject_id.to_owned(),
-                light,
-            })
-            .await?;
-
-        match response {
-            NodeResponse::Ok => Ok(()),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "NodeResponse::Ok".to_owned(),
-                path: node_path,
-            }),
-        }
-    }
 }
 
 #[async_trait]
@@ -602,7 +585,7 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let (owner, new_owner) = if ledger
+                let (owner, new_owner, lease) = if ledger
                     .content()
                     .event_request
                     .content()
@@ -630,7 +613,7 @@ impl Handler<Self> for DistriWorker {
                         }
                     };
 
-                    (ledger.signature().signer.clone(), None)
+                    (ledger.signature().signer.clone(), None, None)
                 } else {
                     let (i_owner, i_new_owner) =
                         match i_owner_new_owner(ctx, &subject_id).await {
@@ -643,30 +626,57 @@ impl Handler<Self> for DistriWorker {
                                     "Failed to check owner status"
                                 );
                                 return Err(emit_fail(ctx, e).await);
-                            }
-                        };
+                        }
+                    };
 
-                    if !i_new_owner.unwrap_or_default()
+                    let requester = Self::requester_id(
+                        "last_event_distribution",
+                        &subject_id,
+                        &info,
+                        &sender,
+                    );
+                    let lease = if !i_new_owner.unwrap_or_default()
                         && !i_owner
                         && !is_gov
-                        && let Err(e) =
-                            Self::up_tracker(ctx, &subject_id, false).await
                     {
-                        error!(
-                            msg_type = "LastEventDistribution",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to bring up tracker for witness subject"
-                        );
-                        let error = DistributorError::UpTrackerFailed {
-                            details: e.to_string(),
-                        };
-                        return Err(emit_fail(ctx, error.into()).await);
+                        match acquire_subject(
+                            ctx,
+                            &subject_id,
+                            requester.clone(),
+                            None,
+                            true,
+                        )
+                        .await
+                        {
+                            Ok(lease) => Some(lease),
+                            Err(e) => {
+                                error!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to bring up tracker for witness subject"
+                                );
+                                let error = DistributorError::UpTrackerFailed {
+                                    details: e.to_string(),
+                                };
+                                return Err(emit_fail(ctx, error.into()).await);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let update_result =
+                        update_ledger(ctx, &subject_id, vec![*ledger.clone()])
+                            .await;
+
+                    if let Some(lease) = lease.clone()
+                        && update_result.is_err()
+                    {
+                        lease.finish(ctx).await?;
                     }
 
-                    match update_ledger(ctx, &subject_id, vec![*ledger.clone()])
-                        .await
-                    {
+                    match update_result {
                         Ok((last_sn, owner, new_owner))
                             if last_sn < ledger.content().sn =>
                         {
@@ -707,31 +717,19 @@ impl Handler<Self> for DistriWorker {
                                     return Err(emit_fail(ctx, e).await);
                                 };
 
-                            let i_new_owner = if let Some(new_owner) = new_owner
-                            {
-                                new_owner == *self.our_key
-                            } else {
-                                false
-                            };
-
                             if !is_gov
-                                && owner != *self.our_key
-                                && !i_new_owner
-                                && let Err(e) =
-                                    self.down_tracker(ctx, &subject_id).await
+                                && !self.should_keep_tracker_up(
+                                    &owner,
+                                    &new_owner,
+                                )
+                                && let Some(lease) = lease.clone()
                             {
-                                error!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to stop tracker after ledger request"
-                                );
-                                return Err(e);
+                                lease.finish(ctx).await?;
                             }
 
                             return Ok(());
                         }
-                        Ok((.., owner, new_owner)) => (owner, new_owner),
+                        Ok((.., owner, new_owner)) => (owner, new_owner, lease),
                         Err(e) => {
                             if let ActorError::Functional { .. } = e.clone() {
                                 warn!(
@@ -763,7 +761,7 @@ impl Handler<Self> for DistriWorker {
                         info.request_id,
                         info.receiver.clone()
                     ),
-                    request_id: info.request_id,
+                    request_id: info.request_id.clone(),
                     version: info.version,
                 };
 
@@ -787,24 +785,11 @@ impl Handler<Self> for DistriWorker {
                     return Err(emit_fail(ctx, e).await);
                 };
 
-                let i_new_owner = if let Some(ref new_owner) = new_owner {
-                    *new_owner == *self.our_key
-                } else {
-                    false
-                };
-
                 if !is_gov
-                    && owner != *self.our_key
-                    && !i_new_owner
-                    && let Err(e) = self.down_tracker(ctx, &subject_id).await
+                    && !self.should_keep_tracker_up(&owner, &new_owner)
+                    && let Some(lease) = lease
                 {
-                    error!(
-                        msg_type = "LastEventDistribution",
-                        subject_id = %subject_id,
-                        error = %e,
-                        "Failed to stop tracker after processing"
-                    );
-                    return Err(e);
+                    lease.finish(ctx).await?;
                 }
 
                 debug!(
@@ -869,7 +854,7 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let (i_owner, i_new_owner) = if ledger[0]
+                let (i_owner, i_new_owner, lease) = if ledger[0]
                     .content()
                     .event_request
                     .content()
@@ -898,7 +883,7 @@ impl Handler<Self> for DistriWorker {
                     };
 
                     let event = ledger.remove(0);
-                    (event.signature().signer == *self.our_key, false)
+                    (event.signature().signer == *self.our_key, false, None)
                 } else {
                     // TODO en un futuro mejorar esto
                     if ledger[0]
@@ -925,30 +910,57 @@ impl Handler<Self> for DistriWorker {
                             }
                         };
 
+                    let requester = Self::requester_id(
+                        "ledger_distribution",
+                        &subject_id,
+                        &info,
+                        &sender,
+                    );
                     let i_new_owner = i_new_owner.unwrap_or_default();
-                    if !i_new_owner
+                    let lease = if !i_new_owner
                         && !i_owner
                         && !is_gov
-                        && let Err(e) =
-                            Self::up_tracker(ctx, &subject_id, false).await
                     {
-                        error!(
-                            msg_type = "LedgerDistribution",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to bring up tracker for witness subject"
-                        );
-                        let error = DistributorError::UpTrackerFailed {
-                            details: e.to_string(),
-                        };
-                        return Err(emit_fail(ctx, error.into()).await);
-                    }
+                        match acquire_subject(
+                            ctx,
+                            &subject_id,
+                            requester.clone(),
+                            None,
+                            true,
+                        )
+                        .await
+                        {
+                            Ok(lease) => Some(lease),
+                            Err(e) => {
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to bring up tracker for witness subject"
+                                );
+                                let error = DistributorError::UpTrackerFailed {
+                                    details: e.to_string(),
+                                };
+                                return Err(emit_fail(ctx, error.into()).await);
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
-                    (i_owner, i_new_owner)
+                    (i_owner, i_new_owner, lease)
                 };
 
-                let (i_owner, i_new_owner) = if !ledger.is_empty() {
-                    match update_ledger(ctx, &subject_id, ledger).await {
+                let (i_owner, i_new_owner, lease) = if !ledger.is_empty() {
+                    let update_result = update_ledger(ctx, &subject_id, ledger).await;
+
+                    if let Some(lease) = lease.clone()
+                        && update_result.is_err()
+                    {
+                        lease.finish(ctx).await?;
+                    }
+
+                    match update_result {
                         Ok((last_sn, owner, new_owner)) => {
                             let i_new_owner = if let Some(new_owner) = new_owner
                             {
@@ -967,7 +979,7 @@ impl Handler<Self> for DistriWorker {
 
                                 let new_info = ComunicateInfo {
                                     receiver: sender.clone(),
-                                    request_id: info.request_id,
+                                    request_id: info.request_id.clone(),
                                     version: info.version,
                                     receiver_actor: format!(
                                         "/user/node/distributor_{}",
@@ -999,7 +1011,7 @@ impl Handler<Self> for DistriWorker {
                                 };
                             }
 
-                            (owner == *self.our_key, i_new_owner)
+                            (owner == *self.our_key, i_new_owner, lease)
                         }
                         Err(e) => {
                             if let ActorError::Functional { .. } = e.clone() {
@@ -1026,21 +1038,15 @@ impl Handler<Self> for DistriWorker {
                         }
                     }
                 } else {
-                    (i_owner, i_new_owner)
+                    (i_owner, i_new_owner, lease)
                 };
 
                 if !is_gov
                     && !i_owner
                     && !i_new_owner
-                    && let Err(e) = self.down_tracker(ctx, &subject_id).await
+                    && let Some(lease) = lease
                 {
-                    error!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        error = %e,
-                        "Failed to stop tracker after processing"
-                    );
-                    return Err(e);
+                    lease.finish(ctx).await?;
                 }
 
                 debug!(
