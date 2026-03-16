@@ -16,16 +16,11 @@ use crate::{
     auth::{Auth, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
-    governance::{Governance, GovernanceMessage, data::GovernanceData},
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
-    model::{
-        common::node::SignTypesNode,
-        event::{Protocols, ValidationMetadata},
-    },
-    subject::{SignedLedger, SubjectMetadata},
+    model::common::node::SignTypesNode,
+    node::subject_manager::{SubjectManager, SubjectManagerMessage},
     system::ConfigHelper,
-    tracker::{InitParamsTracker, Tracker, TrackerInit, TrackerMessage},
 };
 
 use ave_common::{
@@ -307,72 +302,20 @@ impl Node {
         Ok(())
     }
 
-    async fn create_subjects(
+    async fn create_distributors(
         &self,
         ctx: &mut ActorContext<Self>,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External database helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
-
-        let Some(hash) = self.hash else {
-            error!("Hash is None during subject creation");
-            return Err(ActorError::FunctionalCritical {
-                description: "Hash is None".to_string(),
-            });
-        };
-
-        for (subject, data) in self.owned_subjects.clone() {
-            if let SubjectData::Governance { .. } = data {
-                let governance_actor = ctx
-                    .create_child(
-                        &subject.to_string(),
-                        Governance::initial((None, self.our_key.clone(), hash)),
-                    )
-                    .await?;
-
-                let sink = Sink::new(
-                    governance_actor.subscribe(),
-                    ext_db.get_subject(),
-                );
-
-                ctx.system().run_sink(sink).await;
-
+        for subject in self.owned_subjects.keys() {
+            let distributor_name = format!("distributor_{}", subject);
+            if ctx
+                .get_child::<DistriWorker>(&distributor_name)
+                .await
+                .is_err()
+            {
                 ctx.create_child(
-                    &format!("distributor_{}", subject),
-                    DistriWorker {
-                        our_key: self.our_key.clone(),
-                        network: network.clone(),
-                    },
-                )
-                .await?;
-            } else {
-                let tracker_actor = ctx
-                    .create_child(
-                        &subject.to_string(),
-                        Tracker::initial(InitParamsTracker {
-                            data: None,
-                            hash,
-                            is_service: self.is_service,
-                            public_key: self.our_key.clone(),
-                        }),
-                    )
-                    .await?;
-
-                let sink =
-                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
-
-                ctx.system().run_sink(sink).await;
-
-                ctx.create_child(
-                    &format!("distributor_{}", subject),
+                    &distributor_name,
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
@@ -382,55 +325,15 @@ impl Node {
             }
         }
 
-        for (subject, data) in self.known_subjects.clone() {
-            let i_new_owner = self
-                .transfer_subjects
-                .get(&subject)
-                .is_some_and(|transfer| transfer.new_owner == *self.our_key);
-
-            if let SubjectData::Governance { .. } = data {
-                let governance_actor = ctx
-                    .create_child(
-                        &subject.to_string(),
-                        Governance::initial((None, self.our_key.clone(), hash)),
-                    )
-                    .await?;
-
-                let sink = Sink::new(
-                    governance_actor.subscribe(),
-                    ext_db.get_subject(),
-                );
-
-                ctx.system().run_sink(sink).await;
-
+        for subject in self.known_subjects.keys() {
+            let distributor_name = format!("distributor_{}", subject);
+            if ctx
+                .get_child::<DistriWorker>(&distributor_name)
+                .await
+                .is_err()
+            {
                 ctx.create_child(
-                    &format!("distributor_{}", subject),
-                    DistriWorker {
-                        our_key: self.our_key.clone(),
-                        network: network.clone(),
-                    },
-                )
-                .await?;
-            } else if i_new_owner {
-                let tracker_actor = ctx
-                    .create_child(
-                        &subject.to_string(),
-                        Tracker::initial(InitParamsTracker {
-                            data: None,
-                            hash,
-                            is_service: self.is_service,
-                            public_key: self.our_key.clone(),
-                        }),
-                    )
-                    .await?;
-
-                let sink =
-                    Sink::new(tracker_actor.subscribe(), ext_db.get_subject());
-
-                ctx.system().run_sink(sink).await;
-
-                ctx.create_child(
-                    &format!("distributor_{}", subject),
+                    &distributor_name,
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
@@ -442,6 +345,24 @@ impl Node {
 
         Ok(())
     }
+
+    fn governance_ids(&self) -> Vec<DigestIdentifier> {
+        let mut governance_ids = self
+            .owned_subjects
+            .iter()
+            .filter(|(_, data)| matches!(data, SubjectData::Governance { .. }))
+            .map(|(subject_id, _)| subject_id.clone())
+            .collect::<HashSet<_>>();
+
+        governance_ids.extend(
+            self.known_subjects
+                .iter()
+                .filter(|(_, data)| matches!(data, SubjectData::Governance { .. }))
+                .map(|(subject_id, _)| subject_id.clone()),
+        );
+
+        governance_ids.into_iter().collect()
+    }
 }
 
 /// Node message.
@@ -450,12 +371,12 @@ pub enum NodeMessage {
     GetGovernances,
     SignRequest(SignTypesNode),
     PendingTransfers,
-    UpSubject {
+    RegisterSubject {
+        owner: PublicKey,
         subject_id: DigestIdentifier,
-        light: bool,
+        data: SubjectData,
     },
     GetSubjectData(DigestIdentifier),
-    CreateNewSubject(SignedLedger),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
     AuthData(DigestIdentifier),
@@ -600,11 +521,46 @@ impl Actor for Node {
             return Err(e);
         }
 
-        if let Err(e) = self.create_subjects(ctx, &network).await {
+        if let Err(e) = self.create_distributors(ctx, &network).await {
             error!(
                 error = %e,
-                "Failed to create subjects"
+                "Failed to create distributors"
             );
+            return Err(e);
+        }
+
+        let Some(hash) = self.hash else {
+            error!("Hash is None during subject manager startup");
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash is None".to_string(),
+            });
+        };
+
+        let subject_manager = match ctx
+            .create_child(
+                "subject_manager",
+                SubjectManager::new(
+                    self.our_key.clone(),
+                    hash,
+                    self.is_service,
+                ),
+            )
+            .await
+        {
+            Ok(actor) => actor,
+            Err(e) => {
+                error!(error = %e, "Failed to create subject_manager child");
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = subject_manager
+            .ask(SubjectManagerMessage::UpGovernances {
+                governance_ids: self.governance_ids(),
+            })
+            .await
+        {
+            error!(error = %e, "Failed to bootstrap governances");
             return Err(e);
         }
 
@@ -652,6 +608,53 @@ impl Handler<Self> for Node {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
+            NodeMessage::RegisterSubject {
+                owner,
+                subject_id,
+                data,
+            } => {
+                let Some(network): Option<Arc<NetworkSender>> =
+                    ctx.system().get_helper("network").await
+                else {
+                    error!(
+                        msg_type = "RegisterSubject",
+                        subject_id = %subject_id,
+                        "Network helper not found"
+                    );
+                    return Err(ActorError::Helper {
+                        name: "network".to_string(),
+                        reason: "Not found".to_string(),
+                    });
+                };
+
+                self.on_event(
+                    NodeEvent::RegisterSubject {
+                        owner,
+                        subject_id: subject_id.clone(),
+                        data,
+                    },
+                    ctx,
+                )
+                .await;
+
+                let distributor_name = format!("distributor_{}", subject_id);
+                if ctx
+                    .get_child::<DistriWorker>(&distributor_name)
+                    .await
+                    .is_err()
+                {
+                    ctx.create_child(
+                        &distributor_name,
+                        DistriWorker {
+                            our_key: self.our_key.clone(),
+                            network,
+                        },
+                    )
+                    .await?;
+                }
+
+                Ok(NodeResponse::Ok)
+            }
             NodeMessage::EOLSubject {
                 subject_id,
                 i_owner,
@@ -700,60 +703,6 @@ impl Handler<Self> for Node {
                 };
 
                 Ok(NodeResponse::SubjectData(subject_data))
-            }
-            NodeMessage::UpSubject { subject_id, light } => {
-                let Some(ext_db): Option<Arc<ExternalDB>> =
-                    ctx.system().get_helper("ext_db").await
-                else {
-                    error!(
-                        msg_type = "UpSubject",
-                        subject_id = %subject_id,
-                        "External database helper not found"
-                    );
-                    return Err(ActorError::Helper {
-                        name: "ext_db".to_string(),
-                        reason: "Not found".to_string(),
-                    });
-                };
-
-                let Some(hash) = self.hash else {
-                    error!(
-                        msg_type = "UpSubject",
-                        subject_id = %subject_id,
-                        "Hash is None"
-                    );
-                    return Err(ActorError::FunctionalCritical {
-                        description: "Hash is None".to_string(),
-                    });
-                };
-
-                let tracker_actor = ctx
-                    .create_child(
-                        &subject_id.to_string(),
-                        Tracker::initial(InitParamsTracker {
-                            data: None,
-                            hash,
-                            is_service: self.is_service,
-                            public_key: self.our_key.clone(),
-                        }),
-                    )
-                    .await?;
-                if !light {
-                    let sink = Sink::new(
-                        tracker_actor.subscribe(),
-                        ext_db.get_subject(),
-                    );
-                    ctx.system().run_sink(sink).await;
-                }
-
-                debug!(
-                    msg_type = "UpSubject",
-                    subject_id = %subject_id,
-                    light = light,
-                    "Subject brought up successfully"
-                );
-
-                Ok(NodeResponse::Ok)
             }
             NodeMessage::GetSubjectData(subject_id) => {
                 let data = if let Some(data) =
@@ -839,199 +788,6 @@ impl Handler<Self> for Node {
                     msg_type = "ConfirmTransfer",
                     subject_id = %subject_id,
                     "Transfer confirmed between other parties"
-                );
-
-                Ok(NodeResponse::Ok)
-            }
-            NodeMessage::CreateNewSubject(ledger) => {
-                let Some(ext_db): Option<Arc<ExternalDB>> =
-                    ctx.system().get_helper("ext_db").await
-                else {
-                    error!(
-                        msg_type = "CreateNewSubject",
-                        "External database helper not found"
-                    );
-                    return Err(ActorError::Helper {
-                        name: "ext_db".to_string(),
-                        reason: "Not found".to_string(),
-                    });
-                };
-
-                let Some(network): Option<Arc<NetworkSender>> =
-                    ctx.system().get_helper("network").await
-                else {
-                    error!(
-                        msg_type = "CreateNewSubject",
-                        "Network helper not found"
-                    );
-                    return Err(ActorError::Helper {
-                        name: "network".to_string(),
-                        reason: "Not found".to_string(),
-                    });
-                };
-
-                let Some(hash) = self.hash else {
-                    error!(msg_type = "CreateNewSubject", "Hash is None");
-                    return Err(ActorError::FunctionalCritical {
-                        description: "Hash is None".to_string(),
-                    });
-                };
-
-                let metadata = match &ledger.content().protocols {
-                    Protocols::Create { validation } => {
-                        if let ValidationMetadata::Metadata(metadata) =
-                            &validation.validation_metadata
-                        {
-                            metadata.clone()
-                        } else {
-                            error!(
-                                msg_type = "CreateNewSubject",
-                                "ValidationMetadata must be Metadata in Create event"
-                            );
-                            return Err(ActorError::Functional { description: "In Create event ValidationMetadata must be Metadata".to_string() });
-                        }
-                    }
-                    _ => {
-                        error!(
-                            msg_type = "CreateNewSubject",
-                            "Event must be a Create event"
-                        );
-                        return Err(ActorError::Functional {
-                            description: "Event must be a Create event"
-                                .to_string(),
-                        });
-                    }
-                };
-
-                let subject_id = metadata.subject_id.to_string();
-
-                let subject_data = if metadata.schema_id.is_gov() {
-                    let subject_metadata = SubjectMetadata::new(&metadata);
-                    let governance_data =
-                        serde_json::from_value::<GovernanceData>(
-                            metadata.properties.0,
-                        )
-                        .map_err(|e| {
-                            error!(
-                                msg_type = "CreateNewSubject",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Governance properties must be GovernanceData"
-                            );
-                            ActorError::Functional { description: format!("In governance properties must be a GovernanceData: {e}")}
-                        })?;
-
-                    let governance = Governance::initial((
-                        Some((subject_metadata, governance_data)),
-                        self.our_key.clone(),
-                        hash,
-                    ));
-
-                    let governance_actor =
-                        ctx.create_child(&subject_id, governance).await?;
-
-                    let sink = Sink::new(
-                        governance_actor.subscribe(),
-                        ext_db.get_subject(),
-                    );
-                    ctx.system().run_sink(sink).await;
-
-                    if let Err(e) = governance_actor
-                        .ask(GovernanceMessage::UpdateLedger {
-                            events: vec![ledger.clone()],
-                        })
-                        .await
-                    {
-                        error!(
-                            msg_type = "CreateNewSubject",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to update governance ledger"
-                        );
-                        governance_actor.tell_stop().await;
-                        return Err(e);
-                    };
-
-                    debug!(
-                        msg_type = "CreateNewSubject",
-                        subject_id = %subject_id,
-                        "Governance subject created successfully"
-                    );
-
-                    SubjectData::Governance { active: true }
-                } else {
-                    let tracker_init = TrackerInit::from(&*metadata);
-
-                    let tracker = Tracker::initial(InitParamsTracker {
-                        data: Some(tracker_init),
-                        hash,
-                        is_service: self.is_service,
-                        public_key: self.our_key.clone(),
-                    });
-
-                    let tracker_actor =
-                        ctx.create_child(&subject_id, tracker).await?;
-
-                    let sink = Sink::new(
-                        tracker_actor.subscribe(),
-                        ext_db.get_subject(),
-                    );
-                    ctx.system().run_sink(sink).await;
-
-                    if let Err(e) = tracker_actor
-                        .ask(TrackerMessage::UpdateLedger {
-                            events: vec![ledger.clone()],
-                        })
-                        .await
-                    {
-                        error!(
-                            msg_type = "CreateNewSubject",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to update tracker ledger"
-                        );
-                        tracker_actor.tell_stop().await;
-                        return Err(e);
-                    };
-
-                    debug!(
-                        msg_type = "CreateNewSubject",
-                        subject_id = %subject_id,
-                        governance_id = %metadata.governance_id,
-                        "Tracker subject created successfully"
-                    );
-
-                    SubjectData::Tracker {
-                        governance_id: metadata.governance_id.clone(),
-                        schema_id: metadata.schema_id.clone(),
-                        namespace: metadata.namespace.to_string(),
-                        active: true,
-                    }
-                };
-
-                self.on_event(
-                    NodeEvent::RegisterSubject {
-                        subject_id: metadata.subject_id.clone(),
-                        owner: metadata.owner.clone(),
-                        data: subject_data,
-                    },
-                    ctx,
-                )
-                .await;
-
-                ctx.create_child(
-                    &format!("distributor_{}", subject_id),
-                    DistriWorker {
-                        our_key: self.our_key.clone(),
-                        network,
-                    },
-                )
-                .await?;
-
-                debug!(
-                    msg_type = "CreateNewSubject",
-                    subject_id = %subject_id,
-                    "New subject and distributor created successfully"
                 );
 
                 Ok(NodeResponse::Ok)

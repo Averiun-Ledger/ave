@@ -16,6 +16,7 @@ use crate::{
     governance::{Governance, GovernanceMessage, data::GovernanceData},
     helpers::db::ExternalDB,
     model::event::{Protocols, ValidationMetadata},
+    node::{Node, NodeMessage, NodeResponse, SubjectData},
     subject::{SignedLedger, SubjectMetadata},
     tracker::{InitParamsTracker, Tracker, TrackerInit, TrackerMessage},
 };
@@ -212,6 +213,19 @@ impl SubjectManager {
             return Err(error);
         }
 
+        self.register_subject_in_node(
+            ctx,
+            metadata.owner.clone(),
+            metadata.subject_id.clone(),
+            SubjectData::Tracker {
+                governance_id: metadata.governance_id.clone(),
+                schema_id: metadata.schema_id.clone(),
+                namespace: metadata.namespace.to_string(),
+                active: true,
+            },
+        )
+        .await?;
+
         Ok(())
     }
 
@@ -262,6 +276,14 @@ impl SubjectManager {
             governance_actor.tell_stop().await;
             return Err(error);
         }
+
+        self.register_subject_in_node(
+            ctx,
+            metadata.owner.clone(),
+            metadata.subject_id.clone(),
+            SubjectData::Governance { active: true },
+        )
+        .await?;
 
         Ok(())
     }
@@ -327,6 +349,31 @@ impl SubjectManager {
         let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
         ctx.system().run_sink(sink).await;
         Ok(())
+    }
+
+    async fn register_subject_in_node(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        owner: PublicKey,
+        subject_id: DigestIdentifier,
+        data: SubjectData,
+    ) -> Result<(), ActorError> {
+        let node = ctx.get_parent::<Node>().await?;
+        let response = node
+            .ask(NodeMessage::RegisterSubject {
+                owner,
+                subject_id,
+                data,
+            })
+            .await?;
+
+        match response {
+            NodeResponse::Ok => Ok(()),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ctx.path().parent(),
+                expected: "NodeResponse::Ok".to_owned(),
+            }),
+        }
     }
 }
 
