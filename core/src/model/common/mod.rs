@@ -56,7 +56,7 @@ where
     A: Actor + Handler<A>,
 {
     let path =
-        ActorPath::from(format!("/user/node/{}/role_register", governance_id));
+        ActorPath::from(format!("/user/node/subject_manager/{}/role_register", governance_id));
     let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
     let response = actor
@@ -89,7 +89,7 @@ where
     A: Actor + Handler<A>,
 {
     let path =
-        ActorPath::from(format!("/user/node/{}/role_register", governance_id));
+        ActorPath::from(format!("/user/node/subject_manager/{}/role_register", governance_id));
     let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
     let response = actor
@@ -117,7 +117,7 @@ where
     A: Actor + Handler<A>,
 {
     let actor_path = ActorPath::from(format!(
-        "/user/node/{}/subject_register",
+        "/user/node/subject_manager/{}/subject_register",
         governance_id
     ));
 
@@ -152,7 +152,7 @@ where
     A: Actor + Handler<A>,
 {
     let actor_path = ActorPath::from(format!(
-        "/user/node/{}/witnesses_register",
+        "/user/node/subject_manager/{}/witnesses_register",
         governance_id
     ));
 

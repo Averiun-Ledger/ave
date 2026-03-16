@@ -140,12 +140,12 @@ impl Handler<Self> for EvalCoordinator {
                 let receiver_actor =
                     if evaluation_req.content().schema_id.is_gov() {
                         format!(
-                            "/user/node/{}/evaluator",
+                            "/user/node/subject_manager/{}/evaluator",
                             evaluation_req.content().governance_id
                         )
                     } else {
                         format!(
-                            "/user/node/{}/{}_evaluation",
+                            "/user/node/subject_manager/{}/{}_evaluation",
                             evaluation_req.content().governance_id,
                             evaluation_req.content().schema_id
                         )

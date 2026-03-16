@@ -25,37 +25,24 @@ use crate::{
 
 pub async fn get_gov<A>(
     ctx: &mut ActorContext<A>,
-    subject_id: &DigestIdentifier,
+    governance_id: &DigestIdentifier,
 ) -> Result<GovernanceData, ActorError>
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!("/user/node/{}", subject_id));
+    let path =
+        ActorPath::from(format!("/user/node/subject_manager/{}", governance_id));
+    let governance_actor = ctx.system().get_actor::<Governance>(&path).await?;
+    let response = governance_actor
+        .ask(GovernanceMessage::GetGovernance)
+        .await?;
 
-    if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
-        let response = tracker_actor.ask(TrackerMessage::GetGovernance).await?;
-        match response {
-            TrackerResponse::Governance(gov_data) => Ok(*gov_data),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "TrackerResponse::Governance".to_owned(),
-                path,
-            }),
-        }
-    } else if let Ok(governance_actor) =
-        ctx.system().get_actor::<Governance>(&path).await
-    {
-        let response = governance_actor
-            .ask(GovernanceMessage::GetGovernance)
-            .await?;
-        match response {
-            GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "GovernanceResponse::Governance".to_owned(),
-                path,
-            }),
-        }
-    } else {
-        Err(ActorError::NotFound { path })
+    match response {
+        GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "GovernanceResponse::Governance".to_owned(),
+            path,
+        }),
     }
 }
 
@@ -66,7 +53,7 @@ pub async fn get_metadata<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!("/user/node/{}", subject_id));
+    let path = ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
 
     if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor.ask(TrackerMessage::GetMetadata).await?;
@@ -101,7 +88,7 @@ pub async fn get_version<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!("/user/node/{}", governance_id));
+    let path = ActorPath::from(format!("/user/node/subject_manager/{}", governance_id));
     let actor = ctx.system().get_actor::<Governance>(&path).await?;
     let response = actor.ask(GovernanceMessage::GetVersion).await?;
 
@@ -121,7 +108,7 @@ pub async fn get_last_ledger_event<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!("/user/node/{}", subject_id));
+    let path = ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
 
     if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
@@ -160,7 +147,7 @@ pub async fn update_ledger<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!("/user/node/{}", subject_id));
+    let path = ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
 
     if let Ok(tracker_actor) = ctx.system().get_actor::<Tracker>(&path).await {
         let response = tracker_actor
@@ -235,7 +222,7 @@ where
     A: Actor + Handler<A>,
 {
     let actor_path = ActorPath::from(format!(
-        "/user/node/{}/witnesses_register",
+        "/user/node/subject_manager/{}/witnesses_register",
         governance_id
     ));
 
@@ -262,7 +249,7 @@ where
     A: Actor + Handler<A>,
 {
     let actor_path = ActorPath::from(format!(
-        "/user/node/{}/witnesses_register",
+        "/user/node/subject_manager/{}/witnesses_register",
         governance_id
     ));
 
@@ -292,7 +279,7 @@ where
     A: Actor + Handler<A>,
 {
     let actor_path =
-        ActorPath::from(format!("/user/node/{}/approver", governance_id));
+        ActorPath::from(format!("/user/node/subject_manager/{}/approver", governance_id));
 
     let actor: ActorRef<ApprPersist> =
         ctx.system().get_actor(&actor_path).await?;

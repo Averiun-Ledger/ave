@@ -72,6 +72,8 @@ pub struct RequestManager {
     #[serde(skip)]
     subject_id: DigestIdentifier,
     #[serde(skip)]
+    governance_id: Option<DigestIdentifier>,
+    #[serde(skip)]
     retry_timeout: u64,
     #[serde(skip)]
     retry_diff: u64,
@@ -91,6 +93,7 @@ pub enum RebootType {
 pub struct InitRequestManager {
     pub our_key: Arc<PublicKey>,
     pub subject_id: DigestIdentifier,
+    pub governance_id: Option<DigestIdentifier>,
     pub helpers: (HashAlgorithm, Arc<NetworkSender>),
 }
 
@@ -130,6 +133,7 @@ impl BorshDeserialize for RequestManager {
             our_key,
             id,
             subject_id,
+            governance_id: None,
             command,
             request,
             state,
@@ -212,6 +216,15 @@ impl RequestManager {
         }
 
         Ok(metadata)
+    }
+
+    async fn get_governance_data(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<GovernanceData, RequestManagerError> {
+        let governance_id =
+            self.governance_id.as_ref().unwrap_or(&self.subject_id);
+        Ok(get_gov(ctx, governance_id).await?)
     }
 
     async fn build_request_eval(
@@ -614,7 +627,7 @@ impl RequestManager {
                 return Err(RequestManagerError::HelpersNotInitialized);
             };
 
-            let governance_data = get_gov(ctx, &self.subject_id).await?;
+            let governance_data = self.get_governance_data(ctx).await?;
 
             let (actual_protocols, gov_version, sn) =
                 if let Some((eval_req, eval_data)) = eval {
@@ -867,7 +880,7 @@ impl RequestManager {
             if create.schema_id == SchemaType::Governance {
                 None
             } else {
-                let governance_data = get_gov(ctx, &self.subject_id).await?;
+                let governance_data = self.get_governance_data(ctx).await?;
 
                 let witnesses =
                     governance_data.get_witnesses(WitnessesData::Schema {
@@ -887,7 +900,7 @@ impl RequestManager {
                 });
             };
 
-            let governance_data = get_gov(ctx, &self.subject_id).await?;
+            let governance_data = self.get_governance_data(ctx).await?;
 
             let witnesses = match data {
                 SubjectData::Governance { .. } => {
@@ -1342,7 +1355,7 @@ impl RequestManager {
                 return Err(RequestManagerError::SubjecData);
             };
 
-            let gov = get_gov(ctx, &self.subject_id).await?;
+            let gov = self.get_governance_data(ctx).await?;
             match subject_data {
                 SubjectData::Tracker {
                     schema_id,
@@ -1564,6 +1577,15 @@ impl Actor for RequestManager {
             );
             return Err(e);
         }
+
+        if self.governance_id.is_none()
+            && let Some(request) = &self.request
+            && let EventRequest::Create(create) = request.content()
+            && !create.schema_id.is_gov()
+        {
+            self.governance_id = Some(create.governance_id.clone());
+        }
+
         Ok(())
     }
 }
@@ -2361,6 +2383,7 @@ impl PersistentActor for RequestManager {
             our_key: params.our_key,
             id: DigestIdentifier::default(),
             subject_id: params.subject_id,
+            governance_id: params.governance_id,
             command: ReqManInitMessage::Evaluate,
             request: None,
             state: RequestManagerState::Starting,

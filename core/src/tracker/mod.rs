@@ -3,8 +3,6 @@ use std::sync::Arc;
 use crate::{
     db::Storable,
     governance::{
-        Governance, GovernanceMessage, GovernanceResponse,
-        data::GovernanceData,
         sn_register::{SnRegister, SnRegisterMessage},
         subject_register::{SubjectRegister, SubjectRegisterMessage},
         witnesses_register::{WitnessesRegister, WitnessesRegisterMessage},
@@ -135,7 +133,7 @@ impl Subject for Tracker {
         let witnesses_register = ctx
             .system()
             .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
+                "/user/node/subject_manager/{}/witnesses_register",
                 self.governance_id
             )))
             .await?;
@@ -173,7 +171,7 @@ impl Subject for Tracker {
         let witnesses_register = ctx
             .system()
             .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
+                "/user/node/subject_manager/{}/witnesses_register",
                 self.governance_id
             )))
             .await?;
@@ -202,7 +200,7 @@ impl Subject for Tracker {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
-                    "/user/node/{}/subject_register",
+                    "/user/node/subject_manager/{}/subject_register",
                     self.governance_id
                 )))
                 .await?;
@@ -222,7 +220,7 @@ impl Subject for Tracker {
         let witnesses_register = ctx
             .system()
             .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
+                "/user/node/subject_manager/{}/witnesses_register",
                 self.governance_id
             )))
             .await?;
@@ -253,7 +251,7 @@ impl Subject for Tracker {
         let witnesses_register = ctx
             .system()
             .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
+                "/user/node/subject_manager/{}/witnesses_register",
                 self.governance_id
             )))
             .await?;
@@ -377,7 +375,7 @@ impl Tracker {
         let sn_register = ctx
             .system()
             .get_actor::<SnRegister>(&ActorPath::from(format!(
-                "/user/node/{}/sn_register",
+                "/user/node/subject_manager/{}/sn_register",
                 self.governance_id
             )))
             .await?;
@@ -394,7 +392,7 @@ impl Tracker {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
-                    "/user/node/{}/subject_register",
+                    "/user/node/subject_manager/{}/subject_register",
                     self.governance_id
                 )))
                 .await?;
@@ -413,7 +411,7 @@ impl Tracker {
         let witnesses_register = ctx
             .system()
             .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
-                "/user/node/{}/witnesses_register",
+                "/user/node/subject_manager/{}/witnesses_register",
                 self.governance_id
             )))
             .await?;
@@ -435,7 +433,7 @@ impl Tracker {
         let sn_register = ctx
             .system()
             .get_actor::<SnRegister>(&ActorPath::from(format!(
-                "/user/node/{}/sn_register",
+                "/user/node/subject_manager/{}/sn_register",
                 self.governance_id
             )))
             .await?;
@@ -447,31 +445,6 @@ impl Tracker {
                 sn: self.subject_metadata.sn,
             })
             .await
-    }
-
-    async fn get_governance(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) -> Result<GovernanceData, ActorError> {
-        let governance_path =
-            ActorPath::from(format!("/user/node/{}", self.governance_id));
-
-        let governance_actor = ctx
-            .system()
-            .get_actor::<Governance>(&governance_path)
-            .await?;
-
-        let response = governance_actor
-            .ask(GovernanceMessage::GetGovernance)
-            .await?;
-
-        match response {
-            GovernanceResponse::Governance(gov) => Ok(*gov),
-            _ => Err(ActorError::UnexpectedResponse {
-                path: governance_path,
-                expected: "GovernanceResponse::Governance".to_owned(),
-            }),
-        }
     }
 
     async fn verify_new_ledger_events(
@@ -714,7 +687,6 @@ pub enum TrackerMessage {
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
     UpdateLedger { events: Vec<SignedLedger> },
-    GetGovernance,
 }
 
 impl Message for TrackerMessage {}
@@ -731,7 +703,6 @@ pub enum TrackerResponse {
     LastLedger {
         ledger_event: Box<Option<SignedLedger>>,
     },
-    Governance(Box<GovernanceData>),
     Sn(u64),
     Ok,
 }
@@ -866,11 +837,6 @@ impl Handler<Self> for Tracker {
                     self.subject_metadata.owner.clone(),
                     self.subject_metadata.new_owner.clone(),
                 ))
-            }
-            TrackerMessage::GetGovernance => {
-                return Ok(TrackerResponse::Governance(Box::new(
-                    self.get_governance(ctx).await?,
-                )));
             }
         }
     }

@@ -1615,7 +1615,7 @@ pub mod tests {
 
         let subject_actor: ActorRef<Tracker> = system
             .get_actor(&ActorPath::from(format!(
-                "/user/node/{}",
+                "/user/node/subject_manager/{}",
                 request_data.subject_id
             )))
             .await

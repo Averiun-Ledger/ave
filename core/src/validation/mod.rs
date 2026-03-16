@@ -734,7 +734,7 @@ pub mod tests {
         wait_request(&tracking, response.request_id).await;
 
         let subject_actor: ActorRef<Governance> = system
-            .get_actor(&ActorPath::from(format!("/user/node/{}", owned_subj)))
+            .get_actor(&ActorPath::from(format!("/user/node/subject_manager/{}", owned_subj)))
             .await
             .unwrap();
 

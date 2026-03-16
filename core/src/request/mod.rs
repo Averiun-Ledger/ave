@@ -219,7 +219,7 @@ impl RequestHandler {
         }
 
         let approver_path =
-            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -242,7 +242,7 @@ impl RequestHandler {
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
         let approver_path =
-            ActorPath::from(format!("/user/node/{}/approver", subject_id));
+            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -286,7 +286,7 @@ impl RequestHandler {
         let mut responses = vec![];
         for governance in vec.iter() {
             let approver_path =
-                ActorPath::from(format!("/user/node/{}/approver", governance));
+                ActorPath::from(format!("/user/node/subject_manager/{}/approver", governance));
             if let Ok(approver_actor) =
                 ctx.system().get_actor::<ApprPersist>(&approver_path).await
             {
@@ -548,6 +548,7 @@ impl RequestHandler {
         request_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
         is_gov: bool,
+        governance_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         let Some(helpers) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
@@ -566,6 +567,7 @@ impl RequestHandler {
             let init_data = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
+                governance_id,
                 helpers,
             };
 
@@ -902,9 +904,13 @@ impl Actor for RequestHandler {
         };
 
         for (subject_id, request_id) in self.handling.clone() {
+            let governance_id = get_subject_data(ctx, &subject_id)
+                .await?
+                .and_then(|data| data.get_governance_id());
             let request_manager_init = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
+                governance_id,
                 helpers: (hash, network.clone()),
             };
 
@@ -1079,8 +1085,9 @@ impl Handler<Self> for RequestHandler {
                 let event_request_type =
                     EventRequestType::from(request.content());
                 let signer = request.signature().signer.clone();
-                let governance_id = subject_data
-                    .get_governance_id()
+                let governance_id = subject_data.get_governance_id();
+                let governance_subject_id = governance_id
+                    .clone()
                     .unwrap_or_else(|| request.content().get_subject_id());
                 let is_gov = subject_data.get_schema_id().is_gov();
 
@@ -1113,7 +1120,7 @@ impl Handler<Self> for RequestHandler {
                     ctx,
                     (*self.our_key).clone(),
                     signer.clone(),
-                    &governance_id,
+                    &governance_subject_id,
                     &event_request_type,
                     subject_data.clone(),
                 )
@@ -1121,7 +1128,7 @@ impl Handler<Self> for RequestHandler {
                 {
                     error!(
                         msg_type = "NewRequest",
-                        governance_id = %governance_id,
+                        governance_id = %governance_subject_id,
                         error = %e,
                         "Signature check failed"
                     );
@@ -1164,6 +1171,7 @@ impl Handler<Self> for RequestHandler {
                         &request_id,
                         &subject_id,
                         is_gov,
+                        governance_id,
                     )
                     .await
                 {

@@ -48,7 +48,7 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let subject_path =
-            ActorPath::from(format!("/user/node/{}", subject_id));
+            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
 
         let subject_actor =
             ctx.system().get_actor::<Tracker>(&subject_path).await?;
@@ -63,7 +63,7 @@ impl DistriWorker {
         lo_sn: Option<u64>,
         is_gov: bool,
     ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
-        let path = ActorPath::from(format!("/user/node/{}", subject_id));
+        let path = ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
 
         if is_gov {
             let governance_actor =

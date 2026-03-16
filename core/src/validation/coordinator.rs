@@ -142,10 +142,10 @@ impl Handler<Self> for ValiCoordinator {
                 let governance_id = validation_req.content().get_governance_id().expect("The build process verified that the event request is valid");
 
                 let receiver_actor = if schema_id.is_gov() {
-                    format!("/user/node/{}/validator", governance_id)
+                    format!("/user/node/subject_manager/{}/validator", governance_id)
                 } else {
                     format!(
-                        "/user/node/{}/{}_validation",
+                        "/user/node/subject_manager/{}/{}_validation",
                         governance_id, schema_id
                     )
                 };
