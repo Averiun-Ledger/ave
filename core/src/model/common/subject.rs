@@ -18,7 +18,12 @@ use crate::{
         },
     },
     model::common::check_subject_creation,
-    node::{Node, NodeMessage},
+    node::{
+        Node, NodeMessage,
+        subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
+    },
     subject::{Metadata, SignedLedger},
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
@@ -41,6 +46,60 @@ where
         GovernanceResponse::Governance(gov_data) => Ok(*gov_data),
         _ => Err(ActorError::UnexpectedResponse {
             expected: "GovernanceResponse::Governance".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn up_subject<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+    requester: String,
+    create_ledger: Option<SignedLedger>,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from("/user/node/subject_manager");
+    let actor = ctx.system().get_actor::<SubjectManager>(&path).await?;
+    let response = actor
+        .ask(SubjectManagerMessage::Up {
+            subject_id: subject_id.clone(),
+            requester,
+            create_ledger,
+        })
+        .await?;
+
+    match response {
+        SubjectManagerResponse::Up => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "SubjectManagerResponse::Up".to_owned(),
+            path,
+        }),
+    }
+}
+
+pub async fn finish_subject<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+    requester: String,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from("/user/node/subject_manager");
+    let actor = ctx.system().get_actor::<SubjectManager>(&path).await?;
+    let response = actor
+        .ask(SubjectManagerMessage::Finish {
+            subject_id: subject_id.clone(),
+            requester,
+        })
+        .await?;
+
+    match response {
+        SubjectManagerResponse::Finish => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            expected: "SubjectManagerResponse::Finish".to_owned(),
             path,
         }),
     }

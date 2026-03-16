@@ -33,8 +33,8 @@ use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
-    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata,
-    make_obsolete, update_ledger,
+    finish_subject, get_gov, get_gov_sn, get_last_ledger_event,
+    get_metadata, make_obsolete, up_subject, update_ledger,
 };
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -162,7 +162,7 @@ impl RequestManager {
         )
         .await;
 
-        let metadata = Self::check_data_eval(ctx, &request).await?;
+        let metadata = self.check_data_eval(ctx, &request).await?;
 
         let (signed_evaluation_req, quorum, signers, init_state) =
             self.build_request_eval(ctx, &metadata, &request).await?;
@@ -194,7 +194,16 @@ impl RequestManager {
     }
 
     // revisado
+    fn needs_subject_manager(&self) -> bool {
+        self.governance_id.is_some()
+    }
+
+    fn requester_id(&self) -> String {
+        self.id.to_string()
+    }
+
     async fn check_data_eval(
+        &self,
         ctx: &mut ActorContext<Self>,
         request: &Signed<EventRequest>,
     ) -> Result<Metadata, RequestManagerError> {
@@ -209,7 +218,20 @@ impl RequestManager {
             }
         };
 
-        let metadata = get_metadata(ctx, &subject_id).await?;
+        let subject_up = if self.needs_subject_manager() {
+            up_subject(ctx, &self.subject_id, self.requester_id(), None)
+                .await?;
+            true
+        } else {
+            false
+        };
+        let metadata = get_metadata(ctx, &subject_id).await;
+
+        if subject_up {
+            finish_subject(ctx, &self.subject_id, self.requester_id()).await?;
+        }
+
+        let metadata = metadata?;
 
         if confirm && !metadata.schema_id.is_gov() {
             return Err(RequestManagerError::ConfirmNotEvaluableForTracker);
@@ -446,7 +468,10 @@ impl RequestManager {
 
             return Err(RequestManagerError::NoApproversAvailable {
                 schema_id: SchemaType::Governance.to_string(),
-                governance_id: self.subject_id.clone(),
+                governance_id: self
+                    .governance_id
+                    .clone()
+                    .unwrap_or_else(|| self.subject_id.clone()),
             });
         }
 
@@ -651,7 +676,45 @@ impl RequestManager {
                     (ActualProtocols::None, governance_data.version, None)
                 };
 
-            let metadata = get_metadata(ctx, &self.subject_id).await?;
+            let subject_up = if self.needs_subject_manager() {
+                up_subject(ctx, &self.subject_id, self.requester_id(), None)
+                    .await?;
+                true
+            } else {
+                false
+            };
+            let metadata = get_metadata(ctx, &self.subject_id).await;
+            let last_ledger_event = match metadata {
+                Ok(metadata) => {
+                    let last_ledger_event =
+                        get_last_ledger_event(ctx, &self.subject_id).await;
+
+                    if subject_up {
+                        finish_subject(
+                            ctx,
+                            &self.subject_id,
+                            self.requester_id(),
+                        )
+                        .await?;
+                    }
+
+                    (metadata, last_ledger_event?)
+                }
+                Err(error) => {
+                    if subject_up {
+                        finish_subject(
+                            ctx,
+                            &self.subject_id,
+                            self.requester_id(),
+                        )
+                        .await?;
+                    }
+
+                    return Err(error.into());
+                }
+            };
+
+            let (metadata, last_ledger_event) = last_ledger_event;
             let sn = if let Some(sn) = sn {
                 sn
             } else {
@@ -663,9 +726,6 @@ impl RequestManager {
                 &metadata.schema_id,
                 metadata.namespace.clone(),
             )?;
-
-            let last_ledger_event =
-                get_last_ledger_event(ctx, &self.subject_id).await?;
 
             let Some(last_ledger_event) = last_ledger_event else {
                 return Err(RequestManagerError::LastLedgerEventNotFound);
@@ -816,15 +876,42 @@ impl RequestManager {
         ledger: SignedLedger,
     ) -> Result<(), RequestManagerError> {
         if ledger.content().event_request.content().is_create_event() {
-            if let Err(e) = create_subject(ctx, ledger.clone()).await {
-                if let ActorError::Functional { .. } = e {
+            let should_finish = match up_subject(
+                ctx,
+                &self.subject_id,
+                self.requester_id(),
+                Some(ledger.clone()),
+            )
+            .await
+            {
+                Ok(()) => self.needs_subject_manager(),
+                Err(ActorError::Functional { .. }) => {
                     return Err(RequestManagerError::CheckLimit);
-                } else {
-                    return Err(RequestManagerError::ActorError(e));
                 }
+                Err(error) => return Err(error.into()),
             };
+
+            if should_finish {
+                finish_subject(ctx, &self.subject_id, self.requester_id())
+                    .await?;
+            }
         } else {
-            update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await?;
+            let subject_up = if self.needs_subject_manager() {
+                up_subject(ctx, &self.subject_id, self.requester_id(), None)
+                    .await?;
+                true
+            } else {
+                false
+            };
+            let update_result =
+                update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await;
+
+            if subject_up {
+                finish_subject(ctx, &self.subject_id, self.requester_id())
+                    .await?;
+            }
+
+            update_result?;
         }
 
         self.on_event(
