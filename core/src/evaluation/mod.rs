@@ -629,6 +629,9 @@ pub mod tests {
         helpers::db::{ExternalDB, ReadStore},
         model::common::node::SignTypesNode,
         node::Node,
+        node::subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
         request::{
             RequestData, RequestHandler, RequestHandlerMessage,
             RequestHandlerResponse,
@@ -637,6 +640,7 @@ pub mod tests {
                 RequestTrackingResponse,
             },
         },
+        subject::Metadata,
         tracker::{Tracker, TrackerMessage, TrackerResponse},
         validation::tests::create_gov,
     };
@@ -747,6 +751,61 @@ pub mod tests {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             };
         }
+    }
+
+    async fn get_tracker_metadata(
+        system: &SystemRef,
+        subject_id: &DigestIdentifier,
+    ) -> Metadata {
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+        let requester = format!("evaluation_test:{}", subject_id);
+
+        let SubjectManagerResponse::Up = subject_manager
+            .ask(SubjectManagerMessage::Up {
+                subject_id: subject_id.clone(),
+                requester: requester.clone(),
+                create_ledger: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let subject_actor: ActorRef<Tracker> = system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                subject_id
+            )))
+            .await
+            .unwrap();
+
+        let metadata = match subject_actor
+            .ask(TrackerMessage::GetMetadata)
+            .await
+            .unwrap()
+        {
+            TrackerResponse::Metadata(metadata) => *metadata,
+            _ => panic!("Invalid response"),
+        };
+
+        let SubjectManagerResponse::Finish = subject_manager
+            .ask(SubjectManagerMessage::Finish {
+                subject_id: subject_id.clone(),
+                requester,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        metadata
     }
 
     #[test(tokio::test)]
@@ -1579,7 +1638,6 @@ pub mod tests {
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         Arc<ExternalDB>,
-        ActorRef<Tracker>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
         DigestIdentifier,
@@ -1613,23 +1671,9 @@ pub mod tests {
         )
         .await;
 
-        let subject_actor: ActorRef<Tracker> = system
-            .get_actor(&ActorPath::from(format!(
-                "/user/node/subject_manager/{}",
-                request_data.subject_id
-            )))
-            .await
-            .unwrap();
-
         let subject_id = request_data.subject_id.clone();
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 0).await;
         let event = get_event_sn(&db, &subject_id, 0).await;
@@ -1702,7 +1746,6 @@ pub mod tests {
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             request_data.subject_id,
             gov_id,
@@ -1718,11 +1761,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_fact_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1749,13 +1791,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data =
             get_subject_state(&db, &request_data.subject_id, 1).await;
@@ -1827,11 +1863,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_fact_fail_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1858,13 +1893,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data =
             get_subject_state(&db, &request_data.subject_id, 1).await;
@@ -1940,11 +1969,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_transfer_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1968,13 +1996,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
@@ -2074,11 +2096,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_transfer_fail_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -2102,13 +2123,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;

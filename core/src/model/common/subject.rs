@@ -384,7 +384,7 @@ where
         }
     }
 
-    let subject_id = ledger.content().event_request.content().get_subject_id();
+    let subject_id = ledger.content().get_subject_id();
     let requester = ctx.path().to_string();
     let lease = acquire_subject(
         ctx,

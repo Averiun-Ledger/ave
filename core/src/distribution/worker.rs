@@ -21,8 +21,8 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::{
         common::{
-            check_witness_access, emit_fail,
-            node::{get_subject_data, i_owner_new_owner, try_to_update},
+            check_subject_creation, check_witness_access, emit_fail,
+            node::{get_subject_data, try_to_update},
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
                 update_ledger,
@@ -55,17 +55,6 @@ impl DistriWorker {
             "{kind}:{subject_id}:{sender}:{}:{}",
             info.request_id, info.version
         )
-    }
-
-    fn should_keep_tracker_up(
-        &self,
-        owner: &PublicKey,
-        new_owner: &Option<PublicKey>,
-    ) -> bool {
-        *owner == *self.our_key
-            || new_owner
-                .as_ref()
-                .is_some_and(|new_owner| *new_owner == *self.our_key)
     }
 
     async fn get_ledger(
@@ -585,7 +574,7 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let (owner, new_owner, lease) = if ledger
+                let lease = if ledger
                     .content()
                     .event_request
                     .content()
@@ -613,32 +602,15 @@ impl Handler<Self> for DistriWorker {
                         }
                     };
 
-                    (ledger.signature().signer.clone(), None, None)
+                    None
                 } else {
-                    let (i_owner, i_new_owner) =
-                        match i_owner_new_owner(ctx, &subject_id).await {
-                            Ok(res) => res,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "LastEventDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to check owner status"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                        }
-                    };
-
                     let requester = Self::requester_id(
                         "last_event_distribution",
                         &subject_id,
                         &info,
                         &sender,
                     );
-                    let lease = if !i_new_owner.unwrap_or_default()
-                        && !i_owner
-                        && !is_gov
-                    {
+                    let lease = if !is_gov {
                         match acquire_subject(
                             ctx,
                             &subject_id,
@@ -654,7 +626,7 @@ impl Handler<Self> for DistriWorker {
                                     msg_type = "LastEventDistribution",
                                     subject_id = %subject_id,
                                     error = %e,
-                                    "Failed to bring up tracker for witness subject"
+                                    "Failed to bring up tracker for subject update"
                                 );
                                 let error = DistributorError::UpTrackerFailed {
                                     details: e.to_string(),
@@ -677,9 +649,7 @@ impl Handler<Self> for DistriWorker {
                     }
 
                     match update_result {
-                        Ok((last_sn, owner, new_owner))
-                            if last_sn < ledger.content().sn =>
-                        {
+                        Ok((last_sn, _, _)) if last_sn < ledger.content().sn => {
                             debug!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -717,19 +687,13 @@ impl Handler<Self> for DistriWorker {
                                     return Err(emit_fail(ctx, e).await);
                                 };
 
-                            if !is_gov
-                                && !self.should_keep_tracker_up(
-                                    &owner,
-                                    &new_owner,
-                                )
-                                && let Some(lease) = lease.clone()
-                            {
+                            if let Some(lease) = lease.clone() {
                                 lease.finish(ctx).await?;
                             }
 
                             return Ok(());
                         }
-                        Ok((.., owner, new_owner)) => (owner, new_owner, lease),
+                        Ok((..)) => lease,
                         Err(e) => {
                             if let ActorError::Functional { .. } = e.clone() {
                                 warn!(
@@ -785,10 +749,7 @@ impl Handler<Self> for DistriWorker {
                     return Err(emit_fail(ctx, e).await);
                 };
 
-                if !is_gov
-                    && !self.should_keep_tracker_up(&owner, &new_owner)
-                    && let Some(lease) = lease
-                {
+                if let Some(lease) = lease {
                     lease.finish(ctx).await?;
                 }
 
@@ -854,36 +815,117 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let (i_owner, i_new_owner, lease) = if ledger[0]
+                let lease = if ledger[0]
                     .content()
                     .event_request
                     .content()
                     .is_create_event()
                     && !is_register
                 {
-                    if let Err(e) = create_subject(ctx, ledger[0].clone()).await
-                    {
-                        if let ActorError::Functional { .. } = e {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to create subject from ledger"
-                            );
-                            return Err(e);
-                        } else {
-                            error!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %e,
-                                "Failed to create subject from ledger"
-                            );
-                            return Err(emit_fail(ctx, e).await);
+                    let create_ledger = ledger[0].clone();
+                    let requester = Self::requester_id(
+                        "ledger_distribution_create",
+                        &subject_id,
+                        &info,
+                        &sender,
+                    );
+
+                    let lease = if is_gov {
+                        if let Err(e) =
+                            create_subject(ctx, create_ledger.clone()).await
+                        {
+                            if let ActorError::Functional { .. } = e {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to create subject from ledger"
+                                );
+                                return Err(e);
+                            } else {
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to create subject from ledger"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        };
+                        None
+                    } else {
+                        let EventRequest::Create(request) = create_ledger
+                            .content()
+                            .event_request
+                            .content()
+                            .clone()
+                        else {
+                            return Err(DistributorError::EmptyEvents.into());
+                        };
+
+                        if let Err(e) = check_subject_creation(
+                            ctx,
+                            &request.governance_id,
+                            create_ledger.signature().signer.clone(),
+                            create_ledger.content().gov_version,
+                            request.namespace.to_string(),
+                            request.schema_id,
+                        )
+                        .await
+                        {
+                            if let ActorError::Functional { .. } = e {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to validate subject creation from ledger"
+                                );
+                                return Err(e);
+                            } else {
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Failed to validate subject creation from ledger"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+                        }
+
+                        match acquire_subject(
+                            ctx,
+                            &subject_id,
+                            requester,
+                            Some(create_ledger),
+                            true,
+                        )
+                        .await
+                        {
+                            Ok(lease) => Some(lease),
+                            Err(e) => {
+                                if let ActorError::Functional { .. } = e {
+                                    warn!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to create subject from ledger"
+                                    );
+                                    return Err(e);
+                                } else {
+                                    error!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to create subject from ledger"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
+                            }
                         }
                     };
 
-                    let event = ledger.remove(0);
-                    (event.signature().signer == *self.our_key, false, None)
+                    let _event = ledger.remove(0);
+                    lease
                 } else {
                     // TODO en un futuro mejorar esto
                     if ledger[0]
@@ -896,31 +938,13 @@ impl Handler<Self> for DistriWorker {
                         let _event = ledger.remove(0);
                     }
 
-                    let (i_owner, i_new_owner) =
-                        match i_owner_new_owner(ctx, &subject_id).await {
-                            Ok(res) => res,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %e,
-                                    "Failed to check owner status"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        };
-
                     let requester = Self::requester_id(
                         "ledger_distribution",
                         &subject_id,
                         &info,
                         &sender,
                     );
-                    let i_new_owner = i_new_owner.unwrap_or_default();
-                    let lease = if !i_new_owner
-                        && !i_owner
-                        && !is_gov
-                    {
+                    if !ledger.is_empty() && !is_gov {
                         match acquire_subject(
                             ctx,
                             &subject_id,
@@ -936,7 +960,7 @@ impl Handler<Self> for DistriWorker {
                                     msg_type = "LedgerDistribution",
                                     subject_id = %subject_id,
                                     error = %e,
-                                    "Failed to bring up tracker for witness subject"
+                                    "Failed to bring up tracker for subject update"
                                 );
                                 let error = DistributorError::UpTrackerFailed {
                                     details: e.to_string(),
@@ -946,12 +970,10 @@ impl Handler<Self> for DistriWorker {
                         }
                     } else {
                         None
-                    };
-
-                    (i_owner, i_new_owner, lease)
+                    }
                 };
 
-                let (i_owner, i_new_owner, lease) = if !ledger.is_empty() {
+                let lease = if !ledger.is_empty() {
                     let update_result = update_ledger(ctx, &subject_id, ledger).await;
 
                     if let Some(lease) = lease.clone()
@@ -961,14 +983,7 @@ impl Handler<Self> for DistriWorker {
                     }
 
                     match update_result {
-                        Ok((last_sn, owner, new_owner)) => {
-                            let i_new_owner = if let Some(new_owner) = new_owner
-                            {
-                                new_owner == *self.our_key
-                            } else {
-                                false
-                            };
-
+                        Ok((last_sn, _, _)) => {
                             if !is_all {
                                 debug!(
                                     msg_type = "LedgerDistribution",
@@ -1011,7 +1026,7 @@ impl Handler<Self> for DistriWorker {
                                 };
                             }
 
-                            (owner == *self.our_key, i_new_owner, lease)
+                            lease
                         }
                         Err(e) => {
                             if let ActorError::Functional { .. } = e.clone() {
@@ -1038,14 +1053,10 @@ impl Handler<Self> for DistriWorker {
                         }
                     }
                 } else {
-                    (i_owner, i_new_owner, lease)
+                    lease
                 };
 
-                if !is_gov
-                    && !i_owner
-                    && !i_new_owner
-                    && let Some(lease) = lease
-                {
+                if let Some(lease) = lease {
                     lease.finish(ctx).await?;
                 }
 
