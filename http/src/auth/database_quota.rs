@@ -5,7 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::{ApiKeyQuotaStatus, QuotaExtensionInfo, UsagePlan};
-use rusqlite::{OptionalExtension, params};
+use ave_actors::rusqlite::{self, OptionalExtension, params};
 use time::OffsetDateTime;
 
 impl AuthDatabase {
