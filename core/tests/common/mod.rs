@@ -91,9 +91,9 @@ pub async fn create_node(
         contracts_path,
         always_accept,
         tracking_size: 100,
-        version_sync_interval_secs: 60,
+        version_sync_interval_secs: 10,
         version_sync_sample_size: 3,
-        version_sync_response_timeout_secs: 30,
+        version_sync_response_timeout_secs: 5,
         spec: None,
     };
 

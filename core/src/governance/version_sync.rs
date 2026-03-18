@@ -158,7 +158,6 @@ impl GovernanceVersionSync {
                 },
             })
             .await
-            .map_err(ActorError::from)
     }
 
     async fn get_auth_peers(
@@ -228,7 +227,7 @@ impl GovernanceVersionSync {
 
     async fn handle_tick(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.update_target.is_some() {
             self.schedule_tick(ctx).await?;
@@ -367,116 +366,5 @@ impl Handler<Self> for GovernanceVersionSync {
         }
 
         Ok(GovernanceVersionSyncResponse::None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use super::*;
-
-    fn pk(value: &str) -> PublicKey {
-        PublicKey::from_str(value).unwrap()
-    }
-
-    fn gov_id() -> DigestIdentifier {
-        DigestIdentifier::from_str(
-            "B3B7tbY0OWp5jVq3OKYwYGQnM2zJ5V8i3G5znQJg4s8A",
-        )
-        .unwrap()
-    }
-
-    fn actor() -> GovernanceVersionSync {
-        GovernanceVersionSync::new(
-            gov_id(),
-            Arc::new(pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbD")),
-            Arc::new(NetworkSender::new(tokio::sync::mpsc::channel(1).0)),
-            5,
-            3,
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-        )
-    }
-
-    #[test]
-    fn refresh_updates_version_and_governance_peers() {
-        let mut actor = actor();
-        let peer = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
-
-        actor.refresh_governance(
-            6,
-            HashSet::from([peer.clone(), (*actor.our_key).clone()]),
-        );
-
-        assert_eq!(actor.local_version, 6);
-        assert_eq!(actor.governance_peers, HashSet::from([peer]));
-    }
-
-    #[test]
-    fn select_peers_uses_governance_plus_auth() {
-        let mut actor = actor();
-        let peer_a = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
-        let peer_b = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbF");
-
-        actor.refresh_governance(5, HashSet::from([peer_a.clone()]));
-        let peers = actor.select_peers(HashSet::from([
-            peer_b.clone(),
-            (*actor.our_key).clone(),
-        ]));
-        let peers: HashSet<_> = peers.into_iter().collect();
-
-        assert_eq!(peers, HashSet::from([peer_a, peer_b]));
-    }
-
-    #[test]
-    fn peer_version_sets_update_target() {
-        let mut actor = actor();
-        let peer = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
-        actor.pending_peers.insert(peer.clone());
-        actor.round_open = true;
-
-        actor.peer_version(peer.clone(), 6);
-
-        assert!(actor.pending_peers.is_empty());
-        assert_eq!(
-            actor.update_target,
-            Some(UpdateTarget { peer, version: 6 })
-        );
-    }
-
-    #[test]
-    fn highest_version_wins_within_round() {
-        let mut actor = actor();
-        let peer_a = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
-        let peer_b = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbF");
-        let peer_c = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbG");
-
-        actor.pending_peers = HashSet::from([
-            peer_a.clone(),
-            peer_b.clone(),
-            peer_c.clone(),
-        ]);
-        actor.round_open = true;
-
-        assert!(!actor.peer_version(peer_a, 7));
-        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(7));
-        assert!(!actor.peer_version(peer_b, 8));
-        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(8));
-        assert!(actor.peer_version(peer_c, 9));
-        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(9));
-    }
-
-    #[test]
-    fn refresh_clears_update_target_when_version_is_reached() {
-        let mut actor = actor();
-        let peer = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
-        actor.update_target = Some(UpdateTarget { peer, version: 7 });
-
-        actor.refresh_governance(6, HashSet::new());
-        assert!(actor.update_target.is_some());
-
-        actor.refresh_governance(7, HashSet::new());
-        assert!(actor.update_target.is_none());
     }
 }

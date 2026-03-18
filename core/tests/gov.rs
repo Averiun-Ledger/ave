@@ -121,6 +121,106 @@ async fn test_invalid_contract() {
 }
 
 #[test(tokio::test)]
+//  Verificar que update protocol actualiza pasivamente la gobernanza.
+async fn test_update_protocol() {
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+    )
+    .await;
+    let node1 = &nodes[0].api;
+    let node2 = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        }
+    });
+
+    let _request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+        node2
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "Fake",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+    
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "Fake2",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap(); 
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(3))
+        .await
+        .unwrap();   
+}
+
+#[test(tokio::test)]
 //  Verificar que se puede crear una gobernanza, sujeto y emitir un evento además de recibir la copia
 async fn test_governance_and_subject_copy_with_approve() {
     // Bootstrap ≤- Addressable

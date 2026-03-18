@@ -495,7 +495,7 @@ impl Subject for Governance {
 impl Governance {
     async fn refresh_version_sync(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if !self.service {
             return Ok(());
