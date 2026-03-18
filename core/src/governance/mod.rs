@@ -2105,7 +2105,7 @@ impl Actor for Governance {
             let tick_interval =
                 Duration::from_secs(config.version_sync_interval_secs.max(1));
             let response_timeout = Duration::from_secs(
-                (config.version_sync_interval_secs.max(1) / 2).max(1),
+                config.version_sync_response_timeout_secs.max(1),
             );
 
             let version_sync = ctx
@@ -2114,6 +2114,7 @@ impl Actor for Governance {
                     GovernanceVersionSync::new(
                         self.subject_metadata.subject_id.clone(),
                         self.our_key.clone(),
+                        network.clone(),
                         self.properties.version,
                         config.version_sync_sample_size,
                         tick_interval,

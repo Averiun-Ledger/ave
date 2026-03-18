@@ -318,6 +318,12 @@ pub enum DistriWorkerMessage {
         sender: PublicKey,
         receiver_actor: String,
     },
+    GetGovernanceVersion {
+        subject_id: DigestIdentifier,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
     // Un nodo nos solicitó la copia del ledger.
     SendDistribution {
         actual_sn: Option<u64>,
@@ -420,6 +426,75 @@ impl Handler<Self> for DistriWorker {
                     sender = %sender,
                     "Last SN response sent successfully"
                 );
+            }
+            DistriWorkerMessage::GetGovernanceVersion {
+                subject_id,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let witness_ok = self
+                    .check_witness(ctx, &subject_id, sender.clone())
+                    .await
+                    .is_ok();
+                let auth_ok = if witness_ok {
+                    true
+                } else {
+                    let auth_path = ActorPath::from("/user/node/auth");
+                    match ctx.system().get_actor::<crate::auth::Auth>(&auth_path).await {
+                        Ok(auth_actor) => match auth_actor
+                            .ask(crate::auth::AuthMessage::GetAuth {
+                                subject_id: subject_id.clone(),
+                            })
+                            .await
+                        {
+                            Ok(crate::auth::AuthResponse::Witnesses(witnesses)) => {
+                                witnesses.contains(&sender)
+                            }
+                            _ => false,
+                        },
+                        Err(_) => false,
+                    }
+                };
+
+                if !auth_ok {
+                    return Err(DistributorError::SenderNoAccess.into());
+                }
+
+                let governance_path = ActorPath::from(format!(
+                    "/user/node/subject_manager/{}",
+                    subject_id
+                ));
+                let governance_actor =
+                    ctx.system().get_actor::<Governance>(&governance_path).await?;
+                let response =
+                    governance_actor.ask(GovernanceMessage::GetVersion).await?;
+                let GovernanceResponse::Version(version) = response else {
+                    return Err(ActorError::UnexpectedResponse {
+                        path: governance_path,
+                        expected: "GovernanceResponse::Version".to_owned(),
+                    });
+                };
+
+                let new_info = ComunicateInfo {
+                    receiver: sender.clone(),
+                    request_id: info.request_id,
+                    version: info.version,
+                    receiver_actor,
+                };
+
+                if let Err(e) = self
+                    .network
+                    .send_command(network::CommandHelper::SendMessage {
+                        message: NetworkMessage {
+                            info: new_info,
+                            message: ActorMessage::GovernanceVersionRes { version },
+                        },
+                    })
+                    .await
+                {
+                    return Err(emit_fail(ctx, e).await);
+                }
             }
             DistriWorkerMessage::SendDistribution {
                 actual_sn,

@@ -53,6 +53,13 @@ pub enum ActorMessage {
     AuthLastSn {
         sn: u64,
     },
+    GovernanceVersionReq {
+        subject_id: DigestIdentifier,
+        receiver_actor: String,
+    },
+    GovernanceVersionRes {
+        version: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

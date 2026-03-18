@@ -218,6 +218,55 @@ impl Intermediary {
                                 }
                             })?;
                     }
+                    ActorMessage::GovernanceVersionReq {
+                        subject_id,
+                        receiver_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(DistriWorkerMessage::GetGovernanceVersion {
+                                subject_id,
+                                info: message.info,
+                                sender: sender.clone(),
+                                receiver_actor,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::GovernanceVersionRes { version } => {
+                        let actor = system
+                            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(
+                                crate::governance::version_sync::GovernanceVersionSyncMessage::PeerVersion {
+                                    peer: sender.clone(),
+                                    version,
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
                     ActorMessage::ValidationReq { req } => {
                         let Ok(schema_id) = req.content().get_schema_id()
                         else {

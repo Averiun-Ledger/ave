@@ -468,6 +468,21 @@ fn log_effective_configuration(
     }
     info!(target: TARGET, "  always acc: {}", config.node.always_accept);
     info!(target: TARGET, "  service   : {}", config.node.is_service);
+    info!(
+        target: TARGET,
+        "  version sync interval        : {}s",
+        config.node.version_sync_interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  version sync sample size     : {}",
+        config.node.version_sync_sample_size
+    );
+    info!(
+        target: TARGET,
+        "  version sync response timeout: {}s",
+        config.node.version_sync_response_timeout_secs
+    );
 
     info!(target: TARGET, "[auth]");
     info!(target: TARGET, "  enabled   : {}", config.auth.enable);

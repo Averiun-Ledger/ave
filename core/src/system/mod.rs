@@ -26,6 +26,7 @@ pub struct ConfigHelper {
     pub tracking_size: usize,
     pub version_sync_interval_secs: u64,
     pub version_sync_sample_size: usize,
+    pub version_sync_response_timeout_secs: u64,
 }
 
 impl From<Config> for ConfigHelper {
@@ -36,6 +37,8 @@ impl From<Config> for ConfigHelper {
             tracking_size: value.tracking_size,
             version_sync_interval_secs: value.version_sync_interval_secs,
             version_sync_sample_size: value.version_sync_sample_size,
+            version_sync_response_timeout_secs:
+                value.version_sync_response_timeout_secs,
         }
     }
 }
@@ -206,6 +209,7 @@ pub mod tests {
             is_service: true,
             version_sync_interval_secs: 60,
             version_sync_sample_size: 3,
+            version_sync_response_timeout_secs: 30,
             spec: None,
         };
 

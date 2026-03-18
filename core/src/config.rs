@@ -39,6 +39,8 @@ pub struct Config {
     pub version_sync_interval_secs: u64,
     /// Number of peers sampled on each version sync round.
     pub version_sync_sample_size: usize,
+    /// Seconds to wait for responses during a version sync round.
+    pub version_sync_response_timeout_secs: u64,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
@@ -58,6 +60,7 @@ impl Default for Config {
             is_service: false,
             version_sync_interval_secs: 60,
             version_sync_sample_size: 3,
+            version_sync_response_timeout_secs: 10,
             spec: None,
         }
     }

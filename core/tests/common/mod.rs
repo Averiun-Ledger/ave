@@ -93,6 +93,7 @@ pub async fn create_node(
         tracking_size: 100,
         version_sync_interval_secs: 60,
         version_sync_sample_size: 3,
+        version_sync_response_timeout_secs: 30,
         spec: None,
     };
 

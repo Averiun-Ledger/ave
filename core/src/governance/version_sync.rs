@@ -12,6 +12,8 @@ use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
 use crate::auth::{Auth, AuthMessage, AuthResponse};
+use crate::helpers::network::{ActorMessage, NetworkMessage, service::NetworkSender};
+use network::ComunicateInfo;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct UpdateTarget {
@@ -45,6 +47,7 @@ impl Response for GovernanceVersionSyncResponse {}
 pub struct GovernanceVersionSync {
     governance_id: DigestIdentifier,
     our_key: Arc<PublicKey>,
+    network: Arc<NetworkSender>,
     local_version: u64,
     sample_size: usize,
     tick_interval: Duration,
@@ -52,12 +55,14 @@ pub struct GovernanceVersionSync {
     governance_peers: HashSet<PublicKey>,
     pending_peers: HashSet<PublicKey>,
     update_target: Option<UpdateTarget>,
+    round_open: bool,
 }
 
 impl GovernanceVersionSync {
     pub fn new(
         governance_id: DigestIdentifier,
         our_key: Arc<PublicKey>,
+        network: Arc<NetworkSender>,
         local_version: u64,
         sample_size: usize,
         tick_interval: Duration,
@@ -66,6 +71,7 @@ impl GovernanceVersionSync {
         Self {
             governance_id,
             our_key,
+            network,
             local_version,
             sample_size: sample_size.max(1),
             tick_interval,
@@ -73,6 +79,7 @@ impl GovernanceVersionSync {
             governance_peers: HashSet::new(),
             pending_peers: HashSet::new(),
             update_target: None,
+            round_open: false,
         }
     }
 
@@ -122,6 +129,38 @@ impl GovernanceVersionSync {
         }
     }
 
+    async fn trigger_update_if_needed(
+        &self,
+        _ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(UpdateTarget { peer, .. }) = self.update_target.clone() else {
+            return Ok(());
+        };
+
+        let info = ComunicateInfo {
+            receiver: peer,
+            request_id: String::default(),
+            version: 0,
+            receiver_actor: format!(
+                "/user/node/distributor_{}",
+                self.governance_id
+            ),
+        };
+
+        self.network
+            .send_command(network::CommandHelper::SendMessage {
+                message: NetworkMessage {
+                    info,
+                    message: ActorMessage::DistributionLedgerReq {
+                        actual_sn: Some(self.local_version),
+                        subject_id: self.governance_id.clone(),
+                    },
+                },
+            })
+            .await
+            .map_err(ActorError::from)
+    }
+
     async fn get_auth_peers(
         &self,
         ctx: &ActorContext<Self>,
@@ -167,11 +206,13 @@ impl GovernanceVersionSync {
         &mut self,
         peer: PublicKey,
         version: u64,
-    ) {
-        self.pending_peers.remove(&peer);
+    ) -> bool {
+        if !self.round_open || !self.pending_peers.remove(&peer) {
+            return false;
+        }
 
         if version <= self.local_version {
-            return;
+            return self.pending_peers.is_empty();
         }
 
         let should_replace = self
@@ -181,11 +222,13 @@ impl GovernanceVersionSync {
         if should_replace {
             self.update_target = Some(UpdateTarget { peer, version });
         }
+
+        self.pending_peers.is_empty()
     }
 
     async fn handle_tick(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if self.update_target.is_some() {
             self.schedule_tick(ctx).await?;
@@ -201,6 +244,38 @@ impl GovernanceVersionSync {
         }
 
         self.pending_peers = peers.into_iter().collect();
+        self.round_open = !self.pending_peers.is_empty();
+
+        for peer in self.pending_peers.clone() {
+            let message = NetworkMessage {
+                info: ComunicateInfo {
+                    receiver: peer.clone(),
+                    request_id: String::default(),
+                    version: 0,
+                    receiver_actor: format!(
+                        "/user/node/distributor_{}",
+                        self.governance_id
+                    ),
+                },
+                message: ActorMessage::GovernanceVersionReq {
+                    subject_id: self.governance_id.clone(),
+                    receiver_actor: ctx.path().to_string(),
+                },
+            };
+
+            if let Err(error) = self.network
+                .send_command(network::CommandHelper::SendMessage { message })
+                .await
+            {
+                warn!(
+                    governance_id = %self.governance_id,
+                    peer = %peer,
+                    error = %error,
+                    "Failed to send governance version request"
+                );
+                self.pending_peers.remove(&peer);
+            }
+        }
 
         debug!(
             governance_id = %self.governance_id,
@@ -265,10 +340,29 @@ impl Handler<Self> for GovernanceVersionSync {
                 }
             }
             GovernanceVersionSyncMessage::RoundTimeout => {
-                self.pending_peers.clear();
+                if self.round_open {
+                    self.round_open = false;
+                    self.pending_peers.clear();
+                    if let Err(error) = self.trigger_update_if_needed(ctx).await {
+                        warn!(
+                            governance_id = %self.governance_id,
+                            error = %error,
+                            "Failed to trigger governance update after round timeout"
+                        );
+                    }
+                }
             }
             GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
-                self.peer_version(peer, version);
+                if self.peer_version(peer, version) {
+                    self.round_open = false;
+                    if let Err(error) = self.trigger_update_if_needed(ctx).await {
+                        warn!(
+                            governance_id = %self.governance_id,
+                            error = %error,
+                            "Failed to trigger governance update after round completion"
+                        );
+                    }
+                }
             }
         }
 
@@ -297,6 +391,7 @@ mod tests {
         GovernanceVersionSync::new(
             gov_id(),
             Arc::new(pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbD")),
+            Arc::new(NetworkSender::new(tokio::sync::mpsc::channel(1).0)),
             5,
             3,
             Duration::from_secs(30),
@@ -339,6 +434,7 @@ mod tests {
         let mut actor = actor();
         let peer = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
         actor.pending_peers.insert(peer.clone());
+        actor.round_open = true;
 
         actor.peer_version(peer.clone(), 6);
 
@@ -347,6 +443,28 @@ mod tests {
             actor.update_target,
             Some(UpdateTarget { peer, version: 6 })
         );
+    }
+
+    #[test]
+    fn highest_version_wins_within_round() {
+        let mut actor = actor();
+        let peer_a = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE");
+        let peer_b = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbF");
+        let peer_c = pk("EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbG");
+
+        actor.pending_peers = HashSet::from([
+            peer_a.clone(),
+            peer_b.clone(),
+            peer_c.clone(),
+        ]);
+        actor.round_open = true;
+
+        assert!(!actor.peer_version(peer_a, 7));
+        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(7));
+        assert!(!actor.peer_version(peer_b, 8));
+        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(8));
+        assert!(actor.peer_version(peer_c, 9));
+        assert_eq!(actor.update_target.as_ref().map(|x| x.version), Some(9));
     }
 
     #[test]

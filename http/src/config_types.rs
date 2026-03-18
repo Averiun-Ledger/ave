@@ -307,6 +307,12 @@ pub struct AveConfigHttp {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+    /// Seconds between version sync rounds for governance service nodes
+    pub version_sync_interval_secs: u64,
+    /// Number of peers sampled on each version sync round
+    pub version_sync_sample_size: usize,
+    /// Seconds to wait for responses during a version sync round
+    pub version_sync_response_timeout_secs: u64,
 
     pub spec: Option<MachineSpecHttp>,
 }
@@ -323,6 +329,10 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
+            version_sync_interval_secs: value.version_sync_interval_secs,
+            version_sync_sample_size: value.version_sync_sample_size,
+            version_sync_response_timeout_secs:
+                value.version_sync_response_timeout_secs,
             spec: value.spec.map(MachineSpecHttp::from),
         }
     }
