@@ -95,6 +95,7 @@ impl SubjectManager {
                         None,
                         self.our_key.clone(),
                         self.hash,
+                        self.is_service,
                     )),
                 )
                 .await?;
@@ -261,6 +262,7 @@ impl SubjectManager {
                     Some((SubjectMetadata::new(&metadata), governance_data)),
                     self.our_key.clone(),
                     self.hash,
+                    self.is_service,
                 )),
             )
             .await?;

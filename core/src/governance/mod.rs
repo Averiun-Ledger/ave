@@ -17,11 +17,12 @@ use crate::{
         events::GovernanceEvent,
         model::{
             CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
-            Schema,
+            Schema, WitnessesData,
         },
         role_register::{RoleRegister, RoleRegisterMessage},
         sn_register::SnRegister,
         subject_register::{SubjectRegister, SubjectRegisterMessage},
+        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
         },
@@ -67,6 +68,7 @@ use tracing::{Span, debug, error, info_span, warn};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 pub mod data;
@@ -76,6 +78,7 @@ pub mod model;
 pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
+pub mod version_sync;
 pub mod witnesses_register;
 
 pub struct RolesUpdate {
@@ -143,6 +146,8 @@ pub struct Governance {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
     #[serde(skip)]
+    pub service: bool,
+    #[serde(skip)]
     pub hash: Option<HashAlgorithm>,
     pub subject_metadata: SubjectMetadata,
     pub properties: GovernanceData,
@@ -177,6 +182,7 @@ impl BorshDeserialize for Governance {
         Ok(Self {
             hash,
             our_key,
+            service: false,
             subject_metadata,
             properties,
         })
@@ -479,6 +485,7 @@ impl Subject for Governance {
             .await?;
 
             self.update_sn(ctx).await?;
+            self.refresh_version_sync(ctx).await?;
         }
 
         Ok(())
@@ -486,6 +493,34 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn refresh_version_sync(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if !self.service {
+            return Ok(());
+        }
+
+        let version_sync = ctx
+            .get_child::<GovernanceVersionSync>("version_sync")
+            .await?;
+        let governance_peers = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
+
+        let _ = version_sync
+            .ask(GovernanceVersionSyncMessage::RefreshGovernance {
+                version: self.properties.version,
+                governance_peers,
+            })
+            .await?;
+
+        Ok(())
+    }
+
     async fn update_schemas(
         &self,
         ctx: &ActorContext<Self>,
@@ -2056,6 +2091,52 @@ impl Actor for Governance {
             return Err(e);
         }
 
+        if self.service {
+            let Some(config): Option<ConfigHelper> =
+                ctx.system().get_helper("config").await
+            else {
+                error!("Config helper not found");
+                return Err(ActorError::Helper {
+                    name: "config".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            let tick_interval =
+                Duration::from_secs(config.version_sync_interval_secs.max(1));
+            let response_timeout = Duration::from_secs(
+                (config.version_sync_interval_secs.max(1) / 2).max(1),
+            );
+
+            let version_sync = ctx
+                .create_child(
+                    "version_sync",
+                    GovernanceVersionSync::new(
+                        self.subject_metadata.subject_id.clone(),
+                        self.our_key.clone(),
+                        self.properties.version,
+                        config.version_sync_sample_size,
+                        tick_interval,
+                        response_timeout,
+                    ),
+                )
+                .await?;
+
+            let governance_peers = self
+                .properties
+                .get_witnesses(WitnessesData::Gov)
+                .map_err(|e| ActorError::Functional {
+                    description: e.to_string(),
+                })?;
+
+            let _ = version_sync
+                .ask(GovernanceVersionSyncMessage::RefreshGovernance {
+                    version: self.properties.version,
+                    governance_peers,
+                })
+                .await?;
+        }
+
         Ok(())
     }
 }
@@ -2177,6 +2258,7 @@ impl PersistentActor for Governance {
         Option<(SubjectMetadata, GovernanceData)>,
         Arc<PublicKey>,
         HashAlgorithm,
+        bool,
     );
 
     fn update(&mut self, state: Self) {
@@ -2194,6 +2276,7 @@ impl PersistentActor for Governance {
         Self {
             hash: Some(params.2),
             our_key: params.1,
+            service: params.3,
             subject_metadata,
             properties,
         }

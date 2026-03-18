@@ -35,6 +35,10 @@ pub struct Config {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
+    /// Seconds between version sync rounds for governance service nodes.
+    pub version_sync_interval_secs: u64,
+    /// Number of peers sampled on each version sync round.
+    pub version_sync_sample_size: usize,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
@@ -52,6 +56,8 @@ impl Default for Config {
             always_accept: Default::default(),
             tracking_size: 100,
             is_service: false,
+            version_sync_interval_secs: 60,
+            version_sync_sample_size: 3,
             spec: None,
         }
     }

@@ -24,6 +24,8 @@ pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
     pub tracking_size: usize,
+    pub version_sync_interval_secs: u64,
+    pub version_sync_sample_size: usize,
 }
 
 impl From<Config> for ConfigHelper {
@@ -32,6 +34,8 @@ impl From<Config> for ConfigHelper {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
+            version_sync_interval_secs: value.version_sync_interval_secs,
+            version_sync_sample_size: value.version_sync_sample_size,
         }
     }
 }
@@ -200,6 +204,8 @@ pub mod tests {
             always_accept: false,
             tracking_size: 100,
             is_service: true,
+            version_sync_interval_secs: 60,
+            version_sync_sample_size: 3,
             spec: None,
         };
 
