@@ -14,7 +14,7 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SubjectQuery,
+        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
     },
     response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
@@ -24,8 +24,8 @@ use ave_bridge::{
         bridge::request::ApprovalStateRes,
         response::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
-            RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
-            TransferSubject,
+            RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+            SubjectDB, SubjsData, TransferSubject,
         },
     },
     http::ProxyConfig,
@@ -661,6 +661,36 @@ pub async fn get_events(
     Ok(Json(bridge.get_events(subject_id, parameters).await?))
 }
 
+/// Get sink-formatted replay events for a subject
+///
+/// Returns events in the same shape consumed by sinks, reconstructed from the
+/// subject ledger.
+#[utoipa::path(
+    get,
+    path = "/sink-events/{subject_id}",
+    operation_id = "getSinkEvents",
+    tag = "Ledger",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        SinkEventsQuery
+    ),
+    responses(
+        (status = 200, description = "Replay events formatted for sinks", body = SinkEventsPage),
+        (status = 400, description = "Invalid subject ID or query params", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sink_events(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Query(parameters): Query<SinkEventsQuery>,
+) -> Result<Json<SinkEventsPage>, HttpError> {
+    Ok(Json(bridge.get_sink_events(subject_id, parameters).await?))
+}
+
 /// Get aborts for a subject
 ///
 /// Returns a paginated list of aborted events for the specified subject.
@@ -915,6 +945,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/subjects", get_all_govs, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{governance_id}", get_all_subjs, require NodeSubject Get);
         $callback!($($args)*, get, "/events/{subject_id}", get_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/sink-events/{subject_id}", get_sink_events, require NodeSubject Get);
         $callback!($($args)*, get, "/events/{subject_id}/{sn}", get_event_sn, require NodeSubject Get);
         $callback!($($args)*, get, "/aborts/{subject_id}", get_aborts, require NodeSubject Get);
         $callback!($($args)*, get, "/events-first-last/{subject_id}", get_first_or_end_events, require NodeSubject Get);

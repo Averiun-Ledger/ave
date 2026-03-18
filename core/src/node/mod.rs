@@ -16,15 +16,19 @@ use crate::{
     auth::{Auth, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
+    governance::{Governance, GovernanceMessage, GovernanceResponse},
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
     model::common::node::SignTypesNode,
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
+    subject::{SignedLedger, replay_sink_events as replay_ledgers_to_sink_events},
     system::ConfigHelper,
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 use ave_common::{
     SchemaType,
+    response::SinkEventsPage,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
@@ -363,12 +367,249 @@ impl Node {
 
         governance_ids.into_iter().collect()
     }
+
+    async fn get_tracker_ledger_batch(
+        ctx: &mut ActorContext<Self>,
+        actor: &ave_actors::ActorRef<Tracker>,
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+        let response = actor
+            .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
+            .await?;
+
+        match response {
+            TrackerResponse::Ledger { ledger, is_all } => Ok((ledger, is_all)),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ctx.path().clone() / "subject_manager",
+                expected: "TrackerResponse::Ledger".to_owned(),
+            }),
+        }
+    }
+
+    async fn get_governance_ledger_batch(
+        ctx: &mut ActorContext<Self>,
+        actor: &ave_actors::ActorRef<Governance>,
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+        let response = actor
+            .ask(GovernanceMessage::GetLedger { lo_sn, hi_sn })
+            .await?;
+
+        match response {
+            GovernanceResponse::Ledger { ledger, is_all } => {
+                Ok((ledger, is_all))
+            }
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ctx.path().clone() / "subject_manager",
+                expected: "GovernanceResponse::Ledger".to_owned(),
+            }),
+        }
+    }
+
+    async fn collect_tracker_ledger(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        hi_sn: u64,
+    ) -> Result<Vec<SignedLedger>, ActorError> {
+        let path =
+            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
+        let mut ledger = Vec::new();
+        let mut lo_sn = None;
+
+        loop {
+            let (mut batch, is_all) =
+                Self::get_tracker_ledger_batch(ctx, &tracker, lo_sn, hi_sn)
+                    .await?;
+            if batch.is_empty() {
+                break;
+            }
+            lo_sn = batch.last().map(|event| event.content().sn);
+            ledger.append(&mut batch);
+            if is_all {
+                break;
+            }
+        }
+
+        Ok(ledger)
+    }
+
+    async fn collect_governance_ledger(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        hi_sn: u64,
+    ) -> Result<Vec<SignedLedger>, ActorError> {
+        let path =
+            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let governance = ctx.system().get_actor::<Governance>(&path).await?;
+        let mut ledger = Vec::new();
+        let mut lo_sn = None;
+
+        loop {
+            let (mut batch, is_all) = Self::get_governance_ledger_batch(
+                ctx,
+                &governance,
+                lo_sn,
+                hi_sn,
+            )
+            .await?;
+            if batch.is_empty() {
+                break;
+            }
+            lo_sn = batch.last().map(|event| event.content().sn);
+            ledger.append(&mut batch);
+            if is_all {
+                break;
+            }
+        }
+
+        Ok(ledger)
+    }
+
+    async fn replay_sink_events(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    ) -> Result<SinkEventsPage, ActorError> {
+        if limit == 0 {
+            return Err(ActorError::Functional {
+                description: "Replay limit must be greater than zero".to_owned(),
+            });
+        }
+        if let Some(to_sn) = to_sn
+            && from_sn > to_sn
+        {
+            return Err(ActorError::Functional {
+                description: "Replay range requires from_sn <= to_sn"
+                    .to_owned(),
+            });
+        }
+
+        let Some(subject_data) = self
+            .owned_subjects
+            .get(&subject_id)
+            .cloned()
+            .or_else(|| self.known_subjects.get(&subject_id).cloned())
+        else {
+            return Err(ActorError::NotFound {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}",
+                    subject_id
+                )),
+            });
+        };
+
+        let sink_timestamp = ave_common::identity::TimeStamp::now().as_nanos();
+        let public_key = self.our_key.to_string();
+
+        match subject_data {
+            SubjectData::Governance { .. } => {
+                let path = ActorPath::from(format!(
+                    "/user/node/subject_manager/{}",
+                    subject_id
+                ));
+                let governance =
+                    ctx.system().get_actor::<Governance>(&path).await?;
+                let response =
+                    governance.ask(GovernanceMessage::GetMetadata).await?;
+                let GovernanceResponse::Metadata(metadata) = response else {
+                    return Err(ActorError::UnexpectedResponse {
+                        path,
+                        expected: "GovernanceResponse::Metadata".to_owned(),
+                    });
+                };
+                let hi_sn = to_sn
+                    .map(|to_sn| to_sn.min(metadata.sn))
+                    .unwrap_or(metadata.sn);
+                let ledger =
+                    Self::collect_governance_ledger(ctx, &subject_id, hi_sn)
+                        .await?;
+                replay_ledgers_to_sink_events(
+                    &ledger,
+                    &public_key,
+                    from_sn,
+                    to_sn,
+                    limit,
+                    sink_timestamp,
+                )
+            }
+            SubjectData::Tracker { .. } => {
+                let subject_manager =
+                    ctx.get_child::<SubjectManager>("subject_manager").await?;
+                let requester = format!(
+                    "node_replay_sink_events:{}:{}:{}",
+                    subject_id,
+                    from_sn,
+                    limit
+                );
+                subject_manager
+                    .ask(SubjectManagerMessage::Up {
+                        subject_id: subject_id.clone(),
+                        requester: requester.clone(),
+                        create_ledger: None,
+                    })
+                    .await?;
+
+                let result = async {
+                    let path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}",
+                        subject_id
+                    ));
+                    let tracker =
+                        ctx.system().get_actor::<Tracker>(&path).await?;
+                    let response =
+                        tracker.ask(TrackerMessage::GetMetadata).await?;
+                    let TrackerResponse::Metadata(metadata) = response else {
+                        return Err(ActorError::UnexpectedResponse {
+                            path,
+                            expected: "TrackerResponse::Metadata".to_owned(),
+                        });
+                    };
+                    let hi_sn = to_sn
+                        .map(|to_sn| to_sn.min(metadata.sn))
+                        .unwrap_or(metadata.sn);
+                    let ledger =
+                        Self::collect_tracker_ledger(ctx, &subject_id, hi_sn)
+                            .await?;
+                    replay_ledgers_to_sink_events(
+                        &ledger,
+                        &public_key,
+                        from_sn,
+                        to_sn,
+                        limit,
+                        sink_timestamp,
+                    )
+                }
+                .await;
+
+                let _ = subject_manager
+                    .ask(SubjectManagerMessage::Finish {
+                        subject_id,
+                        requester,
+                    })
+                    .await;
+
+                result
+            }
+        }
+    }
 }
 
 /// Node message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeMessage {
     GetGovernances,
+    GetSinkEvents {
+        subject_id: DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    },
     SignRequest(SignTypesNode),
     PendingTransfers,
     RegisterSubject {
@@ -405,6 +646,7 @@ impl Message for NodeMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
     Governances(Vec<DigestIdentifier>),
+    SinkEvents(SinkEventsPage),
     SubjectData(Option<SubjectData>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
@@ -608,6 +850,17 @@ impl Handler<Self> for Node {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
+            NodeMessage::GetSinkEvents {
+                subject_id,
+                from_sn,
+                to_sn,
+                limit,
+            } => Ok(NodeResponse::SinkEvents(
+                self.replay_sink_events(
+                    ctx, subject_id, from_sn, to_sn, limit,
+                )
+                .await?,
+            )),
             NodeMessage::RegisterSubject {
                 owner,
                 subject_id,

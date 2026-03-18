@@ -7,11 +7,14 @@ use crate::SchemaType;
 
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
 
 /// Event data sent to external sink consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct DataToSink {
     pub event: DataToSinkEvent,
     pub public_key: String,
@@ -24,6 +27,7 @@ pub struct DataToSink {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum DataToSinkEvent {
     Create {

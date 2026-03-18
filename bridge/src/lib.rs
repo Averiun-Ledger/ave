@@ -5,7 +5,7 @@ pub use ave_common::response::MonitorNetworkState;
 use ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery,
+        EventRequestType, EventsQuery, SinkEventsQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -13,7 +13,7 @@ use ave_common::{
         ApprovalEntry, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
         RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
-        TransferSubject,
+        SinkEventsPage, TransferSubject,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -440,6 +440,17 @@ impl Bridge {
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
         Ok(self.api.get_events(subject_id, query).await?)
+    }
+
+    pub async fn get_sink_events(
+        &self,
+        subject_id: String,
+        query: SinkEventsQuery,
+    ) -> Result<SinkEventsPage, BridgeError> {
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.get_sink_events(subject_id, query).await?)
     }
 
     pub async fn get_aborts(

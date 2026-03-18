@@ -608,9 +608,9 @@ impl Handler<Self> for Evaluation {
 pub mod tests {
     use std::{str::FromStr, sync::Arc, time::Duration};
 
-    use ave_actors::{ActorPath, ActorRef, SystemRef};
+    use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
     use ave_common::{
-        Namespace, SchemaType, ValueWrapper,
+        DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
         bridge::request::{ApprovalState, ApprovalStateRes},
         identity::{DigestIdentifier, PublicKey, Signed},
         request::{CreateRequest, FactRequest, TransferRequest},
@@ -751,6 +751,48 @@ pub mod tests {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             };
         }
+    }
+
+    async fn get_sink_events(
+        node_actor: &ActorRef<Node>,
+        subject_id: &DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    ) -> ave_common::response::SinkEventsPage {
+        let response = node_actor
+            .ask(NodeMessage::GetSinkEvents {
+                subject_id: subject_id.clone(),
+                from_sn,
+                to_sn,
+                limit,
+            })
+            .await
+            .unwrap();
+
+        let NodeResponse::SinkEvents(events) = response else {
+            panic!("Invalid response")
+        };
+
+        events
+    }
+
+    async fn get_sink_events_error(
+        node_actor: &ActorRef<Node>,
+        subject_id: &DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    ) -> ActorError {
+        node_actor
+            .ask(NodeMessage::GetSinkEvents {
+                subject_id: subject_id.clone(),
+                from_sn,
+                to_sn,
+                limit,
+            })
+            .await
+            .unwrap_err()
     }
 
     async fn get_tracker_metadata(
@@ -1756,6 +1798,249 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_create_tracker() {
         let _ = create_tracker().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_create() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+
+        assert_eq!(replay.from_sn, 0);
+        assert_eq!(replay.to_sn, None);
+        assert_eq!(replay.limit, 100);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+        assert_eq!(replay.events.len(), 1);
+
+        let event = &replay.events[0];
+        assert!(!event.public_key.is_empty());
+        assert!(event.sink_timestamp > 0);
+        match &event.event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                owner,
+                schema_id,
+                namespace,
+                sn,
+                gov_version,
+                state,
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
+                assert_eq!(namespace, "");
+                assert_eq!(*sn, 0);
+                assert_eq!(*gov_version, 1);
+                assert!(!owner.is_empty());
+                assert_eq!(state["one"].as_u64().unwrap(), 0);
+                assert_eq!(state["two"].as_u64().unwrap(), 0);
+                assert_eq!(state["three"].as_u64().unwrap(), 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_pagination() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            _db,
+            tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let payload = json!({
+            "ModOne": {
+                "data": 100
+            }
+        });
+
+        let fact_request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(payload.clone()),
+        });
+
+        let _request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
+        let first_page =
+            get_sink_events(&node_actor, &subject_id, 0, None, 1).await;
+        assert_eq!(first_page.events.len(), 1);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_sn, Some(1));
+        match &first_page.events[0].event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                sn,
+                ..
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(*sn, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+
+        let second_page =
+            get_sink_events(&node_actor, &subject_id, 1, None, 10).await;
+        assert_eq!(second_page.events.len(), 1);
+        assert!(!second_page.has_more);
+        assert!(second_page.next_sn.is_none());
+        match &second_page.events[0].event {
+            DataToSinkEvent::Fact {
+                governance_id,
+                subject_id: replay_subject_id,
+                payload: replay_payload,
+                sn,
+                gov_version,
+                ..
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(replay_payload, &payload);
+                assert_eq!(*sn, 1);
+                assert_eq!(*gov_version, 1);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_governance_create() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _subject_actor,
+            _tracking,
+            subject_id,
+            _dir,
+        ) = create_gov().await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+
+        assert_eq!(replay.events.len(), 1);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+
+        match &replay.events[0].event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                schema_id,
+                sn,
+                gov_version,
+                ..
+            } => {
+                assert!(governance_id.is_none());
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Governance);
+                assert_eq!(*sn, 0);
+                assert_eq!(*gov_version, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_invalid_range() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let error =
+            get_sink_events_error(&node_actor, &subject_id, 5, Some(4), 100)
+                .await;
+
+        let ActorError::Functional { description } = error else {
+            panic!("Expected functional error")
+        };
+        assert_eq!(description, "Replay range requires from_sn <= to_sn");
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_invalid_limit() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let error =
+            get_sink_events_error(&node_actor, &subject_id, 0, None, 0).await;
+
+        let ActorError::Functional { description } = error else {
+            panic!("Expected functional error")
+        };
+        assert_eq!(description, "Replay limit must be greater than zero");
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_subject_not_found() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            _subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let missing = DigestIdentifier::from_str(
+            "B3B7tbY0OWp5jVq3OKYwYGQnM2zJ5V8i3G5znQJg4s8A",
+        )
+        .unwrap();
+
+        let error =
+            get_sink_events_error(&node_actor, &missing, 0, None, 100).await;
+
+        let ActorError::NotFound { path } = error else {
+            panic!("Expected not found error")
+        };
+        assert_eq!(
+            path,
+            ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                missing
+            ))
+        );
     }
 
     #[test(tokio::test)]
