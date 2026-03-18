@@ -608,9 +608,9 @@ impl Handler<Self> for Evaluation {
 pub mod tests {
     use std::{str::FromStr, sync::Arc, time::Duration};
 
-    use ave_actors::{ActorPath, ActorRef, SystemRef};
+    use ave_actors::{ActorError, ActorPath, ActorRef, SystemRef};
     use ave_common::{
-        Namespace, SchemaType, ValueWrapper,
+        DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
         bridge::request::{ApprovalState, ApprovalStateRes},
         identity::{DigestIdentifier, PublicKey, Signed},
         request::{CreateRequest, FactRequest, TransferRequest},
@@ -629,6 +629,9 @@ pub mod tests {
         helpers::db::{ExternalDB, ReadStore},
         model::common::node::SignTypesNode,
         node::Node,
+        node::subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
         request::{
             RequestData, RequestHandler, RequestHandlerMessage,
             RequestHandlerResponse,
@@ -637,6 +640,7 @@ pub mod tests {
                 RequestTrackingResponse,
             },
         },
+        subject::Metadata,
         tracker::{Tracker, TrackerMessage, TrackerResponse},
         validation::tests::create_gov,
     };
@@ -699,8 +703,8 @@ pub mod tests {
         wait_request_state: bool,
     ) -> RequestData {
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(request.clone()),
             )))
             .await
             .unwrap();
@@ -747,6 +751,103 @@ pub mod tests {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             };
         }
+    }
+
+    async fn get_sink_events(
+        node_actor: &ActorRef<Node>,
+        subject_id: &DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    ) -> ave_common::response::SinkEventsPage {
+        let response = node_actor
+            .ask(NodeMessage::GetSinkEvents {
+                subject_id: subject_id.clone(),
+                from_sn,
+                to_sn,
+                limit,
+            })
+            .await
+            .unwrap();
+
+        let NodeResponse::SinkEvents(events) = response else {
+            panic!("Invalid response")
+        };
+
+        events
+    }
+
+    async fn get_sink_events_error(
+        node_actor: &ActorRef<Node>,
+        subject_id: &DigestIdentifier,
+        from_sn: u64,
+        to_sn: Option<u64>,
+        limit: u64,
+    ) -> ActorError {
+        node_actor
+            .ask(NodeMessage::GetSinkEvents {
+                subject_id: subject_id.clone(),
+                from_sn,
+                to_sn,
+                limit,
+            })
+            .await
+            .unwrap_err()
+    }
+
+    async fn get_tracker_metadata(
+        system: &SystemRef,
+        subject_id: &DigestIdentifier,
+    ) -> Metadata {
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+        let requester = format!("evaluation_test:{}", subject_id);
+
+        let SubjectManagerResponse::Up = subject_manager
+            .ask(SubjectManagerMessage::Up {
+                subject_id: subject_id.clone(),
+                requester: requester.clone(),
+                create_ledger: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        let subject_actor: ActorRef<Tracker> = system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                subject_id
+            )))
+            .await
+            .unwrap();
+
+        let metadata = match subject_actor
+            .ask(TrackerMessage::GetMetadata)
+            .await
+            .unwrap()
+        {
+            TrackerResponse::Metadata(metadata) => *metadata,
+            _ => panic!("Invalid response"),
+        };
+
+        let SubjectManagerResponse::Finish = subject_manager
+            .ask(SubjectManagerMessage::Finish {
+                subject_id: subject_id.clone(),
+                requester,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        metadata
     }
 
     #[test(tokio::test)]
@@ -894,7 +995,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1016,7 +1116,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 0);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1173,15 +1272,14 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 2);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(transfer_request.clone()),
             )))
             .await
             .unwrap();
@@ -1349,7 +1447,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1551,7 +1648,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(!gov.roles_schema.is_empty());
         assert!(!gov.schemas.is_empty());
@@ -1579,7 +1675,6 @@ pub mod tests {
         ActorRef<Node>,
         ActorRef<RequestHandler>,
         Arc<ExternalDB>,
-        ActorRef<Tracker>,
         ActorRef<RequestTracking>,
         DigestIdentifier,
         DigestIdentifier,
@@ -1613,23 +1708,9 @@ pub mod tests {
         )
         .await;
 
-        let subject_actor: ActorRef<Tracker> = system
-            .get_actor(&ActorPath::from(format!(
-                "/user/node/{}",
-                request_data.subject_id
-            )))
-            .await
-            .unwrap();
-
         let subject_id = request_data.subject_id.clone();
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 0).await;
         let event = get_event_sn(&db, &subject_id, 0).await;
@@ -1702,7 +1783,6 @@ pub mod tests {
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             request_data.subject_id,
             gov_id,
@@ -1716,13 +1796,316 @@ pub mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_fact_tracker() {
+    async fn test_replay_sink_events_tracker_create() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+
+        assert_eq!(replay.from_sn, 0);
+        assert_eq!(replay.to_sn, None);
+        assert_eq!(replay.limit, 100);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+        assert_eq!(replay.events.len(), 1);
+
+        let event = &replay.events[0];
+        assert!(!event.public_key.is_empty());
+        assert!(event.sink_timestamp > 0);
+        match &event.event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                owner,
+                schema_id,
+                namespace,
+                sn,
+                gov_version,
+                state,
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
+                assert_eq!(namespace, "");
+                assert_eq!(*sn, 0);
+                assert_eq!(*gov_version, 1);
+                assert!(!owner.is_empty());
+                assert_eq!(state["one"].as_u64().unwrap(), 0);
+                assert_eq!(state["two"].as_u64().unwrap(), 0);
+                assert_eq!(state["three"].as_u64().unwrap(), 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_pagination() {
         let (
             _system,
             node_actor,
             request_actor,
+            _db,
+            tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let payload = json!({
+            "ModOne": {
+                "data": 100
+            }
+        });
+
+        let fact_request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(payload.clone()),
+        });
+
+        let _request_data = emit_request(
+            fact_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
+        let first_page =
+            get_sink_events(&node_actor, &subject_id, 0, None, 1).await;
+        assert_eq!(first_page.events.len(), 1);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_sn, Some(1));
+        match &first_page.events[0].event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                sn,
+                ..
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(*sn, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+
+        let second_page =
+            get_sink_events(&node_actor, &subject_id, 1, None, 10).await;
+        assert_eq!(second_page.events.len(), 1);
+        assert!(!second_page.has_more);
+        assert!(second_page.next_sn.is_none());
+        match &second_page.events[0].event {
+            DataToSinkEvent::Fact {
+                governance_id,
+                subject_id: replay_subject_id,
+                payload: replay_payload,
+                sn,
+                gov_version,
+                ..
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(replay_payload, &payload);
+                assert_eq!(*sn, 1);
+                assert_eq!(*gov_version, 1);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_governance_create() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _subject_actor,
+            _tracking,
+            subject_id,
+            _dir,
+        ) = create_gov().await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+
+        assert_eq!(replay.events.len(), 1);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+
+        match &replay.events[0].event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                schema_id,
+                sn,
+                gov_version,
+                ..
+            } => {
+                assert!(governance_id.is_none());
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Governance);
+                assert_eq!(*sn, 0);
+                assert_eq!(*gov_version, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_transfer() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            _db,
+            tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let transfer_request = EventRequest::Transfer(TransferRequest {
+            subject_id: subject_id.clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
+            )
+            .unwrap(),
+        });
+
+        let _request_data = emit_request(
+            transfer_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+
+        assert_eq!(replay.events.len(), 1);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+
+        match &replay.events[0].event {
+            DataToSinkEvent::Transfer {
+                governance_id,
+                subject_id: replay_subject_id,
+                schema_id,
+                owner,
+                new_owner,
+                sn,
+                gov_version,
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
+                assert!(!owner.is_empty());
+                assert_eq!(
+                    new_owner,
+                    "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                );
+                assert_eq!(*sn, 1);
+                assert_eq!(*gov_version, 1);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_invalid_range() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let error =
+            get_sink_events_error(&node_actor, &subject_id, 5, Some(4), 100)
+                .await;
+
+        let ActorError::Functional { description } = error else {
+            panic!("Expected functional error")
+        };
+        assert_eq!(description, "Replay range requires from_sn <= to_sn");
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_invalid_limit() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let error =
+            get_sink_events_error(&node_actor, &subject_id, 0, None, 0).await;
+
+        let ActorError::Functional { description } = error else {
+            panic!("Expected functional error")
+        };
+        assert_eq!(description, "Replay limit must be greater than zero");
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_subject_not_found() {
+        let (
+            _system,
+            node_actor,
+            _request_actor,
+            _db,
+            _tracking,
+            _subject_id,
+            _gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let missing = DigestIdentifier::from_str(
+            "B3B7tbY0OWp5jVq3OKYwYGQnM2zJ5V8i3G5znQJg4s8A",
+        )
+        .unwrap();
+
+        let error =
+            get_sink_events_error(&node_actor, &missing, 0, None, 100).await;
+
+        let ActorError::NotFound { path } = error else {
+            panic!("Expected not found error")
+        };
+        assert_eq!(
+            path,
+            ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                missing
+            ))
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn test_fact_tracker() {
+        let (
+            system,
+            node_actor,
+            request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1749,13 +2132,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data =
             get_subject_state(&db, &request_data.subject_id, 1).await;
@@ -1827,11 +2204,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_fact_fail_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1858,13 +2234,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data =
             get_subject_state(&db, &request_data.subject_id, 1).await;
@@ -1940,11 +2310,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_transfer_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -1968,13 +2337,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
@@ -2049,8 +2412,8 @@ pub mod tests {
         assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(transfer_request.clone()),
             )))
             .await
             .unwrap();
@@ -2074,11 +2437,10 @@ pub mod tests {
     #[test(tokio::test)]
     async fn test_transfer_fail_tracker() {
         let (
-            _system,
+            system,
             node_actor,
             request_actor,
             db,
-            subject_actor,
             tracking,
             subject_id,
             gov_id,
@@ -2102,13 +2464,7 @@ pub mod tests {
         )
         .await;
 
-        let TrackerResponse::Metadata(metadata) = subject_actor
-            .ask(TrackerMessage::GetMetadata)
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        let metadata = get_tracker_metadata(&system, &subject_id).await;
 
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;

@@ -14,7 +14,7 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SubjectQuery,
+        FirstEndEvents, GovQuery, SinkEventsQuery, SubjectQuery,
     },
     response::{ApprovalEntry, RequestData, RequestInfoExtend},
 };
@@ -24,8 +24,8 @@ use ave_bridge::{
         bridge::request::ApprovalStateRes,
         response::{
             GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
-            RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
-            TransferSubject,
+            RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+            SubjectDB, SubjsData, TransferSubject,
         },
     },
     http::ProxyConfig,
@@ -661,6 +661,36 @@ pub async fn get_events(
     Ok(Json(bridge.get_events(subject_id, parameters).await?))
 }
 
+/// Get sink-formatted replay events for a subject
+///
+/// Returns events in the same shape consumed by sinks, reconstructed from the
+/// subject ledger.
+#[utoipa::path(
+    get,
+    path = "/sink-events/{subject_id}",
+    operation_id = "getSinkEvents",
+    tag = "Ledger",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier"),
+        SinkEventsQuery
+    ),
+    responses(
+        (status = 200, description = "Replay events formatted for sinks", body = SinkEventsPage),
+        (status = 400, description = "Invalid subject ID or query params", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sink_events(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+    Query(parameters): Query<SinkEventsQuery>,
+) -> Result<Json<SinkEventsPage>, HttpError> {
+    Ok(Json(bridge.get_sink_events(subject_id, parameters).await?))
+}
+
 /// Get aborts for a subject
 ///
 /// Returns a paginated list of aborted events for the specified subject.
@@ -800,6 +830,7 @@ pub enum Resource {
     User,
     NodeSystem,
     NodeSubject,
+    NodeSink,
     NodeRequest,
     UserApiKey,
     NodeManagement,
@@ -811,6 +842,7 @@ impl Resource {
             Self::User => "user",
             Self::NodeSystem => "node_system",
             Self::NodeSubject => "node_subject",
+            Self::NodeSink => "node_sink",
             Self::NodeRequest => "node_request",
             Self::UserApiKey => "user_api_key",
             Self::NodeManagement => "node_management",
@@ -915,6 +947,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/subjects", get_all_govs, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{governance_id}", get_all_subjs, require NodeSubject Get);
         $callback!($($args)*, get, "/events/{subject_id}", get_events, require NodeSubject Get);
+        $callback!($($args)*, get, "/sink-events/{subject_id}", get_sink_events, require NodeSink Get);
         $callback!($($args)*, get, "/events/{subject_id}/{sn}", get_event_sn, require NodeSubject Get);
         $callback!($($args)*, get, "/aborts/{subject_id}", get_aborts, require NodeSubject Get);
         $callback!($($args)*, get, "/events-first-last/{subject_id}", get_first_or_end_events, require NodeSubject Get);
@@ -1372,6 +1405,11 @@ mod tests {
         let status = call(&app, Method::GET, "/request/123", ctx.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
+        // data role does NOT have node_sink:get - should be forbidden
+        let status =
+            call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
         // data role does NOT have node_subject:post - should be forbidden
         let status =
             call(&app, Method::POST, "/manual-distribution/abc", ctx.clone())
@@ -1413,6 +1451,47 @@ mod tests {
         let forbidden =
             call(&app, Method::POST, "/manual-distribution/abc", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sink_role_only_allows_sink_replay_reads() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "sink");
+        let app = router();
+
+        let ok =
+            call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
+        assert_ne!(ok, StatusCode::FORBIDDEN);
+
+        let forbidden_subject =
+            call(&app, Method::GET, "/events/abc", ctx.clone()).await;
+        assert_eq!(forbidden_subject, StatusCode::FORBIDDEN);
+
+        let forbidden_request =
+            call(&app, Method::POST, "/request", ctx).await;
+        assert_eq!(forbidden_request, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_role_cannot_access_sink_replay_reads() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "admin");
+        let app = router();
+
+        let forbidden =
+            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        assert_eq!(forbidden, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn superadmin_role_can_access_sink_replay_reads() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "superadmin");
+        let app = router();
+
+        let status =
+            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        assert_ne!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

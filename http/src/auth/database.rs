@@ -16,7 +16,7 @@ use ave_bridge::{
     resolve_spec,
 };
 use rand::RngExt;
-use rusqlite::{
+use ave_actors::rusqlite::{
     Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };

@@ -41,7 +41,8 @@ use ave_bridge::ave_common::{
             BridgeConfirmRequest, BridgeCreateRequest, BridgeEOLRequest,
             BridgeEventRequest, BridgeFactRequest, BridgeRejectRequest,
             BridgeSignedEventRequest, BridgeTransferRequest, EventRequestType,
-            EventsQuery, FirstEndEvents, GovQuery, SubjectQuery,
+            EventsQuery, FirstEndEvents, GovQuery, SinkEventsQuery,
+            SubjectQuery,
         },
         signature::BridgeSignature,
     },
@@ -49,8 +50,8 @@ use ave_bridge::ave_common::{
         AbortDB, ApprovalEntry, ApprovalReq, EvalResDB, GovsData, LedgerDB,
         Paginator, PaginatorAborts, PaginatorEvents, RequestData,
         RequestEventDB, RequestInfo, RequestInfoExtend, RequestState,
-        RequestsInManager, RequestsInManagerSubject, SubjectDB, SubjsData,
-        TimeRange, TransferSubject,
+        RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+        SubjectDB, SubjsData, TimeRange, TransferSubject,
     },
 };
 
@@ -136,6 +137,7 @@ impl Modify for SecurityAddon {
 
         // ── Ledger ──────────────────────────────────────────────
         server::get_events,
+        server::get_sink_events,
         server::get_aborts,
         server::get_event_sn,
         server::get_first_or_end_events,
@@ -259,6 +261,7 @@ impl Modify for SecurityAddon {
             GovQuery,
             ApprovalQuery,
             EventsQuery,
+            SinkEventsQuery,
             AbortsQuery,
             FirstEndEvents,
 
@@ -294,6 +297,7 @@ impl Modify for SecurityAddon {
             RequestEventDB,
             EvalResDB,
             PaginatorEvents,
+            SinkEventsPage,
             PaginatorAborts,
             Paginator,
             AbortDB,

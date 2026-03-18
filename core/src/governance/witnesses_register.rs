@@ -237,7 +237,7 @@ impl WitnessesRegister {
         let governance_id = ctx.path().parent().key();
 
         let path = ActorPath::from(format!(
-            "/user/node/{}/sn_register",
+            "/user/node/subject_manager/{}/sn_register",
             governance_id
         ));
         let sn_register = ctx.system().get_actor::<SnRegister>(&path).await?;

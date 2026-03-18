@@ -1,6 +1,6 @@
 [package]
 name = "ave-core"
-version = "0.8.0"
+version = "0.9.0"
 edition.workspace = true
 authors.workspace = true
 description = "Averiun Ledger core runtime and node API"
@@ -26,7 +26,6 @@ tracing = { workspace = true }
 network = { package = "ave-network", path = "../network", version = "0.8.0" }
 rmp-serde = { workspace = true }
 wasmtime = {version = "42.0.1"}
-rusqlite = { workspace = true, optional = true }
 base64 = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
@@ -47,5 +46,5 @@ axum = { workspace = true }
 default = ["sqlite", "ext-sqlite"]
 rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
-ext-sqlite = ["rusqlite"]
+ext-sqlite = ["ave-actors/export-sqlite"]
 test = []

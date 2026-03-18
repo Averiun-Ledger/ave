@@ -28,6 +28,7 @@ use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery,
+    SinkEventsQuery,
 };
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};
@@ -35,7 +36,7 @@ use ave_common::request::EventRequest;
 use ave_common::response::{
     GovsData, LedgerDB, MonitorNetworkState, PaginatorAborts, PaginatorEvents,
     RequestInfo, RequestInfoExtend, RequestsInManager,
-    RequestsInManagerSubject, SubjectDB, SubjsData,
+    RequestsInManagerSubject, SinkEventsPage, SubjectDB, SubjsData,
 };
 use config::Config as AveBaseConfig;
 use error::Error;
@@ -410,8 +411,8 @@ impl Api {
     ) -> Result<RequestData, Error> {
         let response = self
             .node
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(request.clone()),
             )))
             .await
             .map_err(|e| {
@@ -841,6 +842,35 @@ impl Api {
                 warn!(error = %e, "Failed to get events");
                 Err(Error::QueryFailed(e.to_string()))
             }
+        }
+    }
+
+    pub async fn get_sink_events(
+        &self,
+        subject_id: DigestIdentifier,
+        query: SinkEventsQuery,
+    ) -> Result<SinkEventsPage, Error> {
+        let response = self
+            .node
+            .ask(NodeMessage::GetSinkEvents {
+                subject_id,
+                from_sn: query.from_sn.unwrap_or(0),
+                to_sn: query.to_sn,
+                limit: query.limit.unwrap_or(100),
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to replay sink events");
+                Error::from(e)
+            })?;
+
+        match response {
+            NodeResponse::SinkEvents(events) => Ok(events),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "node".to_string(),
+                expected: "SinkEvents".to_string(),
+                received: "other".to_string(),
+            }),
         }
     }
 

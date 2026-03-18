@@ -19,7 +19,7 @@ use crate::{
     model::common::{
         emit_fail,
         node::i_can_send_last_ledger,
-        subject::{get_gov, get_last_ledger_event},
+        subject::{acquire_subject, get_gov, get_last_ledger_event},
     },
 };
 
@@ -89,17 +89,31 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
-                let ledger = get_last_ledger_event(ctx, &subject_id)
-                    .await
-                    .map_err(|e| {
-                        error!(
-                            msg_type = "Update",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to get last ledger event"
-                        );
-                        e
-                    })?;
+                let is_tracker = data.get_governance_id().is_some();
+                let ledger = if is_tracker {
+                    let lease = acquire_subject(
+                        ctx,
+                        &subject_id,
+                        format!("manual_distribution:{}", subject_id),
+                        None,
+                        true,
+                    )
+                    .await?;
+                    let ledger = get_last_ledger_event(ctx, &subject_id).await;
+                    lease.finish(ctx).await?;
+                    ledger
+                } else {
+                    get_last_ledger_event(ctx, &subject_id).await
+                }
+                .map_err(|e| {
+                    error!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to get last ledger event"
+                    );
+                    e
+                })?;
 
                 let Some(ledger) = ledger else {
                     error!(

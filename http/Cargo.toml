@@ -1,6 +1,6 @@
 [package]
 name = "ave-http"
-version = "0.8.0"
+version = "0.9.0"
 edition.workspace = true
 authors.workspace = true
 description = "HTTP API server for the Ave runtime, auth system, and admin surface"
@@ -12,7 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ave-bridge = { path = "../bridge", version = "0.8.0", default-features = false, features = ["openapi"] }
+ave-bridge = { path = "../bridge", default-features = false, features = ["openapi"] }
 prometheus-client = { workspace = true, optional = true }
 
 tokio = {  workspace = true }
@@ -39,7 +39,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"]}
 tokio-util = { workspace = true }
 
 # Auth system dependencies
-rusqlite = { workspace = true, features = ["time"] }
+ave-actors = { workspace = true, default-features = false, features = ["export-sqlite"] }
 argon2 = { version = "0.5.3", features = ["std"] }
 sha2 = { workspace = true }
 hex = "0.4.3"
@@ -55,7 +55,7 @@ x509-parser = "0.18"
 test-log = { workspace = true } 
 tempfile = { workspace = true }
 chrono = "0.4.44"
-ave-bridge = { path = "../bridge", version = "0.8.0", default-features = false, features = ["openapi", "test"] }
+ave-bridge = { path = "../bridge", default-features = false, features = ["openapi", "test"] }
 
 [features]
 default = ["sqlite", "ext-sqlite", "prometheus"]

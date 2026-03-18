@@ -701,8 +701,8 @@ pub mod tests {
         });
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                create_req.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(create_req.clone()),
             )))
             .await
             .unwrap();
@@ -734,7 +734,7 @@ pub mod tests {
         wait_request(&tracking, response.request_id).await;
 
         let subject_actor: ActorRef<Governance> = system
-            .get_actor(&ActorPath::from(format!("/user/node/{}", owned_subj)))
+            .get_actor(&ActorPath::from(format!("/user/node/subject_manager/{}", owned_subj)))
             .await
             .unwrap();
 
@@ -850,8 +850,8 @@ pub mod tests {
         });
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                eol_reques.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(eol_reques.clone()),
             )))
             .await
             .unwrap();

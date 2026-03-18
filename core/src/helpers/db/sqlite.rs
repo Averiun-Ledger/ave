@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ave_actors::{ActorRef, Subscriber};
+use ave_actors::rusqlite;
+use ave_actors::rusqlite::types::Type;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
@@ -18,7 +20,6 @@ use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
     registry::Registry,
 };
-use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::Value;
 use time::OffsetDateTime;

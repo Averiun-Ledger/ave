@@ -1,5 +1,5 @@
 use super::database::DatabaseError;
-use rusqlite::Connection;
+use ave_actors::rusqlite::Connection;
 use std::{
     path::Path,
     sync::{Arc, Condvar, Mutex},

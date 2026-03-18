@@ -1,6 +1,7 @@
 //! Response payloads returned by the Ave API.
 
 use crate::{
+    DataToSink,
     SchemaType,
     bridge::request::{ApprovalState, EventRequestType},
 };
@@ -228,6 +229,19 @@ pub struct SubjectDB {
 pub struct PaginatorEvents {
     pub paginator: Paginator,
     pub events: Vec<LedgerDB>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkEventsPage {
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub limit: u64,
+    pub next_sn: Option<u64>,
+    pub has_more: bool,
+    pub events: Vec<DataToSink>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

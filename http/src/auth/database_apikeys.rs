@@ -6,7 +6,7 @@ use super::crypto::{extract_key_prefix, generate_api_key, hash_api_key};
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
-use rusqlite::{
+use ave_actors::rusqlite::{self,
     OptionalExtension, Result as SqliteResult, TransactionBehavior, params,
 };
 

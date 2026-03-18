@@ -152,7 +152,7 @@ impl Handler<Self> for ApprLight {
                 let subject_id = approval_req.content().subject_id.clone();
 
                 let receiver_actor =
-                    format!("/user/node/{}/approver", subject_id);
+                    format!("/user/node/subject_manager/{}/approver", subject_id);
 
                 let message = NetworkMessage {
                     info: ComunicateInfo {

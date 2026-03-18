@@ -64,6 +64,18 @@ pub struct EventsQuery {
     pub event_type: Option<EventRequestType>,
 }
 
+/// Range query for replaying sink-formatted events.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkEventsQuery {
+    pub from_sn: Option<u64>,
+    pub to_sn: Option<u64>,
+    pub limit: Option<u64>,
+}
+
 /// Pagination filters for abort queries.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

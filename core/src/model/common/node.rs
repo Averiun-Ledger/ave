@@ -99,7 +99,7 @@ where
 
     // We obtain the validator
     let node_response =
-        node_actor.ask(NodeMessage::SignRequest(sign_type)).await?;
+        node_actor.ask(NodeMessage::SignRequest(Box::new(sign_type))).await?;
 
     match node_response {
         NodeResponse::SignRequest(signature) => Ok(signature),

@@ -33,8 +33,8 @@ use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
 use crate::model::common::subject::{
-    create_subject, get_gov, get_gov_sn, get_last_ledger_event, get_metadata,
-    make_obsolete, update_ledger,
+    acquire_subject, create_subject, get_gov, get_gov_sn,
+    get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
 };
 use crate::model::event::{
     ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
@@ -72,6 +72,8 @@ pub struct RequestManager {
     #[serde(skip)]
     subject_id: DigestIdentifier,
     #[serde(skip)]
+    governance_id: Option<DigestIdentifier>,
+    #[serde(skip)]
     retry_timeout: u64,
     #[serde(skip)]
     retry_diff: u64,
@@ -91,6 +93,7 @@ pub enum RebootType {
 pub struct InitRequestManager {
     pub our_key: Arc<PublicKey>,
     pub subject_id: DigestIdentifier,
+    pub governance_id: Option<DigestIdentifier>,
     pub helpers: (HashAlgorithm, Arc<NetworkSender>),
 }
 
@@ -130,6 +133,7 @@ impl BorshDeserialize for RequestManager {
             our_key,
             id,
             subject_id,
+            governance_id: None,
             command,
             request,
             state,
@@ -158,7 +162,7 @@ impl RequestManager {
         )
         .await;
 
-        let metadata = Self::check_data_eval(ctx, &request).await?;
+        let metadata = self.check_data_eval(ctx, &request).await?;
 
         let (signed_evaluation_req, quorum, signers, init_state) =
             self.build_request_eval(ctx, &metadata, &request).await?;
@@ -190,7 +194,16 @@ impl RequestManager {
     }
 
     // revisado
+    const fn needs_subject_manager(&self) -> bool {
+        self.governance_id.is_some()
+    }
+
+    fn requester_id(&self) -> String {
+        self.id.to_string()
+    }
+
     async fn check_data_eval(
+        &self,
         ctx: &mut ActorContext<Self>,
         request: &Signed<EventRequest>,
     ) -> Result<Metadata, RequestManagerError> {
@@ -205,13 +218,32 @@ impl RequestManager {
             }
         };
 
-        let metadata = get_metadata(ctx, &subject_id).await?;
+        let lease = acquire_subject(
+            ctx,
+            &self.subject_id,
+            self.requester_id(),
+            None,
+            self.needs_subject_manager(),
+        )
+        .await?;
+        let metadata = get_metadata(ctx, &subject_id).await;
+        lease.finish(ctx).await?;
+        let metadata = metadata?;
 
         if confirm && !metadata.schema_id.is_gov() {
             return Err(RequestManagerError::ConfirmNotEvaluableForTracker);
         }
 
         Ok(metadata)
+    }
+
+    async fn get_governance_data(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<GovernanceData, RequestManagerError> {
+        let governance_id =
+            self.governance_id.as_ref().unwrap_or(&self.subject_id);
+        Ok(get_gov(ctx, governance_id).await?)
     }
 
     async fn build_request_eval(
@@ -433,7 +465,10 @@ impl RequestManager {
 
             return Err(RequestManagerError::NoApproversAvailable {
                 schema_id: SchemaType::Governance.to_string(),
-                governance_id: self.subject_id.clone(),
+                governance_id: self
+                    .governance_id
+                    .clone()
+                    .unwrap_or_else(|| self.subject_id.clone()),
             });
         }
 
@@ -614,7 +649,7 @@ impl RequestManager {
                 return Err(RequestManagerError::HelpersNotInitialized);
             };
 
-            let governance_data = get_gov(ctx, &self.subject_id).await?;
+            let governance_data = self.get_governance_data(ctx).await?;
 
             let (actual_protocols, gov_version, sn) =
                 if let Some((eval_req, eval_data)) = eval {
@@ -638,7 +673,29 @@ impl RequestManager {
                     (ActualProtocols::None, governance_data.version, None)
                 };
 
-            let metadata = get_metadata(ctx, &self.subject_id).await?;
+            let lease = acquire_subject(
+                ctx,
+                &self.subject_id,
+                self.requester_id(),
+                None,
+                self.needs_subject_manager(),
+            )
+            .await?;
+            let metadata = get_metadata(ctx, &self.subject_id).await;
+            let last_ledger_event = match metadata {
+                Ok(metadata) => {
+                    let last_ledger_event =
+                        get_last_ledger_event(ctx, &self.subject_id).await;
+                    lease.finish(ctx).await?;
+                    (metadata, last_ledger_event?)
+                }
+                Err(error) => {
+                    lease.finish(ctx).await?;
+                    return Err(error.into());
+                }
+            };
+
+            let (metadata, last_ledger_event) = last_ledger_event;
             let sn = if let Some(sn) = sn {
                 sn
             } else {
@@ -650,9 +707,6 @@ impl RequestManager {
                 &metadata.schema_id,
                 metadata.namespace.clone(),
             )?;
-
-            let last_ledger_event =
-                get_last_ledger_event(ctx, &self.subject_id).await?;
 
             let Some(last_ledger_event) = last_ledger_event else {
                 return Err(RequestManagerError::LastLedgerEventNotFound);
@@ -806,12 +860,22 @@ impl RequestManager {
             if let Err(e) = create_subject(ctx, ledger.clone()).await {
                 if let ActorError::Functional { .. } = e {
                     return Err(RequestManagerError::CheckLimit);
-                } else {
-                    return Err(RequestManagerError::ActorError(e));
                 }
-            };
+                return Err(e.into());
+            }
         } else {
-            update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await?;
+            let lease = acquire_subject(
+                ctx,
+                &self.subject_id,
+                self.requester_id(),
+                None,
+                self.needs_subject_manager(),
+            )
+            .await?;
+            let update_result =
+                update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await;
+            lease.finish(ctx).await?;
+            update_result?;
         }
 
         self.on_event(
@@ -867,7 +931,7 @@ impl RequestManager {
             if create.schema_id == SchemaType::Governance {
                 None
             } else {
-                let governance_data = get_gov(ctx, &self.subject_id).await?;
+                let governance_data = self.get_governance_data(ctx).await?;
 
                 let witnesses =
                     governance_data.get_witnesses(WitnessesData::Schema {
@@ -887,7 +951,7 @@ impl RequestManager {
                 });
             };
 
-            let governance_data = get_gov(ctx, &self.subject_id).await?;
+            let governance_data = self.get_governance_data(ctx).await?;
 
             let witnesses = match data {
                 SubjectData::Governance { .. } => {
@@ -1342,7 +1406,7 @@ impl RequestManager {
                 return Err(RequestManagerError::SubjecData);
             };
 
-            let gov = get_gov(ctx, &self.subject_id).await?;
+            let gov = self.get_governance_data(ctx).await?;
             match subject_data {
                 SubjectData::Tracker {
                     schema_id,
@@ -1564,6 +1628,15 @@ impl Actor for RequestManager {
             );
             return Err(e);
         }
+
+        if self.governance_id.is_none()
+            && let Some(request) = &self.request
+            && let EventRequest::Create(create) = request.content()
+            && !create.schema_id.is_gov()
+        {
+            self.governance_id = Some(create.governance_id.clone());
+        }
+
         Ok(())
     }
 }
@@ -2361,6 +2434,7 @@ impl PersistentActor for RequestManager {
             our_key: params.our_key,
             id: DigestIdentifier::default(),
             subject_id: params.subject_id,
+            governance_id: params.governance_id,
             command: ReqManInitMessage::Evaluate,
             request: None,
             state: RequestManagerState::Starting,

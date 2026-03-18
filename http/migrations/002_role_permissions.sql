@@ -117,3 +117,16 @@ SELECT
     1
 FROM resources r
 WHERE r.name IN ('node_request', 'node_subject', 'node_system');
+
+-- =============================================================================
+-- SINK ROLE PERMISSIONS
+-- =============================================================================
+INSERT OR IGNORE INTO role_permissions (role_id, resource_id, action_id, allowed, is_system)
+SELECT
+    (SELECT id FROM roles WHERE name = 'sink'),
+    r.id,
+    (SELECT id FROM actions WHERE name = 'get'),
+    1,
+    1
+FROM resources r
+WHERE r.name = 'node_sink';
