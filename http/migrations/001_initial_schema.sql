@@ -246,6 +246,7 @@ INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
     ('admin_users', 'Administrative user management endpoints', 1),
     ('node_system', 'Node information endpoints', 1),
     ('node_subject', 'Ledger subject and governance endpoints', 1),
+    ('node_sink', 'Ledger sink replay endpoints', 1),
     ('node_request', 'Ledger request submission endpoints', 1),
     ('user_api_key', 'User self-service API key endpoints', 1),
     ('node_management', 'Node configuration and metrics endpoints', 1);
@@ -269,7 +270,8 @@ INSERT OR IGNORE INTO roles (name, description, is_system) VALUES
     ('admin', 'Administrative access to users, roles, and API keys', 1),
     ('sender', 'Limited to sending event requests', 1),
     ('manager', 'Business manager with operational control', 1),
-    ('data', 'Read-only access to business data', 1);
+    ('data', 'Read-only access to business data', 1),
+    ('sink', 'Read-only access to sink replay endpoints', 1);
 
 -- Get role IDs
 -- Note: We'll set up permissions programmatically in Rust to handle the dynamic IDs

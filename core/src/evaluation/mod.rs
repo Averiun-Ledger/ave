@@ -703,8 +703,8 @@ pub mod tests {
         wait_request_state: bool,
     ) -> RequestData {
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(request.clone()),
             )))
             .await
             .unwrap();
@@ -995,7 +995,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1117,7 +1116,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 0);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1274,15 +1272,14 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 2);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
         assert!(gov.policies_schema.is_empty());
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(transfer_request.clone()),
             )))
             .await
             .unwrap();
@@ -1450,7 +1447,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(gov.roles_schema.is_empty());
         assert!(gov.schemas.is_empty());
@@ -1652,7 +1648,6 @@ pub mod tests {
         assert_eq!(metadata.properties.0, subject_data.properties);
         let gov = GovernanceData::try_from(metadata.properties).unwrap();
         assert_eq!(gov.version, 1);
-        // TODO MEJORAR
         assert!(!gov.members.is_empty());
         assert!(!gov.roles_schema.is_empty());
         assert!(!gov.schemas.is_empty());
@@ -1960,6 +1955,67 @@ pub mod tests {
                 assert_eq!(schema_id, &SchemaType::Governance);
                 assert_eq!(*sn, 0);
                 assert_eq!(*gov_version, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_transfer() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            _db,
+            tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let transfer_request = EventRequest::Transfer(TransferRequest {
+            subject_id: subject_id.clone(),
+            new_owner: PublicKey::from_str(
+                "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE",
+            )
+            .unwrap(),
+        });
+
+        let _request_data = emit_request(
+            transfer_request,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
+        let replay = get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+
+        assert_eq!(replay.events.len(), 1);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+
+        match &replay.events[0].event {
+            DataToSinkEvent::Transfer {
+                governance_id,
+                subject_id: replay_subject_id,
+                schema_id,
+                owner,
+                new_owner,
+                sn,
+                gov_version,
+            } => {
+                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
+                assert!(!owner.is_empty());
+                assert_eq!(
+                    new_owner,
+                    "EUrVnqpwo9EKBvMru4wWLMpJgOTKM5gZnxApRmjrRbbE"
+                );
+                assert_eq!(*sn, 1);
+                assert_eq!(*gov_version, 1);
             }
             other => panic!("Unexpected event: {other:?}"),
         }
@@ -2356,8 +2412,8 @@ pub mod tests {
         assert!(metadata.properties.0["three"].as_u64().unwrap() == 0);
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                transfer_request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(transfer_request.clone()),
             )))
             .await
             .unwrap();

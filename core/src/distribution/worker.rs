@@ -927,7 +927,6 @@ impl Handler<Self> for DistriWorker {
                     let _event = ledger.remove(0);
                     lease
                 } else {
-                    // TODO en un futuro mejorar esto
                     if ledger[0]
                         .content()
                         .event_request

@@ -273,9 +273,8 @@ impl ValiWorker {
         gov_version: u64,
         sn: u64,
     ) -> Result<(), ValidatorError> {
-        // // Check event request.
+        // Check event request.
 
-        // todo mover a check
         if request.verify().is_err() {
             return Err(ValidatorError::InvalidSignature {
                 data: "event request",
@@ -784,7 +783,6 @@ impl ValiWorker {
                     gov_version,
                     subject_id,
                 } => {
-                    // todo Check is valid en check_data
                     if let EventRequest::Create(create) =
                         event_request.content()
                     {

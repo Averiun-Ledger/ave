@@ -194,7 +194,7 @@ impl RequestManager {
     }
 
     // revisado
-    fn needs_subject_manager(&self) -> bool {
+    const fn needs_subject_manager(&self) -> bool {
         self.governance_id.is_some()
     }
 

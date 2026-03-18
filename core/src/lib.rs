@@ -411,8 +411,8 @@ impl Api {
     ) -> Result<RequestData, Error> {
         let response = self
             .node
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                request.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(request.clone()),
             )))
             .await
             .map_err(|e| {

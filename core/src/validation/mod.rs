@@ -701,8 +701,8 @@ pub mod tests {
         });
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                create_req.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(create_req.clone()),
             )))
             .await
             .unwrap();
@@ -850,8 +850,8 @@ pub mod tests {
         });
 
         let response = node_actor
-            .ask(NodeMessage::SignRequest(SignTypesNode::EventRequest(
-                eol_reques.clone(),
+            .ask(NodeMessage::SignRequest(Box::new(
+                SignTypesNode::EventRequest(eol_reques.clone()),
             )))
             .await
             .unwrap();

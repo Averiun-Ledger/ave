@@ -369,7 +369,7 @@ impl Node {
     }
 
     async fn get_tracker_ledger_batch(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         actor: &ave_actors::ActorRef<Tracker>,
         lo_sn: Option<u64>,
         hi_sn: u64,
@@ -388,7 +388,7 @@ impl Node {
     }
 
     async fn get_governance_ledger_batch(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         actor: &ave_actors::ActorRef<Governance>,
         lo_sn: Option<u64>,
         hi_sn: u64,
@@ -409,7 +409,7 @@ impl Node {
     }
 
     async fn collect_tracker_ledger(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
     ) -> Result<Vec<SignedLedger>, ActorError> {
@@ -437,7 +437,7 @@ impl Node {
     }
 
     async fn collect_governance_ledger(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
     ) -> Result<Vec<SignedLedger>, ActorError> {
@@ -470,7 +470,7 @@ impl Node {
 
     async fn replay_sink_events(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
@@ -610,7 +610,7 @@ pub enum NodeMessage {
         to_sn: Option<u64>,
         limit: u64,
     },
-    SignRequest(SignTypesNode),
+    SignRequest(Box<SignTypesNode>),
     PendingTransfers,
     RegisterSubject {
         owner: PublicKey,
@@ -1046,6 +1046,7 @@ impl Handler<Self> for Node {
                 Ok(NodeResponse::Ok)
             }
             NodeMessage::SignRequest(content) => {
+                let content = *content;
                 let content_type = match &content {
                     SignTypesNode::EventRequest(_) => "EventRequest",
                     SignTypesNode::ValidationReq(_) => "ValidationReq",

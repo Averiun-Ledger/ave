@@ -166,7 +166,6 @@ impl Handler<Self> for EvalCoordinator {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                // TODO, la evaluación, si hay compilación podría tardar más
                 #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::FixedInterval(
                     FixedIntervalStrategy::new(1, Duration::from_secs(20)),

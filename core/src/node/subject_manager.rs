@@ -29,7 +29,7 @@ pub enum SubjectManagerMessage {
     Up {
         subject_id: DigestIdentifier,
         requester: String,
-        create_ledger: Option<SignedLedger>,
+        create_ledger: Option<Box<SignedLedger>>,
     },
     Finish {
         subject_id: DigestIdentifier,
@@ -111,7 +111,7 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: DigestIdentifier,
         requester: String,
-        create_ledger: Option<SignedLedger>,
+        create_ledger: Option<Box<SignedLedger>>,
     ) -> Result<(), ActorError> {
         if let Some(entry) = self.subjects.get_mut(&subject_id) {
             entry.requesters.insert(requester);
@@ -119,6 +119,7 @@ impl SubjectManager {
         }
 
         if let Some(ledger) = create_ledger {
+            let ledger = *ledger;
             let metadata = Self::metadata_from_create_ledger(&ledger)?;
 
             if metadata.schema_id.is_gov() {
@@ -141,7 +142,7 @@ impl SubjectManager {
 
     async fn finish(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
         requester: String,
     ) -> Result<(), ActorError> {
@@ -353,7 +354,7 @@ impl SubjectManager {
 
     async fn register_subject_in_node(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         owner: PublicKey,
         subject_id: DigestIdentifier,
         data: SubjectData,

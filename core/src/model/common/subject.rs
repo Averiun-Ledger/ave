@@ -67,7 +67,7 @@ where
         .ask(SubjectManagerMessage::Up {
             subject_id: subject_id.clone(),
             requester,
-            create_ledger,
+            create_ledger: create_ledger.map(Box::new),
         })
         .await?;
 
