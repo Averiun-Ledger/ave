@@ -1,8 +1,7 @@
 //! Response payloads returned by the Ave API.
 
 use crate::{
-    DataToSink,
-    SchemaType,
+    DataToSink, SchemaType,
     bridge::request::{ApprovalState, EventRequestType},
 };
 use serde::{Deserialize, Serialize};

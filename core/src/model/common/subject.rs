@@ -182,14 +182,9 @@ where
     F: FnOnce(&mut ActorContext<A>) -> Fut,
     Fut: Future<Output = Result<T, ActorError>>,
 {
-    let lease = acquire_subject(
-        ctx,
-        subject_id,
-        requester,
-        create_ledger,
-        active,
-    )
-    .await?;
+    let lease =
+        acquire_subject(ctx, subject_id, requester, create_ledger, active)
+            .await?;
     let result = operation(ctx).await;
     lease.finish(ctx).await?;
     result
@@ -202,10 +197,8 @@ async fn get_subject_path_and_data<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}",
-        subject_id
-    ));
+    let path =
+        ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
     let Some(subject_data) = get_subject_data(ctx, subject_id).await? else {
         return Err(ActorError::NotFound { path });
     };
@@ -220,12 +213,15 @@ pub async fn get_metadata<A>(
 where
     A: Actor + Handler<A>,
 {
-    let (path, subject_data) = get_subject_path_and_data(ctx, subject_id).await?;
+    let (path, subject_data) =
+        get_subject_path_and_data(ctx, subject_id).await?;
 
     match subject_data {
         SubjectData::Tracker { .. } => {
-            let tracker_actor = ctx.system().get_actor::<Tracker>(&path).await?;
-            let response = tracker_actor.ask(TrackerMessage::GetMetadata).await?;
+            let tracker_actor =
+                ctx.system().get_actor::<Tracker>(&path).await?;
+            let response =
+                tracker_actor.ask(TrackerMessage::GetMetadata).await?;
             match response {
                 TrackerResponse::Metadata(metadata) => Ok(*metadata),
                 _ => Err(ActorError::UnexpectedResponse {
@@ -280,14 +276,19 @@ pub async fn get_last_ledger_event<A>(
 where
     A: Actor + Handler<A>,
 {
-    let (path, subject_data) = get_subject_path_and_data(ctx, subject_id).await?;
+    let (path, subject_data) =
+        get_subject_path_and_data(ctx, subject_id).await?;
 
     match subject_data {
         SubjectData::Tracker { .. } => {
-            let tracker_actor = ctx.system().get_actor::<Tracker>(&path).await?;
-            let response = tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
+            let tracker_actor =
+                ctx.system().get_actor::<Tracker>(&path).await?;
+            let response =
+                tracker_actor.ask(TrackerMessage::GetLastLedger).await?;
             match response {
-                TrackerResponse::LastLedger { ledger_event } => Ok(*ledger_event),
+                TrackerResponse::LastLedger { ledger_event } => {
+                    Ok(*ledger_event)
+                }
                 _ => Err(ActorError::UnexpectedResponse {
                     path,
                     expected: "TrackerResponse::LastLedger".to_owned(),
@@ -321,11 +322,13 @@ pub async fn update_ledger<A>(
 where
     A: Actor + Handler<A>,
 {
-    let (path, subject_data) = get_subject_path_and_data(ctx, subject_id).await?;
+    let (path, subject_data) =
+        get_subject_path_and_data(ctx, subject_id).await?;
 
     match subject_data {
         SubjectData::Tracker { .. } => {
-            let tracker_actor = ctx.system().get_actor::<Tracker>(&path).await?;
+            let tracker_actor =
+                ctx.system().get_actor::<Tracker>(&path).await?;
             let response = tracker_actor
                 .ask(TrackerMessage::UpdateLedger { events })
                 .await?;
@@ -386,14 +389,9 @@ where
 
     let subject_id = ledger.content().get_subject_id();
     let requester = ctx.path().to_string();
-    let lease = acquire_subject(
-        ctx,
-        &subject_id,
-        requester,
-        Some(ledger),
-        true,
-    )
-    .await?;
+    let lease =
+        acquire_subject(ctx, &subject_id, requester, Some(ledger), true)
+            .await?;
     lease.finish_if(ctx, should_finish).await?;
 
     Ok(())

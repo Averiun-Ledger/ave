@@ -1459,16 +1459,14 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sink");
         let app = router();
 
-        let ok =
-            call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
+        let ok = call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
         assert_ne!(ok, StatusCode::FORBIDDEN);
 
         let forbidden_subject =
             call(&app, Method::GET, "/events/abc", ctx.clone()).await;
         assert_eq!(forbidden_subject, StatusCode::FORBIDDEN);
 
-        let forbidden_request =
-            call(&app, Method::POST, "/request", ctx).await;
+        let forbidden_request = call(&app, Method::POST, "/request", ctx).await;
         assert_eq!(forbidden_request, StatusCode::FORBIDDEN);
     }
 
@@ -1478,8 +1476,7 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "admin");
         let app = router();
 
-        let forbidden =
-            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let forbidden = call(&app, Method::GET, "/sink-events/abc", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
@@ -1489,8 +1486,7 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "superadmin");
         let app = router();
 
-        let status =
-            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let status = call(&app, Method::GET, "/sink-events/abc", ctx).await;
         assert_ne!(status, StatusCode::FORBIDDEN);
     }
 

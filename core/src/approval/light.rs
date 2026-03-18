@@ -151,8 +151,10 @@ impl Handler<Self> for ApprLight {
                 // Solo admitimos eventos FACT
                 let subject_id = approval_req.content().subject_id.clone();
 
-                let receiver_actor =
-                    format!("/user/node/subject_manager/{}/approver", subject_id);
+                let receiver_actor = format!(
+                    "/user/node/subject_manager/{}/approver",
+                    subject_id
+                );
 
                 let message = NetworkMessage {
                     info: ComunicateInfo {

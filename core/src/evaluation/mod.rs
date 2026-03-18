@@ -654,7 +654,9 @@ pub mod tests {
         loop {
             match db.get_subject_state(&subject_id.to_string()).await {
                 Ok(state) if state.sn >= expected_sn => return state,
-                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                Ok(_) | Err(_)
+                    if started.elapsed() < Duration::from_secs(5) =>
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(state) => {
@@ -1808,7 +1810,8 @@ pub mod tests {
             _dir,
         ) = create_tracker().await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.from_sn, 0);
         assert_eq!(replay.to_sn, None);
@@ -1831,7 +1834,10 @@ pub mod tests {
                 gov_version,
                 state,
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
                 assert_eq!(namespace, "");
@@ -1891,7 +1897,10 @@ pub mod tests {
                 sn,
                 ..
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(*sn, 0);
             }
@@ -1912,7 +1921,10 @@ pub mod tests {
                 gov_version,
                 ..
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(replay_payload, &payload);
                 assert_eq!(*sn, 1);
@@ -1935,7 +1947,8 @@ pub mod tests {
             _dir,
         ) = create_gov().await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -1990,7 +2003,8 @@ pub mod tests {
         )
         .await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2006,7 +2020,10 @@ pub mod tests {
                 sn,
                 gov_version,
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
                 assert!(!owner.is_empty());
@@ -2092,10 +2109,7 @@ pub mod tests {
         };
         assert_eq!(
             path,
-            ActorPath::from(format!(
-                "/user/node/subject_manager/{}",
-                missing
-            ))
+            ActorPath::from(format!("/user/node/subject_manager/{}", missing))
         );
     }
 

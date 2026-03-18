@@ -5,7 +5,9 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::database_audit::AuditLogParams;
 use super::models::*;
-use ave_actors::rusqlite::{self, OptionalExtension, Result as SqliteResult, params};
+use ave_actors::rusqlite::{
+    self, OptionalExtension, Result as SqliteResult, params,
+};
 
 // =============================================================================
 // ROLE OPERATIONS

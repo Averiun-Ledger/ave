@@ -123,13 +123,9 @@ async fn test_invalid_contract() {
 #[test(tokio::test)]
 //  Verificar que update protocol actualiza pasivamente la gobernanza.
 async fn test_update_protocol() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+            .await;
     let node1 = &nodes[0].api;
     let node2 = &nodes[1].api;
 
@@ -151,7 +147,7 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 
-        node2
+    node2
         .auth_subject(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
@@ -191,7 +187,7 @@ async fn test_update_protocol() {
     let _state = get_subject(&node2, governance_id.clone(), Some(2))
         .await
         .unwrap();
-    
+
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
@@ -209,7 +205,7 @@ async fn test_update_protocol() {
 
     emit_fact(node1, governance_id.clone(), json, true)
         .await
-        .unwrap(); 
+        .unwrap();
 
     let _state = get_subject(&node1, governance_id.clone(), Some(3))
         .await
@@ -217,7 +213,7 @@ async fn test_update_protocol() {
 
     let _state = get_subject(&node2, governance_id.clone(), Some(3))
         .await
-        .unwrap();   
+        .unwrap();
 }
 
 #[test(tokio::test)]

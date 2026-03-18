@@ -603,7 +603,9 @@ pub mod tests {
         loop {
             match db.get_subject_state(&subject_id.to_string()).await {
                 Ok(state) if state.sn >= expected_sn => return state,
-                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                Ok(_) | Err(_)
+                    if started.elapsed() < Duration::from_secs(5) =>
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(state) => {
@@ -734,7 +736,10 @@ pub mod tests {
         wait_request(&tracking, response.request_id).await;
 
         let subject_actor: ActorRef<Governance> = system
-            .get_actor(&ActorPath::from(format!("/user/node/subject_manager/{}", owned_subj)))
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                owned_subj
+            )))
             .await
             .unwrap();
 

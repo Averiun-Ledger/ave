@@ -416,11 +416,11 @@ pub fn replay_sink_events(
 
     for ledger in ledgers {
         if replay_state.is_none() {
-            let metadata = ledger
-                .content()
-                .get_create_metadata()
-                .map_err(|e| ActorError::Functional {
-                    description: e.to_string(),
+            let metadata =
+                ledger.content().get_create_metadata().map_err(|e| {
+                    ActorError::Functional {
+                        description: e.to_string(),
+                    }
                 })?;
             replay_state = Some(SinkReplayState::from_metadata(&metadata));
         }
@@ -441,27 +441,28 @@ pub fn replay_sink_events(
                 break;
             }
 
-            let event_data_ledger = match ledger.content().event_request.content() {
-                EventRequest::Create(..) => {
-                    let metadata = ledger
-                        .content()
-                        .get_create_metadata()
-                        .map_err(|e| ActorError::Functional {
+            let event_data_ledger =
+                match ledger.content().event_request.content() {
+                    EventRequest::Create(..) => {
+                        let metadata = ledger
+                            .content()
+                            .get_create_metadata()
+                            .map_err(|e| ActorError::Functional {
                             description: e.to_string(),
                         })?;
-                    EventLedgerDataForSink::Create {
-                        state: metadata.properties.0,
+                        EventLedgerDataForSink::Create {
+                            state: metadata.properties.0,
+                        }
                     }
-                }
-                EventRequest::Fact(..)
-                | EventRequest::Transfer(..)
-                | EventRequest::Confirm(..)
-                | EventRequest::Reject(..)
-                | EventRequest::EOL(..) => EventLedgerDataForSink::build(
-                    &ledger.content().protocols,
-                    &Value::Null,
-                ),
-            };
+                    EventRequest::Fact(..)
+                    | EventRequest::Transfer(..)
+                    | EventRequest::Confirm(..)
+                    | EventRequest::Reject(..)
+                    | EventRequest::EOL(..) => EventLedgerDataForSink::build(
+                        &ledger.content().protocols,
+                        &Value::Null,
+                    ),
+                };
 
             let data = state.data_for_sink(ledger, event_data_ledger);
             events.push(build_data_to_sink(

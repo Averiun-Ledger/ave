@@ -12,7 +12,9 @@ use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
 use crate::auth::{Auth, AuthMessage, AuthResponse};
-use crate::helpers::network::{ActorMessage, NetworkMessage, service::NetworkSender};
+use crate::helpers::network::{
+    ActorMessage, NetworkMessage, service::NetworkSender,
+};
 use network::ComunicateInfo;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -104,9 +106,8 @@ impl GovernanceVersionSync {
         let delay = self.response_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = actor
-                .tell(GovernanceVersionSyncMessage::RoundTimeout)
-                .await;
+            let _ =
+                actor.tell(GovernanceVersionSyncMessage::RoundTimeout).await;
         });
         Ok(())
     }
@@ -182,10 +183,7 @@ impl GovernanceVersionSync {
         }
     }
 
-    fn select_peers(
-        &self,
-        auth_peers: HashSet<PublicKey>,
-    ) -> Vec<PublicKey> {
+    fn select_peers(&self, auth_peers: HashSet<PublicKey>) -> Vec<PublicKey> {
         let mut peers = self.governance_peers.clone();
         peers.extend(auth_peers);
         peers.remove(&*self.our_key);
@@ -201,11 +199,7 @@ impl GovernanceVersionSync {
             .sample(&mut rng, self.sample_size.min(peers.len()))
     }
 
-    fn peer_version(
-        &mut self,
-        peer: PublicKey,
-        version: u64,
-    ) -> bool {
+    fn peer_version(&mut self, peer: PublicKey, version: u64) -> bool {
         if !self.round_open || !self.pending_peers.remove(&peer) {
             return false;
         }
@@ -262,7 +256,8 @@ impl GovernanceVersionSync {
                 },
             };
 
-            if let Err(error) = self.network
+            if let Err(error) = self
+                .network
                 .send_command(network::CommandHelper::SendMessage { message })
                 .await
             {
@@ -342,7 +337,8 @@ impl Handler<Self> for GovernanceVersionSync {
                 if self.round_open {
                     self.round_open = false;
                     self.pending_peers.clear();
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await {
+                    if let Err(error) = self.trigger_update_if_needed(ctx).await
+                    {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,
@@ -354,7 +350,8 @@ impl Handler<Self> for GovernanceVersionSync {
             GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
                 if self.peer_version(peer, version) {
                     self.round_open = false;
-                    if let Err(error) = self.trigger_update_if_needed(ctx).await {
+                    if let Err(error) = self.trigger_update_if_needed(ctx).await
+                    {
                         warn!(
                             governance_id = %self.governance_id,
                             error = %error,

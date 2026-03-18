@@ -86,8 +86,10 @@ impl Approval {
         let subject_id = self.request.content().subject_id.to_string();
 
         if signer == *self.our_key {
-            let approver_path =
-                ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+            let approver_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/approver",
+                subject_id
+            ));
             let approver_actor = ctx
                 .system()
                 .get_actor::<ApprPersist>(&approver_path)

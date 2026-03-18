@@ -218,8 +218,10 @@ impl RequestHandler {
             return Err(RequestHandlerError::ObsoleteApproval);
         }
 
-        let approver_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+        let approver_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/approver",
+            subject_id
+        ));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -241,8 +243,10 @@ impl RequestHandler {
         subject_id: &DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
-        let approver_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+        let approver_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/approver",
+            subject_id
+        ));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -285,8 +289,10 @@ impl RequestHandler {
 
         let mut responses = vec![];
         for governance in vec.iter() {
-            let approver_path =
-                ActorPath::from(format!("/user/node/subject_manager/{}/approver", governance));
+            let approver_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/approver",
+                governance
+            ));
             if let Ok(approver_actor) =
                 ctx.system().get_actor::<ApprPersist>(&approver_path).await
             {

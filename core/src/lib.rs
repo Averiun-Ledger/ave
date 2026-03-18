@@ -27,8 +27,8 @@ use std::sync::Arc;
 use auth::{Auth, AuthMessage, AuthResponse, AuthWitness};
 use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor};
 use ave_common::bridge::request::{
-    AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType, EventsQuery,
-    SinkEventsQuery,
+    AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
+    EventsQuery, SinkEventsQuery,
 };
 use ave_common::identity::keys::KeyPair;
 use ave_common::identity::{DigestIdentifier, PublicKey, Signed};

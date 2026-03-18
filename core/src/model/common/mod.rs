@@ -55,8 +55,10 @@ pub async fn get_actual_roles_register<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path =
-        ActorPath::from(format!("/user/node/subject_manager/{}/role_register", governance_id));
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/role_register",
+        governance_id
+    ));
     let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
     let response = actor
@@ -88,8 +90,10 @@ pub async fn get_validation_roles_register<A>(
 where
     A: Actor + Handler<A>,
 {
-    let path =
-        ActorPath::from(format!("/user/node/subject_manager/{}/role_register", governance_id));
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/role_register",
+        governance_id
+    ));
     let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
 
     let response = actor

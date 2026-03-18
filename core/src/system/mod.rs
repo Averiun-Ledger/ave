@@ -37,8 +37,8 @@ impl From<Config> for ConfigHelper {
             tracking_size: value.tracking_size,
             version_sync_interval_secs: value.version_sync_interval_secs,
             version_sync_sample_size: value.version_sync_sample_size,
-            version_sync_response_timeout_secs:
-                value.version_sync_response_timeout_secs,
+            version_sync_response_timeout_secs: value
+                .version_sync_response_timeout_secs,
         }
     }
 }
@@ -114,13 +114,13 @@ pub async fn system(
 
     let ext_db = Arc::new(
         ExternalDB::build(
-        config.external_db.db,
-        config.external_db.durability,
-        db_manager_actor,
-        config.spec.clone(),
-    )
-    .await
-    .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
+            config.external_db.db,
+            config.external_db.durability,
+            db_manager_actor,
+            config.spec.clone(),
+        )
+        .await
+        .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
     );
 
     system.add_helper("ext_db", Arc::clone(&ext_db)).await;

@@ -65,7 +65,10 @@ impl DistriWorker {
         lo_sn: Option<u64>,
         is_gov: bool,
     ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
-        let path = ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            subject_id
+        ));
 
         if is_gov {
             let governance_actor =
@@ -93,7 +96,8 @@ impl DistriWorker {
                 true,
             )
             .await?;
-            let tracker_actor = ctx.system().get_actor::<Tracker>(&path).await?;
+            let tracker_actor =
+                ctx.system().get_actor::<Tracker>(&path).await?;
             let response = tracker_actor
                 .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
                 .await;
@@ -293,7 +297,6 @@ impl DistriWorker {
             }
         }
     }
-
 }
 
 #[async_trait]
@@ -441,16 +444,20 @@ impl Handler<Self> for DistriWorker {
                     true
                 } else {
                     let auth_path = ActorPath::from("/user/node/auth");
-                    match ctx.system().get_actor::<crate::auth::Auth>(&auth_path).await {
+                    match ctx
+                        .system()
+                        .get_actor::<crate::auth::Auth>(&auth_path)
+                        .await
+                    {
                         Ok(auth_actor) => match auth_actor
                             .ask(crate::auth::AuthMessage::GetAuth {
                                 subject_id: subject_id.clone(),
                             })
                             .await
                         {
-                            Ok(crate::auth::AuthResponse::Witnesses(witnesses)) => {
-                                witnesses.contains(&sender)
-                            }
+                            Ok(crate::auth::AuthResponse::Witnesses(
+                                witnesses,
+                            )) => witnesses.contains(&sender),
                             _ => false,
                         },
                         Err(_) => false,
@@ -465,8 +472,10 @@ impl Handler<Self> for DistriWorker {
                     "/user/node/subject_manager/{}",
                     subject_id
                 ));
-                let governance_actor =
-                    ctx.system().get_actor::<Governance>(&governance_path).await?;
+                let governance_actor = ctx
+                    .system()
+                    .get_actor::<Governance>(&governance_path)
+                    .await?;
                 let response =
                     governance_actor.ask(GovernanceMessage::GetVersion).await?;
                 let GovernanceResponse::Version(version) = response else {
@@ -488,7 +497,9 @@ impl Handler<Self> for DistriWorker {
                     .send_command(network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
-                            message: ActorMessage::GovernanceVersionRes { version },
+                            message: ActorMessage::GovernanceVersionRes {
+                                version,
+                            },
                         },
                     })
                     .await
@@ -724,7 +735,9 @@ impl Handler<Self> for DistriWorker {
                     }
 
                     match update_result {
-                        Ok((last_sn, _, _)) if last_sn < ledger.content().sn => {
+                        Ok((last_sn, _, _))
+                            if last_sn < ledger.content().sn =>
+                        {
                             debug!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -1048,7 +1061,8 @@ impl Handler<Self> for DistriWorker {
                 };
 
                 let lease = if !ledger.is_empty() {
-                    let update_result = update_ledger(ctx, &subject_id, ledger).await;
+                    let update_result =
+                        update_ledger(ctx, &subject_id, ledger).await;
 
                     if let Some(lease) = lease.clone()
                         && update_result.is_err()

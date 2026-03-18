@@ -331,8 +331,8 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             is_service: value.is_service,
             version_sync_interval_secs: value.version_sync_interval_secs,
             version_sync_sample_size: value.version_sync_sample_size,
-            version_sync_response_timeout_secs:
-                value.version_sync_response_timeout_secs,
+            version_sync_response_timeout_secs: value
+                .version_sync_response_timeout_secs,
             spec: value.spec.map(MachineSpecHttp::from),
         }
     }

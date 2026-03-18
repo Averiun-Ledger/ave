@@ -5,8 +5,9 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::models::*;
 use super::system_config::{SystemConfigKey, system_config_from_row};
-use ave_actors::rusqlite::{self,
-    OptionalExtension, Result as SqliteResult, TransactionBehavior, params,
+use ave_actors::rusqlite::{
+    self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
+    params,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 

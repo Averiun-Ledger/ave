@@ -7,15 +7,15 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ave_actors::{ActorRef, Subscriber};
 use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
+use ave_actors::{ActorRef, Subscriber};
+use ave_common::SchemaType;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, SubjsData, TimeRange,
 };
-use ave_common::SchemaType;
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
     registry::Registry,
@@ -1234,8 +1234,11 @@ impl SqliteWriteStore {
         let (sender, receiver) = mpsc::channel(WRITE_QUEUE_CAPACITY);
         let metrics = Arc::clone(&runtime.metrics);
         let shutdown = CancellationToken::new();
-        let worker =
-            spawn_write_worker(Arc::clone(&runtime), receiver, shutdown.clone());
+        let worker = spawn_write_worker(
+            Arc::clone(&runtime),
+            receiver,
+            shutdown.clone(),
+        );
         Self {
             inner: Arc::new(SqliteWriteStoreInner {
                 manager,
@@ -1347,7 +1350,9 @@ fn spawn_write_worker(
                 match receiver.try_recv() {
                     Ok(job) => jobs.push(job),
                     Err(mpsc::error::TryRecvError::Empty) => {
-                        if shutting_down || jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW {
+                        if shutting_down
+                            || jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW
+                        {
                             break;
                         }
 
@@ -2034,11 +2039,7 @@ fn get_subjects_from_conn(
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), Some(schema_id)) => stmt
             .query_map(
-                params![
-                    governance_id,
-                    if active { 1 } else { 0 },
-                    schema_id
-                ],
+                params![governance_id, if active { 1 } else { 0 }, schema_id],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
@@ -2048,7 +2049,8 @@ fn get_subjects_from_conn(
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
-    if !subjects.is_empty() || register_governance_exists(conn, governance_id)? {
+    if !subjects.is_empty() || register_governance_exists(conn, governance_id)?
+    {
         Ok(subjects)
     } else {
         Err(DatabaseError::GovernanceNotFound(governance_id.to_owned()))
@@ -3438,11 +3440,8 @@ impl Subscriber<SignedLedger> for SqliteWriteStore {
                 error = %e,
                 "Failed to save signed ledger to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3478,11 +3477,8 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save subject state to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3517,11 +3513,8 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3548,11 +3541,8 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
     async fn notify(&self, event: RegisterEvent) {
         if let Err(e) = self.persist_register(event.clone()).await {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     error = %e,

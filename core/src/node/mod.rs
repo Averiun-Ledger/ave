@@ -21,17 +21,19 @@ use crate::{
     manual_distribution::ManualDistribution,
     model::common::node::SignTypesNode,
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
-    subject::{SignedLedger, replay_sink_events as replay_ledgers_to_sink_events},
+    subject::{
+        SignedLedger, replay_sink_events as replay_ledgers_to_sink_events,
+    },
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
 use ave_common::{
     SchemaType,
-    response::SinkEventsPage,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
+    response::SinkEventsPage,
 };
 
 use async_trait::async_trait;
@@ -361,7 +363,9 @@ impl Node {
         governance_ids.extend(
             self.known_subjects
                 .iter()
-                .filter(|(_, data)| matches!(data, SubjectData::Governance { .. }))
+                .filter(|(_, data)| {
+                    matches!(data, SubjectData::Governance { .. })
+                })
                 .map(|(subject_id, _)| subject_id.clone()),
         );
 
@@ -413,8 +417,10 @@ impl Node {
         subject_id: &DigestIdentifier,
         hi_sn: u64,
     ) -> Result<Vec<SignedLedger>, ActorError> {
-        let path =
-            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            subject_id
+        ));
         let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
@@ -441,8 +447,10 @@ impl Node {
         subject_id: &DigestIdentifier,
         hi_sn: u64,
     ) -> Result<Vec<SignedLedger>, ActorError> {
-        let path =
-            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            subject_id
+        ));
         let governance = ctx.system().get_actor::<Governance>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
@@ -478,7 +486,8 @@ impl Node {
     ) -> Result<SinkEventsPage, ActorError> {
         if limit == 0 {
             return Err(ActorError::Functional {
-                description: "Replay limit must be greater than zero".to_owned(),
+                description: "Replay limit must be greater than zero"
+                    .to_owned(),
             });
         }
         if let Some(to_sn) = to_sn
@@ -543,9 +552,7 @@ impl Node {
                     ctx.get_child::<SubjectManager>("subject_manager").await?;
                 let requester = format!(
                     "node_replay_sink_events:{}:{}:{}",
-                    subject_id,
-                    from_sn,
-                    limit
+                    subject_id, from_sn, limit
                 );
                 subject_manager
                     .ask(SubjectManagerMessage::Up {
@@ -728,7 +735,8 @@ impl Actor for Node {
             });
         };
 
-        let register_actor = match ctx.create_child("register", Register).await {
+        let register_actor = match ctx.create_child("register", Register).await
+        {
             Ok(actor) => actor,
             Err(e) => {
                 error!(error = %e, "Failed to create register child");
@@ -856,10 +864,8 @@ impl Handler<Self> for Node {
                 to_sn,
                 limit,
             } => Ok(NodeResponse::SinkEvents(
-                self.replay_sink_events(
-                    ctx, subject_id, from_sn, to_sn, limit,
-                )
-                .await?,
+                self.replay_sink_events(ctx, subject_id, from_sn, to_sn, limit)
+                    .await?,
             )),
             NodeMessage::RegisterSubject {
                 owner,
