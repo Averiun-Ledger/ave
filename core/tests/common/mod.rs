@@ -101,7 +101,7 @@ pub async fn create_node(
             },
             tracker: TrackerSyncConfig {
                 interval_secs: 10,
-                page_size: 200,
+                page_size: 10,
                 response_timeout_secs: 5,
                 update_batch_size: 2,
                 update_timeout_secs: 5,

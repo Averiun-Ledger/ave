@@ -27,15 +27,14 @@ use crate::common::{
 // El issuer es any
 async fn test_issuer_any() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
 
     let owner_governance = &nodes[0].api;
     let emit_events = &nodes[1].api;
@@ -193,15 +192,14 @@ async fn test_issuer_any() {
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY
 async fn test_limits_in_subjects() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
 
     let owner_governance = &nodes[0].api;
     let emit_events = &nodes[1].api;
@@ -996,15 +994,14 @@ async fn test_namespace_in_role_2() {
 #[test(tokio::test)]
 // Testear la transferencia de sujeto
 async fn test_subject_transfer_event_1() {
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -3536,6 +3533,161 @@ async fn test_subj_no_all_validators() {
             "one": 1, "three": 0, "two": 0
         })
     );
+}
+
+#[test(tokio::test)]
+async fn test_tracker_sync_updates_new_service_witness() {
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        true,
+    )
+    .await;
+
+    let owner_governance = &nodes[0].api;
+    let future_witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![future_witness])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": future_witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _ = get_subject(future_witness, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(owner_governance, subject_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    assert!(
+        future_witness
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    let json = json!({
+        "roles": {
+            "tracker_schemas": {
+                "add": {
+                    "witness": [
+                        {
+                            "name": "AveNode2",
+                            "namespace": []
+                        }
+                    ]
+                }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _ = get_subject(future_witness, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _ = get_subject(owner_governance, subject_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let _ = get_subject(future_witness, subject_id.clone(), Some(1))
+        .await
+        .unwrap();
 }
 
 #[test(tokio::test)]
