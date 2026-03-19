@@ -814,6 +814,26 @@ pub async fn get_subject_state(
     Ok(Json(bridge.get_subject_state(subject_id).await?))
 }
 
+/// Get Prometheus metrics
+///
+/// Returns the Prometheus text exposition payload for this node.
+/// This operational endpoint is available when the server is built with
+/// Prometheus support enabled.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    operation_id = "getMetrics",
+    tag = "System",
+    responses(
+        (status = 200, description = "Prometheus metrics payload", body = String, content_type = "text/plain"),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_metrics() -> &'static str {
+    ""
+}
+
 async fn audit_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,

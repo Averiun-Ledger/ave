@@ -39,22 +39,8 @@ pub enum TrackerSyncMessage {
     UpdateTimeout {
         batch_nonce: u64,
     },
-    NetworkRequest {
-        request_nonce: u64,
-        governance_version: u64,
-        after_subject_id: Option<DigestIdentifier>,
-        limit: usize,
-        info: ComunicateInfo,
-        sender: PublicKey,
-        receiver_actor: String,
-    },
-    NetworkResponse {
-        peer: PublicKey,
-        request_nonce: u64,
-        governance_version: u64,
-        items: Vec<CurrentWitnessSubject>,
-        next_cursor: Option<DigestIdentifier>,
-    },
+    NetworkRequest(TrackerSyncNetworkRequest),
+    NetworkResponse(TrackerSyncNetworkResponse),
 }
 
 impl Message for TrackerSyncMessage {}
@@ -98,6 +84,36 @@ enum SyncState {
     Updating(UpdateState),
 }
 
+#[derive(Debug, Clone)]
+pub struct TrackerSyncConfig {
+    pub service: bool,
+    pub tick_interval: Duration,
+    pub response_timeout: Duration,
+    pub page_size: usize,
+    pub update_batch_size: usize,
+    pub update_timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackerSyncNetworkRequest {
+    pub request_nonce: u64,
+    pub governance_version: u64,
+    pub after_subject_id: Option<DigestIdentifier>,
+    pub limit: usize,
+    pub info: ComunicateInfo,
+    pub sender: PublicKey,
+    pub receiver_actor: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackerSyncNetworkResponse {
+    pub peer: PublicKey,
+    pub request_nonce: u64,
+    pub governance_version: u64,
+    pub items: Vec<CurrentWitnessSubject>,
+    pub next_cursor: Option<DigestIdentifier>,
+}
+
 pub struct TrackerSync {
     governance_id: DigestIdentifier,
     our_key: Arc<PublicKey>,
@@ -119,29 +135,24 @@ impl TrackerSync {
         governance_id: DigestIdentifier,
         our_key: Arc<PublicKey>,
         network: Arc<NetworkSender>,
-        service: bool,
-        tick_interval: Duration,
-        response_timeout: Duration,
-        page_size: usize,
-        update_batch_size: usize,
-        update_timeout: Duration,
+        config: TrackerSyncConfig,
     ) -> Self {
         Self {
             governance_id,
             our_key,
             network,
-            service,
-            tick_interval,
-            response_timeout,
-            page_size: page_size.max(1),
-            update_batch_size: update_batch_size.max(1),
-            update_timeout,
+            service: config.service,
+            tick_interval: config.tick_interval,
+            response_timeout: config.response_timeout,
+            page_size: config.page_size.max(1),
+            update_batch_size: config.update_batch_size.max(1),
+            update_timeout: config.update_timeout,
             next_nonce: 0,
             state: SyncState::Idle,
         }
     }
 
-    fn allocate_nonce(&mut self) -> u64 {
+    const fn allocate_nonce(&mut self) -> u64 {
         self.next_nonce += 1;
         self.next_nonce
     }
@@ -532,13 +543,7 @@ impl TrackerSync {
     async fn handle_network_request(
         &self,
         ctx: &ActorContext<Self>,
-        request_nonce: u64,
-        governance_version: u64,
-        after_subject_id: Option<DigestIdentifier>,
-        limit: usize,
-        info: ComunicateInfo,
-        sender: PublicKey,
-        receiver_actor: String,
+        request: TrackerSyncNetworkRequest,
     ) -> Result<(), ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/witnesses_register",
@@ -547,10 +552,10 @@ impl TrackerSync {
         let actor = ctx.system().get_actor::<WitnessesRegister>(&path).await?;
         let response = actor
             .ask(WitnessesRegisterMessage::ListCurrentWitnessSubjects {
-                node: sender.clone(),
-                governance_version,
-                after_subject_id,
-                limit,
+                node: request.sender.clone(),
+                governance_version: request.governance_version,
+                after_subject_id: request.after_subject_id,
+                limit: request.limit,
             })
             .await?;
 
@@ -572,13 +577,13 @@ impl TrackerSync {
             .send_command(network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info: ComunicateInfo {
-                        receiver: sender,
-                        request_id: info.request_id,
-                        version: info.version,
-                        receiver_actor,
+                        receiver: request.sender,
+                        request_id: request.info.request_id,
+                        version: request.info.version,
+                        receiver_actor: request.receiver_actor,
                     },
                     message: ActorMessage::TrackerSyncRes {
-                        request_nonce,
+                        request_nonce: request.request_nonce,
                         governance_version,
                         items,
                         next_cursor,
@@ -666,34 +671,16 @@ impl Handler<Self> for TrackerSync {
                     self.advance_update_phase(ctx).await?;
                 }
             }
-            TrackerSyncMessage::NetworkRequest {
-                request_nonce,
-                governance_version,
-                after_subject_id,
-                limit,
-                info,
-                sender,
-                receiver_actor,
-            } => {
-                self.handle_network_request(
-                    ctx,
-                    request_nonce,
-                    governance_version,
-                    after_subject_id,
-                    limit,
-                    info,
-                    sender,
-                    receiver_actor,
-                )
-                .await?;
+            TrackerSyncMessage::NetworkRequest(request) => {
+                self.handle_network_request(ctx, request).await?;
             }
-            TrackerSyncMessage::NetworkResponse {
+            TrackerSyncMessage::NetworkResponse(TrackerSyncNetworkResponse {
                 peer,
                 request_nonce,
                 governance_version,
                 items,
                 next_cursor,
-            } => {
+            }) => {
                 let (active_peer, active_governance_version) =
                     match &self.state {
                         SyncState::Fetching(state)

@@ -22,7 +22,7 @@ use crate::{
         role_register::{RoleRegister, RoleRegisterMessage},
         sn_register::SnRegister,
         subject_register::{SubjectRegister, SubjectRegisterMessage},
-        tracker_sync::TrackerSync,
+        tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
@@ -2126,12 +2126,16 @@ impl Actor for Governance {
                         self.subject_metadata.subject_id.clone(),
                         self.our_key.clone(),
                         network.clone(),
-                        self.service,
-                        tracker_sync_tick_interval,
-                        tracker_sync_response_timeout,
-                        config.sync_tracker.page_size,
-                        config.sync_tracker.update_batch_size,
-                        tracker_sync_update_timeout,
+                        TrackerSyncConfig {
+                            service: self.service,
+                            tick_interval: tracker_sync_tick_interval,
+                            response_timeout: tracker_sync_response_timeout,
+                            page_size: config.sync_tracker.page_size,
+                            update_batch_size: config
+                                .sync_tracker
+                                .update_batch_size,
+                            update_timeout: tracker_sync_update_timeout,
+                        },
                     ),
                 )
                 .await

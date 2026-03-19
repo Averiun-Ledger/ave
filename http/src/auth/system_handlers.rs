@@ -184,7 +184,7 @@ pub async fn query_audit_logs(
         ("days" = Option<u32>, Query, description = "Number of days to include (default 7)")
     ),
     responses(
-        (status = 200, description = "Audit statistics"),
+        (status = 200, description = "Audit statistics", body = serde_json::Value),
         (status = 403, description = "Permission denied", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -457,7 +457,7 @@ pub async fn get_my_permissions_detailed(
         ("hours" = Option<u32>, Query, description = "Time window in hours (default 24)")
     ),
     responses(
-        (status = 200, description = "Rate limit statistics"),
+        (status = 200, description = "Rate limit statistics", body = serde_json::Value),
         (status = 403, description = "Permission denied", body = ErrorResponse),
     ),
     security(("api_key" = []))

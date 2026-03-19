@@ -60,21 +60,12 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
 pub struct SyncConfig {
     pub governance: GovernanceSyncConfig,
     pub tracker: TrackerSyncConfig,
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            governance: Default::default(),
-            tracker: Default::default(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

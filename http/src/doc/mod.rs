@@ -25,11 +25,12 @@ use crate::{
     config_types::{
         ApiKeyConfigHttp, AuthConfigHttp, AveActorsStoreConfigHttp,
         AveConfigHttp, AveStoreConfigHttp, ConfigHttp, ControlListConfigHttp,
-        CorsConfigHttp, EndpointRateLimitHttp, HttpConfigHttp,
-        LockoutConfigHttp, LoggingHttp, LoggingOutputHttp, NetworkConfigHttp,
-        ProxyConfigHttp, RateLimitConfigHttp, RoutingConfigHttp,
-        RoutingNodeHttp, SelfSignedCertConfigHttp, SessionConfigHttp,
-        SinkConfigHttp, SinkServerHttp,
+        CorsConfigHttp, EndpointRateLimitHttp, GovernanceSyncConfigHttp,
+        HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
+        NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
+        RoutingConfigHttp, RoutingNodeHttp, SelfSignedCertConfigHttp,
+        SessionConfigHttp, SinkConfigHttp, SinkServerHttp, SyncConfigHttp,
+        TrackerSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -81,7 +82,7 @@ impl Modify for SecurityAddon {
     info(
         title = "Ave HTTP API",
         description = "RESTful API for Ave Ledger — a distributed ledger technology for managing digital assets and events with governance, approvals, and cryptographic security.\n\n## Authentication\n\nWhen the authentication system is enabled, most endpoints require an `X-API-Key` header.\nObtain an API key through the `POST /login` endpoint.\nWhen authentication is disabled in the node configuration, endpoints are accessible without credentials.",
-        version = "0.8.0",
+        version = "0.9.0",
         contact(
             name = "Averiun",
             url = "https://www.averiun.com/",
@@ -198,6 +199,9 @@ impl Modify for SecurityAddon {
         system_handlers::get_rate_limit_stats,
         system_handlers::list_system_config,
         system_handlers::update_system_config,
+
+        // ── Observability ───────────────────────────────────────
+        server::get_metrics,
     ),
     components(
         schemas(
@@ -308,6 +312,9 @@ impl Modify for SecurityAddon {
             // ── Configuration ───────────────────────────────────
             ConfigHttp,
             AveConfigHttp,
+            SyncConfigHttp,
+            GovernanceSyncConfigHttp,
+            TrackerSyncConfigHttp,
             NetworkConfigHttp,
             RoutingConfigHttp,
             RoutingNodeHttp,
