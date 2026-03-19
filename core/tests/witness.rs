@@ -26,6 +26,7 @@ async fn test_witeness_not_gov() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -162,6 +163,7 @@ async fn test_not_access() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = &nodes[0].api;
@@ -357,6 +359,7 @@ async fn test_basic_access() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -525,6 +528,7 @@ async fn test_basic_access() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[1].keys.clone()),
     )
     .await;
@@ -651,6 +655,7 @@ async fn test_basic_transfers() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -1140,6 +1145,7 @@ async fn test_basic_transfers() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[2].keys.clone()),
     )
     .await;
@@ -1213,6 +1219,7 @@ async fn test_basic_transfers() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[1].keys.clone()),
     )
     .await;
@@ -1234,6 +1241,7 @@ async fn test_basic_transfers() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[3].keys.clone()),
     )
     .await;
@@ -1358,6 +1366,7 @@ async fn test_basic_explicit_witness() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -1590,6 +1599,7 @@ async fn test_basic_explicit_witness() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[2].keys.clone()),
     )
     .await;
@@ -1715,6 +1725,7 @@ async fn test_basic_implicit_witness() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -1987,6 +1998,7 @@ async fn test_basic_implicit_witness() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[2].keys.clone()),
     )
     .await;
@@ -2122,6 +2134,7 @@ async fn test_explicit_witness() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -2470,6 +2483,7 @@ async fn test_explicit_witness() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[1].keys.clone()),
     )
     .await;
@@ -2671,6 +2685,7 @@ async fn test_explicit_witness() {
         &listen_address,
         peers,
         true,
+        false,
         Some(node_new_alice.keys.clone()),
     )
     .await;
@@ -2735,6 +2750,7 @@ async fn test_explicit_witness_2() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -3225,6 +3241,7 @@ async fn test_explicit_witness_2() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[3].keys.clone()),
     )
     .await;
@@ -3671,6 +3688,7 @@ async fn test_explicit_witness_2() {
         &listen_address,
         peers,
         true,
+        false,
         Some(node_new_charlie.keys.clone()),
     )
     .await;
@@ -3735,6 +3753,7 @@ async fn test_range() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -4033,6 +4052,7 @@ async fn test_range() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[2].keys.clone()),
     )
     .await;
@@ -4123,6 +4143,7 @@ async fn test_ns_schema() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -4488,6 +4509,7 @@ async fn test_multi_source() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -4721,6 +4743,7 @@ async fn test_multi_source() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[1].keys.clone()),
     )
     .await;
@@ -4903,6 +4926,7 @@ async fn test_multi_source() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[3].keys.clone()),
     )
     .await;
@@ -5035,6 +5059,7 @@ async fn test_multi_source() {
         &listen_address,
         peers,
         true,
+        false,
         Some(node_new_charlie.keys.clone()),
     )
     .await;
@@ -5099,6 +5124,7 @@ async fn test_more_cases() {
         vec![vec![0], vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -5366,6 +5392,7 @@ async fn test_more_cases() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[4].keys.clone()),
     )
     .await;
@@ -5535,6 +5562,7 @@ async fn test_more_cases() {
         &listen_address,
         peers,
         true,
+        false,
         Some(node_new_dali.keys.clone()),
     )
     .await;
@@ -5752,6 +5780,7 @@ async fn test_more_cases() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[1].keys.clone()),
     )
     .await;
@@ -5816,6 +5845,7 @@ async fn test_more_cases_2() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();
@@ -6064,6 +6094,7 @@ async fn test_more_cases_2() {
         &listen_address,
         peers,
         true,
+        false,
         Some(nodes[3].keys.clone()),
     )
     .await;
@@ -6320,6 +6351,7 @@ async fn test_more_cases_3() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let owner = nodes[0].api.clone();

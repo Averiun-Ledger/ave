@@ -35,12 +35,8 @@ pub struct Config {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
-    /// Seconds between version sync rounds for governance service nodes.
-    pub version_sync_interval_secs: u64,
-    /// Number of peers sampled on each version sync round.
-    pub version_sync_sample_size: usize,
-    /// Seconds to wait for responses during a version sync round.
-    pub version_sync_response_timeout_secs: u64,
+    /// Sync protocol configuration.
+    pub sync: SyncConfig,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
@@ -58,10 +54,75 @@ impl Default for Config {
             always_accept: Default::default(),
             tracking_size: 100,
             is_service: false,
-            version_sync_interval_secs: 60,
-            version_sync_sample_size: 3,
-            version_sync_response_timeout_secs: 10,
+            sync: Default::default(),
             spec: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct SyncConfig {
+    pub governance: GovernanceSyncConfig,
+    pub tracker: TrackerSyncConfig,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            governance: Default::default(),
+            tracker: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct GovernanceSyncConfig {
+    /// Seconds between version sync rounds for governance service nodes.
+    pub interval_secs: u64,
+    /// Number of peers sampled on each version sync round.
+    pub sample_size: usize,
+    /// Seconds to wait for responses during a version sync round.
+    pub response_timeout_secs: u64,
+}
+
+impl Default for GovernanceSyncConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 60,
+            sample_size: 3,
+            response_timeout_secs: 10,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct TrackerSyncConfig {
+    /// Seconds between tracker sync rounds for service nodes.
+    pub interval_secs: u64,
+    /// Number of tracker subjects returned per remote page.
+    pub page_size: usize,
+    /// Seconds to wait for a tracker sync page response.
+    pub response_timeout_secs: u64,
+    /// Number of tracker updates launched per local batch.
+    pub update_batch_size: usize,
+    /// Seconds between tracker update progress checks.
+    pub update_timeout_secs: u64,
+}
+
+impl Default for TrackerSyncConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 30,
+            page_size: 50,
+            response_timeout_secs: 10,
+            update_batch_size: 2,
+            update_timeout_secs: 10,
         }
     }
 }

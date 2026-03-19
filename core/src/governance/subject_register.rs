@@ -104,6 +104,11 @@ pub enum SubjectRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    GetSubjectsByOwnerSchema {
+        owner: PublicKey,
+        schema_id: SchemaType,
+        namespace: String,
+    },
     RegisterData {
         gov_version: u64,
         data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)>,
@@ -131,7 +136,7 @@ impl Message for SubjectRegisterMessage {
             Self::RegisterData { .. }
             | Self::CreateSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. } => false,
+            Self::Check { .. } | Self::GetSubjectsByOwnerSchema { .. } => false,
         }
     }
 }
@@ -139,6 +144,7 @@ impl Message for SubjectRegisterMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterResponse {
     Ok,
+    Subjects(Vec<DigestIdentifier>),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -209,6 +215,24 @@ impl Handler<Self> for SubjectRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {
         match msg {
+            SubjectRegisterMessage::GetSubjectsByOwnerSchema {
+                owner,
+                schema_id,
+                namespace,
+            } => {
+                let subjects = self
+                    .register
+                    .get(&(owner, schema_id, namespace))
+                    .map(|(_, subjects)| {
+                        let mut subjects =
+                            subjects.iter().cloned().collect::<Vec<_>>();
+                        subjects.sort();
+                        subjects
+                    })
+                    .unwrap_or_default();
+
+                return Ok(SubjectRegisterResponse::Subjects(subjects));
+            }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();
                 self.on_event(

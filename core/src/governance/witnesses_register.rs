@@ -1,7 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::governance::sn_register::{
     SnLimit, SnRegister, SnRegisterMessage, SnRegisterResponse,
+};
+use crate::governance::subject_register::{
+    SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
 use crate::model::common::{Interval, IntervalSet, emit_fail};
 use async_trait::async_trait;
@@ -99,6 +102,12 @@ pub enum WitnessesRegisterMessage {
     GetSnGov,
     GetTrackerSnCreator {
         subject_id: DigestIdentifier,
+    },
+    ListCurrentWitnessSubjects {
+        node: PublicKey,
+        governance_version: u64,
+        after_subject_id: Option<DigestIdentifier>,
+        limit: usize,
     },
     UpdateCreatorsWitnessesFact {
         version: u64,
@@ -222,10 +231,21 @@ pub enum WitnessesRegisterResponse {
     Access { sn: Option<u64> },
     GovSn { sn: u64 },
     TrackerCreatorSn { data: Option<(PublicKey, u64)> },
+    CurrentWitnessSubjects {
+        governance_version: u64,
+        items: Vec<CurrentWitnessSubject>,
+        next_cursor: Option<DigestIdentifier>,
+    },
     Ok,
 }
 
 impl Response for WitnessesRegisterResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentWitnessSubject {
+    pub subject_id: DigestIdentifier,
+    pub target_sn: u64,
+}
 
 impl WitnessesRegister {
     async fn get_sn(
@@ -605,6 +625,162 @@ impl WitnessesRegister {
 
         Ok(sn_limit)
     }
+
+    fn has_active_schema_witness(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &Namespace,
+    ) -> bool {
+        let has_match = |witness_data: &HashMap<Namespace, IntervalData>| {
+            witness_data.iter().any(|(current_namespace, (_, current_lo))| {
+                current_lo.is_some()
+                    && current_namespace.is_ancestor_or_equal_of(namespace)
+            })
+        };
+
+        self.witnesses
+            .get(&(node.clone(), schema_id.clone()))
+            .is_some_and(has_match)
+            || self
+                .witnesses
+                .get(&(node.clone(), SchemaType::TrackerSchemas))
+                .is_some_and(has_match)
+    }
+
+    fn is_current_witness_for_entry(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &str,
+        creator_witnesses: &HashMap<WitnessesType, IntervalData>,
+    ) -> bool {
+        if creator_witnesses
+            .get(&WitnessesType::User(node.clone()))
+            .is_some_and(|(_, current_lo)| current_lo.is_some())
+        {
+            return true;
+        }
+
+        if !creator_witnesses
+            .get(&WitnessesType::Witnesses)
+            .is_some_and(|(_, current_lo)| current_lo.is_some())
+        {
+            return false;
+        }
+
+        self.has_active_schema_witness(
+            node,
+            schema_id,
+            &Namespace::from(namespace.to_owned()),
+        )
+    }
+
+    async fn get_subjects_for_owner_schema(
+        &self,
+        ctx: &ActorContext<Self>,
+        owner: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &str,
+    ) -> Result<Vec<DigestIdentifier>, ActorError> {
+        let governance_id = ctx.path().parent().key();
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/subject_register",
+            governance_id
+        ));
+        let actor = ctx.system().get_actor::<SubjectRegister>(&path).await?;
+        let response = actor
+            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchema {
+                owner: owner.clone(),
+                schema_id: schema_id.clone(),
+                namespace: namespace.to_owned(),
+            })
+            .await?;
+
+        match response {
+            SubjectRegisterResponse::Subjects(subjects) => Ok(subjects),
+            _ => Err(ActorError::UnexpectedResponse {
+                path,
+                expected: "SubjectRegisterResponse::Subjects".to_owned(),
+            }),
+        }
+    }
+
+    async fn list_current_witness_subjects(
+        &self,
+        ctx: &ActorContext<Self>,
+        node: &PublicKey,
+        governance_version: u64,
+        after_subject_id: Option<DigestIdentifier>,
+        limit: usize,
+    ) -> Result<(Vec<CurrentWitnessSubject>, Option<DigestIdentifier>), ActorError>
+    {
+        let mut subjects = BTreeMap::new();
+
+        for ((creator, namespace, schema_id), creator_witnesses) in
+            &self.witnesses_creator
+        {
+            if !self.is_current_witness_for_entry(
+                node,
+                schema_id,
+                namespace,
+                creator_witnesses,
+            ) {
+                continue;
+            }
+
+            let current_subjects = self
+                .get_subjects_for_owner_schema(
+                    ctx,
+                    creator,
+                    schema_id,
+                    namespace,
+                )
+                .await?;
+
+            for subject_id in current_subjects {
+                if let Some(data) = self.subjects.get(&subject_id) {
+                    subjects.insert(subject_id, data.sn);
+                }
+            }
+        }
+
+        let limit = limit.max(1);
+        let mut items = Vec::with_capacity(limit + 1);
+        let effective_cursor = if governance_version == self.gov_sn {
+            after_subject_id
+        } else {
+            None
+        };
+
+        for (subject_id, target_sn) in subjects {
+            if effective_cursor
+                .as_ref()
+                .is_some_and(|cursor| &subject_id <= cursor)
+            {
+                continue;
+            }
+
+            items.push(CurrentWitnessSubject {
+                subject_id,
+                target_sn,
+            });
+
+            if items.len() > limit {
+                break;
+            }
+        }
+
+        let next_cursor = if items.len() > limit {
+            let extra = items.pop();
+            let _ = extra;
+            items.last().map(|item| item.subject_id.clone())
+        } else {
+            None
+        };
+
+        Ok((items, next_cursor))
+    }
 }
 
 #[async_trait]
@@ -648,6 +824,30 @@ impl Handler<Self> for WitnessesRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
+            WitnessesRegisterMessage::ListCurrentWitnessSubjects {
+                node,
+                governance_version,
+                after_subject_id,
+                limit,
+            } => {
+                let (items, next_cursor) = self
+                    .list_current_witness_subjects(
+                        ctx,
+                        &node,
+                        governance_version,
+                        after_subject_id,
+                        limit,
+                    )
+                    .await?;
+
+                return Ok(
+                    WitnessesRegisterResponse::CurrentWitnessSubjects {
+                        governance_version: self.gov_sn,
+                        items,
+                        next_cursor,
+                    },
+                );
+            }
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
                 let data = self
                     .subjects

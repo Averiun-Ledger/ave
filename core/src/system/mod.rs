@@ -2,7 +2,7 @@ pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
-    config::{Config, SinkAuth},
+    config::{Config, GovernanceSyncConfig, SinkAuth, TrackerSyncConfig},
     db::Database,
     external_db::DBManager,
     helpers::{db::ExternalDB, sink::AveSink},
@@ -24,9 +24,8 @@ pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
     pub tracking_size: usize,
-    pub version_sync_interval_secs: u64,
-    pub version_sync_sample_size: usize,
-    pub version_sync_response_timeout_secs: u64,
+    pub sync_governance: GovernanceSyncConfig,
+    pub sync_tracker: TrackerSyncConfig,
 }
 
 impl From<Config> for ConfigHelper {
@@ -35,10 +34,8 @@ impl From<Config> for ConfigHelper {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
-            version_sync_interval_secs: value.version_sync_interval_secs,
-            version_sync_sample_size: value.version_sync_sample_size,
-            version_sync_response_timeout_secs: value
-                .version_sync_response_timeout_secs,
+            sync_governance: value.sync.governance,
+            sync_tracker: value.sync.tracker,
         }
     }
 }
@@ -148,7 +145,7 @@ pub mod tests {
 
     use crate::config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig,
+        AveInternalDBFeatureConfig, SyncConfig,
     };
 
     use super::*;
@@ -207,9 +204,20 @@ pub mod tests {
             always_accept: false,
             tracking_size: 100,
             is_service: true,
-            version_sync_interval_secs: 60,
-            version_sync_sample_size: 3,
-            version_sync_response_timeout_secs: 30,
+            sync: SyncConfig {
+                governance: GovernanceSyncConfig {
+                    interval_secs: 60,
+                    sample_size: 3,
+                    response_timeout_secs: 30,
+                },
+                tracker: TrackerSyncConfig {
+                    interval_secs: 60,
+                    page_size: 200,
+                    response_timeout_secs: 10,
+                    update_batch_size: 2,
+                    update_timeout_secs: 10,
+                },
+            },
             spec: None,
         };
 

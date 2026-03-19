@@ -28,7 +28,13 @@ use crate::common::{
 async fn test_issuer_any() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+        create_nodes_and_connections(
+            vec![vec![]],
+            vec![vec![0]],
+            vec![],
+            true,
+            false,
+        )
             .await;
 
     let owner_governance = &nodes[0].api;
@@ -188,7 +194,13 @@ async fn test_issuer_any() {
 async fn test_limits_in_subjects() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+        create_nodes_and_connections(
+            vec![vec![]],
+            vec![vec![0]],
+            vec![],
+            true,
+            false,
+        )
             .await;
 
     let owner_governance = &nodes[0].api;
@@ -471,6 +483,7 @@ async fn test_namespace_in_role_1() {
         vec![vec![0], vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let evaluator = &nodes[0].api;
@@ -729,6 +742,7 @@ async fn test_namespace_in_role_2() {
         vec![vec![0], vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
     let evaluator = &nodes[0].api;
@@ -983,7 +997,13 @@ async fn test_namespace_in_role_2() {
 // Testear la transferencia de sujeto
 async fn test_subject_transfer_event_1() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![vec![0]], vec![], true)
+        create_nodes_and_connections(
+            vec![vec![]],
+            vec![vec![0]],
+            vec![],
+            true,
+            false,
+        )
             .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
@@ -1231,6 +1251,7 @@ async fn test_subject_transfer_event_2() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -1584,6 +1605,7 @@ async fn test_subject_transfer_event_3() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -1961,6 +1983,7 @@ async fn test_dynamic_witnesses_1() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -2195,6 +2218,7 @@ async fn test_dynamic_witnesses_2() {
         vec![vec![0], vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -2474,6 +2498,7 @@ async fn test_dynamic_witnesses_explicit_1() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -2660,6 +2685,7 @@ async fn test_dynamic_witnesses_explicit_2() {
         vec![vec![0], vec![0]],
         vec![],
         true,
+        false,
     )
     .await;
 
@@ -2889,7 +2915,8 @@ async fn test_dynamic_witnesses_explicit_2() {
 // Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_validator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -2991,7 +3018,8 @@ async fn test_no_subject_validator() {
 // Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_evaluator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3136,7 +3164,8 @@ async fn test_no_subject_evaluator() {
 // No es issuer
 async fn test_no_subject_issuer() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3235,7 +3264,8 @@ async fn test_no_subject_issuer() {
 // Testear 1000 eventos sin cooldown para un sujeto
 async fn test_1000_events() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3357,7 +3387,8 @@ async fn test_1000_events() {
 // uno que esté o que no
 async fn test_subj_no_all_validators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3513,7 +3544,8 @@ async fn test_subj_no_all_validators() {
 // uno que esté o que no
 async fn test_subj_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3666,7 +3698,8 @@ async fn test_subj_no_all_evaluators() {
 // Creator infinity, falla porque no hay validadores, luego se completan todas las creaciones.
 async fn test_infinty_creations() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3828,7 +3861,8 @@ async fn test_infinty_creations() {
 // Creator Quantity 2, falla porque no hay validadores, luego se completa 2 creaciones.
 async fn test_quantity_creations() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true).await;
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
 
     let owner_governance = &nodes[0].api;
 

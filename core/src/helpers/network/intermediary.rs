@@ -12,6 +12,7 @@ use crate::{
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
+    governance::tracker_sync::{TrackerSync, TrackerSyncMessage},
     update::updater::{Updater, UpdaterMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
@@ -259,6 +260,68 @@ impl Intermediary {
                                     version,
                                 },
                             )
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::TrackerSyncReq {
+                        subject_id: _,
+                        request_nonce,
+                        governance_version,
+                        after_subject_id,
+                        limit,
+                        receiver_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<TrackerSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(TrackerSyncMessage::NetworkRequest {
+                                request_nonce,
+                                governance_version,
+                                after_subject_id,
+                                limit,
+                                info: message.info,
+                                sender: sender.clone(),
+                                receiver_actor,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::TrackerSyncRes {
+                        request_nonce,
+                        governance_version,
+                        items,
+                        next_cursor,
+                    } => {
+                        let actor = system
+                            .get_actor::<TrackerSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(TrackerSyncMessage::NetworkResponse {
+                                peer: sender.clone(),
+                                request_nonce,
+                                governance_version,
+                                items,
+                                next_cursor,
+                            })
                             .await
                             .map_err(|e| {
                                 IntermediaryError::SendMessageFailed {

@@ -16,7 +16,8 @@ use ave_core::{
     Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config, SinkAuth,
+        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig, SinkAuth,
+        SyncConfig, TrackerSyncConfig,
     },
 };
 use network::{Config as NetworkConfig, RoutingNode};
@@ -49,6 +50,7 @@ pub async fn create_node(
     listen_address: &str,
     peers: Vec<RoutingNode>,
     always_accept: bool,
+    is_service: bool,
     keys: Option<KeyPair>,
 ) -> (NodeData, Vec<TempDir>) {
     let keys =
@@ -76,7 +78,7 @@ pub async fn create_node(
     vec_dirs.push(contract_dir);
 
     let config = Config {
-        is_service: true,
+        is_service,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
         internal_db: AveInternalDBConfig {
@@ -91,9 +93,20 @@ pub async fn create_node(
         contracts_path,
         always_accept,
         tracking_size: 100,
-        version_sync_interval_secs: 10,
-        version_sync_sample_size: 3,
-        version_sync_response_timeout_secs: 5,
+        sync: SyncConfig {
+            governance: GovernanceSyncConfig {
+                interval_secs: 10,
+                sample_size: 3,
+                response_timeout_secs: 5,
+            },
+            tracker: TrackerSyncConfig {
+                interval_secs: 10,
+                page_size: 200,
+                response_timeout_secs: 5,
+                update_batch_size: 2,
+                update_timeout_secs: 5,
+            },
+        },
         spec: None,
     };
 
@@ -130,6 +143,7 @@ pub async fn create_nodes_and_connections(
     addressable: Vec<Vec<usize>>,
     ephemeral: Vec<Vec<usize>>,
     always_accept: bool,
+    is_service: bool,
 ) -> (Vec<NodeData>, Vec<TempDir>) {
     let mut nodes: Vec<NodeData> = Vec::new();
     let mut dirs = vec![];
@@ -156,6 +170,7 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
             None,
         )
         .await;
@@ -184,6 +199,7 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
             None,
         )
         .await;
@@ -210,6 +226,7 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
             None,
         )
         .await;

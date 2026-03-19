@@ -22,6 +22,7 @@ use crate::{
         role_register::{RoleRegister, RoleRegisterMessage},
         sn_register::SnRegister,
         subject_register::{SubjectRegister, SubjectRegisterMessage},
+        tracker_sync::TrackerSync,
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
@@ -78,6 +79,7 @@ pub mod model;
 pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
+pub mod tracker_sync;
 pub mod version_sync;
 pub mod witnesses_register;
 
@@ -2091,22 +2093,56 @@ impl Actor for Governance {
             return Err(e);
         }
 
-        if self.service {
-            let Some(config): Option<ConfigHelper> =
-                ctx.system().get_helper("config").await
-            else {
-                error!("Config helper not found");
-                return Err(ActorError::Helper {
-                    name: "config".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
+        let Some(config): Option<ConfigHelper> =
+            ctx.system().get_helper("config").await
+        else {
+            error!("Config helper not found");
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
 
-            let tick_interval =
-                Duration::from_secs(config.version_sync_interval_secs.max(1));
-            let response_timeout = Duration::from_secs(
-                config.version_sync_response_timeout_secs.max(1),
+        let version_sync_tick_interval =
+            Duration::from_secs(config.sync_governance.interval_secs.max(1));
+        let version_sync_response_timeout = Duration::from_secs(
+            config.sync_governance.response_timeout_secs.max(1),
+        );
+        let tracker_sync_tick_interval =
+            Duration::from_secs(config.sync_tracker.interval_secs.max(1));
+        let tracker_sync_response_timeout = Duration::from_secs(
+            config.sync_tracker.response_timeout_secs.max(1),
+        );
+        let tracker_sync_update_timeout = Duration::from_secs(
+            config.sync_tracker.update_timeout_secs.max(1),
+        );
+
+        if let Err(e) = ctx
+            .create_child(
+                "tracker_sync",
+                TrackerSync::new(
+                    self.subject_metadata.subject_id.clone(),
+                    self.our_key.clone(),
+                    network.clone(),
+                    self.service,
+                    tracker_sync_tick_interval,
+                    tracker_sync_response_timeout,
+                    config.sync_tracker.page_size,
+                    config.sync_tracker.update_batch_size,
+                    tracker_sync_update_timeout,
+                ),
+            )
+            .await
+        {
+            error!(
+                error = %e,
+                subject_id = %self.subject_metadata.subject_id,
+                "Failed to create tracker_sync child"
             );
+            return Err(e);
+        }
+
+        if self.service {
 
             let version_sync = ctx
                 .create_child(
@@ -2116,9 +2152,9 @@ impl Actor for Governance {
                         self.our_key.clone(),
                         network.clone(),
                         self.properties.version,
-                        config.version_sync_sample_size,
-                        tick_interval,
-                        response_timeout,
+                        config.sync_governance.sample_size,
+                        version_sync_tick_interval,
+                        version_sync_response_timeout,
                     ),
                 )
                 .await?;

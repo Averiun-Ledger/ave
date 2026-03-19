@@ -307,14 +307,32 @@ pub struct AveConfigHttp {
     pub tracking_size: usize,
     /// Is a service node
     pub is_service: bool,
-    /// Seconds between version sync rounds for governance service nodes
-    pub version_sync_interval_secs: u64,
-    /// Number of peers sampled on each version sync round
-    pub version_sync_sample_size: usize,
-    /// Seconds to wait for responses during a version sync round
-    pub version_sync_response_timeout_secs: u64,
+    /// Sync protocol configuration
+    pub sync: SyncConfigHttp,
 
     pub spec: Option<MachineSpecHttp>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SyncConfigHttp {
+    pub governance: GovernanceSyncConfigHttp,
+    pub tracker: TrackerSyncConfigHttp,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct GovernanceSyncConfigHttp {
+    pub interval_secs: u64,
+    pub sample_size: usize,
+    pub response_timeout_secs: u64,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct TrackerSyncConfigHttp {
+    pub interval_secs: u64,
+    pub page_size: usize,
+    pub response_timeout_secs: u64,
+    pub update_batch_size: usize,
+    pub update_timeout_secs: u64,
 }
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
@@ -329,10 +347,32 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
-            version_sync_interval_secs: value.version_sync_interval_secs,
-            version_sync_sample_size: value.version_sync_sample_size,
-            version_sync_response_timeout_secs: value
-                .version_sync_response_timeout_secs,
+            sync: SyncConfigHttp {
+                governance: GovernanceSyncConfigHttp {
+                    interval_secs: value.sync.governance.interval_secs,
+                    sample_size: value.sync.governance.sample_size,
+                    response_timeout_secs: value
+                        .sync
+                        .governance
+                        .response_timeout_secs,
+                },
+                tracker: TrackerSyncConfigHttp {
+                    interval_secs: value.sync.tracker.interval_secs,
+                    page_size: value.sync.tracker.page_size,
+                    response_timeout_secs: value
+                        .sync
+                        .tracker
+                        .response_timeout_secs,
+                    update_batch_size: value
+                        .sync
+                        .tracker
+                        .update_batch_size,
+                    update_timeout_secs: value
+                        .sync
+                        .tracker
+                        .update_timeout_secs,
+                },
+            },
             spec: value.spec.map(MachineSpecHttp::from),
         }
     }
