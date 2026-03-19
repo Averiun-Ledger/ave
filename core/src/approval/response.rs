@@ -20,5 +20,6 @@ pub enum ApprovalRes {
         agrees: bool,
         req_subject_data_hash: DigestIdentifier,
     },
+    Abort(String),
     TimeOut(TimeOut),
 }

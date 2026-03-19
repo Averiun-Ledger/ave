@@ -22,7 +22,7 @@ use crate::approval::light::{ApprLight, ApprLightMessage};
 use crate::approval::persist::{ApprPersist, ApprPersistMessage};
 use crate::governance::model::Quorum;
 use crate::helpers::network::service::NetworkSender;
-use crate::model::common::emit_fail;
+use crate::model::common::{abort_req, emit_fail};
 
 use crate::model::event::ApprovalData;
 use crate::model::network::TimeOut;
@@ -286,6 +286,37 @@ impl Handler<Self> for Approval {
                             } else {
                                 self.approvers_disagrees.push(signature);
                             }
+                        }
+                        ApprovalRes::Abort(error) => {
+                            if let Err(e) = abort_req(
+                                ctx,
+                                self.request_id.clone(),
+                                sender.clone(),
+                                error.clone(),
+                                self.request.content().sn,
+                            )
+                            .await
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    request_id = %self.request_id,
+                                    sender = %sender,
+                                    abort_reason = %error,
+                                    error = %e,
+                                    "Failed to abort request"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+
+                            debug!(
+                                msg_type = "Response",
+                                request_id = %self.request_id,
+                                sender = %sender,
+                                abort_reason = %error,
+                                "Approval aborted"
+                            );
+
+                            return Ok(());
                         }
                         ApprovalRes::TimeOut(approval_time_out) => {
                             self.approvers_timeout.push(approval_time_out);

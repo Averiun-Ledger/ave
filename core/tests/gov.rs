@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::atomic::Ordering};
 
 mod common;
 
@@ -8,6 +8,7 @@ use ave_common::{
         PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
+    response::RequestState,
 };
 use ave_core::auth::AuthWitness;
 
@@ -16,8 +17,413 @@ use common::{
     create_subject, emit_approve, emit_confirm, emit_fact, emit_transfer,
     get_subject,
 };
+use futures::future::join_all;
+use network::{NodeType, RoutingNode};
 use serde_json::json;
 use test_log::test;
+
+use crate::common::{
+    PORT_COUNTER, create_node, get_abort_request, node_running,
+    wait_request_state,
+};
+
+#[test(tokio::test)]
+//  Verificar que update protocol actualiza pasivamente la gobernanza.
+async fn test_update_protocol() {
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        true,
+    )
+    .await;
+    let node1 = &nodes[0].api;
+    let node2 = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.public_key()
+                }
+            ]
+        }
+    });
+
+    let _request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    node2
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node2.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "Fake",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "Fake2",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+//  El owner perdió el ledger, se lo pidió a un testigo que no tenía la última versión
+// la siguiente request se aborta.
+async fn test_approve_invalid_gov_version() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0]],
+        vec![],
+        false,
+        false,
+    )
+    .await;
+    let node1 = nodes[0].api.clone();
+    let node2 = nodes[1].api.clone();
+    let node3 = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node2, vec![&node1, &node3]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": node1.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": {
+                        "fixed": 100
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "approver": ["AveNode3"]
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(&node2, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        &node2,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    node1
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node1.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    node3
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node2.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node3.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node3, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "AveNode4",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    let request_id = emit_fact(&node2, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        &node2,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_approve(
+        &node3,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let _state = get_subject(&node2, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let _state = get_subject(&node1, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    node3.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node3, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: node1.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_node2, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        false,
+        Some(nodes[1].keys.clone()),
+    )
+    .await;
+    let new_node2 = node_new_node2.api.clone();
+    node_running(&new_node2).await.unwrap();
+
+    assert!(
+        new_node2
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_node2
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_node2
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(1))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "AveNode5",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    let request_id = emit_fact(&new_node2, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    wait_request_state(
+        &new_node2,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts =
+        get_abort_request(&new_node2, governance_id.clone(), request_id)
+            .await
+            .unwrap();
+
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "Abort approval, governance update is required by signer: local=2, request=1"
+    );
+
+
+        new_node2
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node3.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    new_node2
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+
+    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    // add new fake member to governance
+    let json = json!({
+    "members": {
+        "add": [
+            {
+                "name": "AveNode5",
+                "key": fake_node
+            }
+        ]
+    }});
+
+    let request_id = emit_fact(&new_node2, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    emit_approve(
+        &new_node2,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_approve(
+        &node3,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        false,
+    )
+    .await
+    .unwrap();
+
+    
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+}
 
 #[test(tokio::test)]
 // El el init state es invalido, se aborata la request
@@ -120,108 +526,6 @@ async fn test_invalid_contract() {
         state.properties,
         json!({"members":{"Owner":node.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"schemas":{},"version":0})
     );
-}
-
-#[test(tokio::test)]
-//  Verificar que update protocol actualiza pasivamente la gobernanza.
-async fn test_update_protocol() {
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            true,
-        )
-            .await;
-    let node1 = &nodes[0].api;
-    let node2 = &nodes[1].api;
-
-    let governance_id =
-        create_and_authorize_governance(node1, vec![node2]).await;
-
-    let json = json!({
-        "members": {
-            "add": [
-                {
-                    "name": "AveNode2",
-                    "key": node2.public_key()
-                }
-            ]
-        }
-    });
-
-    let _request_id = emit_fact(node1, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    node2
-        .auth_subject(
-            governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
-        )
-        .await
-        .unwrap();
-
-    node2.update_subject(governance_id.clone()).await.unwrap();
-
-    let _state = get_subject(&node2, governance_id.clone(), Some(1))
-        .await
-        .unwrap();
-
-    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-        .public_key()
-        .to_string();
-
-    // add new fake member to governance
-    let json = json!({
-    "members": {
-        "add": [
-            {
-                "name": "Fake",
-                "key": fake_node
-            }
-        ]
-    }});
-
-    emit_fact(node1, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node1, governance_id.clone(), Some(2))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node2, governance_id.clone(), Some(2))
-        .await
-        .unwrap();
-
-    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-        .public_key()
-        .to_string();
-
-    // add new fake member to governance
-    let json = json!({
-    "members": {
-        "add": [
-            {
-                "name": "Fake2",
-                "key": fake_node
-            }
-        ]
-    }});
-
-    emit_fact(node1, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node1, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node2, governance_id.clone(), Some(3))
-        .await
-        .unwrap();
 }
 
 #[test(tokio::test)]
@@ -597,15 +901,14 @@ async fn test_many_schema_in_one_governance() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza
 async fn test_transfer_event_governance_1() {
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -706,15 +1009,14 @@ async fn test_transfer_event_governance_1() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro
 async fn test_transfer_event_governance_2() {
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -856,15 +1158,14 @@ async fn test_transfer_event_governance_2() {
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![],
-            vec![],
-            false,
-            false,
-        )
-        .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![],
+        vec![],
+        false,
+        false,
+    )
+    .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -1401,15 +1702,14 @@ async fn test_governance_not_quorum_many_approvers() {
 #[test(tokio::test)]
 // Se añade un evaluador, se evalua, se le elimina y se vuelve a evaluar.
 async fn test_change_roles_gov() {
-    let (nodes, _dirs) =
-        create_nodes_and_connections(
-            vec![vec![]],
-            vec![vec![0]],
-            vec![],
-            true,
-            false,
-        )
-            .await;
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
     let eval_node = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 

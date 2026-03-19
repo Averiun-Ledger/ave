@@ -112,7 +112,7 @@ impl ApprPersist {
         ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
         gov_version: u64,
-    ) -> Result<(), ActorError> {
+    ) -> Result<Option<String>, ActorError> {
         let Some((.., network)) = &self.helpers else {
             return Err(ActorError::FunctionalCritical {
                 description: "Helpers are None".to_owned(),
@@ -153,10 +153,79 @@ impl ApprPersist {
                 update_ledger_network(data, network.clone()).await?;
             }
             std::cmp::Ordering::Less => {
-                // TODO Por ahora no vamos hacer nada, pero esto quiere decir que el owner perdió el ledger
-                // lo recuperó pero no recibió la última versión. Aquí se podría haber producido un fork.
-                // Esto ocurre solo en la aprobación porque solo se realiza en las gobernanzas.
+                return Ok(Some(format!(
+                    "Abort approval, governance update is required by signer: local={}, request={}",
+                    governance.version, gov_version
+                )));
             }
+        }
+
+        Ok(None)
+    }
+
+    async fn send_signed_response(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        response: ApprovalRes,
+        request: &Signed<ApprovalReq>,
+        request_id: &str,
+        version: u64,
+    ) -> Result<(), ActorError> {
+        let Some((.., network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Helpers are None".to_owned(),
+            });
+        };
+
+        let sign_type = SignTypesNode::ApprovalRes(Box::new(response.clone()));
+        let signature = get_sign(ctx, sign_type).await?;
+
+        let subject_id = request.content().subject_id.clone();
+        if self.node_key == *self.our_key {
+            let subject_id = ctx.path().parent().key();
+            let approval_actor = ctx
+                .system()
+                .get_actor::<Approval>(&ActorPath::from(&format!(
+                    "/user/request/{}/approval",
+                    subject_id
+                )))
+                .await;
+            if let Ok(approval_actor) = approval_actor {
+                approval_actor
+                    .tell(ApprovalMessage::Response {
+                        approval_res: response,
+                        sender: (*self.our_key).clone(),
+                        signature: Some(signature),
+                    })
+                    .await?;
+            }
+        } else {
+            let signed_response: Signed<ApprovalRes> =
+                Signed::from_parts(response, signature);
+
+            let new_info = ComunicateInfo {
+                receiver: self.node_key.clone(),
+                request_id: request_id.to_string(),
+                version,
+                receiver_actor: format!(
+                    "/user/request/{}/approval/{}",
+                    subject_id, self.our_key
+                ),
+            };
+
+            if let Err(e) = network
+                .send_command(network::CommandHelper::SendMessage {
+                    message: NetworkMessage {
+                        info: new_info,
+                        message: ActorMessage::ApprovalRes {
+                            res: Box::new(signed_response),
+                        },
+                    },
+                })
+                .await
+            {
+                return Err(emit_fail(ctx, e).await);
+            };
         }
 
         Ok(())
@@ -165,17 +234,16 @@ impl ApprPersist {
     async fn send_response(
         &self,
         ctx: &mut ActorContext<Self>,
-        request: Signed<ApprovalReq>,
+        request: &Signed<ApprovalReq>,
         response: bool,
         request_id: &str,
         version: u64,
     ) -> Result<(), ActorError> {
-        let Some((hash, network)) = self.helpers.clone() else {
+        let Some((hash, ..)) = self.helpers.clone() else {
             return Err(ActorError::FunctionalCritical {
                 description: "Helpers are None".to_owned(),
             });
         };
-
         let approval_req_hash =
             hash_borsh(&*hash.hasher(), &request).map_err(|e| {
                 ActorError::FunctionalCritical {
@@ -207,59 +275,8 @@ impl ApprPersist {
             agrees: response,
             req_subject_data_hash,
         };
-        let sign_type = SignTypesNode::ApprovalRes(Box::new(res.clone()));
-        let signature = get_sign(ctx, sign_type).await?;
-
-        let subject_id = request.content().subject_id.clone();
-        if self.node_key == *self.our_key {
-            // Approval actor.
-            let subject_id = ctx.path().parent().key();
-            let approval_actor = ctx
-                .system()
-                .get_actor::<Approval>(&ActorPath::from(&format!(
-                    "/user/request/{}/approval",
-                    subject_id
-                )))
-                .await;
-            if let Ok(approval_actor) = approval_actor {
-                approval_actor
-                    .tell(ApprovalMessage::Response {
-                        approval_res: res,
-                        sender: (*self.our_key).clone(),
-                        signature: Some(signature),
-                    })
-                    .await?;
-            }
-        } else {
-            let signed_response: Signed<ApprovalRes> =
-                Signed::from_parts(res, signature);
-
-            let new_info = ComunicateInfo {
-                receiver: self.node_key.clone(),
-                request_id: request_id.to_string(),
-                version,
-                receiver_actor: format!(
-                    "/user/request/{}/approval/{}",
-                    subject_id, self.our_key
-                ),
-            };
-
-            if let Err(e) = network
-                .send_command(network::CommandHelper::SendMessage {
-                    message: NetworkMessage {
-                        info: new_info,
-                        message: ActorMessage::ApprovalRes {
-                            res: Box::new(signed_response),
-                        },
-                    },
-                })
-                .await
-            {
-                return Err(emit_fail(ctx, e).await);
-            };
-        }
-
-        Ok(())
+        self.send_signed_response(ctx, res, request, request_id, version)
+            .await
     }
 }
 
@@ -454,7 +471,7 @@ impl Handler<Self> for ApprPersist {
                     if let Err(e) = self
                         .send_response(
                             ctx,
-                            approval_req,
+                            &approval_req,
                             response,
                             &self.request_id.to_string(),
                             self.version,
@@ -493,7 +510,7 @@ impl Handler<Self> for ApprPersist {
                             if let Err(e) = self
                                 .send_response(
                                     ctx,
-                                    approval_req.clone(),
+                                    &approval_req,
                                     true,
                                     &request_id.to_string(),
                                     version,
@@ -544,7 +561,7 @@ impl Handler<Self> for ApprPersist {
                     if let Err(e) = self
                         .send_response(
                             ctx,
-                            approval_req.clone(),
+                            &approval_req,
                             response,
                             &request_id.to_string(),
                             version,
@@ -601,7 +618,7 @@ impl Handler<Self> for ApprPersist {
                         });
                     }
 
-                    if let Err(e) = self
+                    let governance_check = match self
                         .check_governance(
                             ctx,
                             &approval_req.content().subject_id,
@@ -609,12 +626,37 @@ impl Handler<Self> for ApprPersist {
                         )
                         .await
                     {
-                        warn!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to check governance"
-                        );
-                        return Err(emit_fail(ctx, e).await);
+                        Ok(check) => check,
+                        Err(e) => {
+                            warn!(
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Failed to check governance"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    };
+
+                    if let Some(reason) = governance_check {
+                        if let Err(e) = self
+                            .send_signed_response(
+                                ctx,
+                                ApprovalRes::Abort(reason),
+                                &approval_req,
+                                &info.request_id,
+                                info.version,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Failed to send approval abort response"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+
+                        return Ok(ApprPersistResponse::Ok);
                     }
 
                     let state =
@@ -640,7 +682,7 @@ impl Handler<Self> for ApprPersist {
                         && let Err(e) = self
                             .send_response(
                                 ctx,
-                                approval_req.clone(),
+                                &approval_req,
                                 true,
                                 &info.request_id,
                                 info.version,
@@ -702,7 +744,7 @@ impl Handler<Self> for ApprPersist {
                     if let Err(e) = self
                         .send_response(
                             ctx,
-                            approval_req.clone(),
+                            &approval_req,
                             response,
                             &self.request_id.to_string(),
                             self.version,
