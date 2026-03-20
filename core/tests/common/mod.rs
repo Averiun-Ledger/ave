@@ -23,6 +23,7 @@ use ave_core::{
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
+    path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicU16, Ordering},
     time::Duration,
@@ -52,18 +53,35 @@ pub async fn create_node(
     always_accept: bool,
     is_service: bool,
     keys: Option<KeyPair>,
+    local_db: Option<PathBuf>,
+    ext_db: Option<PathBuf>,
+    contracts_path: Option<PathBuf>,
 ) -> (NodeData, Vec<TempDir>) {
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let dir = tempfile::tempdir().expect("Can not create temporal directory");
-    let local_db = dir.path().to_path_buf();
-    vec_dirs.push(dir);
+    let local_db = if let Some(local_db) = local_db {
+        local_db
+    } else {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let local_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-    let dir = tempfile::tempdir().expect("Can not create temporal directory");
-    let ext_db = dir.path().to_path_buf();
-    vec_dirs.push(dir);
+        local_db
+    };
+
+    let ext_db = if let Some(ext_db) = ext_db {
+        ext_db
+    } else {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let ext_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
+
+        ext_db
+    };
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -72,10 +90,16 @@ pub async fn create_node(
         peers,
     );
 
-    let contract_dir =
-        tempfile::tempdir().expect("Can not create temporal directory");
-    let contracts_path = contract_dir.path().to_path_buf();
-    vec_dirs.push(contract_dir);
+    let contracts_path = if let Some(contracts_path) = contracts_path {
+        contracts_path
+    } else {
+        let contract_dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let contracts_path = contract_dir.path().to_path_buf();
+        vec_dirs.push(contract_dir);
+
+        contracts_path
+    };
 
     let config = Config {
         is_service,
@@ -172,6 +196,9 @@ pub async fn create_nodes_and_connections(
             always_accept,
             is_service,
             None,
+            None,
+            None,
+            None,
         )
         .await;
         dirs.append(&mut vec_dirs);
@@ -201,6 +228,9 @@ pub async fn create_nodes_and_connections(
             always_accept,
             is_service,
             None,
+            None,
+            None,
+            None,
         )
         .await;
         dirs.append(&mut vec_dirs);
@@ -227,6 +257,9 @@ pub async fn create_nodes_and_connections(
             peers,
             always_accept,
             is_service,
+            None,
+            None,
+            None,
             None,
         )
         .await;

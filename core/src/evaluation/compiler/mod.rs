@@ -39,6 +39,12 @@ pub struct ContractResult {
     pub error: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContractArtifactMetadata {
+    contract_hash: DigestIdentifier,
+    manifest_hash: DigestIdentifier,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Compiler {
     contract: DigestIdentifier,
@@ -46,6 +52,12 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    const SHARED_TARGET_DIR: &'static str = "target";
+    const VENDOR_DIR: &'static str = "vendor";
+    const ARTIFACT_WASM: &'static str = "contract.wasm";
+    const ARTIFACT_PRECOMPILED: &'static str = "contract.cwasm";
+    const ARTIFACT_METADATA: &'static str = "contract.json";
+
     pub fn new(hash: HashAlgorithm) -> Self {
         Self {
             contract: DigestIdentifier::default(),
@@ -54,34 +66,107 @@ impl Compiler {
     }
 
     fn compilation_toml() -> String {
-        r#"
-    [package]
-    name = "contract"
-    version = "0.1.0"
-    edition = "2024"
-
-    [dependencies]
-    serde = { version = "1.0.219", features = ["derive"] }
-    serde_json = "1.0.140"
-    ave-contract-sdk = "0.7.0"
-
-    [profile.release]
-    strip = "debuginfo"
-    lto = true
-
-    [lib]
-    crate-type = ["cdylib"]
-
-    [workspace]
-      "#
-        .into()
+        include_str!("contract_Cargo.toml").to_owned()
     }
 
-    async fn compile_contract(
+    fn contracts_root(
+        contract_path: &Path,
+    ) -> Result<PathBuf, CompilerError> {
+        contract_path
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| CompilerError::InvalidContractPath {
+                path: contract_path.to_string_lossy().to_string(),
+                details:
+                    "expected contract path under <contracts_path>/contracts/<name>"
+                        .to_owned(),
+            })
+    }
+
+    fn artifact_wasm_path(contract_path: &Path) -> PathBuf {
+        contract_path.join(Self::ARTIFACT_WASM)
+    }
+
+    fn artifact_metadata_path(contract_path: &Path) -> PathBuf {
+        contract_path.join(Self::ARTIFACT_METADATA)
+    }
+
+    fn artifact_precompiled_path(contract_path: &Path) -> PathBuf {
+        contract_path.join(Self::ARTIFACT_PRECOMPILED)
+    }
+
+    fn cargo_config_path(contract_path: &Path) -> PathBuf {
+        contract_path.join(".cargo").join("config.toml")
+    }
+
+    fn build_output_wasm_path(contracts_root: &Path) -> PathBuf {
+        contracts_root
+            .join(Self::SHARED_TARGET_DIR)
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join(Self::ARTIFACT_WASM)
+    }
+
+    fn cargo_config(
+        shared_target_dir: &Path,
+        vendor_dir: Option<&Path>,
+    ) -> String {
+        let mut config = format!(
+            "[build]\ntarget-dir = \"{}\"\n",
+            shared_target_dir.to_string_lossy()
+        );
+
+        if let Some(vendor_dir) = vendor_dir {
+            config.push_str(&format!(
+                "\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
+                vendor_dir.to_string_lossy()
+            ));
+        }
+
+        config
+    }
+
+    async fn build_contract(
+        contract_path: &Path,
+        offline: bool,
+    ) -> Result<(), CompilerError> {
+        let cargo = contract_path.join("Cargo.toml");
+        let cargo_config = Self::cargo_config_path(contract_path);
+        let mut command = Command::new("cargo");
+        command
+            .arg("build")
+            .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
+            .arg("--target")
+            .arg("wasm32-unknown-unknown")
+            .arg("--release")
+            .env("CARGO_HOME", contract_path.join(".cargo"))
+            .env("CARGO_CONFIG", &cargo_config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        if offline {
+            command.arg("--offline");
+        }
+
+        let status = command
+            .status()
+            .await
+            .map_err(|e| CompilerError::CargoBuildFailed {
+                details: e.to_string(),
+            })?;
+
+        if !status.success() {
+            return Err(CompilerError::CompilationFailed);
+        }
+
+        Ok(())
+    }
+
+    async fn prepare_contract_project(
         contract: &str,
         contract_path: &Path,
     ) -> Result<(), CompilerError> {
-        // Write contract.
         let decode_base64 = BASE64_STANDARD.decode(contract).map_err(|e| {
             CompilerError::Base64DecodeFailed {
                 details: format!(
@@ -92,6 +177,7 @@ impl Compiler {
             }
         })?;
 
+        let contracts_root = Self::contracts_root(contract_path)?;
         let dir = contract_path.join("src");
         if !Path::new(&dir).exists() {
             fs::create_dir_all(&dir).await.map_err(|e| {
@@ -102,9 +188,18 @@ impl Compiler {
             })?;
         }
 
+        let cargo_config_dir = contract_path.join(".cargo");
+        if !Path::new(&cargo_config_dir).exists() {
+            fs::create_dir_all(&cargo_config_dir).await.map_err(|e| {
+                CompilerError::DirectoryCreationFailed {
+                    path: cargo_config_dir.to_string_lossy().to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+        }
+
         let toml: String = Self::compilation_toml();
         let cargo = contract_path.join("Cargo.toml");
-        // We write cargo.toml
         fs::write(&cargo, toml).await.map_err(|e| {
             CompilerError::FileWriteFailed {
                 path: cargo.to_string_lossy().to_string(),
@@ -120,34 +215,154 @@ impl Compiler {
             }
         })?;
 
-        // Compiling contract
-        let status = Command::new("cargo")
-            .arg("build")
-            .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
-            .arg("--target")
-            .arg("wasm32-unknown-unknown")
-            .arg("--release")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map_err(|e| CompilerError::CargoBuildFailed {
+        let vendor_dir = contracts_root.join(Self::VENDOR_DIR);
+        let cargo_config = Self::cargo_config(
+            &contracts_root.join(Self::SHARED_TARGET_DIR),
+            vendor_dir.exists().then_some(vendor_dir.as_path()),
+        );
+        let cargo_config_path = Self::cargo_config_path(contract_path);
+        fs::write(&cargo_config_path, cargo_config).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: cargo_config_path.to_string_lossy().to_string(),
                 details: e.to_string(),
-            })?;
-
-        // Is success
-        if !status.success() {
-            return Err(CompilerError::CompilationFailed);
-        }
+            }
+        })?;
 
         Ok(())
     }
 
-    async fn check_wasm(
-        ctx: &ActorContext<Self>,
+    async fn load_artifact_metadata(
         contract_path: &Path,
-        state: ValueWrapper,
+    ) -> Result<Option<ContractArtifactMetadata>, CompilerError> {
+        let metadata_path = Self::artifact_metadata_path(contract_path);
+        if !metadata_path.exists() {
+            return Ok(None);
+        }
+
+        let metadata =
+            fs::read_to_string(&metadata_path).await.map_err(|e| {
+                CompilerError::FileReadFailed {
+                    path: metadata_path.to_string_lossy().to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+
+        let metadata = serde_json::from_str::<ContractArtifactMetadata>(
+            &metadata,
+        )
+        .map_err(|e| CompilerError::MetadataParseFailed {
+            path: metadata_path.to_string_lossy().to_string(),
+            details: e.to_string(),
+        })?;
+
+        Ok(Some(metadata))
+    }
+
+    async fn persist_artifact(
+        contract_path: &Path,
+        wasm_bytes: &[u8],
+        precompiled_bytes: &[u8],
+        metadata: &ContractArtifactMetadata,
+    ) -> Result<(), CompilerError> {
+        let artifact_path = Self::artifact_wasm_path(contract_path);
+        fs::write(&artifact_path, wasm_bytes).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: artifact_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let precompiled_path = Self::artifact_precompiled_path(contract_path);
+        fs::write(&precompiled_path, precompiled_bytes).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: precompiled_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let metadata_path = Self::artifact_metadata_path(contract_path);
+        let metadata_json = serde_json::to_vec(metadata).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "contract artifact metadata",
+                details: e.to_string(),
+            }
+        })?;
+        fs::write(&metadata_path, metadata_json).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: metadata_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        Ok(())
+    }
+
+    async fn load_artifact_wasm(
+        contract_path: &Path,
     ) -> Result<Vec<u8>, CompilerError> {
+        let wasm_path = Self::artifact_wasm_path(contract_path);
+        fs::read(&wasm_path).await.map_err(|e| CompilerError::FileReadFailed {
+            path: wasm_path.to_string_lossy().to_string(),
+            details: e.to_string(),
+        })
+    }
+
+    async fn load_artifact_precompiled(
+        contract_path: &Path,
+    ) -> Result<Vec<u8>, CompilerError> {
+        let precompiled_path = Self::artifact_precompiled_path(contract_path);
+        fs::read(&precompiled_path).await.map_err(|e| {
+            CompilerError::FileReadFailed {
+                path: precompiled_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })
+    }
+
+    async fn load_compiled_wasm(
+        contracts_root: &Path,
+    ) -> Result<Vec<u8>, CompilerError> {
+        let wasm_path = Self::build_output_wasm_path(contracts_root);
+        fs::read(&wasm_path).await.map_err(|e| CompilerError::FileReadFailed {
+            path: wasm_path.to_string_lossy().to_string(),
+            details: e.to_string(),
+        })
+    }
+
+    fn deserialize_precompiled(
+        wasm_runtime: &WasmRuntime,
+        precompiled_bytes: &[u8],
+    ) -> Result<Module, CompilerError> {
+        unsafe {
+            Module::deserialize(&wasm_runtime.engine, precompiled_bytes)
+                .map_err(|e| CompilerError::WasmDeserializationFailed {
+                    details: e.to_string(),
+                })
+        }
+    }
+
+    fn precompile_module(
+        wasm_runtime: &WasmRuntime,
+        wasm_bytes: &[u8],
+    ) -> Result<(Vec<u8>, Module), CompilerError> {
+        let precompiled_bytes = wasm_runtime
+            .engine
+            .precompile_module(wasm_bytes)
+            .map_err(|e| CompilerError::WasmPrecompileFailed {
+                details: e.to_string(),
+            })?;
+
+        let module =
+            Self::deserialize_precompiled(wasm_runtime, &precompiled_bytes)?;
+
+        Ok((precompiled_bytes, module))
+    }
+
+    async fn validate_module(
+        ctx: &ActorContext<Self>,
+        module: &Module,
+        state: ValueWrapper,
+    ) -> Result<(), CompilerError> {
         let Some(wasm_runtime) = ctx
             .system()
             .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
@@ -157,46 +372,11 @@ impl Compiler {
                 name: "wasm_runtime",
             });
         };
-        // Read compile contract
-        let wasm_path = contract_path
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join("contract.wasm");
-        let file = fs::read(&wasm_path).await.map_err(|e| {
-            CompilerError::FileReadFailed {
-                path: wasm_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
 
-        // Precompilation
-        let contract_bytes = wasm_runtime
-            .engine
-            .precompile_module(&file)
-            .map_err(|e| CompilerError::WasmPrecompileFailed {
-                details: e.to_string(),
-            })?;
-
-        drop(file);
-
-        // Module represents a precompiled WebAssembly program that is ready to be instantiated and executed.
-        // This function receives the previous input from Engine::precompile_module, that is why this function can be considered safe.
-        let module = unsafe {
-            Module::deserialize(&wasm_runtime.engine, &contract_bytes).map_err(
-                |e| CompilerError::WasmDeserializationFailed {
-                    details: e.to_string(),
-                },
-            )?
-        };
-
-        // Obtain imports
         let imports = module.imports();
-        // get functions of sdk
         let mut pending_sdk = Self::get_sdk_functions_identifier();
 
         for import in imports {
-            // import must be a function
             match import.ty() {
                 ExternType::Func(_) => {
                     if !pending_sdk.remove(import.name()) {
@@ -227,35 +407,25 @@ impl Compiler {
             });
         }
 
-        // We create a context from the state and the event.
         let (context, state_ptr) =
             Self::generate_context(state, &wasm_runtime.limits)?;
-
-        // Container to store and manage the global state of a WebAssembly instance during its execution.
         let mut store = Store::new(&wasm_runtime.engine, context);
 
-        // Limit WASM linear memory and table growth to prevent resource exhaustion.
         store.limiter(|data| &mut data.store_limits);
-
-        // Set fuel limit for compilation/validation (more generous than production)
         store.set_fuel(MAX_FUEL_COMPILATION).map_err(|e| {
             CompilerError::FuelLimitError {
                 details: e.to_string(),
             }
         })?;
 
-        // Responsible for combining several object files into a single WebAssembly executable file (.wasm).
         let linker = generate_linker(&wasm_runtime.engine)?;
-
-        // Contract instance.
         let instance =
-            linker.instantiate(&mut store, &module).map_err(|e| {
+            linker.instantiate(&mut store, module).map_err(|e| {
                 CompilerError::InstantiationFailed {
                     details: e.to_string(),
                 }
             })?;
 
-        // Get access to contract, only to check if main_function exist.
         let _main_contract_entrypoint = instance
             .get_typed_func::<(u32, u32, u32, u32), u32>(
                 &mut store,
@@ -265,14 +435,12 @@ impl Compiler {
                 function: "main_function",
             })?;
 
-        // Get access to contract
         let init_contract_entrypoint = instance
             .get_typed_func::<u32, u32>(&mut store, "init_check_function")
             .map_err(|_e| CompilerError::EntryPointNotFound {
                 function: "init_check_function",
             })?;
 
-        // Contract execution
         let result_ptr =
             init_contract_entrypoint
                 .call(&mut store, state_ptr)
@@ -282,7 +450,177 @@ impl Compiler {
 
         Self::check_result(&store, result_ptr)?;
 
-        Ok(contract_bytes)
+        Ok(())
+    }
+
+    async fn compile_or_load(
+        &self,
+        ctx: &ActorContext<Self>,
+        contract: &str,
+        contract_path: &Path,
+        initial_value: Value,
+    ) -> Result<(Arc<Module>, DigestIdentifier), CompilerError> {
+        let contract_hash =
+            hash_borsh(&*self.hash.hasher(), &contract).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract hash",
+                    details: e.to_string(),
+                }
+            })?;
+        let manifest = Self::compilation_toml();
+        let manifest_hash =
+            hash_borsh(&*self.hash.hasher(), &manifest).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract manifest hash",
+                    details: e.to_string(),
+                }
+            })?;
+
+        Self::prepare_contract_project(contract, contract_path).await?;
+
+        let Some(wasm_runtime) = ctx
+            .system()
+            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+            .await
+        else {
+            return Err(CompilerError::MissingHelper {
+                name: "wasm_runtime",
+            });
+        };
+
+        let expected_metadata = ContractArtifactMetadata {
+            contract_hash: contract_hash.clone(),
+            manifest_hash,
+        };
+
+        if let Some(current_metadata) =
+            Self::load_artifact_metadata(contract_path).await?
+            && current_metadata.contract_hash == expected_metadata.contract_hash
+            && current_metadata.manifest_hash == expected_metadata.manifest_hash
+        {
+            match Self::load_artifact_precompiled(contract_path).await {
+                Ok(precompiled_bytes) => {
+                    match Self::deserialize_precompiled(
+                        &wasm_runtime,
+                        &precompiled_bytes,
+                    ) {
+                        Ok(module) => {
+                            match Self::validate_module(
+                                ctx,
+                                &module,
+                                ValueWrapper(initial_value.clone()),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    return Ok((
+                                        Arc::new(module),
+                                        contract_hash,
+                                    ));
+                                }
+                                Err(error) => {
+                                    debug!(
+                                        error = %error,
+                                        path = %contract_path.display(),
+                                        "Persisted precompiled contract is invalid, retrying from wasm artifact"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            debug!(
+                                error = %error,
+                                path = %contract_path.display(),
+                                "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        path = %contract_path.display(),
+                        "Persisted precompiled artifact can not be read, retrying from wasm artifact"
+                    );
+                }
+            }
+
+            match Self::load_artifact_wasm(contract_path).await {
+                Ok(wasm_bytes) => {
+                    match Self::precompile_module(
+                        &wasm_runtime,
+                        &wasm_bytes,
+                    ) {
+                        Ok((precompiled_bytes, module)) => {
+                            match Self::validate_module(
+                                ctx,
+                                &module,
+                                ValueWrapper(initial_value.clone()),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    Self::persist_artifact(
+                                        contract_path,
+                                        &wasm_bytes,
+                                        &precompiled_bytes,
+                                        &expected_metadata,
+                                    )
+                                    .await?;
+                                    return Ok((
+                                        Arc::new(module),
+                                        contract_hash,
+                                    ));
+                                }
+                                Err(error) => {
+                                    debug!(
+                                        error = %error,
+                                        path = %contract_path.display(),
+                                        "Persisted wasm artifact is invalid, recompiling"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            debug!(
+                                error = %error,
+                                path = %contract_path.display(),
+                                "Persisted wasm artifact can not be precompiled, recompiling"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        path = %contract_path.display(),
+                        "Persisted contract artifact can not be read, recompiling"
+                    );
+                }
+            }
+        }
+
+        let contracts_root = Self::contracts_root(contract_path)?;
+        Self::build_contract(
+            contract_path,
+            contracts_root.join(Self::VENDOR_DIR).exists(),
+        )
+        .await?;
+
+        let wasm_bytes = Self::load_compiled_wasm(&contracts_root).await?;
+        let (precompiled_bytes, module) =
+            Self::precompile_module(&wasm_runtime, &wasm_bytes)?;
+        Self::validate_module(ctx, &module, ValueWrapper(initial_value))
+            .await?;
+        Self::persist_artifact(
+            contract_path,
+            &wasm_bytes,
+            &precompiled_bytes,
+            &expected_metadata,
+        )
+        .await?;
+
+        Ok((Arc::new(module), contract_hash))
     }
 
     fn check_result(
@@ -384,36 +722,25 @@ impl Handler<Self> for Compiler {
                 contract_path,
                 initial_value,
             } => {
-                if let Err(e) =
-                    Self::compile_contract(&contract, &contract_path).await
+                if let Err(e) = self
+                    .compile_or_load(
+                        ctx,
+                        &contract,
+                        &contract_path,
+                        initial_value,
+                    )
+                    .await
                 {
                     error!(
                         msg_type = "TemporalCompile",
                         error = %e,
                         contract_name = %contract_name,
                         path = %contract_path.display(),
-                        "Contract compilation failed"
+                        "Contract compilation or validation failed"
                     );
                     let _ = fs::remove_dir_all(&contract_path).await;
                     return Ok(CompilerResponse::Error(e));
                 };
-
-                if let Err(e) = Self::check_wasm(
-                    ctx,
-                    &contract_path,
-                    ValueWrapper(initial_value),
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "TemporalCompile",
-                        error = %e,
-                        contract_name = %contract_name,
-                        "WASM validation failed"
-                    );
-                    let _ = fs::remove_dir_all(&contract_path).await;
-                    return Ok(CompilerResponse::Error(e));
-                }
 
                 if let Err(e) = fs::remove_dir_all(&contract_path).await {
                     error!(
@@ -451,40 +778,30 @@ impl Handler<Self> for Compiler {
                     };
 
                 if contract_hash != self.contract {
-                    if let Err(e) =
-                        Self::compile_contract(&contract, &contract_path).await
+                    let (contract, contract_hash) = match self
+                        .compile_or_load(
+                            ctx,
+                            &contract,
+                            &contract_path,
+                            initial_value,
+                        )
+                        .await
                     {
-                        error!(
-                            msg_type = "Compile",
-                            error = %e,
-                            contract_name = %contract_name,
-                            path = %contract_path.display(),
-                            "Contract compilation failed"
-                        );
-                        return Ok(CompilerResponse::Error(e));
-                    };
-
-                    let contract = match Self::check_wasm(
-                        ctx,
-                        &contract_path,
-                        ValueWrapper(initial_value),
-                    )
-                    .await
-                    {
-                        Ok(contract) => contract,
+                        Ok(result) => result,
                         Err(e) => {
                             error!(
                                 msg_type = "Compile",
                                 error = %e,
                                 contract_name = %contract_name,
-                                "WASM validation failed"
+                                path = %contract_path.display(),
+                                "Contract compilation or validation failed"
                             );
                             return Ok(CompilerResponse::Error(e));
                         }
                     };
 
                     {
-                        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts").await else {
+                        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>("contracts").await else {
                             error!(
                                 msg_type = "Compile",
                                 "Contracts helper not found"

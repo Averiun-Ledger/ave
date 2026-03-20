@@ -14,6 +14,7 @@ use ave_actors::{
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
+use wasmtime::Module;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
@@ -62,7 +63,7 @@ pub async fn system(
         .add_helper("wasm_runtime", Arc::new(wasm_runtime))
         .await;
 
-    let contracts: HashMap<String, Vec<u8>> = HashMap::new();
+    let contracts: HashMap<String, Arc<Module>> = HashMap::new();
     system
         .add_helper("contracts", Arc::new(RwLock::new(contracts)))
         .await;

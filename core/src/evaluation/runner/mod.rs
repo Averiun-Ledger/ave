@@ -353,31 +353,22 @@ impl Runner {
 
         let Some(contracts) = ctx
             .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts")
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>("contracts")
             .await
         else {
             return Err(RunnerError::MissingHelper { name: "contracts" });
         };
 
-        let contract = {
+        let module = {
             let contracts = contracts.read().await;
-            let Some(contract) = contracts.get(contract_name) else {
+            let Some(module) = contracts.get(contract_name) else {
                 return Err(RunnerError::ContractNotFound {
                     name: contract_name.to_owned(),
                 });
             };
-            let result = contract.to_vec();
+            let result = module.clone();
             drop(contracts);
             result
-        };
-
-        let module = unsafe {
-            Module::deserialize(&wasm_runtime.engine, contract).map_err(
-                |e| RunnerError::WasmError {
-                    operation: "deserialize module",
-                    details: e.to_string(),
-                },
-            )?
         };
 
         let (context, state_ptr, init_state_ptr, event_ptr) =

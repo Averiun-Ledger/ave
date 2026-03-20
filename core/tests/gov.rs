@@ -290,6 +290,9 @@ async fn test_approve_invalid_gov_version() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_node2 = node_new_node2.api.clone();
@@ -362,8 +365,7 @@ async fn test_approve_invalid_gov_version() {
         "Abort approval, governance update is required by signer: local=2, request=1"
     );
 
-
-        new_node2
+    new_node2
         .auth_subject(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(&node3.public_key()).unwrap()),
@@ -419,7 +421,6 @@ async fn test_approve_invalid_gov_version() {
     .await
     .unwrap();
 
-    
     let _state = get_subject(&new_node2, governance_id.clone(), Some(3))
         .await
         .unwrap();

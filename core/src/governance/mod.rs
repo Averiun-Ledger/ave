@@ -8,7 +8,7 @@ use crate::{
     },
     db::Storable,
     evaluation::{
-        compiler::{Compiler, CompilerMessage},
+        compiler::{Compiler, CompilerMessage, CompilerResponse},
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
@@ -1336,8 +1336,8 @@ impl Governance {
                 initial_value,
             } = schema;
 
-            compiler
-                .tell(CompilerMessage::Compile {
+            let response = compiler
+                .ask(CompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: contract.clone(),
                     initial_value: initial_value.0.clone(),
@@ -1346,6 +1346,15 @@ impl Governance {
                         .join(format!("{}_{}", subject_id, id)),
                 })
                 .await?;
+
+            if let CompilerResponse::Error(error) = response {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Can not compile schema contract {}: {}",
+                        id, error
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1387,8 +1396,8 @@ impl Governance {
                 .get_child::<Compiler>(&format!("{}_compiler", id))
                 .await?;
 
-            actor
-                .tell(CompilerMessage::Compile {
+            let response = actor
+                .ask(CompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),
@@ -1397,6 +1406,15 @@ impl Governance {
                         .join(format!("{}_{}", subject_id, id)),
                 })
                 .await?;
+
+            if let CompilerResponse::Error(error) = response {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Can not refresh schema contract {}: {}",
+                        id, error
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -2094,41 +2112,6 @@ impl Actor for Governance {
             });
         };
 
-        if self.subject_metadata.active {
-            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
-                error!(
-                    error = %e,
-                    "Failed to build governance child actors"
-                );
-                return Err(e);
-            }
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: self.our_key.to_string(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let sink =
-                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-            ctx.system().run_sink(sink).await;
-
-            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-            ctx.system().run_sink(sink).await;
-        }
-
         if let Err(e) = ctx
             .create_child("role_register", RoleRegister::initial(()))
             .await
@@ -2171,6 +2154,41 @@ impl Actor for Governance {
                 "Failed to create witnesses_register child"
             );
             return Err(e);
+        }
+
+        if self.subject_metadata.active {
+            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
+                error!(
+                    error = %e,
+                    "Failed to build governance child actors"
+                );
+                return Err(e);
+            }
+
+            let sink_actor = match ctx
+                .create_child(
+                    "sink_data",
+                    SinkData {
+                        public_key: self.our_key.to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create sink_data child"
+                    );
+                    return Err(e);
+                }
+            };
+            let sink =
+                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
+            ctx.system().run_sink(sink).await;
+
+            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
+            ctx.system().run_sink(sink).await;
         }
 
         if self.service {

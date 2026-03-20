@@ -530,6 +530,9 @@ async fn test_basic_access() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -1147,6 +1150,9 @@ async fn test_basic_transfers() {
         true,
         false,
         Some(nodes[2].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_bob = node_new_bob.api;
@@ -1221,6 +1227,9 @@ async fn test_basic_transfers() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -1243,6 +1252,9 @@ async fn test_basic_transfers() {
         true,
         false,
         Some(nodes[3].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie = node_new_charlie.api;
@@ -1601,6 +1613,9 @@ async fn test_basic_explicit_witness() {
         true,
         false,
         Some(nodes[2].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_bob = node_new_bob.api;
@@ -2000,6 +2015,9 @@ async fn test_basic_implicit_witness() {
         true,
         false,
         Some(nodes[2].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_bob = node_new_bob.api;
@@ -2485,6 +2503,9 @@ async fn test_explicit_witness() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -2687,6 +2708,9 @@ async fn test_explicit_witness() {
         true,
         false,
         Some(node_new_alice.keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -3243,6 +3267,9 @@ async fn test_explicit_witness_2() {
         true,
         false,
         Some(nodes[3].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie = node_new_charlie.api.clone();
@@ -3690,6 +3717,9 @@ async fn test_explicit_witness_2() {
         true,
         false,
         Some(node_new_charlie.keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie_2 = node_new_charlie_2.api;
@@ -4054,6 +4084,9 @@ async fn test_range() {
         true,
         false,
         Some(nodes[2].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_bob = node_new_bob.api;
@@ -4745,6 +4778,9 @@ async fn test_multi_source() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -4928,6 +4964,9 @@ async fn test_multi_source() {
         true,
         false,
         Some(nodes[3].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie = node_new_charlie.api;
@@ -5061,6 +5100,9 @@ async fn test_multi_source() {
         true,
         false,
         Some(node_new_charlie.keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie = node_new_charlie.api;
@@ -5394,6 +5436,9 @@ async fn test_more_cases() {
         true,
         false,
         Some(nodes[4].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_dali = node_new_dali.api;
@@ -5564,6 +5609,9 @@ async fn test_more_cases() {
         true,
         false,
         Some(node_new_dali.keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_dali = node_new_dali.api;
@@ -5782,6 +5830,9 @@ async fn test_more_cases() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -6096,6 +6147,9 @@ async fn test_more_cases_2() {
         true,
         false,
         Some(nodes[3].keys.clone()),
+        None,
+        None,
+        None,
     )
     .await;
     let new_charlie = node_new_charlie.api.clone();

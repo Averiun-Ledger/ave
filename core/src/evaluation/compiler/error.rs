@@ -3,6 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
+    #[error("invalid contract path [{path}]: {details}")]
+    InvalidContractPath { path: String, details: String },
+
     #[error("base64 decode failed: {details}")]
     Base64DecodeFailed { details: String },
 
@@ -14,6 +17,9 @@ pub enum CompilerError {
 
     #[error("file read failed [{path}]: {details}")]
     FileReadFailed { path: String, details: String },
+
+    #[error("metadata parse failed [{path}]: {details}")]
+    MetadataParseFailed { path: String, details: String },
 
     #[error("cargo build failed: {details}")]
     CargoBuildFailed { details: String },
