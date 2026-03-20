@@ -8,7 +8,11 @@ use crate::{
     },
     db::Storable,
     evaluation::{
-        compiler::{Compiler, CompilerMessage, CompilerResponse},
+        compiler::{
+            CompilerResponse, ContractCompiler, ContractCompilerMessage,
+            ContractRegister, ContractRegisterMessage,
+            ContractRegisterResponse,
+        },
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
@@ -74,6 +78,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::{fs, sync::RwLock};
+use wasmtime::Module;
 
 pub mod data;
 pub mod error;
@@ -403,7 +409,12 @@ impl Subject for Governance {
                 let old_schemas_eval = old_gov
                     .schemas_name(ProtocolTypes::Evaluation, &self.our_key);
 
-                Self::down_compilers_schemas(ctx, &old_schemas_eval).await?;
+                Self::down_compilers_schemas(
+                    ctx,
+                    &old_schemas_eval,
+                    &self.subject_metadata.subject_id,
+                )
+                .await?;
 
                 let old_schemas_val = old_gov
                     .schemas_name(ProtocolTypes::Validation, &self.our_key);
@@ -741,7 +752,12 @@ impl Governance {
                 .filter(|x| !new_schemas_eval.contains_key(x))
                 .cloned()
                 .collect();
-            Self::down_compilers_schemas(ctx, &down).await?;
+            Self::down_compilers_schemas(
+                ctx,
+                &down,
+                &self.subject_metadata.subject_id,
+            )
+            .await?;
 
             // Subimos los compilers que soy nuevo evaluador
             let up = new_schemas_eval
@@ -910,6 +926,111 @@ impl Governance {
         Ok(())
     }
 
+    async fn sweep_contract_artifacts(
+        &self,
+        ctx: &ActorContext<Self>,
+        schemas: &BTreeMap<SchemaType, Schema>,
+    ) -> Result<(), ActorError> {
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+        else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let contract_register =
+            ctx.get_child::<ContractRegister>("contract_register").await?;
+
+        let prefix = format!("{}_", self.subject_metadata.subject_id);
+        let mut allowed: HashSet<String> = schemas
+            .keys()
+            .map(|schema_id| {
+                format!("{}_{}", self.subject_metadata.subject_id, schema_id)
+            })
+            .collect();
+
+        let registered: Vec<String> = match contract_register
+            .ask(ContractRegisterMessage::ListContracts)
+            .await?
+        {
+            ContractRegisterResponse::Contracts(contracts) => contracts,
+            _ => Vec::new(),
+        };
+
+        for contract_name in registered {
+            if contract_name.starts_with(&prefix)
+                && !allowed.contains(&contract_name)
+            {
+                contract_register
+                    .tell(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await?;
+                let mut contracts = contracts.write().await;
+                contracts.remove(&contract_name);
+            }
+        }
+
+        let contracts_dir = config.contracts_path.join("contracts");
+        if !contracts_dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not read contracts directory {}: {}",
+                    contracts_dir.display(),
+                    e
+                ),
+            }
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not iterate contracts directory {}: {}",
+                    contracts_dir.display(),
+                    e
+                ),
+            }
+        })? {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !file_name.starts_with(&prefix) {
+                continue;
+            }
+
+            let is_temp = file_name.starts_with(&format!(
+                "{}_temp_",
+                self.subject_metadata.subject_id
+            ));
+            if is_temp || !allowed.contains(&file_name) {
+                let path = entry.path();
+                let _ = fs::remove_dir_all(path).await;
+                if !is_temp {
+                    allowed.remove(&file_name);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn build_childs(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -938,6 +1059,7 @@ impl Governance {
             let schemas = self
                 .properties
                 .schemas(ProtocolTypes::Evaluation, &self.our_key);
+            self.sweep_contract_artifacts(ctx, &schemas).await?;
             Self::up_compilers_schemas(
                 ctx,
                 &schemas,
@@ -1326,10 +1448,14 @@ impl Governance {
         };
 
         for (id, schema) in schemas {
-            let actor_name = format!("{}_compiler", id);
+            let actor_name = format!("{}_contract_compiler", id);
 
             let compiler =
-                ctx.create_child(&actor_name, Compiler::new(*hash)).await?;
+                ctx.create_child(
+                    &actor_name,
+                    ContractCompiler::new(*hash),
+                )
+                .await?;
 
             let Schema {
                 contract,
@@ -1337,7 +1463,7 @@ impl Governance {
             } = schema;
 
             let response = compiler
-                .ask(CompilerMessage::Compile {
+                .ask(ContractCompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: contract.clone(),
                     initial_value: initial_value.0.clone(),
@@ -1363,13 +1489,59 @@ impl Governance {
     async fn down_compilers_schemas(
         ctx: &ActorContext<Self>,
         schemas: &BTreeSet<SchemaType>,
+        subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+        else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let contract_register =
+            ctx.get_child::<ContractRegister>("contract_register").await?;
+
         for schema_id in schemas.iter() {
             let actor = ctx
-                .get_child::<Compiler>(&format!("{}_compiler", schema_id))
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    schema_id
+                ))
                 .await?;
 
             actor.ask_stop().await?;
+
+            let contract_name = format!("{}_{}", subject_id, schema_id);
+            contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: contract_name.clone(),
+                })
+                .await?;
+
+            {
+                let mut contracts = contracts.write().await;
+                contracts.remove(&contract_name);
+            }
+
+            let contract_path = config
+                .contracts_path
+                .join("contracts")
+                .join(&contract_name);
+            let _ = fs::remove_dir_all(contract_path).await;
         }
 
         Ok(())
@@ -1393,11 +1565,14 @@ impl Governance {
 
         for (id, schema) in schemas {
             let actor = ctx
-                .get_child::<Compiler>(&format!("{}_compiler", id))
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    id
+                ))
                 .await?;
 
             let response = actor
-                .ask(CompilerMessage::Compile {
+                .ask(ContractCompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),
@@ -2152,6 +2327,17 @@ impl Actor for Governance {
             error!(
                 error = %e,
                 "Failed to create witnesses_register child"
+            );
+            return Err(e);
+        }
+
+        if let Err(e) = ctx
+            .create_child("contract_register", ContractRegister::initial(()))
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create contract_register child"
             );
             return Err(e);
         }

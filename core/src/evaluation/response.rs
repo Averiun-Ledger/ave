@@ -114,8 +114,9 @@ impl From<CompilerError> for EvaluatorError {
             | CompilerError::DirectoryCreationFailed { .. }
             | CompilerError::FileWriteFailed { .. }
             | CompilerError::FileReadFailed { .. }
-            | CompilerError::MetadataParseFailed { .. }
             | CompilerError::MissingHelper { .. }
+            | CompilerError::ContractRegisterFailed { .. }
+            | CompilerError::ToolchainFingerprintFailed { .. }
             | CompilerError::FuelLimitError { .. }
             | CompilerError::WasmPrecompileFailed { .. }
             | CompilerError::WasmDeserializationFailed { .. }

@@ -42,7 +42,7 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
     Evaluation, EvaluationMessage,
-    compiler::{Compiler, CompilerMessage},
+    compiler::{TempCompiler, TempCompilerMessage},
     request::EvaluationReq,
     response::EvaluationRes,
     runner::{Runner, RunnerMessage, RunnerResponse, types::RunnerResult},
@@ -101,7 +101,7 @@ impl EvalWorker {
         };
 
         let compiler = ctx
-            .create_child("compiler", Compiler::new(self.hash))
+            .create_child("temp_compiler", TempCompiler::new(self.hash))
             .await?;
 
         for id in ids {
@@ -110,7 +110,7 @@ impl EvalWorker {
             };
 
             let response = compiler
-                .ask(CompilerMessage::TemporalCompile {
+                .ask(TempCompilerMessage::Compile {
                     contract_name: format!("{}_{}", self.governance_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),

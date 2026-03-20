@@ -1,15 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash as StdHash, Hasher},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
 };
 
-use async_trait::async_trait;
-use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor, Response,
-};
+use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
     ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
@@ -19,8 +16,7 @@ use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{fs, process::Command, sync::RwLock};
-
-use tracing::{Span, debug, error, info_span};
+use tracing::debug;
 use wasmtime::{ExternType, Module, Store};
 
 use crate::model::common::contract::{
@@ -28,7 +24,18 @@ use crate::model::common::contract::{
     generate_linker,
 };
 
+pub mod contract_compiler;
+pub mod contract_register;
 pub mod error;
+pub mod temp_compiler;
+
+pub use contract_compiler::{ContractCompiler, ContractCompilerMessage};
+pub use contract_register::{
+    ContractRegister, ContractRegisterEvent, ContractRegisterMessage,
+    ContractRegisterResponse,
+};
+pub use temp_compiler::{TempCompiler, TempCompilerMessage};
+
 use error::*;
 
 #[derive(
@@ -39,31 +46,39 @@ pub struct ContractResult {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContractArtifactMetadata {
-    contract_hash: DigestIdentifier,
-    manifest_hash: DigestIdentifier,
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct ContractArtifactRecord {
+    pub contract_hash: DigestIdentifier,
+    pub manifest_hash: DigestIdentifier,
+    pub wasm_hash: DigestIdentifier,
+    pub cwasm_hash: DigestIdentifier,
+    pub engine_fingerprint: DigestIdentifier,
+    pub toolchain_fingerprint: DigestIdentifier,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Compiler {
-    contract: DigestIdentifier,
-    hash: HashAlgorithm,
+#[derive(Debug, Clone)]
+pub enum CompilerResponse {
+    Ok,
+    Error(CompilerError),
 }
 
-impl Compiler {
+impl Response for CompilerResponse {}
+
+struct CompilerSupport;
+
+impl CompilerSupport {
     const SHARED_TARGET_DIR: &'static str = "target";
     const VENDOR_DIR: &'static str = "vendor";
     const ARTIFACT_WASM: &'static str = "contract.wasm";
     const ARTIFACT_PRECOMPILED: &'static str = "contract.cwasm";
-    const ARTIFACT_METADATA: &'static str = "contract.json";
-
-    pub fn new(hash: HashAlgorithm) -> Self {
-        Self {
-            contract: DigestIdentifier::default(),
-            hash,
-        }
-    }
+    const LEGACY_ARTIFACT_METADATA: &'static str = "contract.json";
 
     fn compilation_toml() -> String {
         include_str!("contract_Cargo.toml").to_owned()
@@ -88,12 +103,12 @@ impl Compiler {
         contract_path.join(Self::ARTIFACT_WASM)
     }
 
-    fn artifact_metadata_path(contract_path: &Path) -> PathBuf {
-        contract_path.join(Self::ARTIFACT_METADATA)
-    }
-
     fn artifact_precompiled_path(contract_path: &Path) -> PathBuf {
         contract_path.join(Self::ARTIFACT_PRECOMPILED)
+    }
+
+    fn legacy_artifact_metadata_path(contract_path: &Path) -> PathBuf {
+        contract_path.join(Self::LEGACY_ARTIFACT_METADATA)
     }
 
     fn cargo_config_path(contract_path: &Path) -> PathBuf {
@@ -198,7 +213,7 @@ impl Compiler {
             })?;
         }
 
-        let toml: String = Self::compilation_toml();
+        let toml = Self::compilation_toml();
         let cargo = contract_path.join("Cargo.toml");
         fs::write(&cargo, toml).await.map_err(|e| {
             CompilerError::FileWriteFailed {
@@ -224,72 +239,6 @@ impl Compiler {
         fs::write(&cargo_config_path, cargo_config).await.map_err(|e| {
             CompilerError::FileWriteFailed {
                 path: cargo_config_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-
-        Ok(())
-    }
-
-    async fn load_artifact_metadata(
-        contract_path: &Path,
-    ) -> Result<Option<ContractArtifactMetadata>, CompilerError> {
-        let metadata_path = Self::artifact_metadata_path(contract_path);
-        if !metadata_path.exists() {
-            return Ok(None);
-        }
-
-        let metadata =
-            fs::read_to_string(&metadata_path).await.map_err(|e| {
-                CompilerError::FileReadFailed {
-                    path: metadata_path.to_string_lossy().to_string(),
-                    details: e.to_string(),
-                }
-            })?;
-
-        let metadata = serde_json::from_str::<ContractArtifactMetadata>(
-            &metadata,
-        )
-        .map_err(|e| CompilerError::MetadataParseFailed {
-            path: metadata_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })?;
-
-        Ok(Some(metadata))
-    }
-
-    async fn persist_artifact(
-        contract_path: &Path,
-        wasm_bytes: &[u8],
-        precompiled_bytes: &[u8],
-        metadata: &ContractArtifactMetadata,
-    ) -> Result<(), CompilerError> {
-        let artifact_path = Self::artifact_wasm_path(contract_path);
-        fs::write(&artifact_path, wasm_bytes).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
-                path: artifact_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-
-        let precompiled_path = Self::artifact_precompiled_path(contract_path);
-        fs::write(&precompiled_path, precompiled_bytes).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
-                path: precompiled_path.to_string_lossy().to_string(),
-                details: e.to_string(),
-            }
-        })?;
-
-        let metadata_path = Self::artifact_metadata_path(contract_path);
-        let metadata_json = serde_json::to_vec(metadata).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "contract artifact metadata",
-                details: e.to_string(),
-            }
-        })?;
-        fs::write(&metadata_path, metadata_json).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
-                path: metadata_path.to_string_lossy().to_string(),
                 details: e.to_string(),
             }
         })?;
@@ -329,6 +278,34 @@ impl Compiler {
         })
     }
 
+    async fn persist_artifact(
+        contract_path: &Path,
+        wasm_bytes: &[u8],
+        precompiled_bytes: &[u8],
+    ) -> Result<(), CompilerError> {
+        let artifact_path = Self::artifact_wasm_path(contract_path);
+        fs::write(&artifact_path, wasm_bytes).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: artifact_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let precompiled_path = Self::artifact_precompiled_path(contract_path);
+        fs::write(&precompiled_path, precompiled_bytes).await.map_err(|e| {
+            CompilerError::FileWriteFailed {
+                path: precompiled_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        let legacy_metadata_path =
+            Self::legacy_artifact_metadata_path(contract_path);
+        let _ = fs::remove_file(&legacy_metadata_path).await;
+
+        Ok(())
+    }
+
     fn deserialize_precompiled(
         wasm_runtime: &WasmRuntime,
         precompiled_bytes: &[u8],
@@ -358,20 +335,12 @@ impl Compiler {
         Ok((precompiled_bytes, module))
     }
 
-    async fn validate_module(
-        ctx: &ActorContext<Self>,
+    async fn validate_module<A: Actor>(
+        ctx: &ActorContext<A>,
         module: &Module,
         state: ValueWrapper,
     ) -> Result<(), CompilerError> {
-        let Some(wasm_runtime) = ctx
-            .system()
-            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
-            .await
-        else {
-            return Err(CompilerError::MissingHelper {
-                name: "wasm_runtime",
-            });
-        };
+        let wasm_runtime = Self::wasm_runtime(ctx).await?;
 
         let imports = module.imports();
         let mut pending_sdk = Self::get_sdk_functions_identifier();
@@ -453,15 +422,145 @@ impl Compiler {
         Ok(())
     }
 
-    async fn compile_or_load(
-        &self,
-        ctx: &ActorContext<Self>,
+    async fn wasm_runtime<A: Actor>(
+        ctx: &ActorContext<A>,
+    ) -> Result<Arc<WasmRuntime>, CompilerError> {
+        ctx.system()
+            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
+            .await
+            .ok_or(CompilerError::MissingHelper {
+                name: "wasm_runtime",
+            })
+    }
+
+    async fn contracts_helper<A: Actor>(
+        ctx: &ActorContext<A>,
+    ) -> Result<Arc<RwLock<HashMap<String, Arc<Module>>>>, ActorError> {
+        ctx.system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+            .ok_or_else(|| ActorError::Helper {
+                name: "contracts".to_owned(),
+                reason: "Not found".to_owned(),
+            })
+    }
+
+    fn build_contract_record(
+        hash: HashAlgorithm,
+        contract_hash: DigestIdentifier,
+        manifest_hash: DigestIdentifier,
+        wasm_bytes: &[u8],
+        precompiled_bytes: &[u8],
+        engine_fingerprint: DigestIdentifier,
+        toolchain_fingerprint: DigestIdentifier,
+    ) -> Result<ContractArtifactRecord, CompilerError> {
+        let wasm_hash = Self::hash_bytes(hash, wasm_bytes, "wasm artifact")?;
+        let cwasm_hash =
+            Self::hash_bytes(hash, precompiled_bytes, "cwasm artifact")?;
+
+        Ok(ContractArtifactRecord {
+            contract_hash,
+            manifest_hash,
+            wasm_hash,
+            cwasm_hash,
+            engine_fingerprint,
+            toolchain_fingerprint,
+        })
+    }
+
+    fn hash_bytes(
+        hash: HashAlgorithm,
+        bytes: &[u8],
+        context: &'static str,
+    ) -> Result<DigestIdentifier, CompilerError> {
+        hash_borsh(&*hash.hasher(), &bytes.to_vec()).map_err(|e| {
+            CompilerError::SerializationError {
+                context,
+                details: e.to_string(),
+            }
+        })
+    }
+
+    fn engine_fingerprint(
+        hash: HashAlgorithm,
+        wasm_runtime: &WasmRuntime,
+    ) -> Result<DigestIdentifier, CompilerError> {
+        let mut hasher = DefaultHasher::new();
+        wasm_runtime
+            .engine
+            .precompile_compatibility_hash()
+            .hash(&mut hasher);
+        hash_borsh(&*hash.hasher(), &hasher.finish()).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "engine fingerprint",
+                details: e.to_string(),
+            }
+        })
+    }
+
+    async fn toolchain_fingerprint(
+        hash: HashAlgorithm,
+    ) -> Result<DigestIdentifier, CompilerError> {
+        let output = Command::new("rustc")
+            .arg("--version")
+            .arg("--verbose")
+            .output()
+            .await
+            .map_err(|e| CompilerError::ToolchainFingerprintFailed {
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(CompilerError::ToolchainFingerprintFailed {
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let fingerprint_input =
+            String::from_utf8_lossy(&output.stdout).to_string();
+        hash_borsh(&*hash.hasher(), &fingerprint_input).map_err(|e| {
+            CompilerError::SerializationError {
+                context: "toolchain fingerprint",
+                details: e.to_string(),
+            }
+        })
+    }
+
+    async fn contract_environment(
+        hash: HashAlgorithm,
+        wasm_runtime: &Arc<WasmRuntime>,
+    ) -> Result<(DigestIdentifier, DigestIdentifier), CompilerError> {
+        let engine_fingerprint = Self::engine_fingerprint(hash, wasm_runtime)?;
+        let toolchain_fingerprint =
+            Self::toolchain_fingerprint(hash).await?;
+        Ok((engine_fingerprint, toolchain_fingerprint))
+    }
+
+    fn metadata_matches(
+        persisted: &ContractArtifactRecord,
+        expected_contract_hash: &DigestIdentifier,
+        expected_manifest_hash: &DigestIdentifier,
+        expected_engine_fingerprint: &DigestIdentifier,
+        expected_toolchain_fingerprint: &DigestIdentifier,
+    ) -> bool {
+        persisted.contract_hash == *expected_contract_hash
+            && persisted.manifest_hash == *expected_manifest_hash
+            && persisted.engine_fingerprint == *expected_engine_fingerprint
+            && persisted.toolchain_fingerprint
+                == *expected_toolchain_fingerprint
+    }
+
+    async fn compile_fresh<A: Actor>(
+        hash: HashAlgorithm,
+        ctx: &ActorContext<A>,
         contract: &str,
         contract_path: &Path,
         initial_value: Value,
-    ) -> Result<(Arc<Module>, DigestIdentifier), CompilerError> {
+    ) -> Result<(Arc<Module>, ContractArtifactRecord), CompilerError> {
         let contract_hash =
-            hash_borsh(&*self.hash.hasher(), &contract).map_err(|e| {
+            hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
                 CompilerError::SerializationError {
                     context: "contract hash",
                     details: e.to_string(),
@@ -469,7 +568,7 @@ impl Compiler {
             })?;
         let manifest = Self::compilation_toml();
         let manifest_hash =
-            hash_borsh(&*self.hash.hasher(), &manifest).map_err(|e| {
+            hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
                 CompilerError::SerializationError {
                     context: "contract manifest hash",
                     details: e.to_string(),
@@ -478,127 +577,9 @@ impl Compiler {
 
         Self::prepare_contract_project(contract, contract_path).await?;
 
-        let Some(wasm_runtime) = ctx
-            .system()
-            .get_helper::<Arc<WasmRuntime>>("wasm_runtime")
-            .await
-        else {
-            return Err(CompilerError::MissingHelper {
-                name: "wasm_runtime",
-            });
-        };
-
-        let expected_metadata = ContractArtifactMetadata {
-            contract_hash: contract_hash.clone(),
-            manifest_hash,
-        };
-
-        if let Some(current_metadata) =
-            Self::load_artifact_metadata(contract_path).await?
-            && current_metadata.contract_hash == expected_metadata.contract_hash
-            && current_metadata.manifest_hash == expected_metadata.manifest_hash
-        {
-            match Self::load_artifact_precompiled(contract_path).await {
-                Ok(precompiled_bytes) => {
-                    match Self::deserialize_precompiled(
-                        &wasm_runtime,
-                        &precompiled_bytes,
-                    ) {
-                        Ok(module) => {
-                            match Self::validate_module(
-                                ctx,
-                                &module,
-                                ValueWrapper(initial_value.clone()),
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    return Ok((
-                                        Arc::new(module),
-                                        contract_hash,
-                                    ));
-                                }
-                                Err(error) => {
-                                    debug!(
-                                        error = %error,
-                                        path = %contract_path.display(),
-                                        "Persisted precompiled contract is invalid, retrying from wasm artifact"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            debug!(
-                                error = %error,
-                                path = %contract_path.display(),
-                                "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    debug!(
-                        error = %error,
-                        path = %contract_path.display(),
-                        "Persisted precompiled artifact can not be read, retrying from wasm artifact"
-                    );
-                }
-            }
-
-            match Self::load_artifact_wasm(contract_path).await {
-                Ok(wasm_bytes) => {
-                    match Self::precompile_module(
-                        &wasm_runtime,
-                        &wasm_bytes,
-                    ) {
-                        Ok((precompiled_bytes, module)) => {
-                            match Self::validate_module(
-                                ctx,
-                                &module,
-                                ValueWrapper(initial_value.clone()),
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    Self::persist_artifact(
-                                        contract_path,
-                                        &wasm_bytes,
-                                        &precompiled_bytes,
-                                        &expected_metadata,
-                                    )
-                                    .await?;
-                                    return Ok((
-                                        Arc::new(module),
-                                        contract_hash,
-                                    ));
-                                }
-                                Err(error) => {
-                                    debug!(
-                                        error = %error,
-                                        path = %contract_path.display(),
-                                        "Persisted wasm artifact is invalid, recompiling"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            debug!(
-                                error = %error,
-                                path = %contract_path.display(),
-                                "Persisted wasm artifact can not be precompiled, recompiling"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    debug!(
-                        error = %error,
-                        path = %contract_path.display(),
-                        "Persisted contract artifact can not be read, recompiling"
-                    );
-                }
-            }
-        }
+        let wasm_runtime = Self::wasm_runtime(ctx).await?;
+        let (engine_fingerprint, toolchain_fingerprint) =
+            Self::contract_environment(hash, &wasm_runtime).await?;
 
         let contracts_root = Self::contracts_root(contract_path)?;
         Self::build_contract(
@@ -612,15 +593,264 @@ impl Compiler {
             Self::precompile_module(&wasm_runtime, &wasm_bytes)?;
         Self::validate_module(ctx, &module, ValueWrapper(initial_value))
             .await?;
-        Self::persist_artifact(
-            contract_path,
+        Self::persist_artifact(contract_path, &wasm_bytes, &precompiled_bytes)
+            .await?;
+
+        let metadata = Self::build_contract_record(
+            hash,
+            contract_hash,
+            manifest_hash,
             &wasm_bytes,
             &precompiled_bytes,
-            &expected_metadata,
+            engine_fingerprint,
+            toolchain_fingerprint,
+        )?;
+
+        Ok((Arc::new(module), metadata))
+    }
+
+    async fn compile_or_load_registered<A: Actor>(
+        hash: HashAlgorithm,
+        ctx: &ActorContext<A>,
+        contract_name: &str,
+        contract: &str,
+        contract_path: &Path,
+        initial_value: Value,
+    ) -> Result<(Arc<Module>, ContractArtifactRecord), CompilerError> {
+        let contract_hash =
+            hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract hash",
+                    details: e.to_string(),
+                }
+            })?;
+        let manifest = Self::compilation_toml();
+        let manifest_hash =
+            hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "contract manifest hash",
+                    details: e.to_string(),
+                }
+            })?;
+
+        Self::prepare_contract_project(contract, contract_path).await?;
+
+        let wasm_runtime = Self::wasm_runtime(ctx).await?;
+        let (engine_fingerprint, toolchain_fingerprint) =
+            Self::contract_environment(hash, &wasm_runtime).await?;
+
+        let parent_path = ctx.path().parent();
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", parent_path));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .map_err(|e| CompilerError::ContractRegisterFailed {
+                details: e.to_string(),
+            })?;
+
+        let persisted = match register
+            .ask(ContractRegisterMessage::GetMetadata {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Metadata(metadata)) => metadata,
+            Ok(ContractRegisterResponse::Contracts(_)) => None,
+            Ok(ContractRegisterResponse::Ok) => None,
+            Err(e) => {
+                return Err(CompilerError::ContractRegisterFailed {
+                    details: e.to_string(),
+                });
+            }
+        };
+
+        if let Some(persisted) = persisted
+            && Self::metadata_matches(
+                &persisted,
+                &contract_hash,
+                &manifest_hash,
+                &engine_fingerprint,
+                &toolchain_fingerprint,
+            )
+        {
+            match Self::load_artifact_precompiled(contract_path).await {
+                Ok(precompiled_bytes) => {
+                    let precompiled_hash = Self::hash_bytes(
+                        hash,
+                        &precompiled_bytes,
+                        "persisted cwasm artifact",
+                    )?;
+                    if precompiled_hash == persisted.cwasm_hash {
+                        match Self::deserialize_precompiled(
+                            &wasm_runtime,
+                            &precompiled_bytes,
+                        ) {
+                            Ok(module) => {
+                                match Self::validate_module(
+                                    ctx,
+                                    &module,
+                                    ValueWrapper(initial_value.clone()),
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        return Ok((
+                                            Arc::new(module),
+                                            persisted,
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        debug!(
+                                            error = %error,
+                                            path = %contract_path.display(),
+                                            "Persisted precompiled contract is invalid, retrying from wasm artifact"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                debug!(
+                                    error = %error,
+                                    path = %contract_path.display(),
+                                    "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
+                                );
+                            }
+                        }
+                    } else {
+                        debug!(
+                            expected = %persisted.cwasm_hash,
+                            actual = %precompiled_hash,
+                            path = %contract_path.display(),
+                            "Persisted precompiled artifact hash mismatch, retrying from wasm artifact"
+                        );
+                    }
+                }
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        path = %contract_path.display(),
+                        "Persisted precompiled artifact can not be read, retrying from wasm artifact"
+                    );
+                }
+            }
+
+            match Self::load_artifact_wasm(contract_path).await {
+                Ok(wasm_bytes) => {
+                    let wasm_hash = Self::hash_bytes(
+                        hash,
+                        &wasm_bytes,
+                        "persisted wasm artifact",
+                    )?;
+                    if wasm_hash == persisted.wasm_hash {
+                        match Self::precompile_module(
+                            &wasm_runtime,
+                            &wasm_bytes,
+                        ) {
+                            Ok((precompiled_bytes, module)) => {
+                                match Self::validate_module(
+                                    ctx,
+                                    &module,
+                                    ValueWrapper(initial_value.clone()),
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        Self::persist_artifact(
+                                            contract_path,
+                                            &wasm_bytes,
+                                            &precompiled_bytes,
+                                        )
+                                        .await?;
+                                        let refreshed_record =
+                                            Self::build_contract_record(
+                                                hash,
+                                                contract_hash.clone(),
+                                                manifest_hash.clone(),
+                                                &wasm_bytes,
+                                                &precompiled_bytes,
+                                                engine_fingerprint.clone(),
+                                                toolchain_fingerprint.clone(),
+                                            )?;
+
+                                        register
+                                            .tell(
+                                                ContractRegisterMessage::SetMetadata {
+                                                    contract_name: contract_name
+                                                        .to_owned(),
+                                                    metadata: refreshed_record
+                                                        .clone(),
+                                                },
+                                            )
+                                            .await
+                                            .map_err(|e| {
+                                                CompilerError::ContractRegisterFailed {
+                                                    details: e.to_string(),
+                                                }
+                                            })?;
+
+                                        return Ok((
+                                            Arc::new(module),
+                                            refreshed_record,
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        debug!(
+                                            error = %error,
+                                            path = %contract_path.display(),
+                                            "Persisted wasm artifact is invalid, recompiling"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                debug!(
+                                    error = %error,
+                                    path = %contract_path.display(),
+                                    "Persisted wasm artifact can not be precompiled, recompiling"
+                                );
+                            }
+                        }
+                    } else {
+                        debug!(
+                            expected = %persisted.wasm_hash,
+                            actual = %wasm_hash,
+                            path = %contract_path.display(),
+                            "Persisted wasm artifact hash mismatch, recompiling"
+                        );
+                    }
+                }
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        path = %contract_path.display(),
+                        "Persisted contract artifact can not be read, recompiling"
+                    );
+                }
+            }
+        }
+
+        let (module, metadata) = Self::compile_fresh(
+            hash,
+            ctx,
+            contract,
+            contract_path,
+            initial_value,
         )
         .await?;
 
-        Ok((Arc::new(module), contract_hash))
+        register
+            .tell(ContractRegisterMessage::SetMetadata {
+                contract_name: contract_name.to_owned(),
+                metadata: metadata.clone(),
+            })
+            .await
+            .map_err(|e| CompilerError::ContractRegisterFailed {
+                details: e.to_string(),
+            })?;
+
+        Ok((module, metadata))
     }
 
     fn check_result(
@@ -662,175 +892,5 @@ impl Compiler {
         ["alloc", "write_byte", "pointer_len", "read_byte"]
             .into_iter()
             .collect()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum CompilerMessage {
-    TemporalCompile {
-        contract: String,
-        contract_name: String,
-        initial_value: Value,
-        contract_path: PathBuf,
-    },
-    Compile {
-        contract: String,
-        contract_name: String,
-        initial_value: Value,
-        contract_path: PathBuf,
-    },
-}
-
-impl Message for CompilerMessage {}
-
-#[derive(Debug, Clone)]
-pub enum CompilerResponse {
-    Ok,
-    Error(CompilerError),
-}
-
-impl Response for CompilerResponse {}
-
-impl NotPersistentActor for Compiler {}
-
-#[async_trait]
-impl Actor for Compiler {
-    type Event = ();
-    type Message = CompilerMessage;
-    type Response = CompilerResponse;
-
-    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
-        parent_span.map_or_else(
-            || info_span!("Compiler", id),
-            |parent_span| info_span!(parent: parent_span, "Compiler", id),
-        )
-    }
-}
-
-#[async_trait]
-impl Handler<Self> for Compiler {
-    async fn handle_message(
-        &mut self,
-        _sender: ActorPath,
-        msg: CompilerMessage,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<CompilerResponse, ActorError> {
-        match msg {
-            CompilerMessage::TemporalCompile {
-                contract,
-                contract_name,
-                contract_path,
-                initial_value,
-            } => {
-                if let Err(e) = self
-                    .compile_or_load(
-                        ctx,
-                        &contract,
-                        &contract_path,
-                        initial_value,
-                    )
-                    .await
-                {
-                    error!(
-                        msg_type = "TemporalCompile",
-                        error = %e,
-                        contract_name = %contract_name,
-                        path = %contract_path.display(),
-                        "Contract compilation or validation failed"
-                    );
-                    let _ = fs::remove_dir_all(&contract_path).await;
-                    return Ok(CompilerResponse::Error(e));
-                };
-
-                if let Err(e) = fs::remove_dir_all(&contract_path).await {
-                    error!(
-                        msg_type = "TemporalCompile",
-                        error = %e,
-                        path = %contract_path.display(),
-                        "Failed to remove temporal contract directory"
-                    );
-                }
-
-                Ok(CompilerResponse::Ok)
-            }
-            CompilerMessage::Compile {
-                contract,
-                contract_name,
-                contract_path,
-                initial_value,
-            } => {
-                let contract_hash =
-                    match hash_borsh(&*self.hash.hasher(), &contract) {
-                        Ok(hash) => hash,
-                        Err(e) => {
-                            error!(
-                                msg_type = "Compile",
-                                error = %e,
-                                "Failed to hash contract"
-                            );
-                            return Err(ActorError::FunctionalCritical {
-                                description: format!(
-                                    "Can not hash contract: {}",
-                                    e
-                                ),
-                            });
-                        }
-                    };
-
-                if contract_hash != self.contract {
-                    let (contract, contract_hash) = match self
-                        .compile_or_load(
-                            ctx,
-                            &contract,
-                            &contract_path,
-                            initial_value,
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!(
-                                msg_type = "Compile",
-                                error = %e,
-                                contract_name = %contract_name,
-                                path = %contract_path.display(),
-                                "Contract compilation or validation failed"
-                            );
-                            return Ok(CompilerResponse::Error(e));
-                        }
-                    };
-
-                    {
-                        let Some(contracts) = ctx.system().get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>("contracts").await else {
-                            error!(
-                                msg_type = "Compile",
-                                "Contracts helper not found"
-                            );
-                            return Err(ActorError::Helper { name: "contracts".to_string(), reason: "Not found".to_string() });
-                        };
-
-                        let mut contracts = contracts.write().await;
-                        contracts.insert(contract_name.clone(), contract);
-                    }
-
-                    self.contract = contract_hash.clone();
-
-                    debug!(
-                        msg_type = "Compile",
-                        contract_name = %contract_name,
-                        contract_hash = %contract_hash,
-                        "Contract compiled and validated successfully"
-                    );
-                } else {
-                    debug!(
-                        msg_type = "Compile",
-                        contract_name = %contract_name,
-                        "Contract already compiled, skipping"
-                    );
-                }
-
-                Ok(CompilerResponse::Ok)
-            }
-        }
     }
 }

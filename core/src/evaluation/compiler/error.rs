@@ -18,9 +18,6 @@ pub enum CompilerError {
     #[error("file read failed [{path}]: {details}")]
     FileReadFailed { path: String, details: String },
 
-    #[error("metadata parse failed [{path}]: {details}")]
-    MetadataParseFailed { path: String, details: String },
-
     #[error("cargo build failed: {details}")]
     CargoBuildFailed { details: String },
 
@@ -29,6 +26,12 @@ pub enum CompilerError {
 
     #[error("missing helper: {name}")]
     MissingHelper { name: &'static str },
+
+    #[error("contract register failed: {details}")]
+    ContractRegisterFailed { details: String },
+
+    #[error("toolchain fingerprint failed: {details}")]
+    ToolchainFingerprintFailed { details: String },
 
     #[error("wasm precompile failed: {details}")]
     WasmPrecompileFailed { details: String },
