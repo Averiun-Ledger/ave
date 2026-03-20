@@ -17,8 +17,8 @@ use ave_common::identity::{DigestIdentifier, PublicKey};
 
 use crate::governance::model::Quorum;
 use crate::governance::role_register::{
-    RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
-    SearchRole,
+    CurrentValidationRoles, RoleDataRegister, RoleRegister,
+    RoleRegisterMessage, RoleRegisterResponse, SearchRole,
 };
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
@@ -105,6 +105,34 @@ where
         _ => Err(ActorError::UnexpectedResponse {
             path,
             expected: "RolesRegisterResponse::Validation".to_string(),
+        }),
+    }
+}
+
+pub async fn get_current_validation_roles_register<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    schema_id: SchemaType,
+) -> Result<CurrentValidationRoles, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/role_register",
+        governance_id
+    ));
+    let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
+
+    let response = actor
+        .ask(RoleRegisterMessage::GetCurrentValidationRoles { schema_id })
+        .await?;
+
+    match response {
+        RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
+        _ => Err(ActorError::UnexpectedResponse {
+            path,
+            expected:
+                "RolesRegisterResponse::CurrentValidationRoles".to_string(),
         }),
     }
 }

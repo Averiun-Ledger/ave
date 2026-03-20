@@ -5,6 +5,7 @@ RUNNER="${RUNNER:-cargo}"
 BASE_FLAGS="${BASE_FLAGS:---all-targets}"
 INSTALL_FLAGS="${INSTALL_FLAGS:---locked}"
 LOG_DIR="${LOG_DIR:-target/test-logs}"
+COMPILE_ONLY=0
 
 # OPTIMIZATION: Run tests in parallel
 PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
@@ -262,7 +263,11 @@ run_groups() {
   local total_groups=${#GROUP_KEYS[@]}
   local current_group=0
 
-  print_header "RUNNING TESTS"
+  if [[ "${COMPILE_ONLY}" -eq 1 ]]; then
+    print_header "RUNNING PRE-COMPILATION"
+  else
+    print_header "RUNNING TESTS"
+  fi
 
   for ((i=0; i<${#GROUP_KEYS[@]}; i++)); do
     local key="${GROUP_KEYS[$i]}"
@@ -289,6 +294,10 @@ run_groups() {
     pre_cmd+=(--no-run)
 
     run_step "${pre_label}" "${pre_sub}" "${pre_cmd[@]}"
+
+    if [[ "${COMPILE_ONLY}" -eq 1 ]]; then
+      continue
+    fi
 
     # ===== Individual execution per package =====
     local pkg_count=0
@@ -427,6 +436,19 @@ print_summary() {
 }
 
 main() {
+  while getopts ":c" opt; do
+    case "${opt}" in
+      c)
+        COMPILE_ONLY=1
+        ;;
+      \?)
+        echo "${RED}✖ Error: unknown option -${OPTARG}${RESET}" >&2
+        exit 1
+        ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
   print_header "AVE TEST SUITE"
   ensure_tools
   build_groups "$@"

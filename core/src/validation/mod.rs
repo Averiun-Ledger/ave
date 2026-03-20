@@ -4,16 +4,17 @@ use crate::{
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
     model::{
-        common::{
-            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
-        },
+        common::{abort_req, emit_fail, send_reboot_to_req, take_random_signers},
         event::{ValidationData, ValidationMetadata},
     },
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         response::ResponseSummary,
-        worker::{ValiWorker, ValiWorkerMessage},
+        worker::{
+            CurrentRequestRoles, CurrentWorkerRoles, ValiWorker,
+            ValiWorkerMessage,
+        },
     },
 };
 use ave_actors::{
@@ -73,6 +74,8 @@ pub struct Validation {
     pending_validators: HashSet<PublicKey>,
 
     init_state: Option<ValueWrapper>,
+
+    current_request_roles: CurrentRequestRoles,
 }
 
 impl Validation {
@@ -80,6 +83,7 @@ impl Validation {
         our_key: Arc<PublicKey>,
         request: Signed<ValidationReq>,
         init_state: Option<ValueWrapper>,
+        current_request_roles: CurrentRequestRoles,
         quorum: Quorum,
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
@@ -100,6 +104,7 @@ impl Validation {
             reboot: false,
             current_validators: HashSet::new(),
             pending_validators: HashSet::new(),
+            current_request_roles,
         }
     }
 
@@ -147,6 +152,13 @@ impl Validation {
                         sn: self.request.content().get_sn(),
                         hash: self.hash,
                         network: self.network.clone(),
+                        current_roles: CurrentWorkerRoles {
+                            evaluation: self
+                                .current_request_roles
+                                .evaluation
+                                .clone(),
+                            approval: self.current_request_roles.approval.clone(),
+                        },
                         stop:true
                     },
                 )

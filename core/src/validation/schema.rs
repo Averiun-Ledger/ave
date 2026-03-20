@@ -16,10 +16,11 @@ use network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
+    governance::role_register::CurrentSchemaRoles,
     Signed,
     helpers::network::service::NetworkSender,
     model::common::{emit_fail, node::try_to_update},
-    validation::worker::{ValiWorker, ValiWorkerMessage},
+    validation::worker::{CurrentWorkerRoles, ValiWorker, ValiWorkerMessage},
 };
 
 use super::request::ValidationReq;
@@ -33,6 +34,7 @@ pub struct ValidationSchema {
     pub schema_id: SchemaType,
     pub creators: BTreeMap<PublicKey, BTreeSet<Namespace>>,
     pub init_state: ValueWrapper,
+    pub current_roles: CurrentSchemaRoles,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
 }
@@ -49,6 +51,7 @@ pub enum ValidationSchemaMessage {
         sn: u64,
         gov_version: u64,
         init_state: ValueWrapper,
+        current_roles: CurrentSchemaRoles,
     },
 }
 
@@ -193,6 +196,22 @@ impl Handler<Self> for ValidationSchema {
                             governance_id: self.governance_id.clone(),
                             gov_version: self.gov_version,
                             sn: self.sn,
+                            current_roles: CurrentWorkerRoles {
+                                evaluation: crate::governance::role_register::RoleDataRegister {
+                                    workers: self
+                                        .current_roles
+                                        .evaluation
+                                        .iter()
+                                        .filter(|role| role.namespace.is_ancestor_or_equal_of(&validation_req.content().get_namespace().unwrap_or_default()))
+                                        .map(|role| role.key.clone())
+                                        .collect(),
+                                    quorum: self.current_roles.evaluation_quorum.clone(),
+                                },
+                                approval: crate::governance::role_register::RoleDataRegister {
+                                    workers: std::collections::HashSet::new(),
+                                    quorum: crate::governance::model::Quorum::default(),
+                                },
+                            },
                             hash: self.hash,
                             network: self.network.clone(),
                             stop: true,
@@ -247,11 +266,13 @@ impl Handler<Self> for ValidationSchema {
                 sn,
                 gov_version,
                 init_state,
+                current_roles,
             } => {
                 self.creators = creators;
                 self.gov_version = gov_version;
                 self.sn = sn;
                 self.init_state = init_state;
+                self.current_roles = current_roles;
 
                 debug!(
                     msg_type = "Update",

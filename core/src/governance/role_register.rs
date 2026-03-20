@@ -96,14 +96,38 @@ pub struct UpdateQuorum {
     pub quorum: Quorum,
 }
 
-#[derive(Debug, Clone)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 pub struct RoleDataRegister {
     pub workers: HashSet<PublicKey>,
     pub quorum: Quorum,
 }
 
 #[derive(Debug, Clone)]
+pub struct CurrentSchemaRoles {
+    pub evaluation: HashSet<RoleData>,
+    pub evaluation_quorum: Quorum,
+    pub validation: HashSet<RoleData>,
+    pub validation_quorum: Quorum,
+}
+
+#[derive(Debug, Clone)]
+pub struct CurrentValidationRoles {
+    pub approval: RoleDataRegister,
+    pub schema: CurrentSchemaRoles,
+}
+
+#[derive(Debug, Clone)]
 pub enum RoleRegisterMessage {
+    GetCurrentValidationRoles {
+        schema_id: SchemaType,
+    },
     SearchActualRoles {
         version: u64,
         evaluation: SearchRole,
@@ -158,6 +182,7 @@ impl Message for RoleRegisterMessage {
 
 #[derive(Debug, Clone)]
 pub enum RoleRegisterResponse {
+    CurrentValidationRoles(CurrentValidationRoles),
     ActualRoles {
         evaluation: RoleDataRegister,
         approval: Option<RoleDataRegister>,
@@ -250,6 +275,90 @@ impl Handler<Self> for RoleRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<RoleRegisterResponse, ActorError> {
         match msg {
+            RoleRegisterMessage::GetCurrentValidationRoles { schema_id } => {
+                let approval = RoleDataRegister {
+                    workers: self.approvers.clone(),
+                    quorum: self.appr_quorum.clone(),
+                };
+
+                let Some(evaluation_quorum) =
+                    self.eval_quorum.get(&schema_id).cloned()
+                else {
+                    return Ok(RoleRegisterResponse::MissingData);
+                };
+
+                let Some(validation_quorum) = self
+                    .vali_quorum
+                    .get(&schema_id)
+                    .and_then(|quorum| quorum.get_prev_or_equal(self.version))
+                else {
+                    return Ok(RoleRegisterResponse::MissingData);
+                };
+
+                let mut evaluation = HashSet::new();
+                if !schema_id.is_gov()
+                    && let Some(evaluators) =
+                        self.evaluators.get(&SchemaType::TrackerSchemas)
+                {
+                    for (key, namespace) in evaluators {
+                        evaluation.insert(RoleData {
+                            key: key.clone(),
+                            namespace: namespace.clone(),
+                        });
+                    }
+                }
+
+                if let Some(evaluators) = self.evaluators.get(&schema_id) {
+                    for (key, namespace) in evaluators {
+                        evaluation.insert(RoleData {
+                            key: key.clone(),
+                            namespace: namespace.clone(),
+                        });
+                    }
+                }
+
+                let mut validation = HashSet::new();
+                if !schema_id.is_gov()
+                    && let Some(validators) =
+                        self.validators.get(&SchemaType::TrackerSchemas)
+                {
+                    for ((key, namespace), (_, last)) in validators {
+                        if let Some(last) = last
+                            && *last <= self.version
+                        {
+                            validation.insert(RoleData {
+                                key: key.clone(),
+                                namespace: namespace.clone(),
+                            });
+                        }
+                    }
+                }
+
+                if let Some(validators) = self.validators.get(&schema_id) {
+                    for ((key, namespace), (_, last)) in validators {
+                        if let Some(last) = last
+                            && *last <= self.version
+                        {
+                            validation.insert(RoleData {
+                                key: key.clone(),
+                                namespace: namespace.clone(),
+                            });
+                        }
+                    }
+                }
+
+                Ok(RoleRegisterResponse::CurrentValidationRoles(
+                    CurrentValidationRoles {
+                        approval,
+                        schema: CurrentSchemaRoles {
+                            evaluation,
+                            evaluation_quorum,
+                            validation,
+                            validation_quorum,
+                        },
+                    },
+                ))
+            }
             RoleRegisterMessage::SearchActualRoles {
                 version,
                 evaluation,

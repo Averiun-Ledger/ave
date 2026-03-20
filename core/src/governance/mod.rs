@@ -19,7 +19,10 @@ use crate::{
             CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
             Schema, WitnessesData,
         },
-        role_register::{RoleRegister, RoleRegisterMessage},
+        role_register::{
+            CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
+            RoleRegisterResponse,
+        },
         sn_register::SnRegister,
         subject_register::{SubjectRegister, SubjectRegisterMessage},
         tracker_sync::{TrackerSync, TrackerSyncConfig},
@@ -495,6 +498,30 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn current_validation_roles(
+        &self,
+        ctx: &ActorContext<Self>,
+        schema_id: SchemaType,
+    ) -> Result<CurrentValidationRoles, ActorError> {
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+        let response = actor
+            .ask(RoleRegisterMessage::GetCurrentValidationRoles { schema_id })
+            .await?;
+
+        match response {
+            RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/role_register",
+                    self.subject_metadata.subject_id
+                )),
+                expected:
+                    "RoleRegisterResponse::CurrentValidationRoles"
+                        .to_owned(),
+            }),
+        }
+    }
+
     async fn refresh_version_sync(
         &self,
         ctx: &ActorContext<Self>,
@@ -559,6 +586,9 @@ impl Governance {
         }
 
         for (schema_id, init_state) in update_vali.iter() {
+            let current_roles = self
+                .current_validation_roles(ctx, schema_id.clone())
+                .await?;
             let actor = ctx
                 .get_child::<ValidationSchema>(&format!(
                     "{}_validation",
@@ -575,6 +605,7 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
+                    current_roles: current_roles.schema,
                 })
                 .await?;
         }
@@ -646,6 +677,9 @@ impl Governance {
         }
 
         for (schema_id, init_state) in up_vali.iter() {
+            let current_roles = self
+                .current_validation_roles(ctx, schema_id.clone())
+                .await?;
             let vali_actor = ValidationSchema {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
@@ -657,6 +691,7 @@ impl Governance {
                     .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
+                current_roles: current_roles.schema,
                 hash: *hash_network.0,
                 network: hash_network.1.clone(),
             };
@@ -850,9 +885,24 @@ impl Governance {
         }
 
         if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
+            let current_roles = self
+                .current_validation_roles(ctx, SchemaType::Governance)
+                .await?;
             validator
-                .tell(ValiWorkerMessage::UpdateGovVersion {
+                .tell(ValiWorkerMessage::UpdateCurrentRoles {
                     gov_version: self.properties.version,
+                    current_roles: crate::validation::worker::CurrentWorkerRoles {
+                        approval: current_roles.approval,
+                        evaluation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
+                    },
                 })
                 .await?;
         }
@@ -948,6 +998,9 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Validator,
         }) {
+            let current_roles = self
+                .current_validation_roles(ctx, SchemaType::Governance)
+                .await?;
             // If we are a validator
             let validator = ValiWorker {
                 node_key: node_key.clone(),
@@ -958,6 +1011,18 @@ impl Governance {
                 sn: self.subject_metadata.sn,
                 hash: *hash,
                 network: network.clone(),
+                current_roles: crate::validation::worker::CurrentWorkerRoles {
+                    approval: current_roles.approval,
+                    evaluation: crate::governance::role_register::RoleDataRegister {
+                        workers: current_roles
+                            .schema
+                            .evaluation
+                            .iter()
+                            .map(|role| role.key.clone())
+                            .collect(),
+                        quorum: current_roles.schema.evaluation_quorum,
+                    },
+                },
                 stop: false,
             };
             ctx.create_child("validator", validator).await?;
@@ -1046,6 +1111,9 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
+                let current_roles = self
+                    .current_validation_roles(ctx, SchemaType::Governance)
+                    .await?;
                 // If we are a validator
                 let validator = ValiWorker {
                     node_key: node_key.clone(),
@@ -1056,6 +1124,18 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     hash: *hash,
                     network: network.clone(),
+                    current_roles: crate::validation::worker::CurrentWorkerRoles {
+                        approval: current_roles.approval,
+                        evaluation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
+                    },
                     stop: false,
                 };
                 ctx.create_child("validator", validator).await?;

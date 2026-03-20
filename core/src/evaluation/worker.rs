@@ -13,7 +13,7 @@ use crate::{
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::common::{
         emit_fail,
-        node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
+        node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
     system::ConfigHelper,
@@ -134,31 +134,30 @@ impl EvalWorker {
         &self,
         gov_version: u64,
     ) -> Result<bool, ActorError> {
-        match gov_version.cmp(&self.gov_version) {
+        match self.gov_version.cmp(&gov_version) {
+            std::cmp::Ordering::Less => {
+                warn!(
+                    local_gov_version = self.gov_version,
+                    request_gov_version = gov_version,
+                    governance_id = %self.governance_id,
+                    sender = %self.node_key,
+                    "Received request with a higher governance version; ignoring request"
+                );
+                Err(ActorError::Functional {
+                    description:
+                        "Abort evaluation, request governance version is higher than local"
+                            .to_owned(),
+                })
+            }
             std::cmp::Ordering::Equal => {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
+                Ok(false)
             }
             std::cmp::Ordering::Greater => {
-                // Me llega una versión mayor a la mía.
-                let data = UpdateData {
-                    sn: self.sn,
-                    gov_version: self.gov_version,
-                    subject_id: self.governance_id.clone(),
-                    other_node: self.node_key.clone(),
-                };
-                update_ledger_network(data, self.network.clone()).await?;
-                let e = ActorError::Functional {
-                    description: "Abort evaluation, update is required"
-                        .to_owned(),
-                };
-                return Err(e);
+                Ok(true)
             }
-            std::cmp::Ordering::Less => {
-                return Ok(true);
-            }
-        }
 
-        Ok(false)
+        }
     }
 
     async fn evaluate(

@@ -5,7 +5,7 @@
 use super::database::AuthDatabase;
 use ave_bridge::{MachineSpec, auth::AuthConfig};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 const TARGET: &str = "ave::http::auth";
 
@@ -53,7 +53,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
     // Get total users (using a high limit to get all users for statistics)
     match db.list_users(false, 10000, 0) {
         Ok(users) => {
-            info!(target: TARGET, count = users.len(), "active users");
+            debug!(target: TARGET, count = users.len(), "active users");
         }
         Err(e) => {
             error!(target: TARGET, error = %e, "failed to get user count");
@@ -62,7 +62,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
 
     match db.list_roles() {
         Ok(roles) => {
-            info!(target: TARGET, count = roles.len(), "roles");
+            debug!(target: TARGET, count = roles.len(), "roles");
         }
         Err(e) => {
             error!(target: TARGET, error = %e, "failed to get role count");
@@ -71,7 +71,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
 
     match db.get_audit_stats(7) {
         Ok(stats) => {
-            info!(target: TARGET, stats = %stats, "audit stats (last 7 days)");
+            debug!(target: TARGET, stats = %stats, "audit stats (last 7 days)");
         }
         Err(e) => {
             error!(target: TARGET, error = %e, "failed to get audit stats");
@@ -79,7 +79,7 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
     }
 
     let metrics = db.metrics_snapshot();
-    info!(
+    debug!(
         target: TARGET,
         primary_lock_wait_count = metrics.primary_lock_wait_count,
         primary_lock_wait_avg_ms = metrics.primary_lock_wait_avg_ms,
@@ -123,7 +123,7 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
     if audit_retention_days > 0 {
         match db.cleanup_old_audit_logs(audit_retention_days) {
             Ok(deleted) if deleted > 0 => {
-                info!(target: TARGET, deleted, "cleaned up expired audit log entries");
+                debug!(target: TARGET, deleted, "cleaned up expired audit log entries");
             }
             Ok(_) => {}
             Err(e) => {
@@ -136,7 +136,7 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
     if audit_max_entries > 0 {
         match db.cleanup_excess_audit_logs(audit_max_entries) {
             Ok(deleted) if deleted > 0 => {
-                info!(
+                debug!(
                     target: TARGET,
                     deleted,
                     limit = audit_max_entries,
@@ -152,7 +152,7 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
 
     match db.cleanup_expired_api_keys() {
         Ok(deleted) if deleted > 0 => {
-            info!(target: TARGET, deleted, "cleaned up expired API keys");
+            debug!(target: TARGET, deleted, "cleaned up expired API keys");
         }
         Ok(_) => {}
         Err(e) => {
@@ -162,7 +162,7 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
 
     match db.cleanup_rate_limits() {
         Ok(deleted) if deleted > 0 => {
-            info!(target: TARGET, deleted, "cleaned up stale rate limit entries");
+            debug!(target: TARGET, deleted, "cleaned up stale rate limit entries");
         }
         Ok(_) => {}
         Err(e) => {
@@ -171,7 +171,7 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
     }
 
     let metrics = db.metrics_snapshot();
-    info!(
+    debug!(
         target: TARGET,
         primary_lock_wait_count = metrics.primary_lock_wait_count,
         primary_lock_wait_avg_ms = metrics.primary_lock_wait_avg_ms,
