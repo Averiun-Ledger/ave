@@ -104,6 +104,7 @@ struct DbMetrics {
     blocking_queue_wait_count: AtomicU64,
     blocking_queue_wait_ns_max: AtomicU64,
     blocking_rejections_total: AtomicU64,
+    blocking_in_flight_current: AtomicU64,
     blocking_task_duration_ns_total: AtomicU64,
     blocking_task_count: AtomicU64,
     blocking_task_duration_ns_max: AtomicU64,
@@ -417,6 +418,32 @@ impl AuthDatabase {
         }
     }
 
+    fn inc_blocking_in_flight(&self) {
+        let current = self
+            .metrics
+            .blocking_in_flight_current
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.set_blocking_in_flight(current as i64);
+        }
+    }
+
+    fn dec_blocking_in_flight(&self) {
+        let previous = self
+            .metrics
+            .blocking_in_flight_current
+            .fetch_sub(1, Ordering::Relaxed);
+        let current = previous.saturating_sub(1);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.set_blocking_in_flight(current as i64);
+        }
+    }
+
     pub(crate) fn record_request_metrics(
         &self,
         request_kind: &'static str,
@@ -590,6 +617,11 @@ impl AuthDatabase {
             metrics.register_into(registry);
             metrics
         });
+        metrics.set_blocking_in_flight(
+            self.metrics
+                .blocking_in_flight_current
+                .load(Ordering::Relaxed) as i64,
+        );
         let _ = metrics;
     }
 
@@ -973,14 +1005,16 @@ impl AuthDatabase {
             )
         })?;
         self.record_blocking_queue_wait(operation, queue_started.elapsed());
+        self.inc_blocking_in_flight();
 
         let started = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             work(db)
         })
-        .await
-        .map_err(|e| {
+        .await;
+        self.dec_blocking_in_flight();
+        let result = result.map_err(|e| {
             DatabaseError::Query(format!(
                 "blocking db task {} failed: {}",
                 operation, e

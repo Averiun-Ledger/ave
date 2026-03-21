@@ -22,6 +22,7 @@ struct DialAttemptLabels {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct DialFailureLabels {
+    phase: &'static str,
     kind: &'static str,
 }
 
@@ -63,6 +64,16 @@ struct ControlListDeniedLabels {
     reason: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct BootstrapDurationLabels {
+    result: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NetworkStateLabels {
+    state: &'static str,
+}
+
 /// Metrics handle used by the network worker.
 #[derive(Debug)]
 pub struct NetworkMetrics {
@@ -88,8 +99,9 @@ pub struct NetworkMetrics {
     control_list_block_last_success_age_seconds: Gauge,
     control_list_allow_peers: Gauge,
     control_list_block_peers: Gauge,
-    state_current: Gauge,
-    bootstrap_duration_seconds: Histogram,
+    state: Family<NetworkStateLabels, Gauge>,
+    bootstrap_duration_seconds:
+        Family<BootstrapDurationLabels, Histogram, fn() -> Histogram>,
     pending_message_age_seconds: Histogram,
     control_list_updater_duration_seconds: Histogram,
 }
@@ -119,10 +131,13 @@ impl NetworkMetrics {
             control_list_block_last_success_age_seconds: Gauge::default(),
             control_list_allow_peers: Gauge::default(),
             control_list_block_peers: Gauge::default(),
-            state_current: Gauge::default(),
-            bootstrap_duration_seconds: Histogram::new(vec![
-                0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0,
-            ]),
+            state: Family::default(),
+            bootstrap_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0,
+                    80.0,
+                ])
+            }),
             pending_message_age_seconds: Histogram::new(vec![
                 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
             ]),
@@ -140,7 +155,7 @@ impl NetworkMetrics {
         );
         registry.register(
             "network_dial_failures",
-            "Total dial failures, labeled by kind.",
+            "Total dial failures, labeled by phase and kind.",
             self.dial_failures_total.clone(),
         );
         registry.register(
@@ -244,13 +259,13 @@ impl NetworkMetrics {
             self.control_list_block_peers.clone(),
         );
         registry.register(
-            "network_state_current",
-            "Current network state as numeric value (start=0,dial=1,dialing=2,running=3,disconnected=4).",
-            self.state_current.clone(),
+            "network_state",
+            "Current network state as one-hot gauges labeled by state.",
+            self.state.clone(),
         );
         registry.register(
             "network_bootstrap_duration_seconds",
-            "Bootstrap connection duration in seconds.",
+            "Bootstrap connection duration in seconds, labeled by result.",
             self.bootstrap_duration_seconds.clone(),
         );
         registry.register(
@@ -277,9 +292,13 @@ impl NetworkMetrics {
             .inc();
     }
 
-    pub(crate) fn observe_dial_failure(&self, kind: &'static str) {
+    pub(crate) fn observe_dial_failure(
+        &self,
+        phase: &'static str,
+        kind: &'static str,
+    ) {
         self.dial_failures_total
-            .get_or_create(&DialFailureLabels { kind })
+            .get_or_create(&DialFailureLabels { phase, kind })
             .inc();
     }
 
@@ -477,14 +496,12 @@ impl NetworkMetrics {
     }
 
     pub(crate) fn set_state_current(&self, state: &NetworkState) {
-        let value = match state {
-            NetworkState::Start => 0,
-            NetworkState::Dial => 1,
-            NetworkState::Dialing => 2,
-            NetworkState::Running => 3,
-            NetworkState::Disconnected => 4,
-        };
-        self.state_current.set(value);
+        let current = Self::state_label(state);
+        for known in Self::state_labels() {
+            self.state
+                .get_or_create(&NetworkStateLabels { state: known })
+                .set((known == current) as i64);
+        }
     }
 
     pub(crate) fn observe_state_transition(&self, state: &NetworkState) {
@@ -531,8 +548,28 @@ impl NetworkMetrics {
         self.response_channels_pending.set(value);
     }
 
-    pub(crate) fn observe_bootstrap_duration_seconds(&self, seconds: f64) {
-        self.bootstrap_duration_seconds.observe(seconds);
+    pub(crate) fn observe_bootstrap_duration_seconds(
+        &self,
+        result: &'static str,
+        seconds: f64,
+    ) {
+        self.bootstrap_duration_seconds
+            .get_or_create(&BootstrapDurationLabels { result })
+            .observe(seconds);
+    }
+
+    const fn state_labels() -> [&'static str; 5] {
+        ["start", "dial", "dialing", "running", "disconnected"]
+    }
+
+    const fn state_label(state: &NetworkState) -> &'static str {
+        match state {
+            NetworkState::Start => "start",
+            NetworkState::Dial => "dial",
+            NetworkState::Dialing => "dialing",
+            NetworkState::Running => "running",
+            NetworkState::Disconnected => "disconnected",
+        }
     }
 }
 

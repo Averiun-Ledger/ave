@@ -499,10 +499,12 @@ struct DbPrometheusMetrics {
         Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
     writer_queue_depth: Gauge,
     writer_batch_size: Histogram,
+    writer_batch_duration_seconds: Histogram,
     writer_batch_retries_total: Counter,
     writer_failures_total: Family<WriterFailureLabels, Counter>,
     page_anchor_lookups_total: Family<PageAnchorLabels, Counter>,
     pages_walked_from_anchor_total: Counter,
+    count_cache_lookups_total: Family<CountCacheLabels, Counter>,
     count_query_duration_seconds: Histogram,
 }
 
@@ -518,6 +520,11 @@ struct WriterFailureLabels {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct PageAnchorLabels {
+    result: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CountCacheLabels {
     result: &'static str,
 }
 
@@ -560,10 +567,15 @@ impl DbPrometheusMetrics {
             writer_batch_size: Histogram::new(vec![
                 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
             ]),
+            writer_batch_duration_seconds: Histogram::new(vec![
+                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                1.0, 2.0, 5.0,
+            ]),
             writer_batch_retries_total: Counter::default(),
             writer_failures_total: Family::default(),
             page_anchor_lookups_total: Family::default(),
             pages_walked_from_anchor_total: Counter::default(),
+            count_cache_lookups_total: Family::default(),
             count_query_duration_seconds: Histogram::new(vec![
                 0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
                 0.5, 1.0,
@@ -593,6 +605,11 @@ impl DbPrometheusMetrics {
             self.writer_batch_size.clone(),
         );
         registry.register(
+            "external_db_writer_batch_duration_seconds",
+            "End-to-end duration of external DB writer batches, including retries.",
+            self.writer_batch_duration_seconds.clone(),
+        );
+        registry.register(
             "external_db_writer_batch_retries",
             "Total external DB writer batch retries due to transient write failures.",
             self.writer_batch_retries_total.clone(),
@@ -611,6 +628,11 @@ impl DbPrometheusMetrics {
             "external_db_pages_walked_from_anchor",
             "Total number of pages walked forward from a cached anchor while resolving pagination.",
             self.pages_walked_from_anchor_total.clone(),
+        );
+        registry.register(
+            "external_db_count_cache_lookups",
+            "Total count-cache lookups for pagination queries, labeled by result.",
+            self.count_cache_lookups_total.clone(),
         );
         registry.register(
             "external_db_count_query_duration_seconds",
@@ -753,6 +775,14 @@ impl SqliteMetrics {
         }
     }
 
+    fn record_writer_batch_duration(&self, elapsed: std::time::Duration) {
+        if let Some(metrics) = self.prometheus.get() {
+            metrics
+                .writer_batch_duration_seconds
+                .observe(Self::ns_to_seconds(Self::duration_to_ns(elapsed)));
+        }
+    }
+
     fn record_page_anchor_hit(&self) {
         self.page_anchor_hit_count.fetch_add(1, Ordering::Relaxed);
         if let Some(metrics) = self.prometheus.get() {
@@ -781,6 +811,17 @@ impl SqliteMetrics {
             .fetch_add(pages, Ordering::Relaxed);
         if let Some(metrics) = self.prometheus.get() {
             metrics.pages_walked_from_anchor_total.inc_by(pages);
+        }
+    }
+
+    fn record_count_cache_lookup(&self, hit: bool) {
+        if let Some(metrics) = self.prometheus.get() {
+            metrics
+                .count_cache_lookups_total
+                .get_or_create(&CountCacheLabels {
+                    result: if hit { "hit" } else { "miss" },
+                })
+                .inc();
         }
     }
 
@@ -1447,11 +1488,15 @@ fn execute_write_batch(
     runtime: Arc<SqliteRuntime>,
     jobs: Vec<WriteJob>,
 ) -> Result<(), DatabaseError> {
+    let started = Instant::now();
     let mut attempt = 1;
 
     loop {
         match persist_write_batch(&runtime, &jobs) {
             Ok(()) => {
+                runtime
+                    .metrics
+                    .record_writer_batch_duration(started.elapsed());
                 for job in jobs {
                     let _ = job.response.send(Ok(()));
                 }
@@ -1476,6 +1521,9 @@ fn execute_write_batch(
             }
             Err(error) => {
                 runtime.metrics.record_writer_failure("batch_terminal");
+                runtime
+                    .metrics
+                    .record_writer_batch_duration(started.elapsed());
                 for job in jobs {
                     let _ = job.response.send(Err(error.clone()));
                 }
@@ -1691,10 +1739,13 @@ impl SqliteRuntime {
     }
 
     fn lookup_count_cache(&self, key: &str, subject_id: &str) -> Option<u64> {
-        self.page_cache
+        let cached = self
+            .page_cache
             .lock()
             .ok()
-            .and_then(|mut cache| cache.lookup_count(key, subject_id))
+            .and_then(|mut cache| cache.lookup_count(key, subject_id));
+        self.metrics.record_count_cache_lookup(cached.is_some());
+        cached
     }
 
     fn store_count_cache(&self, key: String, subject_id: &str, total: u64) {
@@ -3592,5 +3643,79 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn metric_value(metrics: &str, name: &str) -> f64 {
+        metrics
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(name) {
+                    line.split_whitespace().nth(1)?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
+
+    #[test]
+    fn writer_batch_duration_metric_is_observed() {
+        let metrics = SqliteMetrics::default();
+        let mut registry = Registry::default();
+        metrics.register_prometheus_metrics(&mut registry);
+
+        metrics.record_writer_batch_duration(Duration::from_millis(5));
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(&text, "external_db_writer_batch_duration_seconds_count"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn count_cache_lookups_track_hit_and_miss() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let tuning = tuning_for_ram(1024);
+        let runtime =
+            SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime");
+
+        let mut registry = Registry::default();
+        runtime.metrics.register_prometheus_metrics(&mut registry);
+
+        assert_eq!(runtime.lookup_count_cache("key", "subject"), None);
+        runtime.store_count_cache("key".to_owned(), "subject", 42);
+        assert_eq!(runtime.lookup_count_cache("key", "subject"), Some(42));
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "external_db_count_cache_lookups_total{result=\"miss\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "external_db_count_cache_lookups_total{result=\"hit\"}"
+            ),
+            1.0
+        );
     }
 }
