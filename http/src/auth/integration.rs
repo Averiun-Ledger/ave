@@ -98,7 +98,6 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
         blocking_task_avg_ms = metrics.blocking_task_avg_ms,
         blocking_task_max_ms = metrics.blocking_task_max_ms,
         request_count = metrics.request_count,
-        avg_db_ops_per_request = metrics.avg_db_ops_per_request,
         avg_request_db_ms = metrics.avg_request_db_ms,
         max_request_db_ms = metrics.max_request_db_ms,
         "auth db metrics snapshot"
@@ -190,7 +189,6 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
         blocking_task_avg_ms = metrics.blocking_task_avg_ms,
         blocking_task_max_ms = metrics.blocking_task_max_ms,
         request_count = metrics.request_count,
-        avg_db_ops_per_request = metrics.avg_db_ops_per_request,
         avg_request_db_ms = metrics.avg_request_db_ms,
         max_request_db_ms = metrics.max_request_db_ms,
         "auth db metrics snapshot"

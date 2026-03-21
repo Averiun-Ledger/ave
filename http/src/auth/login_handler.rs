@@ -5,6 +5,7 @@
 use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::{
     DatabaseErrorMapping, db_error_to_response as shared_db_error_to_response,
+    request_result_from_status,
 };
 use super::models::{ErrorResponse, LoginRequest, LoginResponse, UserInfo};
 use super::request_meta;
@@ -55,7 +56,6 @@ pub async fn login(
     let ip_address = request_meta.ip_address;
     let user_agent = request_meta.user_agent;
     let request_started = Instant::now();
-    let mut db_operations = 0u64;
 
     // SECURITY FIX: Check rate limit BEFORE credential verification
     // This prevents brute force attacks by limiting requests per IP
@@ -65,9 +65,9 @@ pub async fn login(
     })
     .await
     .map_err(|e| {
-        db.record_request_db_metrics(
+        db.record_request_metrics(
             "login",
-            db_operations + 1,
+            "rate_limited",
             request_started.elapsed(),
         );
         (
@@ -77,7 +77,6 @@ pub async fn login(
             }),
         )
     })?;
-    db_operations += 1;
 
     let login_username = req.username.clone();
     let login_password = req.password.clone();
@@ -121,11 +120,6 @@ pub async fn login(
         })
         .await
         .map_err(|e| {
-            db.record_request_db_metrics(
-                "login",
-                db_operations + 1,
-                request_started.elapsed(),
-            );
             warn!(
                 target: TARGET,
                 username = %req.username,
@@ -133,12 +127,17 @@ pub async fn login(
                 error = %e,
                 "login failed"
             );
-            db_error_to_response(e)
+            let response = db_error_to_response(e);
+            db.record_request_metrics(
+                "login",
+                request_result_from_status(response.0),
+                request_started.elapsed(),
+            );
+            response
         })?;
-    db_operations += 1;
-    db.record_request_db_metrics(
+    db.record_request_metrics(
         "login",
-        db_operations,
+        "success",
         request_started.elapsed(),
     );
 
@@ -194,7 +193,6 @@ pub async fn change_password(
         request_meta::extract_request_meta(&headers, addr, &proxy);
     let ip_address = request_meta.ip_address;
     let request_started = Instant::now();
-    let mut db_operations = 0u64;
 
     // SECURITY FIX: Check rate limit BEFORE credential verification
     // This prevents brute force attacks on password change endpoint
@@ -208,9 +206,9 @@ pub async fn change_password(
     })
     .await
     .map_err(|e| {
-        db.record_request_db_metrics(
+        db.record_request_metrics(
             "change_password",
-            db_operations + 1,
+            "rate_limited",
             request_started.elapsed(),
         );
         (
@@ -220,7 +218,6 @@ pub async fn change_password(
             }),
         )
     })?;
-    db_operations += 1;
 
     let username = req.username.clone();
     let current_password = req.current_password.clone();
@@ -234,17 +231,17 @@ pub async fn change_password(
     })
     .await
     .map_err(|e| {
-        db.record_request_db_metrics(
+        let response = db_error_to_response(e);
+        db.record_request_metrics(
             "change_password",
-            db_operations + 1,
+            request_result_from_status(response.0),
             request_started.elapsed(),
         );
-        db_error_to_response(e)
+        response
     })?;
-    db_operations += 1;
-    db.record_request_db_metrics(
+    db.record_request_metrics(
         "change_password",
-        db_operations,
+        "success",
         request_started.elapsed(),
     );
 

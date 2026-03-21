@@ -107,7 +107,6 @@ struct DbMetrics {
     blocking_task_duration_ns_total: AtomicU64,
     blocking_task_count: AtomicU64,
     blocking_task_duration_ns_max: AtomicU64,
-    request_db_ops_total: AtomicU64,
     request_count: AtomicU64,
     request_db_duration_ns_total: AtomicU64,
     request_db_duration_ns_max: AtomicU64,
@@ -132,7 +131,6 @@ pub struct DbMetricsSnapshot {
     pub blocking_task_avg_ms: f64,
     pub blocking_task_max_ms: f64,
     pub request_count: u64,
-    pub avg_db_ops_per_request: f64,
     pub avg_request_db_ms: f64,
     pub max_request_db_ms: f64,
 }
@@ -419,18 +417,15 @@ impl AuthDatabase {
         }
     }
 
-    pub(crate) fn record_request_db_metrics(
+    pub(crate) fn record_request_metrics(
         &self,
         request_kind: &'static str,
-        db_operations: u64,
+        result: &'static str,
         elapsed: Duration,
     ) {
         let ns = Self::duration_to_ns(elapsed);
         let elapsed_ms = Self::ns_to_ms(ns);
 
-        self.metrics
-            .request_db_ops_total
-            .fetch_add(db_operations, Ordering::Relaxed);
         self.metrics.request_count.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .request_db_duration_ns_total
@@ -441,7 +436,7 @@ impl AuthDatabase {
         if let Some(metrics) = self.prometheus_metrics() {
             metrics.observe_request_metrics(
                 request_kind,
-                db_operations,
+                result,
                 Self::duration_to_seconds(elapsed),
             );
         }
@@ -449,7 +444,7 @@ impl AuthDatabase {
         debug!(
             target: TARGET,
             request_kind,
-            db_operations,
+            result,
             elapsed_ms,
             "auth db request metrics"
         );
@@ -458,7 +453,7 @@ impl AuthDatabase {
             warn!(
                 target: TARGET,
                 request_kind,
-                db_operations,
+                result,
                 elapsed_ms,
                 "slow auth db request"
             );
@@ -530,8 +525,6 @@ impl AuthDatabase {
             .load(Ordering::Relaxed);
 
         let request_count = self.metrics.request_count.load(Ordering::Relaxed);
-        let request_db_ops_total =
-            self.metrics.request_db_ops_total.load(Ordering::Relaxed);
         let request_db_duration_ns_total = self
             .metrics
             .request_db_duration_ns_total
@@ -578,11 +571,6 @@ impl AuthDatabase {
             ),
             blocking_task_max_ms: Self::ns_to_ms(blocking_task_duration_ns_max),
             request_count,
-            avg_db_ops_per_request: if request_count == 0 {
-                0.0
-            } else {
-                request_db_ops_total as f64 / request_count as f64
-            },
             avg_request_db_ms: Self::avg_ns_to_ms(
                 request_db_duration_ns_total,
                 request_count,

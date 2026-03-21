@@ -19,6 +19,7 @@ struct OperationLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
     request_kind: &'static str,
+    result: &'static str,
 }
 
 #[derive(Debug)]
@@ -33,7 +34,6 @@ pub struct AuthPrometheusMetrics {
     blocking_task_rejections_total: Family<OperationLabels, Counter>,
     request_db_duration_seconds:
         Family<RequestLabels, Histogram, fn() -> Histogram>,
-    request_db_ops_total: Family<RequestLabels, Counter>,
     request_total: Family<RequestLabels, Counter>,
 }
 
@@ -73,7 +73,6 @@ impl AuthPrometheusMetrics {
                     5.0, 10.0,
                 ])
             }),
-            request_db_ops_total: Family::default(),
             request_total: Family::default(),
         }
     }
@@ -100,23 +99,18 @@ impl AuthPrometheusMetrics {
             self.blocking_task_duration_seconds.clone(),
         );
         registry.register(
-            "auth_db_blocking_rejections_total",
+            "auth_db_blocking_rejections",
             "Total auth blocking tasks rejected due to backpressure timeout, labeled by operation.",
             self.blocking_task_rejections_total.clone(),
         );
         registry.register(
             "auth_db_request_seconds",
-            "End-to-end database time consumed by auth-facing requests, labeled by request kind.",
+            "End-to-end database time consumed by auth-facing requests, labeled by request kind and result.",
             self.request_db_duration_seconds.clone(),
         );
         registry.register(
-            "auth_db_request_ops_total",
-            "Total auth database operations attributed to requests, labeled by request kind.",
-            self.request_db_ops_total.clone(),
-        );
-        registry.register(
-            "auth_db_requests_total",
-            "Total auth requests that recorded database metrics, labeled by request kind.",
+            "auth_db_requests",
+            "Total auth requests that recorded database metrics, labeled by request kind and result.",
             self.request_total.clone(),
         );
     }
@@ -166,14 +160,14 @@ impl AuthPrometheusMetrics {
     pub fn observe_request_metrics(
         &self,
         request_kind: &'static str,
-        db_operations: u64,
+        result: &'static str,
         elapsed_seconds: f64,
     ) {
-        let labels = RequestLabels { request_kind };
+        let labels = RequestLabels {
+            request_kind,
+            result,
+        };
         self.request_total.get_or_create(&labels).inc();
-        self.request_db_ops_total
-            .get_or_create(&labels)
-            .inc_by(db_operations);
         self.request_db_duration_seconds
             .get_or_create(&labels)
             .observe(elapsed_seconds);

@@ -5,6 +5,7 @@
 use crate::auth::middleware::uuid::Uuid;
 
 use super::database::{AuthDatabase, DatabaseError};
+use super::http_api::request_result_from_status;
 use super::models::{AuthContext, ErrorResponse};
 use super::request_meta;
 use ave_bridge::ProxyConfig;
@@ -51,7 +52,6 @@ where
             return Ok(Self);
         };
         let request_started = Instant::now();
-        let mut db_operations = 0u64;
 
         // Auth is enabled - validate API key
         let api_key = parts
@@ -95,11 +95,10 @@ where
                 )
             })
             .await;
-        db_operations += 1;
         pre_auth_result.map_err(|e| {
-            db.record_request_db_metrics(
+            db.record_request_metrics(
                 "api_key_auth",
-                db_operations,
+                "rate_limited",
                 request_started.elapsed(),
             );
             {
@@ -132,9 +131,9 @@ where
             .await
             .map_err(|e| match e {
                 DatabaseError::RateLimitExceeded(message) => {
-                    db.record_request_db_metrics(
+                    db.record_request_metrics(
                         "api_key_auth",
-                        db_operations + 1,
+                        "rate_limited",
                         request_started.elapsed(),
                     );
                     warn!(
@@ -149,9 +148,9 @@ where
                     )
                 }
                 DatabaseError::PasswordChangeRequired(message) => {
-                    db.record_request_db_metrics(
+                    db.record_request_metrics(
                         "api_key_auth",
-                        db_operations + 1,
+                        request_result_from_status(StatusCode::FORBIDDEN),
                         request_started.elapsed(),
                     );
                     warn!(
@@ -167,9 +166,9 @@ where
                 }
                 DatabaseError::PermissionDenied(_)
                 | DatabaseError::AccountLocked(_) => {
-                    db.record_request_db_metrics(
+                    db.record_request_metrics(
                         "api_key_auth",
-                        db_operations + 1,
+                        request_result_from_status(StatusCode::UNAUTHORIZED),
                         request_started.elapsed(),
                     );
                     warn!(
@@ -186,9 +185,11 @@ where
                     )
                 }
                 other => {
-                    db.record_request_db_metrics(
+                    db.record_request_metrics(
                         "api_key_auth",
-                        db_operations + 1,
+                        request_result_from_status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ),
                         request_started.elapsed(),
                     );
                     error!(
@@ -207,10 +208,9 @@ where
                     )
                 }
             })?;
-        db_operations += 1;
-        db.record_request_db_metrics(
+        db.record_request_metrics(
             "api_key_auth",
-            db_operations,
+            "success",
             request_started.elapsed(),
         );
 

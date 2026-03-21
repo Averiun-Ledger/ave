@@ -1992,21 +1992,14 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
@@ -2072,42 +2065,28 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_total"
-            ),
-            0.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_per_peer_total"
-            ),
-            0.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
@@ -2172,21 +2151,14 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             1.0
         );
