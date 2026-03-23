@@ -3,17 +3,19 @@
 use crate::{
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::{
-        common::{
-            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
-        },
+        common::{abort_req, emit_fail, send_reboot_to_req, take_random_signers},
         event::{ValidationData, ValidationMetadata},
     },
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
         response::ResponseSummary,
-        worker::{ValiWorker, ValiWorkerMessage},
+        worker::{
+            CurrentRequestRoles, CurrentWorkerRoles, ValiWorker,
+            ValiWorkerMessage,
+        },
     },
 };
 use ave_actors::{
@@ -73,13 +75,22 @@ pub struct Validation {
     pending_validators: HashSet<PublicKey>,
 
     init_state: Option<ValueWrapper>,
+
+    current_request_roles: CurrentRequestRoles,
 }
 
 impl Validation {
+    fn observe_event(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("validation", result);
+        }
+    }
+
     pub fn new(
         our_key: Arc<PublicKey>,
         request: Signed<ValidationReq>,
         init_state: Option<ValueWrapper>,
+        current_request_roles: CurrentRequestRoles,
         quorum: Quorum,
         hash: HashAlgorithm,
         network: Arc<NetworkSender>,
@@ -100,6 +111,7 @@ impl Validation {
             reboot: false,
             current_validators: HashSet::new(),
             pending_validators: HashSet::new(),
+            current_request_roles,
         }
     }
 
@@ -147,6 +159,13 @@ impl Validation {
                         sn: self.request.content().get_sn(),
                         hash: self.hash,
                         network: self.network.clone(),
+                        current_roles: CurrentWorkerRoles {
+                            evaluation: self
+                                .current_request_roles
+                                .evaluation
+                                .clone(),
+                            approval: self.current_request_roles.approval.clone(),
+                        },
                         stop:true
                     },
                 )
@@ -387,9 +406,10 @@ impl Handler<Self> for Validation {
                                 self.validators_signatures.push(signature);
                             }
                             ValidationRes::TimeOut => {
-                                // Do nothing
+                                Self::observe_event("timeout");
                             }
                             ValidationRes::Abort(error) => {
+                                Self::observe_event("abort");
                                 if let Err(e) = abort_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -409,6 +429,7 @@ impl Handler<Self> for Validation {
                                 }
                             }
                             ValidationRes::Reboot => {
+                                Self::observe_event("reboot");
                                 if let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -454,6 +475,9 @@ impl Handler<Self> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
+                            if matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event("reboot");
+                            }
 
                             let validation_data = self.build_validation_data();
 
@@ -468,6 +492,10 @@ impl Handler<Self> for Validation {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             };
+
+                            if !matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event("success");
+                            }
 
                             debug!(
                                 msg_type = "Response",
@@ -526,6 +554,8 @@ impl Handler<Self> for Validation {
                                         "Failed to send reboot to request actor"
                                     );
                                     return Err(emit_fail(ctx, e).await);
+                                } else if self.current_validators.is_empty() {
+                                    Self::observe_event("reboot");
                                 }
                     } else {
                         warn!(
@@ -545,6 +575,7 @@ impl Handler<Self> for Validation {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        Self::observe_event("error");
         error!(
             request_id = %self.request_id,
             version = self.version,
@@ -603,7 +634,9 @@ pub mod tests {
         loop {
             match db.get_subject_state(&subject_id.to_string()).await {
                 Ok(state) if state.sn >= expected_sn => return state,
-                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                Ok(_) | Err(_)
+                    if started.elapsed() < Duration::from_secs(5) =>
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(state) => {
@@ -734,7 +767,10 @@ pub mod tests {
         wait_request(&tracking, response.request_id).await;
 
         let subject_actor: ActorRef<Governance> = system
-            .get_actor(&ActorPath::from(format!("/user/node/subject_manager/{}", owned_subj)))
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}",
+                owned_subj
+            )))
             .await
             .unwrap();
 

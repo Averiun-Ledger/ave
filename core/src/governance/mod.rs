@@ -8,7 +8,11 @@ use crate::{
     },
     db::Storable,
     evaluation::{
-        compiler::{Compiler, CompilerMessage},
+        compiler::{
+            CompilerResponse, ContractCompiler, ContractCompilerMessage,
+            ContractRegister, ContractRegisterMessage,
+            ContractRegisterResponse,
+        },
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
@@ -17,11 +21,16 @@ use crate::{
         events::GovernanceEvent,
         model::{
             CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
-            Schema,
+            Schema, WitnessesData,
         },
-        role_register::{RoleRegister, RoleRegisterMessage},
+        role_register::{
+            CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
+            RoleRegisterResponse,
+        },
         sn_register::SnRegister,
         subject_register::{SubjectRegister, SubjectRegisterMessage},
+        tracker_sync::{TrackerSync, TrackerSyncConfig},
+        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
         },
@@ -67,7 +76,10 @@ use tracing::{Span, debug, error, info_span, warn};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
+use tokio::{fs, sync::RwLock};
+use wasmtime::Module;
 
 pub mod data;
 pub mod error;
@@ -76,6 +88,8 @@ pub mod model;
 pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
+pub mod tracker_sync;
+pub mod version_sync;
 pub mod witnesses_register;
 
 pub struct RolesUpdate {
@@ -143,6 +157,8 @@ pub struct Governance {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
     #[serde(skip)]
+    pub service: bool,
+    #[serde(skip)]
     pub hash: Option<HashAlgorithm>,
     pub subject_metadata: SubjectMetadata,
     pub properties: GovernanceData,
@@ -177,6 +193,7 @@ impl BorshDeserialize for Governance {
         Ok(Self {
             hash,
             our_key,
+            service: false,
             subject_metadata,
             properties,
         })
@@ -392,7 +409,12 @@ impl Subject for Governance {
                 let old_schemas_eval = old_gov
                     .schemas_name(ProtocolTypes::Evaluation, &self.our_key);
 
-                Self::down_compilers_schemas(ctx, &old_schemas_eval).await?;
+                Self::down_compilers_schemas(
+                    ctx,
+                    &old_schemas_eval,
+                    &self.subject_metadata.subject_id,
+                )
+                .await?;
 
                 let old_schemas_val = old_gov
                     .schemas_name(ProtocolTypes::Validation, &self.our_key);
@@ -479,6 +501,7 @@ impl Subject for Governance {
             .await?;
 
             self.update_sn(ctx).await?;
+            self.refresh_version_sync(ctx).await?;
         }
 
         Ok(())
@@ -486,6 +509,58 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn current_validation_roles(
+        &self,
+        ctx: &ActorContext<Self>,
+        schema_id: SchemaType,
+    ) -> Result<CurrentValidationRoles, ActorError> {
+        let actor = ctx.get_child::<RoleRegister>("role_register").await?;
+        let response = actor
+            .ask(RoleRegisterMessage::GetCurrentValidationRoles { schema_id })
+            .await?;
+
+        match response {
+            RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/role_register",
+                    self.subject_metadata.subject_id
+                )),
+                expected:
+                    "RoleRegisterResponse::CurrentValidationRoles"
+                        .to_owned(),
+            }),
+        }
+    }
+
+    async fn refresh_version_sync(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if !self.service {
+            return Ok(());
+        }
+
+        let version_sync = ctx
+            .get_child::<GovernanceVersionSync>("version_sync")
+            .await?;
+        let governance_peers = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
+
+        let _ = version_sync
+            .ask(GovernanceVersionSyncMessage::RefreshGovernance {
+                version: self.properties.version,
+                governance_peers,
+            })
+            .await?;
+
+        Ok(())
+    }
+
     async fn update_schemas(
         &self,
         ctx: &ActorContext<Self>,
@@ -522,6 +597,9 @@ impl Governance {
         }
 
         for (schema_id, init_state) in update_vali.iter() {
+            let current_roles = self
+                .current_validation_roles(ctx, schema_id.clone())
+                .await?;
             let actor = ctx
                 .get_child::<ValidationSchema>(&format!(
                     "{}_validation",
@@ -538,6 +616,7 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
+                    current_roles: current_roles.schema,
                 })
                 .await?;
         }
@@ -609,6 +688,9 @@ impl Governance {
         }
 
         for (schema_id, init_state) in up_vali.iter() {
+            let current_roles = self
+                .current_validation_roles(ctx, schema_id.clone())
+                .await?;
             let vali_actor = ValidationSchema {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
@@ -620,6 +702,7 @@ impl Governance {
                     .unwrap_or_default(),
                 schema_id: schema_id.clone(),
                 init_state: init_state.clone(),
+                current_roles: current_roles.schema,
                 hash: *hash_network.0,
                 network: hash_network.1.clone(),
             };
@@ -669,7 +752,12 @@ impl Governance {
                 .filter(|x| !new_schemas_eval.contains_key(x))
                 .cloned()
                 .collect();
-            Self::down_compilers_schemas(ctx, &down).await?;
+            Self::down_compilers_schemas(
+                ctx,
+                &down,
+                &self.subject_metadata.subject_id,
+            )
+            .await?;
 
             // Subimos los compilers que soy nuevo evaluador
             let up = new_schemas_eval
@@ -813,11 +901,131 @@ impl Governance {
         }
 
         if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
+            let current_roles = self
+                .current_validation_roles(ctx, SchemaType::Governance)
+                .await?;
             validator
-                .tell(ValiWorkerMessage::UpdateGovVersion {
+                .tell(ValiWorkerMessage::UpdateCurrentRoles {
                     gov_version: self.properties.version,
+                    current_roles: crate::validation::worker::CurrentWorkerRoles {
+                        approval: current_roles.approval,
+                        evaluation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
+                    },
                 })
                 .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn sweep_contract_artifacts(
+        &self,
+        ctx: &ActorContext<Self>,
+        schemas: &BTreeMap<SchemaType, Schema>,
+    ) -> Result<(), ActorError> {
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+        else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let contract_register =
+            ctx.get_child::<ContractRegister>("contract_register").await?;
+
+        let prefix = format!("{}_", self.subject_metadata.subject_id);
+        let mut allowed: HashSet<String> = schemas
+            .keys()
+            .map(|schema_id| {
+                format!("{}_{}", self.subject_metadata.subject_id, schema_id)
+            })
+            .collect();
+
+        let registered: Vec<String> = match contract_register
+            .ask(ContractRegisterMessage::ListContracts)
+            .await?
+        {
+            ContractRegisterResponse::Contracts(contracts) => contracts,
+            _ => Vec::new(),
+        };
+
+        for contract_name in registered {
+            if contract_name.starts_with(&prefix)
+                && !allowed.contains(&contract_name)
+            {
+                contract_register
+                    .tell(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await?;
+                let mut contracts = contracts.write().await;
+                contracts.remove(&contract_name);
+            }
+        }
+
+        let contracts_dir = config.contracts_path.join("contracts");
+        if !contracts_dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not read contracts directory {}: {}",
+                    contracts_dir.display(),
+                    e
+                ),
+            }
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not iterate contracts directory {}: {}",
+                    contracts_dir.display(),
+                    e
+                ),
+            }
+        })? {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !file_name.starts_with(&prefix) {
+                continue;
+            }
+
+            let is_temp = file_name.starts_with(&format!(
+                "{}_temp_",
+                self.subject_metadata.subject_id
+            ));
+            if is_temp || !allowed.contains(&file_name) {
+                let path = entry.path();
+                let _ = fs::remove_dir_all(path).await;
+                if !is_temp {
+                    allowed.remove(&file_name);
+                }
+            }
         }
 
         Ok(())
@@ -851,6 +1059,7 @@ impl Governance {
             let schemas = self
                 .properties
                 .schemas(ProtocolTypes::Evaluation, &self.our_key);
+            self.sweep_contract_artifacts(ctx, &schemas).await?;
             Self::up_compilers_schemas(
                 ctx,
                 &schemas,
@@ -911,6 +1120,9 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Validator,
         }) {
+            let current_roles = self
+                .current_validation_roles(ctx, SchemaType::Governance)
+                .await?;
             // If we are a validator
             let validator = ValiWorker {
                 node_key: node_key.clone(),
@@ -921,6 +1133,18 @@ impl Governance {
                 sn: self.subject_metadata.sn,
                 hash: *hash,
                 network: network.clone(),
+                current_roles: crate::validation::worker::CurrentWorkerRoles {
+                    approval: current_roles.approval,
+                    evaluation: crate::governance::role_register::RoleDataRegister {
+                        workers: current_roles
+                            .schema
+                            .evaluation
+                            .iter()
+                            .map(|role| role.key.clone())
+                            .collect(),
+                        quorum: current_roles.schema.evaluation_quorum,
+                    },
+                },
                 stop: false,
             };
             ctx.create_child("validator", validator).await?;
@@ -1009,6 +1233,9 @@ impl Governance {
                 actor.ask_stop().await?;
             }
             (false, true) => {
+                let current_roles = self
+                    .current_validation_roles(ctx, SchemaType::Governance)
+                    .await?;
                 // If we are a validator
                 let validator = ValiWorker {
                     node_key: node_key.clone(),
@@ -1019,6 +1246,18 @@ impl Governance {
                     sn: self.subject_metadata.sn,
                     hash: *hash,
                     network: network.clone(),
+                    current_roles: crate::validation::worker::CurrentWorkerRoles {
+                        approval: current_roles.approval,
+                        evaluation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
+                    },
                     stop: false,
                 };
                 ctx.create_child("validator", validator).await?;
@@ -1209,18 +1448,22 @@ impl Governance {
         };
 
         for (id, schema) in schemas {
-            let actor_name = format!("{}_compiler", id);
+            let actor_name = format!("{}_contract_compiler", id);
 
             let compiler =
-                ctx.create_child(&actor_name, Compiler::new(*hash)).await?;
+                ctx.create_child(
+                    &actor_name,
+                    ContractCompiler::new(*hash),
+                )
+                .await?;
 
             let Schema {
                 contract,
                 initial_value,
             } = schema;
 
-            compiler
-                .tell(CompilerMessage::Compile {
+            let response = compiler
+                .ask(ContractCompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: contract.clone(),
                     initial_value: initial_value.0.clone(),
@@ -1229,6 +1472,15 @@ impl Governance {
                         .join(format!("{}_{}", subject_id, id)),
                 })
                 .await?;
+
+            if let CompilerResponse::Error(error) = response {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Can not compile schema contract {}: {}",
+                        id, error
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1237,13 +1489,59 @@ impl Governance {
     async fn down_compilers_schemas(
         ctx: &ActorContext<Self>,
         schemas: &BTreeSet<SchemaType>,
+        subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+        else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let contract_register =
+            ctx.get_child::<ContractRegister>("contract_register").await?;
+
         for schema_id in schemas.iter() {
             let actor = ctx
-                .get_child::<Compiler>(&format!("{}_compiler", schema_id))
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    schema_id
+                ))
                 .await?;
 
             actor.ask_stop().await?;
+
+            let contract_name = format!("{}_{}", subject_id, schema_id);
+            contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: contract_name.clone(),
+                })
+                .await?;
+
+            {
+                let mut contracts = contracts.write().await;
+                contracts.remove(&contract_name);
+            }
+
+            let contract_path = config
+                .contracts_path
+                .join("contracts")
+                .join(&contract_name);
+            let _ = fs::remove_dir_all(contract_path).await;
         }
 
         Ok(())
@@ -1267,11 +1565,14 @@ impl Governance {
 
         for (id, schema) in schemas {
             let actor = ctx
-                .get_child::<Compiler>(&format!("{}_compiler", id))
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    id
+                ))
                 .await?;
 
-            actor
-                .tell(CompilerMessage::Compile {
+            let response = actor
+                .ask(ContractCompilerMessage::Compile {
                     contract_name: format!("{}_{}", subject_id, id),
                     contract: schema.contract.clone(),
                     initial_value: schema.initial_value.0.clone(),
@@ -1280,6 +1581,15 @@ impl Governance {
                         .join(format!("{}_{}", subject_id, id)),
                 })
                 .await?;
+
+            if let CompilerResponse::Error(error) = response {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Can not refresh schema contract {}: {}",
+                        id, error
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1977,41 +2287,6 @@ impl Actor for Governance {
             });
         };
 
-        if self.subject_metadata.active {
-            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
-                error!(
-                    error = %e,
-                    "Failed to build governance child actors"
-                );
-                return Err(e);
-            }
-
-            let sink_actor = match ctx
-                .create_child(
-                    "sink_data",
-                    SinkData {
-                        public_key: self.our_key.to_string(),
-                    },
-                )
-                .await
-            {
-                Ok(actor) => actor,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to create sink_data child"
-                    );
-                    return Err(e);
-                }
-            };
-            let sink =
-                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
-            ctx.system().run_sink(sink).await;
-
-            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
-            ctx.system().run_sink(sink).await;
-        }
-
         if let Err(e) = ctx
             .create_child("role_register", RoleRegister::initial(()))
             .await
@@ -2054,6 +2329,137 @@ impl Actor for Governance {
                 "Failed to create witnesses_register child"
             );
             return Err(e);
+        }
+
+        if let Err(e) = ctx
+            .create_child("contract_register", ContractRegister::initial(()))
+            .await
+        {
+            error!(
+                error = %e,
+                "Failed to create contract_register child"
+            );
+            return Err(e);
+        }
+
+        if self.subject_metadata.active {
+            if let Err(e) = self.build_childs(ctx, &hash, &network).await {
+                error!(
+                    error = %e,
+                    "Failed to build governance child actors"
+                );
+                return Err(e);
+            }
+
+            let sink_actor = match ctx
+                .create_child(
+                    "sink_data",
+                    SinkData {
+                        public_key: self.our_key.to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create sink_data child"
+                    );
+                    return Err(e);
+                }
+            };
+            let sink =
+                Sink::new(sink_actor.subscribe(), ext_db.get_sink_data());
+            ctx.system().run_sink(sink).await;
+
+            let sink = Sink::new(sink_actor.subscribe(), ave_sink.clone());
+            ctx.system().run_sink(sink).await;
+        }
+
+        if self.service {
+            let Some(config): Option<ConfigHelper> =
+                ctx.system().get_helper("config").await
+            else {
+                error!("Config helper not found");
+                return Err(ActorError::Helper {
+                    name: "config".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            let version_sync_tick_interval = Duration::from_secs(
+                config.sync_governance.interval_secs.max(1),
+            );
+            let version_sync_response_timeout = Duration::from_secs(
+                config.sync_governance.response_timeout_secs.max(1),
+            );
+            let tracker_sync_tick_interval =
+                Duration::from_secs(config.sync_tracker.interval_secs.max(1));
+            let tracker_sync_response_timeout = Duration::from_secs(
+                config.sync_tracker.response_timeout_secs.max(1),
+            );
+            let tracker_sync_update_timeout = Duration::from_secs(
+                config.sync_tracker.update_timeout_secs.max(1),
+            );
+
+            if let Err(e) = ctx
+                .create_child(
+                    "tracker_sync",
+                    TrackerSync::new(
+                        self.subject_metadata.subject_id.clone(),
+                        self.our_key.clone(),
+                        network.clone(),
+                        TrackerSyncConfig {
+                            service: self.service,
+                            tick_interval: tracker_sync_tick_interval,
+                            response_timeout: tracker_sync_response_timeout,
+                            page_size: config.sync_tracker.page_size,
+                            update_batch_size: config
+                                .sync_tracker
+                                .update_batch_size,
+                            update_timeout: tracker_sync_update_timeout,
+                        },
+                    ),
+                )
+                .await
+            {
+                error!(
+                    error = %e,
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Failed to create tracker_sync child"
+                );
+                return Err(e);
+            }
+
+            let version_sync = ctx
+                .create_child(
+                    "version_sync",
+                    GovernanceVersionSync::new(
+                        self.subject_metadata.subject_id.clone(),
+                        self.our_key.clone(),
+                        network.clone(),
+                        self.properties.version,
+                        config.sync_governance.sample_size,
+                        version_sync_tick_interval,
+                        version_sync_response_timeout,
+                    ),
+                )
+                .await?;
+
+            let governance_peers = self
+                .properties
+                .get_witnesses(WitnessesData::Gov)
+                .map_err(|e| ActorError::Functional {
+                    description: e.to_string(),
+                })?;
+
+            let _ = version_sync
+                .ask(GovernanceVersionSyncMessage::RefreshGovernance {
+                    version: self.properties.version,
+                    governance_peers,
+                })
+                .await?;
         }
 
         Ok(())
@@ -2177,6 +2583,7 @@ impl PersistentActor for Governance {
         Option<(SubjectMetadata, GovernanceData)>,
         Arc<PublicKey>,
         HashAlgorithm,
+        bool,
     );
 
     fn update(&mut self, state: Self) {
@@ -2194,6 +2601,7 @@ impl PersistentActor for Governance {
         Self {
             hash: Some(params.2),
             our_key: params.1,
+            service: params.3,
             subject_metadata,
             properties,
         }

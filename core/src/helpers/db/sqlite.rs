@@ -7,17 +7,23 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ave_actors::{ActorRef, Subscriber};
 use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
+use ave_actors::{ActorRef, Subscriber};
+use ave_common::SchemaType;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, SubjsData, TimeRange,
 };
-use ave_common::SchemaType;
 use prometheus_client::{
-    metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
+    encoding::EncodeLabelSet,
+    metrics::{
+        counter::Counter,
+        family::Family,
+        gauge::Gauge,
+        histogram::Histogram,
+    },
     registry::Registry,
 };
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
@@ -489,16 +495,37 @@ struct SqliteMetrics {
 #[derive(Debug)]
 struct DbPrometheusMetrics {
     reader_wait_seconds: Histogram,
+    read_query_seconds:
+        Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
     writer_queue_depth: Gauge,
-    writer_queue_depth_max: Gauge,
     writer_batch_size: Histogram,
-    writer_batch_size_max: Gauge,
+    writer_batch_duration_seconds: Histogram,
     writer_batch_retries_total: Counter,
-    writer_retry_attempt_max: Gauge,
-    page_anchor_hit_total: Counter,
-    page_anchor_miss_total: Counter,
+    writer_failures_total: Family<WriterFailureLabels, Counter>,
+    page_anchor_lookups_total: Family<PageAnchorLabels, Counter>,
     pages_walked_from_anchor_total: Counter,
+    count_cache_lookups_total: Family<CountCacheLabels, Counter>,
     count_query_duration_seconds: Histogram,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ReadQueryLabels {
+    operation: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct WriterFailureLabels {
+    stage: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PageAnchorLabels {
+    result: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CountCacheLabels {
+    result: &'static str,
 }
 
 #[derive(Default)]
@@ -530,17 +557,25 @@ impl DbPrometheusMetrics {
                 0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
                 0.5, 1.0,
             ]),
+            read_query_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
+                    0.25, 0.5, 1.0,
+                ])
+            }),
             writer_queue_depth: Gauge::default(),
-            writer_queue_depth_max: Gauge::default(),
             writer_batch_size: Histogram::new(vec![
                 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
             ]),
-            writer_batch_size_max: Gauge::default(),
+            writer_batch_duration_seconds: Histogram::new(vec![
+                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                1.0, 2.0, 5.0,
+            ]),
             writer_batch_retries_total: Counter::default(),
-            writer_retry_attempt_max: Gauge::default(),
-            page_anchor_hit_total: Counter::default(),
-            page_anchor_miss_total: Counter::default(),
+            writer_failures_total: Family::default(),
+            page_anchor_lookups_total: Family::default(),
             pages_walked_from_anchor_total: Counter::default(),
+            count_cache_lookups_total: Family::default(),
             count_query_duration_seconds: Histogram::new(vec![
                 0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
                 0.5, 1.0,
@@ -555,14 +590,14 @@ impl DbPrometheusMetrics {
             self.reader_wait_seconds.clone(),
         );
         registry.register(
+            "external_db_read_query_seconds",
+            "Duration of external DB read queries, labeled by operation.",
+            self.read_query_seconds.clone(),
+        );
+        registry.register(
             "external_db_writer_queue_depth",
             "Current number of pending writes queued for the external DB writer.",
             self.writer_queue_depth.clone(),
-        );
-        registry.register(
-            "external_db_writer_queue_depth_max",
-            "Maximum observed depth of the external DB writer queue.",
-            self.writer_queue_depth_max.clone(),
         );
         registry.register(
             "external_db_writer_batch_size",
@@ -570,34 +605,34 @@ impl DbPrometheusMetrics {
             self.writer_batch_size.clone(),
         );
         registry.register(
-            "external_db_writer_batch_size_max",
-            "Maximum observed external DB writer batch size.",
-            self.writer_batch_size_max.clone(),
+            "external_db_writer_batch_duration_seconds",
+            "End-to-end duration of external DB writer batches, including retries.",
+            self.writer_batch_duration_seconds.clone(),
         );
         registry.register(
-            "external_db_writer_batch_retries_total",
+            "external_db_writer_batch_retries",
             "Total external DB writer batch retries due to transient write failures.",
             self.writer_batch_retries_total.clone(),
         );
         registry.register(
-            "external_db_writer_retry_attempt_max",
-            "Maximum retry attempt reached by an external DB writer batch.",
-            self.writer_retry_attempt_max.clone(),
+            "external_db_writer_failures",
+            "Total external DB writer failures, labeled by stage.",
+            self.writer_failures_total.clone(),
         );
         registry.register(
-            "external_db_page_anchor_hit_total",
-            "Total page anchor cache hits for external DB pagination.",
-            self.page_anchor_hit_total.clone(),
+            "external_db_page_anchor_lookups",
+            "Total page anchor cache lookups for external DB pagination, labeled by result.",
+            self.page_anchor_lookups_total.clone(),
         );
         registry.register(
-            "external_db_page_anchor_miss_total",
-            "Total page anchor cache misses for external DB pagination.",
-            self.page_anchor_miss_total.clone(),
-        );
-        registry.register(
-            "external_db_pages_walked_from_anchor_total",
+            "external_db_pages_walked_from_anchor",
             "Total number of pages walked forward from a cached anchor while resolving pagination.",
             self.pages_walked_from_anchor_total.clone(),
+        );
+        registry.register(
+            "external_db_count_cache_lookups",
+            "Total count-cache lookups for pagination queries, labeled by result.",
+            self.count_cache_lookups_total.clone(),
         );
         registry.register(
             "external_db_count_query_duration_seconds",
@@ -668,6 +703,19 @@ impl SqliteMetrics {
         }
     }
 
+    fn record_read_query(
+        &self,
+        operation: &'static str,
+        elapsed: std::time::Duration,
+    ) {
+        if let Some(metrics) = self.prometheus.get() {
+            metrics
+                .read_query_seconds
+                .get_or_create(&ReadQueryLabels { operation })
+                .observe(Self::ns_to_seconds(Self::duration_to_ns(elapsed)));
+        }
+    }
+
     fn record_writer_enqueue(&self) {
         let depth = self
             .writer_queue_depth_current
@@ -676,9 +724,6 @@ impl SqliteMetrics {
         Self::update_max_usize(&self.writer_queue_depth_max, depth);
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_queue_depth.set(depth as i64);
-            metrics
-                .writer_queue_depth_max
-                .set(self.writer_queue_depth_max.load(Ordering::Relaxed) as i64);
         }
     }
 
@@ -689,6 +734,12 @@ impl SqliteMetrics {
             .saturating_sub(1);
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_queue_depth.set(depth as i64);
+            metrics
+                .writer_failures_total
+                .get_or_create(&WriterFailureLabels {
+                    stage: "enqueue_send",
+                })
+                .inc();
         }
     }
 
@@ -704,9 +755,6 @@ impl SqliteMetrics {
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_queue_depth.set(depth as i64);
             metrics.writer_batch_size.observe(size as f64);
-            metrics
-                .writer_batch_size_max
-                .set(self.writer_batch_size_max.load(Ordering::Relaxed) as i64);
         }
     }
 
@@ -715,24 +763,43 @@ impl SqliteMetrics {
         Self::update_max_usize(&self.writer_retry_attempt_max, attempt);
         if let Some(metrics) = self.prometheus.get() {
             metrics.writer_batch_retries_total.inc();
+        }
+    }
+
+    fn record_writer_failure(&self, stage: &'static str) {
+        if let Some(metrics) = self.prometheus.get() {
             metrics
-                .writer_retry_attempt_max
-                .set(self.writer_retry_attempt_max.load(Ordering::Relaxed)
-                    as i64);
+                .writer_failures_total
+                .get_or_create(&WriterFailureLabels { stage })
+                .inc();
+        }
+    }
+
+    fn record_writer_batch_duration(&self, elapsed: std::time::Duration) {
+        if let Some(metrics) = self.prometheus.get() {
+            metrics
+                .writer_batch_duration_seconds
+                .observe(Self::ns_to_seconds(Self::duration_to_ns(elapsed)));
         }
     }
 
     fn record_page_anchor_hit(&self) {
         self.page_anchor_hit_count.fetch_add(1, Ordering::Relaxed);
         if let Some(metrics) = self.prometheus.get() {
-            metrics.page_anchor_hit_total.inc();
+            metrics
+                .page_anchor_lookups_total
+                .get_or_create(&PageAnchorLabels { result: "hit" })
+                .inc();
         }
     }
 
     fn record_page_anchor_miss(&self) {
         self.page_anchor_miss_count.fetch_add(1, Ordering::Relaxed);
         if let Some(metrics) = self.prometheus.get() {
-            metrics.page_anchor_miss_total.inc();
+            metrics
+                .page_anchor_lookups_total
+                .get_or_create(&PageAnchorLabels { result: "miss" })
+                .inc();
         }
     }
 
@@ -744,6 +811,17 @@ impl SqliteMetrics {
             .fetch_add(pages, Ordering::Relaxed);
         if let Some(metrics) = self.prometheus.get() {
             metrics.pages_walked_from_anchor_total.inc_by(pages);
+        }
+    }
+
+    fn record_count_cache_lookup(&self, hit: bool) {
+        if let Some(metrics) = self.prometheus.get() {
+            metrics
+                .count_cache_lookups_total
+                .get_or_create(&CountCacheLabels {
+                    result: if hit { "hit" } else { "miss" },
+                })
+                .inc();
         }
     }
 
@@ -826,15 +904,6 @@ impl SqliteMetrics {
         metrics.writer_queue_depth.set(
             self.writer_queue_depth_current.load(Ordering::Relaxed) as i64,
         );
-        metrics
-            .writer_queue_depth_max
-            .set(self.writer_queue_depth_max.load(Ordering::Relaxed) as i64);
-        metrics
-            .writer_batch_size_max
-            .set(self.writer_batch_size_max.load(Ordering::Relaxed) as i64);
-        metrics
-            .writer_retry_attempt_max
-            .set(self.writer_retry_attempt_max.load(Ordering::Relaxed) as i64);
     }
 }
 
@@ -1067,7 +1136,7 @@ impl ReadStore for SqliteReadStore {
         let subject_id = subject_id.to_owned();
         let runtime = Arc::clone(&self.runtime);
 
-        self.with_reader(move |conn| {
+        self.with_reader("aborts", move |conn| {
             get_aborts_from_conn(conn, runtime.as_ref(), &subject_id, query)
         })
         .await
@@ -1079,7 +1148,7 @@ impl ReadStore for SqliteReadStore {
     ) -> Result<SubjectDB, DatabaseError> {
         let subject_id = subject_id.to_owned();
 
-        self.with_reader(move |conn| {
+        self.with_reader("subject_state", move |conn| {
             get_subject_state_from_conn(conn, &subject_id)
         })
         .await
@@ -1089,7 +1158,9 @@ impl ReadStore for SqliteReadStore {
         &self,
         active: Option<bool>,
     ) -> Result<Vec<GovsData>, DatabaseError> {
-        self.with_reader(move |conn| get_governances_from_conn(conn, active))
+        self.with_reader("governances", move |conn| {
+            get_governances_from_conn(conn, active)
+        })
             .await
     }
 
@@ -1101,7 +1172,7 @@ impl ReadStore for SqliteReadStore {
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         let governance_id = governance_id.to_owned();
 
-        self.with_reader(move |conn| {
+        self.with_reader("subjects", move |conn| {
             get_subjects_from_conn(conn, &governance_id, active, schema_id)
         })
         .await
@@ -1115,7 +1186,7 @@ impl ReadStore for SqliteReadStore {
         let subject_id = subject_id.to_owned();
         let runtime = Arc::clone(&self.runtime);
 
-        self.with_reader(move |conn| {
+        self.with_reader("events", move |conn| {
             get_events_from_conn(conn, runtime.as_ref(), &subject_id, query)
         })
         .await
@@ -1128,7 +1199,7 @@ impl ReadStore for SqliteReadStore {
     ) -> Result<LedgerDB, DatabaseError> {
         let subject_id = subject_id.to_owned();
 
-        self.with_reader(move |conn| {
+        self.with_reader("event_sn", move |conn| {
             get_event_sn_from_conn(conn, &subject_id, sn)
         })
         .await
@@ -1143,7 +1214,7 @@ impl ReadStore for SqliteReadStore {
     ) -> Result<Vec<LedgerDB>, DatabaseError> {
         let subject_id = subject_id.to_owned();
 
-        self.with_reader(move |conn| {
+        self.with_reader("first_or_end_events", move |conn| {
             get_first_or_end_events_from_conn(
                 conn,
                 &subject_id,
@@ -1213,7 +1284,11 @@ impl SqliteReadStore {
         Self { runtime }
     }
 
-    async fn with_reader<T, F>(&self, operation: F) -> Result<T, DatabaseError>
+    async fn with_reader<T, F>(
+        &self,
+        operation_name: &'static str,
+        operation: F,
+    ) -> Result<T, DatabaseError>
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> Result<T, DatabaseError> + Send + 'static,
@@ -1221,8 +1296,13 @@ impl SqliteReadStore {
         let runtime = Arc::clone(&self.runtime);
 
         task::spawn_blocking(move || {
+            let started = Instant::now();
             let conn = runtime.acquire_reader()?;
-            operation(&conn)
+            let result = operation(&conn);
+            runtime
+                .metrics
+                .record_read_query(operation_name, started.elapsed());
+            result
         })
         .await
         .map_err(|e| DatabaseError::BlockingTask(e.to_string()))?
@@ -1234,8 +1314,11 @@ impl SqliteWriteStore {
         let (sender, receiver) = mpsc::channel(WRITE_QUEUE_CAPACITY);
         let metrics = Arc::clone(&runtime.metrics);
         let shutdown = CancellationToken::new();
-        let worker =
-            spawn_write_worker(Arc::clone(&runtime), receiver, shutdown.clone());
+        let worker = spawn_write_worker(
+            Arc::clone(&runtime),
+            receiver,
+            shutdown.clone(),
+        );
         Self {
             inner: Arc::new(SqliteWriteStoreInner {
                 manager,
@@ -1347,7 +1430,9 @@ fn spawn_write_worker(
                 match receiver.try_recv() {
                     Ok(job) => jobs.push(job),
                     Err(mpsc::error::TryRecvError::Empty) => {
-                        if shutting_down || jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW {
+                        if shutting_down
+                            || jobs.len() < WRITE_BATCH_MIN_FOR_WINDOW
+                        {
                             break;
                         }
 
@@ -1403,11 +1488,15 @@ fn execute_write_batch(
     runtime: Arc<SqliteRuntime>,
     jobs: Vec<WriteJob>,
 ) -> Result<(), DatabaseError> {
+    let started = Instant::now();
     let mut attempt = 1;
 
     loop {
         match persist_write_batch(&runtime, &jobs) {
             Ok(()) => {
+                runtime
+                    .metrics
+                    .record_writer_batch_duration(started.elapsed());
                 for job in jobs {
                     let _ = job.response.send(Ok(()));
                 }
@@ -1431,6 +1520,10 @@ fn execute_write_batch(
                 attempt += 1;
             }
             Err(error) => {
+                runtime.metrics.record_writer_failure("batch_terminal");
+                runtime
+                    .metrics
+                    .record_writer_batch_duration(started.elapsed());
                 for job in jobs {
                     let _ = job.response.send(Err(error.clone()));
                 }
@@ -1646,10 +1739,13 @@ impl SqliteRuntime {
     }
 
     fn lookup_count_cache(&self, key: &str, subject_id: &str) -> Option<u64> {
-        self.page_cache
+        let cached = self
+            .page_cache
             .lock()
             .ok()
-            .and_then(|mut cache| cache.lookup_count(key, subject_id))
+            .and_then(|mut cache| cache.lookup_count(key, subject_id));
+        self.metrics.record_count_cache_lookup(cached.is_some());
+        cached
     }
 
     fn store_count_cache(&self, key: String, subject_id: &str, total: u64) {
@@ -2034,11 +2130,7 @@ fn get_subjects_from_conn(
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), Some(schema_id)) => stmt
             .query_map(
-                params![
-                    governance_id,
-                    if active { 1 } else { 0 },
-                    schema_id
-                ],
+                params![governance_id, if active { 1 } else { 0 }, schema_id],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
@@ -2048,7 +2140,8 @@ fn get_subjects_from_conn(
         .map(|row| row.map_err(|e| DatabaseError::Query(e.to_string())))
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
-    if !subjects.is_empty() || register_governance_exists(conn, governance_id)? {
+    if !subjects.is_empty() || register_governance_exists(conn, governance_id)?
+    {
         Ok(subjects)
     } else {
         Err(DatabaseError::GovernanceNotFound(governance_id.to_owned()))
@@ -3438,11 +3531,8 @@ impl Subscriber<SignedLedger> for SqliteWriteStore {
                 error = %e,
                 "Failed to save signed ledger to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3478,11 +3568,8 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save subject state to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3517,11 +3604,8 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3548,11 +3632,8 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
     async fn notify(&self, event: RegisterEvent) {
         if let Err(e) = self.persist_register(event.clone()).await {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
-            if let Err(e) = self
-                .inner
-                .manager
-                .tell(DBManagerMessage::Error(e))
-                .await
+            if let Err(e) =
+                self.inner.manager.tell(DBManagerMessage::Error(e)).await
             {
                 error!(
                     error = %e,
@@ -3562,5 +3643,79 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn metric_value(metrics: &str, name: &str) -> f64 {
+        metrics
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(name) {
+                    line.split_whitespace().nth(1)?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
+
+    #[test]
+    fn writer_batch_duration_metric_is_observed() {
+        let metrics = SqliteMetrics::default();
+        let mut registry = Registry::default();
+        metrics.register_prometheus_metrics(&mut registry);
+
+        metrics.record_writer_batch_duration(Duration::from_millis(5));
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(&text, "external_db_writer_batch_duration_seconds_count"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn count_cache_lookups_track_hit_and_miss() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let tuning = tuning_for_ram(1024);
+        let runtime =
+            SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime");
+
+        let mut registry = Registry::default();
+        runtime.metrics.register_prometheus_metrics(&mut registry);
+
+        assert_eq!(runtime.lookup_count_cache("key", "subject"), None);
+        runtime.store_count_cache("key".to_owned(), "subject", 42);
+        assert_eq!(runtime.lookup_count_cache("key", "subject"), Some(42));
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "external_db_count_cache_lookups_total{result=\"miss\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "external_db_count_cache_lookups_total{result=\"hit\"}"
+            ),
+            1.0
+        );
     }
 }

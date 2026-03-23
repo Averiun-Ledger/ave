@@ -15,6 +15,7 @@ use crate::{
         },
         event::{EvaluationData, EvaluationResponse},
     },
+    metrics::try_core_metrics,
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
 };
 use ave_actors::{
@@ -80,6 +81,12 @@ pub struct Evaluation {
 }
 
 impl Evaluation {
+    fn observe_event(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("evaluation", result);
+        }
+    }
+
     pub fn new(
         our_key: Arc<PublicKey>,
         request: Signed<EvaluationReq>,
@@ -373,9 +380,10 @@ impl Handler<Self> for Evaluation {
                                 self.evaluators_response.push(response);
                             }
                             EvaluationRes::TimeOut => {
-                                // Do nothing
+                                Self::observe_event("timeout");
                             }
                             EvaluationRes::Abort(error) => {
+                                Self::observe_event("abort");
                                 if let Err(e) = abort_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -439,6 +447,7 @@ impl Handler<Self> for Evaluation {
                                 self.errors.push(error);
                             }
                             EvaluationRes::Reboot => {
+                                Self::observe_event("reboot");
                                 if let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -489,6 +498,9 @@ impl Handler<Self> for Evaluation {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             }
+                            if matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event("reboot");
+                            }
 
                             let response = match self
                                 .build_evaluation_data(summary.is_ok())
@@ -515,6 +527,14 @@ impl Handler<Self> for Evaluation {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             };
+
+                            if !matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event(if summary.is_ok() {
+                                    "success"
+                                } else {
+                                    "error"
+                                });
+                            }
 
                             debug!(
                                 msg_type = "Response",
@@ -573,6 +593,8 @@ impl Handler<Self> for Evaluation {
                                 "Failed to send reboot to request actor"
                             );
                             return Err(emit_fail(ctx, e).await);
+                        } else if self.current_evaluators.is_empty() {
+                            Self::observe_event("reboot");
                         }
                     } else {
                         warn!(
@@ -593,6 +615,7 @@ impl Handler<Self> for Evaluation {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        Self::observe_event("error");
         error!(
             request_id = %self.request_id,
             version = self.version,
@@ -654,7 +677,9 @@ pub mod tests {
         loop {
             match db.get_subject_state(&subject_id.to_string()).await {
                 Ok(state) if state.sn >= expected_sn => return state,
-                Ok(_) | Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                Ok(_) | Err(_)
+                    if started.elapsed() < Duration::from_secs(5) =>
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(state) => {
@@ -1808,7 +1833,8 @@ pub mod tests {
             _dir,
         ) = create_tracker().await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.from_sn, 0);
         assert_eq!(replay.to_sn, None);
@@ -1831,7 +1857,10 @@ pub mod tests {
                 gov_version,
                 state,
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
                 assert_eq!(namespace, "");
@@ -1891,7 +1920,10 @@ pub mod tests {
                 sn,
                 ..
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(*sn, 0);
             }
@@ -1912,7 +1944,10 @@ pub mod tests {
                 gov_version,
                 ..
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(replay_payload, &payload);
                 assert_eq!(*sn, 1);
@@ -1935,7 +1970,8 @@ pub mod tests {
             _dir,
         ) = create_gov().await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -1990,7 +2026,8 @@ pub mod tests {
         )
         .await;
 
-        let replay = get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2006,7 +2043,10 @@ pub mod tests {
                 sn,
                 gov_version,
             } => {
-                assert_eq!(governance_id.as_deref(), Some(gov_id.to_string().as_str()));
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
                 assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
                 assert!(!owner.is_empty());
@@ -2092,10 +2132,7 @@ pub mod tests {
         };
         assert_eq!(
             path,
-            ActorPath::from(format!(
-                "/user/node/subject_manager/{}",
-                missing
-            ))
+            ActorPath::from(format!("/user/node/subject_manager/{}", missing))
         );
     }
 

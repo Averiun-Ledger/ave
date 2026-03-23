@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, histogram::Histogram},
+    metrics::{
+        counter::Counter, family::Family, gauge::Gauge,
+        histogram::Histogram,
+    },
     registry::Registry,
 };
 
@@ -19,6 +22,7 @@ struct OperationLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
     request_kind: &'static str,
+    result: &'static str,
 }
 
 #[derive(Debug)]
@@ -31,10 +35,9 @@ pub struct AuthPrometheusMetrics {
     blocking_task_duration_seconds:
         Family<OperationLabels, Histogram, fn() -> Histogram>,
     blocking_task_rejections_total: Family<OperationLabels, Counter>,
+    blocking_in_flight: Gauge,
     request_db_duration_seconds:
         Family<RequestLabels, Histogram, fn() -> Histogram>,
-    request_db_ops_total: Family<RequestLabels, Counter>,
-    request_total: Family<RequestLabels, Counter>,
 }
 
 impl AuthPrometheusMetrics {
@@ -67,14 +70,13 @@ impl AuthPrometheusMetrics {
                 },
             ),
             blocking_task_rejections_total: Family::default(),
+            blocking_in_flight: Gauge::default(),
             request_db_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
                     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
                     5.0, 10.0,
                 ])
             }),
-            request_db_ops_total: Family::default(),
-            request_total: Family::default(),
         }
     }
 
@@ -100,24 +102,19 @@ impl AuthPrometheusMetrics {
             self.blocking_task_duration_seconds.clone(),
         );
         registry.register(
-            "auth_db_blocking_rejections_total",
+            "auth_db_blocking_rejections",
             "Total auth blocking tasks rejected due to backpressure timeout, labeled by operation.",
             self.blocking_task_rejections_total.clone(),
         );
         registry.register(
+            "auth_db_blocking_in_flight",
+            "Current number of auth blocking tasks holding execution capacity.",
+            self.blocking_in_flight.clone(),
+        );
+        registry.register(
             "auth_db_request_seconds",
-            "End-to-end database time consumed by auth-facing requests, labeled by request kind.",
+            "End-to-end database time consumed by auth-facing requests, labeled by request kind and result.",
             self.request_db_duration_seconds.clone(),
-        );
-        registry.register(
-            "auth_db_request_ops_total",
-            "Total auth database operations attributed to requests, labeled by request kind.",
-            self.request_db_ops_total.clone(),
-        );
-        registry.register(
-            "auth_db_requests_total",
-            "Total auth requests that recorded database metrics, labeled by request kind.",
-            self.request_total.clone(),
         );
     }
 
@@ -166,17 +163,20 @@ impl AuthPrometheusMetrics {
     pub fn observe_request_metrics(
         &self,
         request_kind: &'static str,
-        db_operations: u64,
+        result: &'static str,
         elapsed_seconds: f64,
     ) {
-        let labels = RequestLabels { request_kind };
-        self.request_total.get_or_create(&labels).inc();
-        self.request_db_ops_total
-            .get_or_create(&labels)
-            .inc_by(db_operations);
+        let labels = RequestLabels {
+            request_kind,
+            result,
+        };
         self.request_db_duration_seconds
             .get_or_create(&labels)
             .observe(elapsed_seconds);
+    }
+
+    pub fn set_blocking_in_flight(&self, value: i64) {
+        self.blocking_in_flight.set(value);
     }
 }
 

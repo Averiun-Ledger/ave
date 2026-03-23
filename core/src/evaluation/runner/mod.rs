@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -33,6 +34,7 @@ use crate::{
     model::common::contract::{
         MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
     },
+    metrics::try_core_metrics,
 };
 
 type AddRemoveChangeSchema = (
@@ -353,31 +355,22 @@ impl Runner {
 
         let Some(contracts) = ctx
             .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Vec<u8>>>>>("contracts")
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>("contracts")
             .await
         else {
             return Err(RunnerError::MissingHelper { name: "contracts" });
         };
 
-        let contract = {
+        let module = {
             let contracts = contracts.read().await;
-            let Some(contract) = contracts.get(contract_name) else {
+            let Some(module) = contracts.get(contract_name) else {
                 return Err(RunnerError::ContractNotFound {
                     name: contract_name.to_owned(),
                 });
             };
-            let result = contract.to_vec();
+            let result = module.clone();
             drop(contracts);
             result
-        };
-
-        let module = unsafe {
-            Module::deserialize(&wasm_runtime.engine, contract).map_err(
-                |e| RunnerError::WasmError {
-                    operation: "deserialize module",
-                    details: e.to_string(),
-                },
-            )?
         };
 
         let (context, state_ptr, init_state_ptr, event_ptr) =
@@ -1485,8 +1478,15 @@ impl Handler<Self> for Runner {
         msg: RunnerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
+        let started_at = Instant::now();
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
             Ok((result, compilations)) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_execution(
+                        "success",
+                        started_at.elapsed(),
+                    );
+                }
                 debug!(
                     msg_type = "Execute",
                     approval_required = result.approval_required,
@@ -1500,6 +1500,12 @@ impl Handler<Self> for Runner {
                 })
             }
             Err(e) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_execution(
+                        "error",
+                        started_at.elapsed(),
+                    );
+                }
                 error!(
                     msg_type = "Execute",
                     error = %e,

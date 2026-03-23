@@ -3,6 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum CompilerError {
+    #[error("invalid contract path [{path}]: {details}")]
+    InvalidContractPath { path: String, details: String },
+
     #[error("base64 decode failed: {details}")]
     Base64DecodeFailed { details: String },
 
@@ -23,6 +26,12 @@ pub enum CompilerError {
 
     #[error("missing helper: {name}")]
     MissingHelper { name: &'static str },
+
+    #[error("contract register failed: {details}")]
+    ContractRegisterFailed { details: String },
+
+    #[error("toolchain fingerprint failed: {details}")]
+    ToolchainFingerprintFailed { details: String },
 
     #[error("wasm precompile failed: {details}")]
     WasmPrecompileFailed { details: String },

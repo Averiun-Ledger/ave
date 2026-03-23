@@ -25,8 +25,8 @@ pub use error::DatabaseError;
 use sqlite::SqliteLocal;
 use std::path::Path;
 use tokio::fs;
-use tracing::error;
 use tracing::debug;
+use tracing::error;
 #[cfg(feature = "ext-sqlite")]
 mod sqlite;
 

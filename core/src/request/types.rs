@@ -3,7 +3,7 @@ use std::{collections::HashSet, fmt::Display};
 use crate::{
     evaluation::request::EvaluationReq, governance::model::Quorum,
     model::event::EvaluationData, subject::SignedLedger,
-    validation::request::ValidationReq,
+    validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 
 use ave_common::{
@@ -28,6 +28,7 @@ pub enum RequestManagerState {
         request: Box<Signed<ValidationReq>>,
         quorum: Quorum,
         init_state: Option<ValueWrapper>,
+        current_request_roles: CurrentRequestRoles,
         signers: HashSet<PublicKey>,
     },
     UpdateSubject {

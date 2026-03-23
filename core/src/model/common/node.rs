@@ -98,8 +98,9 @@ where
     let node_actor = ctx.system().get_actor::<Node>(&path).await?;
 
     // We obtain the validator
-    let node_response =
-        node_actor.ask(NodeMessage::SignRequest(Box::new(sign_type))).await?;
+    let node_response = node_actor
+        .ask(NodeMessage::SignRequest(Box::new(sign_type)))
+        .await?;
 
     match node_response {
         NodeResponse::SignRequest(signature) => Ok(signature),

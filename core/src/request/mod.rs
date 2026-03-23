@@ -34,6 +34,7 @@ use crate::governance::events::GovernanceEvent;
 use crate::governance::model::{HashThisRole, RoleTypes};
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
+use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
 use crate::model::common::subject::{get_gov, get_version};
 use crate::model::common::{
@@ -184,6 +185,10 @@ impl RequestHandler {
         subject_id: &DigestIdentifier,
         request_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_request_invalid();
+        }
+
         self.on_event(
             RequestHandlerEvent::Invalid {
                 subject_id: subject_id.to_owned(),
@@ -218,8 +223,10 @@ impl RequestHandler {
             return Err(RequestHandlerError::ObsoleteApproval);
         }
 
-        let approver_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+        let approver_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/approver",
+            subject_id
+        ));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -241,8 +248,10 @@ impl RequestHandler {
         subject_id: &DigestIdentifier,
         state: Option<ApprovalState>,
     ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
-        let approver_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+        let approver_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/approver",
+            subject_id
+        ));
         let approver_actor = ctx
             .system()
             .get_actor::<ApprPersist>(&approver_path)
@@ -285,8 +294,10 @@ impl RequestHandler {
 
         let mut responses = vec![];
         for governance in vec.iter() {
-            let approver_path =
-                ActorPath::from(format!("/user/node/subject_manager/{}/approver", governance));
+            let approver_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/approver",
+                governance
+            ));
             if let Ok(approver_actor) =
                 ctx.system().get_actor::<ApprPersist>(&approver_path).await
             {

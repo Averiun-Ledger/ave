@@ -1,10 +1,30 @@
 #!/bin/bash
 
+# Usage:
+#   ./test.sh
+#     Runs the full flow as usual: pre-compilation + tests.
+#     The reported total time includes both phases.
+#
+#   ./test.sh -c
+#     Runs only the pre-compilation phase.
+#     Useful to warm up all Cargo/test artifacts without executing tests.
+#
+#   ./test.sh -r
+#     Runs pre-compilation first and then executes tests.
+#     Timing is split in two phases:
+#       - Warmup duration: pre-compilation time
+#       - Total duration: test execution time after warmup
+#     This is equivalent to running `./test.sh -c` and then `./test.sh`,
+#     but in a single command with separated timing.
+
 # ===================== Configuration =====================
 RUNNER="${RUNNER:-cargo}"
 BASE_FLAGS="${BASE_FLAGS:---all-targets}"
 INSTALL_FLAGS="${INSTALL_FLAGS:---locked}"
 LOG_DIR="${LOG_DIR:-target/test-logs}"
+COMPILE_ONLY=0
+RUN_AFTER_COMPILE=0
+WARMUP_DURATION=0
 
 # OPTIMIZATION: Run tests in parallel
 PARALLEL_JOBS="${PARALLEL_JOBS:-$(nproc)}"
@@ -258,11 +278,11 @@ build_groups() {
   done <<< "${lines}"
 }
 
-run_groups() {
+run_precompile_groups() {
   local total_groups=${#GROUP_KEYS[@]}
   local current_group=0
 
-  print_header "RUNNING TESTS"
+  print_header "RUNNING PRE-COMPILATION"
 
   for ((i=0; i<${#GROUP_KEYS[@]}; i++)); do
     local key="${GROUP_KEYS[$i]}"
@@ -289,6 +309,24 @@ run_groups() {
     pre_cmd+=(--no-run)
 
     run_step "${pre_label}" "${pre_sub}" "${pre_cmd[@]}"
+  done
+}
+
+run_test_groups() {
+  local total_groups=${#GROUP_KEYS[@]}
+  local current_group=0
+
+  print_header "RUNNING TESTS"
+
+  for ((i=0; i<${#GROUP_KEYS[@]}; i++)); do
+    local key="${GROUP_KEYS[$i]}"
+    local pkgs="${GROUP_PKGS[$i]}"
+    current_group=$((current_group + 1))
+
+    # shellcheck disable=SC2206
+    local key_arr=( $key )
+    # shellcheck disable=SC2206
+    local base_arr=( $BASE_FLAGS )
 
     # ===== Individual execution per package =====
     local pkg_count=0
@@ -353,6 +391,9 @@ print_summary() {
   echo "  ${GREEN}✔${RESET} Successful tests:  ${#SUCCESSES[@]}"
   echo "  ${RED}✖${RESET} Failed tests:      ${#FAIL_LABELS[@]}"
   echo "  ${BLUE}⧗${RESET} Total duration:    $(format_duration $duration)"
+  if [ "${WARMUP_DURATION}" -gt 0 ]; then
+    echo "  ${CYAN}↻${RESET} Warmup duration:   $(format_duration "${WARMUP_DURATION}")"
+  fi
   echo "  ${MAGENTA}Σ${RESET} Tests executed:    $TOTAL_TESTS"
 
   if [ $TOTAL_TESTS -gt 0 ]; then
@@ -427,10 +468,40 @@ print_summary() {
 }
 
 main() {
+  while getopts ":cr" opt; do
+    case "${opt}" in
+      c)
+        COMPILE_ONLY=1
+        ;;
+      r)
+        RUN_AFTER_COMPILE=1
+        ;;
+      \?)
+        echo "${RED}✖ Error: unknown option -${OPTARG}${RESET}" >&2
+        exit 1
+        ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
   print_header "AVE TEST SUITE"
   ensure_tools
   build_groups "$@"
-  run_groups
+
+  if [[ "${COMPILE_ONLY}" -eq 1 ]]; then
+    run_precompile_groups
+  elif [[ "${RUN_AFTER_COMPILE}" -eq 1 ]]; then
+    local warmup_start
+    warmup_start=$(date +%s)
+    run_precompile_groups
+    WARMUP_DURATION=$(( $(date +%s) - warmup_start ))
+    START_TIME=$(date +%s)
+    run_test_groups
+  else
+    run_precompile_groups
+    run_test_groups
+  fi
+
   print_summary
   exit "${EXIT_CODE}"
 }

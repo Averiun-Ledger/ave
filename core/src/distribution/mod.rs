@@ -11,6 +11,7 @@ use tracing::{Span, debug, error, info_span};
 use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::common::emit_fail,
     request::manager::{RequestManager, RequestManagerMessage},
     subject::SignedLedger,
@@ -35,6 +36,12 @@ pub struct Distribution {
 }
 
 impl Distribution {
+    fn observe_event(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("distribution", result);
+        }
+    }
+
     pub fn new(
         network: Arc<NetworkSender>,
         distribution_type: DistributionType,
@@ -194,6 +201,7 @@ impl Handler<Self> for Distribution {
                 if self.check_witness(sender.clone())
                     && self.witnesses.is_empty()
                 {
+                    Self::observe_event("success");
                     debug!(
                         msg_type = "Response",
                         subject_id = %self.subject_id,
@@ -222,6 +230,7 @@ impl Handler<Self> for Distribution {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        Self::observe_event("error");
         error!(
             subject_id = %self.subject_id,
             request_id = %self.request_id,

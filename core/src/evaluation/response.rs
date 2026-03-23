@@ -110,10 +110,13 @@ impl From<CompilerError> for EvaluatorError {
             }
             // Fallos del sistema: no deberían ocurrir en un entorno sano
             CompilerError::CargoBuildFailed { .. }
+            | CompilerError::InvalidContractPath { .. }
             | CompilerError::DirectoryCreationFailed { .. }
             | CompilerError::FileWriteFailed { .. }
             | CompilerError::FileReadFailed { .. }
             | CompilerError::MissingHelper { .. }
+            | CompilerError::ContractRegisterFailed { .. }
+            | CompilerError::ToolchainFingerprintFailed { .. }
             | CompilerError::FuelLimitError { .. }
             | CompilerError::WasmPrecompileFailed { .. }
             | CompilerError::WasmDeserializationFailed { .. }

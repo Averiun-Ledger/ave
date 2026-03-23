@@ -2,7 +2,7 @@ pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
-    config::{Config, SinkAuth},
+    config::{Config, GovernanceSyncConfig, SinkAuth, TrackerSyncConfig},
     db::Database,
     external_db::DBManager,
     helpers::{db::ExternalDB, sink::AveSink},
@@ -14,6 +14,7 @@ use ave_actors::{
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
+use wasmtime::Module;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
@@ -24,6 +25,8 @@ pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
     pub tracking_size: usize,
+    pub sync_governance: GovernanceSyncConfig,
+    pub sync_tracker: TrackerSyncConfig,
 }
 
 impl From<Config> for ConfigHelper {
@@ -32,6 +35,8 @@ impl From<Config> for ConfigHelper {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
             tracking_size: value.tracking_size,
+            sync_governance: value.sync.governance,
+            sync_tracker: value.sync.tracker,
         }
     }
 }
@@ -58,7 +63,7 @@ pub async fn system(
         .add_helper("wasm_runtime", Arc::new(wasm_runtime))
         .await;
 
-    let contracts: HashMap<String, Vec<u8>> = HashMap::new();
+    let contracts: HashMap<String, Arc<Module>> = HashMap::new();
     system
         .add_helper("contracts", Arc::new(RwLock::new(contracts)))
         .await;
@@ -107,13 +112,13 @@ pub async fn system(
 
     let ext_db = Arc::new(
         ExternalDB::build(
-        config.external_db.db,
-        config.external_db.durability,
-        db_manager_actor,
-        config.spec.clone(),
-    )
-    .await
-    .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
+            config.external_db.db,
+            config.external_db.durability,
+            db_manager_actor,
+            config.spec.clone(),
+        )
+        .await
+        .map_err(|e| SystemError::ExternalDbBuild(e.to_string()))?,
     );
 
     system.add_helper("ext_db", Arc::clone(&ext_db)).await;
@@ -141,7 +146,7 @@ pub mod tests {
 
     use crate::config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig,
+        AveInternalDBFeatureConfig, SyncConfig,
     };
 
     use super::*;
@@ -200,6 +205,20 @@ pub mod tests {
             always_accept: false,
             tracking_size: 100,
             is_service: true,
+            sync: SyncConfig {
+                governance: GovernanceSyncConfig {
+                    interval_secs: 60,
+                    sample_size: 3,
+                    response_timeout_secs: 30,
+                },
+                tracker: TrackerSyncConfig {
+                    interval_secs: 60,
+                    page_size: 200,
+                    response_timeout_secs: 10,
+                    update_batch_size: 2,
+                    update_timeout_secs: 10,
+                },
+            },
             spec: None,
         };
 

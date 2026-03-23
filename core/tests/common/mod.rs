@@ -7,8 +7,7 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     request::{
-        ConfirmRequest, CreateRequest, EventRequest, FactRequest,
-        RejectRequest, TransferRequest,
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest, TransferRequest
     },
     response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB},
 };
@@ -16,12 +15,14 @@ use ave_core::{
     Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config, SinkAuth,
+        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig, SinkAuth,
+        SyncConfig, TrackerSyncConfig,
     },
 };
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
+    path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicU16, Ordering},
     time::Duration,
@@ -49,19 +50,37 @@ pub async fn create_node(
     listen_address: &str,
     peers: Vec<RoutingNode>,
     always_accept: bool,
+    is_service: bool,
     keys: Option<KeyPair>,
+    local_db: Option<PathBuf>,
+    ext_db: Option<PathBuf>,
+    contracts_path: Option<PathBuf>,
 ) -> (NodeData, Vec<TempDir>) {
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let dir = tempfile::tempdir().expect("Can not create temporal directory");
-    let local_db = dir.path().to_path_buf();
-    vec_dirs.push(dir);
+    let local_db = if let Some(local_db) = local_db {
+        local_db
+    } else {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let local_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-    let dir = tempfile::tempdir().expect("Can not create temporal directory");
-    let ext_db = dir.path().to_path_buf();
-    vec_dirs.push(dir);
+        local_db
+    };
+
+    let ext_db = if let Some(ext_db) = ext_db {
+        ext_db
+    } else {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let ext_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
+
+        ext_db
+    };
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -70,13 +89,19 @@ pub async fn create_node(
         peers,
     );
 
-    let contract_dir =
-        tempfile::tempdir().expect("Can not create temporal directory");
-    let contracts_path = contract_dir.path().to_path_buf();
-    vec_dirs.push(contract_dir);
+    let contracts_path = if let Some(contracts_path) = contracts_path {
+        contracts_path
+    } else {
+        let contract_dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let contracts_path = contract_dir.path().to_path_buf();
+        vec_dirs.push(contract_dir);
+
+        contracts_path
+    };
 
     let config = Config {
-        is_service: true,
+        is_service,
         keypair_algorithm: KeyPairAlgorithm::Ed25519,
         hash_algorithm: HashAlgorithm::Blake3,
         internal_db: AveInternalDBConfig {
@@ -91,6 +116,20 @@ pub async fn create_node(
         contracts_path,
         always_accept,
         tracking_size: 100,
+        sync: SyncConfig {
+            governance: GovernanceSyncConfig {
+                interval_secs: 10,
+                sample_size: 3,
+                response_timeout_secs: 5,
+            },
+            tracker: TrackerSyncConfig {
+                interval_secs: 10,
+                page_size: 10,
+                response_timeout_secs: 5,
+                update_batch_size: 2,
+                update_timeout_secs: 5,
+            },
+        },
         spec: None,
     };
 
@@ -127,6 +166,7 @@ pub async fn create_nodes_and_connections(
     addressable: Vec<Vec<usize>>,
     ephemeral: Vec<Vec<usize>>,
     always_accept: bool,
+    is_service: bool,
 ) -> (Vec<NodeData>, Vec<TempDir>) {
     let mut nodes: Vec<NodeData> = Vec::new();
     let mut dirs = vec![];
@@ -153,6 +193,10 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
+            None,
+            None,
+            None,
             None,
         )
         .await;
@@ -181,6 +225,10 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
+            None,
+            None,
+            None,
             None,
         )
         .await;
@@ -207,6 +255,10 @@ pub async fn create_nodes_and_connections(
             &listen_address,
             peers,
             always_accept,
+            is_service,
+            None,
+            None,
+            None,
             None,
         )
         .await;
@@ -251,6 +303,7 @@ pub async fn create_and_authorize_governance(
     governance_id
 }
 
+#[allow(dead_code)]
 pub async fn create_subject(
     node: &Api,
     governance_id: DigestIdentifier,
@@ -302,6 +355,7 @@ pub async fn emit_fact(
     Ok(request_id)
 }
 
+#[allow(dead_code)]
 pub async fn emit_fact_signed(
     node: &Api,
     keys: &KeyPair,
@@ -555,6 +609,25 @@ pub async fn emit_reject(
     wait_request_state: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = EventRequest::Reject(RejectRequest { subject_id });
+    let response = node.own_request(request).await?;
+    // state of request
+    if !wait_request_state {
+        return Ok(());
+    }
+
+    let request_id = response.request_id;
+    wait_request(node, request_id.clone()).await.unwrap();
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn emit_eol(
+    node: &Api,
+    subject_id: DigestIdentifier,
+    wait_request_state: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = EventRequest::EOL(EOLRequest { subject_id });
     let response = node.own_request(request).await?;
     // state of request
     if !wait_request_state {

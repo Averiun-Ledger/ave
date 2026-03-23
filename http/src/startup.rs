@@ -468,6 +468,46 @@ fn log_effective_configuration(
     }
     info!(target: TARGET, "  always acc: {}", config.node.always_accept);
     info!(target: TARGET, "  service   : {}", config.node.is_service);
+    info!(
+        target: TARGET,
+        "  version sync interval        : {}s",
+        config.node.sync.governance.interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  version sync sample size     : {}",
+        config.node.sync.governance.sample_size
+    );
+    info!(
+        target: TARGET,
+        "  version sync response timeout: {}s",
+        config.node.sync.governance.response_timeout_secs
+    );
+    info!(
+        target: TARGET,
+        "  tracker sync interval        : {}s",
+        config.node.sync.tracker.interval_secs
+    );
+    info!(
+        target: TARGET,
+        "  tracker sync page size       : {}",
+        config.node.sync.tracker.page_size
+    );
+    info!(
+        target: TARGET,
+        "  tracker sync response timeout: {}s",
+        config.node.sync.tracker.response_timeout_secs
+    );
+    info!(
+        target: TARGET,
+        "  tracker sync update batch size : {}",
+        config.node.sync.tracker.update_batch_size
+    );
+    info!(
+        target: TARGET,
+        "  tracker sync update timeout  : {}s",
+        config.node.sync.tracker.update_timeout_secs
+    );
 
     info!(target: TARGET, "[auth]");
     info!(target: TARGET, "  enabled   : {}", config.auth.enable);

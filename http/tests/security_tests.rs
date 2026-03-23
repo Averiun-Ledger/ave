@@ -6,9 +6,10 @@ pub mod common;
 use common::TestDbExt;
 
 use ave_http::auth::database::DatabaseError;
+use prometheus_client::{encoding::text::encode, registry::Registry};
 use test_log::test;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use ave_http::auth::{
     AuthDatabase,
@@ -28,6 +29,19 @@ use axum::{
     extract::{Path, Query},
     http::StatusCode,
 };
+
+fn metric_value(metrics: &str, name: &str) -> f64 {
+    metrics
+        .lines()
+        .find_map(|line| {
+            if line.starts_with(name) {
+                line.split_whitespace().nth(1)?.parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0.0)
+}
 
 // =============================================================================
 // PASSWORD POLICY VALIDATION TESTS
@@ -258,12 +272,50 @@ async fn test_auth_metrics_are_exposed_in_prometheus() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("auth_db_requests_total"));
     assert!(body.contains("auth_db_request_seconds"));
     assert!(body.contains("auth_db_transaction_seconds"));
+    assert!(body.contains("auth_db_blocking_in_flight"));
     assert!(body.contains("request_kind=\"login\""));
     assert!(body.contains("request_kind=\"api_key_auth\""));
     assert!(body.contains("operation=\"authenticate_api_key_request\""));
+}
+
+#[test(tokio::test)]
+async fn test_auth_blocking_in_flight_metric_tracks_running_tasks() {
+    let (db, _dirs) = common::create_test_db();
+    let mut registry = Registry::default();
+    db.register_prometheus_metrics(&mut registry);
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let db_for_task = db.clone();
+    let handle = tokio::spawn(async move {
+        db_for_task
+            .run_blocking("blocking_metric_probe", move |_| {
+                let _ = started_tx.send(());
+                release_rx.recv().expect("release signal");
+                Ok::<(), DatabaseError>(())
+            })
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("blocking task started in time")
+        .expect("blocking task start signal");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut text = String::new();
+    encode(&mut text, &registry).expect("encode metrics");
+    assert_eq!(metric_value(&text, "auth_db_blocking_in_flight"), 1.0);
+
+    release_tx.send(()).expect("release task");
+    handle.await.expect("join task").expect("task result");
+
+    let mut text = String::new();
+    encode(&mut text, &registry).expect("encode metrics");
+    assert_eq!(metric_value(&text, "auth_db_blocking_in_flight"), 0.0);
 }
 
 // =============================================================================

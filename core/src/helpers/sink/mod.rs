@@ -1444,10 +1444,7 @@ mod tests {
             }
             assert!(ready, "test server did not become ready");
 
-            Self {
-                base_url,
-                task,
-            }
+            Self { base_url, task }
         }
     }
 
@@ -1624,9 +1621,7 @@ mod tests {
 
         shutdown.cancel();
 
-        let result = waiter
-            .await
-            .expect("queue waiter task should finish");
+        let result = waiter.await.expect("queue waiter task should finish");
         assert!(result.is_none());
     }
 
@@ -1692,13 +1687,14 @@ mod tests {
         });
 
         sink_calls
-            .wait_for_at_least(1, "transient retry did not perform first attempt")
+            .wait_for_at_least(
+                1,
+                "transient retry did not perform first attempt",
+            )
             .await;
         shared.shutdown.cancel();
 
-        let result = retry
-            .await
-            .expect("retry task should finish");
+        let result = retry.await.expect("retry task should finish");
         assert!(matches!(result, Err(SinkError::Shutdown)));
     }
 
@@ -1823,7 +1819,10 @@ mod tests {
         .await;
 
         sink_calls
-            .wait_for_at_least(1, "sink did not perform the initial retryable request")
+            .wait_for_at_least(
+                1,
+                "sink did not perform the initial retryable request",
+            )
             .await;
         advance_retry_delay(0).await;
         let attempts = sink_calls
@@ -1836,26 +1835,23 @@ mod tests {
     async fn notify_honors_configured_request_timeout() {
         let sink_calls = Arc::new(TestCounter::new());
         let release_requests = Arc::new(Notify::new());
-        let server = TestServer::spawn(
-            Router::new()
-                .route(
-                    "/sink/{subject_id}/{schema_id}",
-                    post({
-                        let sink_calls = Arc::clone(&sink_calls);
-                        let release_requests = Arc::clone(&release_requests);
-                        move |_path: Path<(String, String)>,
-                              Json(_payload): Json<DataToSink>| {
-                            let sink_calls = Arc::clone(&sink_calls);
-                            let release_requests = Arc::clone(&release_requests);
-                            async move {
-                                sink_calls.increment();
-                                release_requests.notified().await;
-                                StatusCode::OK
-                            }
-                        }
-                    }),
-                ),
-        )
+        let server = TestServer::spawn(Router::new().route(
+            "/sink/{subject_id}/{schema_id}",
+            post({
+                let sink_calls = Arc::clone(&sink_calls);
+                let release_requests = Arc::clone(&release_requests);
+                move |_path: Path<(String, String)>,
+                      Json(_payload): Json<DataToSink>| {
+                    let sink_calls = Arc::clone(&sink_calls);
+                    let release_requests = Arc::clone(&release_requests);
+                    async move {
+                        sink_calls.increment();
+                        release_requests.notified().await;
+                        StatusCode::OK
+                    }
+                }
+            }),
+        ))
         .await;
 
         let sink = build_sink_with_servers(
@@ -1885,7 +1881,10 @@ mod tests {
         .await;
 
         let attempts = sink_calls
-            .wait_for_at_least(2, "sink timeout test did not perform the retry request")
+            .wait_for_at_least(
+                2,
+                "sink timeout test did not perform the retry request",
+            )
             .await;
         release_requests.notify_waiters();
         assert_eq!(attempts, 2);
@@ -2153,7 +2152,10 @@ mod tests {
             .wait_for_at_least(1, "token refresh did not complete")
             .await;
         let sink_attempts = sink_calls
-            .wait_for_at_least(1, "refreshed token was not used to send the sink request")
+            .wait_for_at_least(
+                1,
+                "refreshed token was not used to send the sink request",
+            )
             .await;
         assert_eq!(auth_attempts, 1);
         assert_eq!(sink_attempts, 1);

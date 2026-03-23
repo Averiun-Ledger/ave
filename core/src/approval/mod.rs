@@ -22,7 +22,8 @@ use crate::approval::light::{ApprLight, ApprLightMessage};
 use crate::approval::persist::{ApprPersist, ApprPersistMessage};
 use crate::governance::model::Quorum;
 use crate::helpers::network::service::NetworkSender;
-use crate::model::common::emit_fail;
+use crate::metrics::try_core_metrics;
+use crate::model::common::{abort_req, emit_fail};
 
 use crate::model::event::ApprovalData;
 use crate::model::network::TimeOut;
@@ -53,6 +54,12 @@ pub struct Approval {
 }
 
 impl Approval {
+    fn observe_event(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("approval", result);
+        }
+    }
+
     pub fn new(
         our_key: Arc<PublicKey>,
         request: Signed<ApprovalReq>,
@@ -86,8 +93,10 @@ impl Approval {
         let subject_id = self.request.content().subject_id.to_string();
 
         if signer == *self.our_key {
-            let approver_path =
-                ActorPath::from(format!("/user/node/subject_manager/{}/approver", subject_id));
+            let approver_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/approver",
+                subject_id
+            ));
             let approver_actor = ctx
                 .system()
                 .get_actor::<ApprPersist>(&approver_path)
@@ -151,7 +160,7 @@ impl Approval {
     }
 
     fn create_appro_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
-        hash_borsh(&*self.hash.hasher(), &self.request)
+        hash_borsh(&*self.hash.hasher(), self.request.content())
     }
 }
 
@@ -285,7 +294,40 @@ impl Handler<Self> for Approval {
                                 self.approvers_disagrees.push(signature);
                             }
                         }
+                        ApprovalRes::Abort(error) => {
+                            Self::observe_event("abort");
+                            if let Err(e) = abort_req(
+                                ctx,
+                                self.request_id.clone(),
+                                sender.clone(),
+                                error.clone(),
+                                self.request.content().sn,
+                            )
+                            .await
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    request_id = %self.request_id,
+                                    sender = %sender,
+                                    abort_reason = %error,
+                                    error = %e,
+                                    "Failed to abort request"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
+
+                            debug!(
+                                msg_type = "Response",
+                                request_id = %self.request_id,
+                                sender = %sender,
+                                abort_reason = %error,
+                                "Approval aborted"
+                            );
+
+                            return Ok(());
+                        }
                         ApprovalRes::TimeOut(approval_time_out) => {
+                            Self::observe_event("timeout");
                             self.approvers_timeout.push(approval_time_out);
                         }
                     };
@@ -296,6 +338,7 @@ impl Handler<Self> for Approval {
                         self.approvers_agrees.len() as u32
                             + self.approvers_timeout.len() as u32,
                     ) {
+                        Self::observe_event("approved");
                         if let Err(e) =
                             self.send_approval_to_req(ctx, true).await
                         {
@@ -315,8 +358,7 @@ impl Handler<Self> for Approval {
                             "Quorum reached, approval accepted"
                         );
                     } else if self.approvers.is_empty()
-                        && let Err(e) =
-                            self.send_approval_to_req(ctx, false).await
+                        && let Err(e) = self.send_approval_to_req(ctx, false).await
                     {
                         error!(
                             msg_type = "Response",
@@ -325,6 +367,7 @@ impl Handler<Self> for Approval {
                         );
                         return Err(emit_fail(ctx, e).await);
                     } else if self.approvers.is_empty() {
+                        Self::observe_event("rejected");
                         debug!(
                             msg_type = "Response",
                             agrees = self.approvers_agrees.len(),
@@ -350,6 +393,7 @@ impl Handler<Self> for Approval {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        Self::observe_event("error");
         error!(
             request_id = %self.request_id,
             version = self.version,

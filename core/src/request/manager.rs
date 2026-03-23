@@ -16,7 +16,7 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{Span, debug, error, info, info_span, warn};
 
 use crate::approval::request::ApprovalReq;
@@ -29,6 +29,7 @@ use crate::governance::data::GovernanceData;
 use crate::governance::model::{
     HashThisRole, ProtocolTypes, Quorum, RoleTypes, WitnessesData,
 };
+use crate::governance::role_register::RoleDataRegister;
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::send_to_tracking;
@@ -44,8 +45,10 @@ use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;
 use crate::request::{RequestHandler, RequestHandlerMessage};
 use crate::subject::{Metadata, SignedLedger};
+use crate::metrics::try_core_metrics;
 
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
+use crate::validation::worker::CurrentRequestRoles;
 use crate::{
     ActorMessage, NetworkMessage, Validation, ValidationMessage,
     approval::{Approval, ApprovalMessage},
@@ -77,6 +80,12 @@ pub struct RequestManager {
     retry_timeout: u64,
     #[serde(skip)]
     retry_diff: u64,
+    #[serde(skip)]
+    request_started_at: Option<Instant>,
+    #[serde(skip)]
+    current_phase: Option<&'static str>,
+    #[serde(skip)]
+    current_phase_started_at: Option<Instant>,
     command: ReqManInitMessage,
     request: Option<Signed<EventRequest>>,
     state: RequestManagerState,
@@ -129,6 +138,9 @@ impl BorshDeserialize for RequestManager {
         Ok(Self {
             retry_diff: 0,
             retry_timeout: 0,
+            request_started_at: None,
+            current_phase: None,
+            current_phase_started_at: None,
             helpers: None,
             our_key,
             id,
@@ -143,6 +155,53 @@ impl BorshDeserialize for RequestManager {
 }
 
 impl RequestManager {
+    fn begin_request_metrics(&mut self) {
+        self.request_started_at = Some(Instant::now());
+        self.current_phase = None;
+        self.current_phase_started_at = None;
+
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_request_started();
+        }
+    }
+
+    fn ensure_request_metrics_started(&mut self) {
+        if self.request_started_at.is_none() {
+            self.request_started_at = Some(Instant::now());
+        }
+    }
+
+    fn start_phase_metrics(&mut self, phase: &'static str) {
+        self.ensure_request_metrics_started();
+        self.finish_phase_metrics();
+        self.current_phase = Some(phase);
+        self.current_phase_started_at = Some(Instant::now());
+    }
+
+    fn finish_phase_metrics(&mut self) {
+        let Some(phase) = self.current_phase.take() else {
+            self.current_phase_started_at = None;
+            return;
+        };
+        let Some(started_at) = self.current_phase_started_at.take() else {
+            return;
+        };
+
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_request_phase(phase, started_at.elapsed());
+        }
+    }
+
+    fn finish_request_metrics(&mut self, result: &'static str) {
+        self.finish_phase_metrics();
+
+        if let Some(started_at) = self.request_started_at.take()
+            && let Some(metrics) = try_core_metrics()
+        {
+            metrics.observe_request_terminal(result, started_at.elapsed());
+        }
+    }
+
     //////// EVAL
     ////////////////////////////////////////////////
     //Revisado
@@ -369,7 +428,7 @@ impl RequestManager {
     }
 
     async fn run_evaluation(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         request: Signed<EvaluationReq>,
         quorum: Quorum,
@@ -380,6 +439,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        self.start_phase_metrics("evaluation");
         info!("Init evaluation {}", self.id);
         let child = ctx
             .create_child(
@@ -440,7 +500,7 @@ impl RequestManager {
     }
 
     async fn build_approval(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         eval_req: EvaluationReq,
         eval_res: EvaluatorResponse,
@@ -476,7 +536,7 @@ impl RequestManager {
     }
 
     async fn run_approval(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         request: Signed<ApprovalReq>,
         quorum: Quorum,
@@ -486,6 +546,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        self.start_phase_metrics("approval");
         info!("Init approval {}", self.id);
         let child = ctx
             .create_child(
@@ -533,10 +594,18 @@ impl RequestManager {
             Quorum,
             HashSet<PublicKey>,
             Option<ValueWrapper>,
+            CurrentRequestRoles,
         ),
         RequestManagerError,
     > {
-        let (vali_req, quorum, signers, init_state, schema_id) =
+        let (
+            vali_req,
+            quorum,
+            signers,
+            init_state,
+            current_request_roles,
+            schema_id,
+        ) =
             self.build_validation_data(ctx, eval, appro_data).await?;
 
         if signers.is_empty() {
@@ -567,6 +636,7 @@ impl RequestManager {
                     request: Box::new(signed_validation_req.clone()),
                     quorum: quorum.clone(),
                     init_state: init_state.clone(),
+                    current_request_roles: current_request_roles.clone(),
                     signers: signers.clone(),
                 }),
             },
@@ -574,7 +644,13 @@ impl RequestManager {
         )
         .await;
 
-        Ok((signed_validation_req, quorum, signers, init_state))
+        Ok((
+            signed_validation_req,
+            quorum,
+            signers,
+            init_state,
+            current_request_roles,
+        ))
     }
 
     async fn build_validation_data(
@@ -588,6 +664,7 @@ impl RequestManager {
             Quorum,
             HashSet<PublicKey>,
             Option<ValueWrapper>,
+            CurrentRequestRoles,
             SchemaType,
         ),
         RequestManagerError,
@@ -616,6 +693,16 @@ impl RequestManager {
                     quorum,
                     signers,
                     None,
+                    CurrentRequestRoles {
+                        evaluation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                        approval: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                    },
                     SchemaType::Governance,
                 ))
             } else {
@@ -641,6 +728,16 @@ impl RequestManager {
                     quorum,
                     signers,
                     Some(init_state),
+                    CurrentRequestRoles {
+                        evaluation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                        approval: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                    },
                     create.schema_id.clone(),
                 ))
             }
@@ -653,7 +750,7 @@ impl RequestManager {
 
             let (actual_protocols, gov_version, sn) =
                 if let Some((eval_req, eval_data)) = eval {
-                    if let Some(approval_data) = appro_data {
+                    if let Some(approval_data) = appro_data.clone() {
                         (
                             ActualProtocols::EvalApprove {
                                 eval_data,
@@ -719,6 +816,49 @@ impl RequestManager {
 
             let schema_id = metadata.schema_id.clone();
 
+            let current_request_roles =
+                if gov_version == governance_data.version {
+                    let (evaluation_workers, evaluation_quorum) =
+                        governance_data.get_quorum_and_signers(
+                            ProtocolTypes::Evaluation,
+                            &metadata.schema_id,
+                            metadata.namespace.clone(),
+                        )?;
+
+                    let (approval_workers, approval_quorum) =
+                        if appro_data.is_some() {
+                            governance_data.get_quorum_and_signers(
+                                ProtocolTypes::Approval,
+                                &SchemaType::Governance,
+                                Namespace::new(),
+                            )?
+                        } else {
+                            (HashSet::new(), Quorum::default())
+                        };
+
+                    CurrentRequestRoles {
+                        evaluation: RoleDataRegister {
+                            workers: evaluation_workers,
+                            quorum: evaluation_quorum,
+                        },
+                        approval: RoleDataRegister {
+                            workers: approval_workers,
+                            quorum: approval_quorum,
+                        },
+                    }
+                } else {
+                    CurrentRequestRoles {
+                        evaluation: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                        approval: RoleDataRegister {
+                            workers: HashSet::new(),
+                            quorum: Quorum::default(),
+                        },
+                    }
+                };
+
             Ok((
                 ValidationReq::Event {
                     actual_protocols: Box::new(actual_protocols),
@@ -738,23 +878,26 @@ impl RequestManager {
                 quorum,
                 signers,
                 None,
+                current_request_roles,
                 schema_id,
             ))
         }
     }
 
     async fn run_validation(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         request: Signed<ValidationReq>,
         quorum: Quorum,
         signers: HashSet<PublicKey>,
         init_state: Option<ValueWrapper>,
+        current_request_roles: CurrentRequestRoles,
     ) -> Result<(), RequestManagerError> {
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        self.start_phase_metrics("validation");
         info!("Init validation {}", self.id);
         let child = ctx
             .create_child(
@@ -763,6 +906,7 @@ impl RequestManager {
                     self.our_key.clone(),
                     request,
                     init_state,
+                    current_request_roles,
                     quorum,
                     hash,
                     network,
@@ -873,7 +1017,8 @@ impl RequestManager {
             )
             .await?;
             let update_result =
-                update_ledger(ctx, &self.subject_id, vec![ledger.clone()]).await;
+                update_ledger(ctx, &self.subject_id, vec![ledger.clone()])
+                    .await;
             lease.finish(ctx).await?;
             update_result?;
         }
@@ -890,7 +1035,7 @@ impl RequestManager {
     }
 
     async fn build_distribution(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         ledger: SignedLedger,
     ) -> Result<bool, RequestManagerError> {
@@ -975,7 +1120,7 @@ impl RequestManager {
     }
 
     async fn run_distribution(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         witnesses: HashSet<PublicKey>,
         ledger: SignedLedger,
@@ -984,6 +1129,7 @@ impl RequestManager {
             return Err(RequestManagerError::HelpersNotInitialized);
         };
 
+        self.start_phase_metrics("distribution");
         info!("Init distribution {}", self.id);
         let child = ctx
             .create_child(
@@ -1241,6 +1387,7 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
+        self.finish_request_metrics("finished");
         info!("Ending {}", self.id);
         send_to_tracking(
             ctx,
@@ -1264,6 +1411,7 @@ impl RequestManager {
         reboot_type: RebootType,
         governance_id: DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
+        self.start_phase_metrics("reboot");
         self.on_event(
             RequestManagerEvent::UpdateState {
                 state: Box::new(RequestManagerState::Reboot),
@@ -1338,11 +1486,20 @@ impl RequestManager {
             RebootType::TimeOut => {
                 self.retry_timeout += 1;
 
+                #[cfg(not(any(test, feature = "test")))]
                 let seconds = match self.retry_timeout {
                     1 => 30,
                     2 => 60,
                     3 => 120,
                     _ => 300,
+                };
+
+                #[cfg(any(test, feature = "test"))]
+                let seconds = match self.retry_timeout {
+                    1 => 5,
+                    2 => 5,
+                    3 => 5,
+                    _ => 5,
                 };
 
                 info!(
@@ -1383,11 +1540,24 @@ impl RequestManager {
         match self.command {
             ReqManInitMessage::Evaluate => self.build_evaluation(ctx).await,
             ReqManInitMessage::Validate => {
-                let (request, quorum, signers, init_state) =
+                let (
+                    request,
+                    quorum,
+                    signers,
+                    init_state,
+                    current_request_roles,
+                ) =
                     self.build_validation_req(ctx, None, None).await?;
 
-                self.run_validation(ctx, request, quorum, signers, init_state)
-                    .await
+                self.run_validation(
+                    ctx,
+                    request,
+                    quorum,
+                    signers,
+                    init_state,
+                    current_request_roles,
+                )
+                .await
             }
         }
     }
@@ -1491,6 +1661,7 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         self.stops_childs(ctx).await?;
 
+        self.finish_request_metrics("aborted");
         info!("Aborting {}", self.id);
         send_to_tracking(
             ctx,
@@ -1887,6 +2058,7 @@ impl Handler<Self> for RequestManager {
                 request_id,
             } => {
                 self.id = request_id.clone();
+                self.begin_request_metrics();
                 debug!(
                     msg_type = "FirstRun",
                     request_id = %request_id,
@@ -1912,6 +2084,7 @@ impl Handler<Self> for RequestManager {
             }
             RequestManagerMessage::Run { request_id } => {
                 self.id = request_id;
+                self.ensure_request_metrics_started();
 
                 debug!(
                     msg_type = "Run",
@@ -1972,11 +2145,17 @@ impl Handler<Self> for RequestManager {
                         request,
                         quorum,
                         init_state,
+                        current_request_roles,
                         signers,
                     } => {
                         if let Err(e) = self
                             .run_validation(
-                                ctx, *request, quorum, signers, init_state,
+                                ctx,
+                                *request,
+                                quorum,
+                                signers,
+                                init_state,
+                                current_request_roles,
                             )
                             .await
                         {
@@ -2145,7 +2324,13 @@ impl Handler<Self> for RequestManager {
                             request_id = %self.id,
                             "Approval not required, proceeding to validation phase"
                         );
-                        let (request, quorum, signers, init_state) = match self
+                        let (
+                            request,
+                            quorum,
+                            signers,
+                            init_state,
+                            current_request_roles,
+                        ) = match self
                             .build_validation_req(
                                 ctx,
                                 Some((*eval_req, eval_res)),
@@ -2168,7 +2353,12 @@ impl Handler<Self> for RequestManager {
 
                         if let Err(e) = self
                             .run_validation(
-                                ctx, request, quorum, signers, init_state,
+                                ctx,
+                                request,
+                                quorum,
+                                signers,
+                                init_state,
+                                current_request_roles,
                             )
                             .await
                         {
@@ -2221,7 +2411,13 @@ impl Handler<Self> for RequestManager {
                         };
                         return Err(emit_fail(ctx, e).await);
                     };
-                    let (request, quorum, signers, init_state) = match self
+                    let (
+                        request,
+                        quorum,
+                        signers,
+                        init_state,
+                        current_request_roles,
+                    ) = match self
                         .build_validation_req(
                             ctx,
                             Some((eval_req, eval_res)),
@@ -2244,7 +2440,12 @@ impl Handler<Self> for RequestManager {
 
                     if let Err(e) = self
                         .run_validation(
-                            ctx, request, quorum, signers, init_state,
+                            ctx,
+                            request,
+                            quorum,
+                            signers,
+                            init_state,
+                            current_request_roles,
                         )
                         .await
                     {
@@ -2431,6 +2632,9 @@ impl PersistentActor for RequestManager {
         Self {
             retry_diff: 0,
             retry_timeout: 0,
+            request_started_at: None,
+            current_phase: None,
+            current_phase_started_at: None,
             our_key: params.our_key,
             id: DigestIdentifier::default(),
             subject_id: params.subject_id,

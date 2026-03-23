@@ -814,6 +814,26 @@ pub async fn get_subject_state(
     Ok(Json(bridge.get_subject_state(subject_id).await?))
 }
 
+/// Get Prometheus metrics
+///
+/// Returns the Prometheus text exposition payload for this node.
+/// This operational endpoint is available when the server is built with
+/// Prometheus support enabled.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    operation_id = "getMetrics",
+    tag = "System",
+    responses(
+        (status = 200, description = "Prometheus metrics payload", body = String, content_type = "text/plain"),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_metrics() -> &'static str {
+    ""
+}
+
 async fn audit_layer(
     req: axum::http::Request<Body>,
     next: middleware::Next,
@@ -1459,16 +1479,14 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "sink");
         let app = router();
 
-        let ok =
-            call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
+        let ok = call(&app, Method::GET, "/sink-events/abc", ctx.clone()).await;
         assert_ne!(ok, StatusCode::FORBIDDEN);
 
         let forbidden_subject =
             call(&app, Method::GET, "/events/abc", ctx.clone()).await;
         assert_eq!(forbidden_subject, StatusCode::FORBIDDEN);
 
-        let forbidden_request =
-            call(&app, Method::POST, "/request", ctx).await;
+        let forbidden_request = call(&app, Method::POST, "/request", ctx).await;
         assert_eq!(forbidden_request, StatusCode::FORBIDDEN);
     }
 
@@ -1478,8 +1496,7 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "admin");
         let app = router();
 
-        let forbidden =
-            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let forbidden = call(&app, Method::GET, "/sink-events/abc", ctx).await;
         assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
@@ -1489,8 +1506,7 @@ mod tests {
         let ctx = auth_ctx_for_role(&db, "superadmin");
         let app = router();
 
-        let status =
-            call(&app, Method::GET, "/sink-events/abc", ctx).await;
+        let status = call(&app, Method::GET, "/sink-events/abc", ctx).await;
         assert_ne!(status, StatusCode::FORBIDDEN);
     }
 

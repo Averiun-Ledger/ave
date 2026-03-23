@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     evaluation::{request::EvaluationReq, response::EvaluationRes},
+    governance::witnesses_register::CurrentWitnessSubject,
     subject::SignedLedger,
     validation::{request::ValidationReq, response::ValidationRes},
 };
@@ -52,6 +53,27 @@ pub enum ActorMessage {
     },
     AuthLastSn {
         sn: u64,
+    },
+    GovernanceVersionReq {
+        subject_id: DigestIdentifier,
+        receiver_actor: String,
+    },
+    GovernanceVersionRes {
+        version: u64,
+    },
+    TrackerSyncReq {
+        subject_id: DigestIdentifier,
+        request_nonce: u64,
+        governance_version: u64,
+        after_subject_id: Option<DigestIdentifier>,
+        limit: usize,
+        receiver_actor: String,
+    },
+    TrackerSyncRes {
+        request_nonce: u64,
+        governance_version: u64,
+        items: Vec<CurrentWitnessSubject>,
+        next_cursor: Option<DigestIdentifier>,
     },
 }
 

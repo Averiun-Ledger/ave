@@ -10,16 +10,16 @@ use super::db_runtime::{AuthDbRuntime, PooledConnection, auth_tuning_for_ram};
 use super::models::*;
 use super::system_config::SystemConfigKey;
 use super::{MAINTENANCE_LIMITS, PASSWORD_POLICY, VALIDATION_LIMITS};
+use ave_actors::rusqlite::{
+    Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
+    params,
+};
 use ave_bridge::{
     MachineSpec,
     auth::{AuthConfig, EndpointRateLimit},
     resolve_spec,
 };
 use rand::RngExt;
-use ave_actors::rusqlite::{
-    Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
-    params,
-};
 use std::{
     fs,
     path::Path,
@@ -104,10 +104,10 @@ struct DbMetrics {
     blocking_queue_wait_count: AtomicU64,
     blocking_queue_wait_ns_max: AtomicU64,
     blocking_rejections_total: AtomicU64,
+    blocking_in_flight_current: AtomicU64,
     blocking_task_duration_ns_total: AtomicU64,
     blocking_task_count: AtomicU64,
     blocking_task_duration_ns_max: AtomicU64,
-    request_db_ops_total: AtomicU64,
     request_count: AtomicU64,
     request_db_duration_ns_total: AtomicU64,
     request_db_duration_ns_max: AtomicU64,
@@ -132,7 +132,6 @@ pub struct DbMetricsSnapshot {
     pub blocking_task_avg_ms: f64,
     pub blocking_task_max_ms: f64,
     pub request_count: u64,
-    pub avg_db_ops_per_request: f64,
     pub avg_request_db_ms: f64,
     pub max_request_db_ms: f64,
 }
@@ -419,18 +418,41 @@ impl AuthDatabase {
         }
     }
 
-    pub(crate) fn record_request_db_metrics(
+    fn inc_blocking_in_flight(&self) {
+        let current = self
+            .metrics
+            .blocking_in_flight_current
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.set_blocking_in_flight(current as i64);
+        }
+    }
+
+    fn dec_blocking_in_flight(&self) {
+        let previous = self
+            .metrics
+            .blocking_in_flight_current
+            .fetch_sub(1, Ordering::Relaxed);
+        let current = previous.saturating_sub(1);
+
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.set_blocking_in_flight(current as i64);
+        }
+    }
+
+    pub(crate) fn record_request_metrics(
         &self,
         request_kind: &'static str,
-        db_operations: u64,
+        result: &'static str,
         elapsed: Duration,
     ) {
         let ns = Self::duration_to_ns(elapsed);
         let elapsed_ms = Self::ns_to_ms(ns);
 
-        self.metrics
-            .request_db_ops_total
-            .fetch_add(db_operations, Ordering::Relaxed);
         self.metrics.request_count.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .request_db_duration_ns_total
@@ -441,7 +463,7 @@ impl AuthDatabase {
         if let Some(metrics) = self.prometheus_metrics() {
             metrics.observe_request_metrics(
                 request_kind,
-                db_operations,
+                result,
                 Self::duration_to_seconds(elapsed),
             );
         }
@@ -449,7 +471,7 @@ impl AuthDatabase {
         debug!(
             target: TARGET,
             request_kind,
-            db_operations,
+            result,
             elapsed_ms,
             "auth db request metrics"
         );
@@ -458,7 +480,7 @@ impl AuthDatabase {
             warn!(
                 target: TARGET,
                 request_kind,
-                db_operations,
+                result,
                 elapsed_ms,
                 "slow auth db request"
             );
@@ -530,8 +552,6 @@ impl AuthDatabase {
             .load(Ordering::Relaxed);
 
         let request_count = self.metrics.request_count.load(Ordering::Relaxed);
-        let request_db_ops_total =
-            self.metrics.request_db_ops_total.load(Ordering::Relaxed);
         let request_db_duration_ns_total = self
             .metrics
             .request_db_duration_ns_total
@@ -578,11 +598,6 @@ impl AuthDatabase {
             ),
             blocking_task_max_ms: Self::ns_to_ms(blocking_task_duration_ns_max),
             request_count,
-            avg_db_ops_per_request: if request_count == 0 {
-                0.0
-            } else {
-                request_db_ops_total as f64 / request_count as f64
-            },
             avg_request_db_ms: Self::avg_ns_to_ms(
                 request_db_duration_ns_total,
                 request_count,
@@ -602,6 +617,11 @@ impl AuthDatabase {
             metrics.register_into(registry);
             metrics
         });
+        metrics.set_blocking_in_flight(
+            self.metrics
+                .blocking_in_flight_current
+                .load(Ordering::Relaxed) as i64,
+        );
         let _ = metrics;
     }
 
@@ -985,14 +1005,16 @@ impl AuthDatabase {
             )
         })?;
         self.record_blocking_queue_wait(operation, queue_started.elapsed());
+        self.inc_blocking_in_flight();
 
         let started = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             work(db)
         })
-        .await
-        .map_err(|e| {
+        .await;
+        self.dec_blocking_in_flight();
+        let result = result.map_err(|e| {
             DatabaseError::Query(format!(
                 "blocking db task {} failed: {}",
                 operation, e

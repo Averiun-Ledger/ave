@@ -906,6 +906,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if let Err(error) = self.run_connection().await {
             if let Some(metrics) = self.metric_handle() {
                 metrics.observe_bootstrap_duration_seconds(
+                    "failure",
                     bootstrap_start.elapsed().as_secs_f64(),
                 );
             }
@@ -917,6 +918,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
         if let Some(metrics) = self.metric_handle() {
             metrics.observe_bootstrap_duration_seconds(
+                "success",
                 bootstrap_start.elapsed().as_secs_f64(),
             );
         }
@@ -1122,10 +1124,15 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         peer_id: &PeerId,
         bootstrap_flow: bool,
     ) -> Option<(bool, Vec<Multiaddr>)> {
+        let phase = if bootstrap_flow {
+            "bootstrap"
+        } else {
+            "runtime"
+        };
         match e {
             DialError::LocalPeerId { .. } => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("local_peer_id");
+                    metrics.observe_dial_failure(phase, "local_peer_id");
                 }
                 if bootstrap_flow {
                     warn!(target: TARGET, peer_id = %peer_id, "dial rejected: connected peer-id matches local peer");
@@ -1141,7 +1148,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::NoAddresses => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("no_addresses");
+                    metrics.observe_dial_failure(phase, "no_addresses");
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, "dial skipped: no addresses");
@@ -1150,7 +1157,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::DialPeerConditionFalse(_) => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("peer_condition");
+                    metrics.observe_dial_failure(phase, "peer_condition");
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met");
@@ -1161,7 +1168,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::Denied { cause } => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("denied");
+                    metrics.observe_dial_failure(phase, "denied");
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour");
@@ -1170,7 +1177,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::Aborted => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("aborted");
+                    metrics.observe_dial_failure(phase, "aborted");
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, "dial aborted, will retry");
@@ -1179,7 +1186,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::WrongPeerId { obtained, .. } => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("wrong_peer_id");
+                    metrics.observe_dial_failure(phase, "wrong_peer_id");
                 }
                 if bootstrap_flow {
                     warn!(target: TARGET, expected = %peer_id, obtained = %obtained, "dial failed: peer identity mismatch");
@@ -1195,7 +1202,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
             DialError::Transport(items) => {
                 if let Some(metrics) = self.metric_handle() {
-                    metrics.observe_dial_failure("transport");
+                    metrics.observe_dial_failure(phase, "transport");
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, "transport dial failed");
@@ -1992,21 +1999,14 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
@@ -2072,42 +2072,28 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_total"
-            ),
-            0.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_per_peer_total"
-            ),
-            0.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_inbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             0.0
         );
@@ -2172,23 +2158,96 @@ mod tests {
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_total"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_value(
-                &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_per_peer_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_per_peer\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_messages_dropped_outbound_queue_bytes_limit_global_total"
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
             ),
             1.0
+        );
+    }
+
+    #[test]
+    fn dial_failures_include_phase_label() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+
+        metrics.observe_dial_failure("bootstrap", "transport");
+        metrics.observe_dial_failure("runtime", "denied");
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_dial_failures_total{phase=\"bootstrap\",kind=\"transport\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_dial_failures_total{phase=\"runtime\",kind=\"denied\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn bootstrap_duration_is_labeled_by_result() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+
+        metrics.observe_bootstrap_duration_seconds("success", 0.5);
+        metrics.observe_bootstrap_duration_seconds("failure", 1.25);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_bootstrap_duration_seconds_count{result=\"success\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_bootstrap_duration_seconds_count{result=\"failure\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn network_state_is_one_hot() {
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+
+        metrics.set_state_current(&NetworkState::Running);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(&text, "network_state{state=\"running\"}"),
+            1.0
+        );
+        assert_eq!(metric_value(&text, "network_state{state=\"start\"}"), 0.0);
+        assert_eq!(metric_value(&text, "network_state{state=\"dial\"}"), 0.0);
+        assert_eq!(
+            metric_value(&text, "network_state{state=\"dialing\"}"),
+            0.0
+        );
+        assert_eq!(
+            metric_value(&text, "network_state{state=\"disconnected\"}"),
+            0.0
         );
     }
 

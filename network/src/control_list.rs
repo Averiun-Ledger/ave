@@ -229,9 +229,6 @@ pub fn build_control_lists_updaters(
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if let Some(metrics) = metrics_updater.as_deref() {
-                            metrics.inc_control_list_updater_run();
-                        }
                         let started_at = Instant::now();
                         let (
                     (vec_allow_peers, vec_block_peers),
@@ -903,17 +900,16 @@ mod tests {
         encode(&mut text, &registry).expect("encode metrics");
 
         assert_eq!(
-            metric_value(&text, "network_control_list_denied_total"),
-            2.0
-        );
-        assert_eq!(
-            metric_value(&text, "network_control_list_denied_blocked_total"),
+            metric_value(
+                &text,
+                "network_control_list_denied_total{reason=\"blocked\"}"
+            ),
             1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_control_list_denied_not_allowed_total"
+                "network_control_list_denied_total{reason=\"not_allowed\"}"
             ),
             1.0
         );
@@ -957,32 +953,28 @@ mod tests {
         encode(&mut text, &registry).expect("encode metrics");
 
         assert!(
-            metric_value(&text, "network_control_list_updater_runs_total")
-                >= 1.0
-        );
-        assert!(
             metric_value(
                 &text,
-                "network_control_list_allow_update_failure_total"
+                "network_control_list_updates_total{list=\"allow\",result=\"failure\"}"
             ) >= 1.0
         );
         assert!(
             metric_value(
                 &text,
-                "network_control_list_block_update_failure_total"
+                "network_control_list_updates_total{list=\"block\",result=\"failure\"}"
             ) >= 1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_control_list_allow_update_success_total"
+                "network_control_list_updates_total{list=\"allow\",result=\"success\"}"
             ),
             0.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_control_list_block_update_success_total"
+                "network_control_list_updates_total{list=\"block\",result=\"success\"}"
             ),
             0.0
         );
@@ -1040,13 +1032,13 @@ mod tests {
         assert!(
             metric_value(
                 &text,
-                "network_control_list_allow_update_success_total"
+                "network_control_list_updates_total{list=\"allow\",result=\"success\"}"
             ) >= 1.0
         );
         assert!(
             metric_value(
                 &text,
-                "network_control_list_block_update_success_total"
+                "network_control_list_updates_total{list=\"block\",result=\"success\"}"
             ) >= 1.0
         );
 

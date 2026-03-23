@@ -242,11 +242,6 @@ impl Handler<Self> for Auth {
 
                     return Ok(AuthResponse::Witnesses(witnesses.clone()));
                 } else {
-                    warn!(
-                        msg_type = "GetAuth",
-                        subject_id = %subject_id,
-                        "Subject has not been authorized"
-                    );
                     return Err(ActorError::Functional {
                         description: "The subject has not been authorized"
                             .to_owned(),

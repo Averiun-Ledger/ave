@@ -12,6 +12,10 @@ use crate::{
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
+    governance::tracker_sync::{
+        TrackerSync, TrackerSyncMessage, TrackerSyncNetworkRequest,
+        TrackerSyncNetworkResponse,
+    },
     update::updater::{Updater, UpdaterMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
@@ -210,6 +214,121 @@ impl Intermediary {
                                 sn,
                                 sender: sender.clone(),
                             })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::GovernanceVersionReq {
+                        subject_id,
+                        receiver_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(DistriWorkerMessage::GetGovernanceVersion {
+                                subject_id,
+                                info: message.info,
+                                sender: sender.clone(),
+                                receiver_actor,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::GovernanceVersionRes { version } => {
+                        let actor = system
+                            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(
+                                crate::governance::version_sync::GovernanceVersionSyncMessage::PeerVersion {
+                                    peer: sender.clone(),
+                                    version,
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::TrackerSyncReq {
+                        subject_id: _,
+                        request_nonce,
+                        governance_version,
+                        after_subject_id,
+                        limit,
+                        receiver_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<TrackerSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(TrackerSyncMessage::NetworkRequest(
+                                TrackerSyncNetworkRequest {
+                                request_nonce,
+                                governance_version,
+                                after_subject_id,
+                                limit,
+                                info: message.info,
+                                sender: sender.clone(),
+                                receiver_actor,
+                                },
+                            ))
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::TrackerSyncRes {
+                        request_nonce,
+                        governance_version,
+                        items,
+                        next_cursor,
+                    } => {
+                        let actor = system
+                            .get_actor::<TrackerSync>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(TrackerSyncMessage::NetworkResponse(
+                                TrackerSyncNetworkResponse {
+                                peer: sender.clone(),
+                                request_nonce,
+                                governance_version,
+                                items,
+                                next_cursor,
+                                },
+                            ))
                             .await
                             .map_err(|e| {
                                 IntermediaryError::SendMessageFailed {

@@ -13,9 +13,7 @@ use crate::{
         common::{
             check_quorum_signers, emit_fail, get_actual_roles_register,
             get_validation_roles_register,
-            node::{
-                SignTypesNode, UpdateData, get_sign, update_ledger_network,
-            },
+            node::{SignTypesNode, get_sign},
         },
         event::{ApprovalData, EvaluationData, EvaluationResponse},
     },
@@ -37,6 +35,7 @@ use ave_common::{
     },
     request::EventRequest,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 
 use json_patch::{Patch, patch};
 use network::ComunicateInfo;
@@ -54,6 +53,25 @@ use super::{
 };
 
 /// A struct representing a ValiWorker actor.
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct CurrentRequestRoles {
+    pub evaluation: RoleDataRegister,
+    pub approval: RoleDataRegister,
+}
+
+#[derive(Clone, Debug)]
+pub struct CurrentWorkerRoles {
+    pub evaluation: RoleDataRegister,
+    pub approval: RoleDataRegister,
+}
+
 #[derive(Clone, Debug)]
 pub struct ValiWorker {
     pub node_key: PublicKey,
@@ -64,39 +82,49 @@ pub struct ValiWorker {
     pub sn: u64,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
+    pub current_roles: CurrentWorkerRoles,
     pub stop: bool,
 }
 
 impl ValiWorker {
+    fn current_evaluation_roles(&self) -> RoleDataRegister {
+        self.current_roles.evaluation.clone()
+    }
+
+    fn current_approval_roles(&self) -> RoleDataRegister {
+        self.current_roles.approval.clone()
+    }
+
     async fn check_governance(
         &self,
         gov_version: u64,
     ) -> Result<bool, ActorError> {
-        match gov_version.cmp(&self.gov_version) {
+        match self.gov_version.cmp(&gov_version) {
+            std::cmp::Ordering::Less => {
+                warn!(
+                    local_gov_version = self.gov_version,
+                    request_gov_version = gov_version,
+                    governance_id = %self.governance_id,
+                    sender = %self.node_key,
+                    "Received request with a higher governance version; ignoring request"
+                );
+                Err(ActorError::Functional {
+                    description:
+                        "Abort validation, request governance version is higher than local"
+                            .to_owned(),
+                })
+            }
             std::cmp::Ordering::Equal => {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
+                Ok(false)
             }
             std::cmp::Ordering::Greater => {
-                // Me llega una versión mayor a la mía.
-                let data = UpdateData {
-                    sn: self.sn,
-                    gov_version: self.gov_version,
-                    subject_id: self.governance_id.clone(),
-                    other_node: self.node_key.clone(),
-                };
-                update_ledger_network(data, self.network.clone()).await?;
-                let e = ActorError::Functional {
-                    description: "Abort Validation, update is required"
-                        .to_owned(),
-                };
-                return Err(e);
+                Ok(true)
             }
-            std::cmp::Ordering::Less => {
-                return Ok(true);
-            }
+
         }
 
-        Ok(false)
+        
     }
 
     fn check_data(
@@ -571,26 +599,35 @@ impl ValiWorker {
                 problem: e.to_string(),
             })?;
 
-            let (eval_data, appro_data) = get_actual_roles_register(
-                ctx,
-                &metadata.governance_id,
-                SearchRole {
-                    schema_id: metadata.schema_id.clone(),
-                    namespace: metadata.namespace.clone(),
-                },
-                approval.is_some(),
-                gov_version,
-            )
-            .await
-            .map_err(|e| {
-                if let ActorError::UnexpectedResponse { .. } = e {
-                    ValidatorError::OutOfVersion
-                } else {
-                    ValidatorError::InternalError {
-                        problem: e.to_string(),
+            let (eval_data, appro_data) = if gov_version == self.gov_version {
+                (
+                    self.current_evaluation_roles(),
+                    approval
+                        .as_ref()
+                        .map(|_| self.current_approval_roles()),
+                )
+            } else {
+                get_actual_roles_register(
+                    ctx,
+                    &metadata.governance_id,
+                    SearchRole {
+                        schema_id: metadata.schema_id.clone(),
+                        namespace: metadata.namespace.clone(),
+                    },
+                    approval.is_some(),
+                    gov_version,
+                )
+                .await
+                .map_err(|e| {
+                    if let ActorError::UnexpectedResponse { .. } = e {
+                        ValidatorError::OutOfVersion
+                    } else {
+                        ValidatorError::InternalError {
+                            problem: e.to_string(),
+                        }
                     }
-                }
-            })?;
+                })?
+            };
 
             let (appr_required, properties) = self.check_evaluation(
                 evaluation,
@@ -954,8 +991,9 @@ impl ValiWorker {
 
 #[derive(Debug, Clone)]
 pub enum ValiWorkerMessage {
-    UpdateGovVersion {
+    UpdateCurrentRoles {
         gov_version: u64,
+        current_roles: CurrentWorkerRoles,
     },
     LocalValidation {
         validation_req: Box<Signed<ValidationReq>>,
@@ -994,8 +1032,12 @@ impl Handler<Self> for ValiWorker {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            ValiWorkerMessage::UpdateGovVersion { gov_version } => {
+            ValiWorkerMessage::UpdateCurrentRoles {
+                gov_version,
+                current_roles,
+            } => {
                 self.gov_version = gov_version;
+                self.current_roles = current_roles;
             }
             ValiWorkerMessage::LocalValidation { validation_req } => {
                 let validation =

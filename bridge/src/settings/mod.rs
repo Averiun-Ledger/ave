@@ -288,6 +288,18 @@ always_accept = true
 tracking_size = 200
 is_service = true
 
+[node.sync.governance]
+interval_secs = 20
+sample_size = 2
+response_timeout_secs = 7
+
+[node.sync.tracker]
+interval_secs = 30
+page_size = 200
+response_timeout_secs = 8
+update_batch_size = 2
+update_timeout_secs = 6
+
 [node.internal_db]
 db = "/data/ave.db"
 durability = true
@@ -453,6 +465,17 @@ node:
   always_accept: true
   tracking_size: 200
   is_service: true
+  sync:
+    governance:
+      interval_secs: 20
+      sample_size: 2
+      response_timeout_secs: 7
+    tracker:
+      interval_secs: 30
+      page_size: 200
+      response_timeout_secs: 8
+      update_batch_size: 2
+      update_timeout_secs: 6
   network:
     node_type: Addressable
     listen_addresses:
@@ -608,6 +631,20 @@ http:
     "always_accept": true,
     "tracking_size": 200,
     "is_service": true,
+    "sync": {
+      "governance": {
+        "interval_secs": 20,
+        "sample_size": 2,
+        "response_timeout_secs": 7
+      },
+      "tracker": {
+        "interval_secs": 30,
+        "page_size": 200,
+        "response_timeout_secs": 8,
+        "update_batch_size": 2,
+        "update_timeout_secs": 6
+      }
+    },
     "network": {
       "node_type": "Addressable",
       "listen_addresses": [
@@ -860,6 +897,14 @@ http:
         assert_eq!(node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(node.tracking_size, 200);
         assert!(node.is_service);
+        assert_eq!(node.sync.governance.interval_secs, 20);
+        assert_eq!(node.sync.governance.sample_size, 2);
+        assert_eq!(node.sync.governance.response_timeout_secs, 7);
+        assert_eq!(node.sync.tracker.interval_secs, 30);
+        assert_eq!(node.sync.tracker.page_size, 200);
+        assert_eq!(node.sync.tracker.response_timeout_secs, 8);
+        assert_eq!(node.sync.tracker.update_batch_size, 2);
+        assert_eq!(node.sync.tracker.update_timeout_secs, 6);
         assert_eq!(
             node.internal_db.db,
             AveInternalDBFeatureConfig::build(&PathBuf::from("/data/ave.db"))
@@ -1093,6 +1138,14 @@ http:
         );
         assert_eq!(config.node.tracking_size, 100);
         assert!(!config.node.is_service);
+        assert_eq!(config.node.sync.governance.interval_secs, 60);
+        assert_eq!(config.node.sync.governance.sample_size, 3);
+        assert_eq!(config.node.sync.governance.response_timeout_secs, 10);
+        assert_eq!(config.node.sync.tracker.interval_secs, 30);
+        assert_eq!(config.node.sync.tracker.page_size, 50);
+        assert_eq!(config.node.sync.tracker.response_timeout_secs, 10);
+        assert_eq!(config.node.sync.tracker.update_batch_size, 2);
+        assert_eq!(config.node.sync.tracker.update_timeout_secs, 10);
         assert_eq!(config.node.network.node_type, NodeType::Bootstrap);
         assert!(config.node.network.listen_addresses.is_empty());
         assert!(config.node.network.external_addresses.is_empty());
