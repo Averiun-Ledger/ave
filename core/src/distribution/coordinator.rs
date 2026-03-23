@@ -12,6 +12,7 @@ use network::ComunicateInfo;
 use crate::{
     ActorMessage, NetworkMessage,
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::{common::emit_fail, network::RetryNetwork},
     subject::SignedLedger,
 };
@@ -67,6 +68,12 @@ impl Handler<Self> for DistriCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             DistriCoordinatorMessage::EndRetry => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_protocol_event(
+                        "distribution",
+                        "witness_timeout",
+                    );
+                }
                 debug!(
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"

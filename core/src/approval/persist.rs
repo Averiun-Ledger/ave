@@ -245,7 +245,7 @@ impl ApprPersist {
             });
         };
         let approval_req_hash =
-            hash_borsh(&*hash.hasher(), &request).map_err(|e| {
+            hash_borsh(&*hash.hasher(), request.content()).map_err(|e| {
                 ActorError::FunctionalCritical {
                     description: format!(
                         "Can not obtain approval request hash {}",

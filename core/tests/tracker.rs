@@ -2,11 +2,12 @@ use std::{str::FromStr, sync::atomic::Ordering};
 
 mod common;
 
+#[allow(unused)]
+use ave_common::identity::{HashAlgorithm, hash_borsh};
+
 use ave_common::{
     ValueWrapper,
-    identity::{
-        HashAlgorithm, KeyPair, PublicKey, hash_borsh, keys::Ed25519Signer,
-    },
+    identity::{KeyPair, PublicKey, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
 };
@@ -22,7 +23,8 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, emit_fact_signed, get_abort_request, node_running, wait_request, wait_request_state
+    PORT_COUNTER, create_node, emit_fact_signed, get_abort_request,
+    node_running, wait_request, wait_request_state,
 };
 
 #[test(tokio::test)]
@@ -109,23 +111,17 @@ async fn test_up_down_compiler() {
         Some(nodes[0].keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf())
+        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let new_owner = node_new_node2.api.clone();
     node_running(&new_owner).await.unwrap();
 
-
     // create subject
-    let (subject_id, ..) = create_subject(
-        &new_owner,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&new_owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     // emit event to subject
     let json = json!({
@@ -138,8 +134,6 @@ async fn test_up_down_compiler() {
         emit_fact(&new_owner, subject_id.clone(), json.clone(), false)
             .await
             .unwrap();
-
-
 
     let _state = get_subject(&new_owner, subject_id.clone(), Some(1))
         .await

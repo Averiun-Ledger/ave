@@ -3,6 +3,7 @@
 use crate::{
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::{
         common::{abort_req, emit_fail, send_reboot_to_req, take_random_signers},
         event::{ValidationData, ValidationMetadata},
@@ -79,6 +80,12 @@ pub struct Validation {
 }
 
 impl Validation {
+    fn observe_event(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("validation", result);
+        }
+    }
+
     pub fn new(
         our_key: Arc<PublicKey>,
         request: Signed<ValidationReq>,
@@ -399,9 +406,10 @@ impl Handler<Self> for Validation {
                                 self.validators_signatures.push(signature);
                             }
                             ValidationRes::TimeOut => {
-                                // Do nothing
+                                Self::observe_event("timeout");
                             }
                             ValidationRes::Abort(error) => {
+                                Self::observe_event("abort");
                                 if let Err(e) = abort_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -421,6 +429,7 @@ impl Handler<Self> for Validation {
                                 }
                             }
                             ValidationRes::Reboot => {
+                                Self::observe_event("reboot");
                                 if let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
@@ -466,6 +475,9 @@ impl Handler<Self> for Validation {
                                     );
                                     return Err(emit_fail(ctx, e).await);
                                 }
+                            if matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event("reboot");
+                            }
 
                             let validation_data = self.build_validation_data();
 
@@ -480,6 +492,10 @@ impl Handler<Self> for Validation {
                                 );
                                 return Err(emit_fail(ctx, e).await);
                             };
+
+                            if !matches!(summary, ResponseSummary::Reboot) {
+                                Self::observe_event("success");
+                            }
 
                             debug!(
                                 msg_type = "Response",
@@ -538,6 +554,8 @@ impl Handler<Self> for Validation {
                                         "Failed to send reboot to request actor"
                                     );
                                     return Err(emit_fail(ctx, e).await);
+                                } else if self.current_validators.is_empty() {
+                                    Self::observe_event("reboot");
                                 }
                     } else {
                         warn!(
@@ -557,6 +575,7 @@ impl Handler<Self> for Validation {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        Self::observe_event("error");
         error!(
             request_id = %self.request_id,
             version = self.version,

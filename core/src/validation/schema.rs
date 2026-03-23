@@ -19,6 +19,7 @@ use crate::{
     governance::role_register::CurrentSchemaRoles,
     Signed,
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::common::{emit_fail, node::try_to_update},
     validation::worker::{CurrentWorkerRoles, ValiWorker, ValiWorkerMessage},
 };
@@ -87,7 +88,13 @@ impl Handler<Self> for ValidationSchema {
                 info,
                 sender,
             } => {
+                let observe = |result: &'static str| {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_schema_event("validation_schema", result);
+                    }
+                };
                 if sender != validation_req.signature().signer {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -101,6 +108,7 @@ impl Handler<Self> for ValidationSchema {
                     match validation_req.content().get_governance_id() {
                         Ok(governance_id) => governance_id,
                         Err(e) => {
+                            observe("rejected");
                             warn!(
                                 msg_type = "NetworkRequest",
                                 error = %e,
@@ -111,6 +119,7 @@ impl Handler<Self> for ValidationSchema {
                     };
 
                 if self.governance_id != governance_id {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         expected_governance_id = %self.governance_id,
@@ -123,6 +132,7 @@ impl Handler<Self> for ValidationSchema {
                 let schema_id = match validation_req.content().get_schema_id() {
                     Ok(schema_id) => schema_id,
                     Err(e) => {
+                        observe("rejected");
                         warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
@@ -133,6 +143,7 @@ impl Handler<Self> for ValidationSchema {
                 };
 
                 if self.schema_id != schema_id {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         expected_schema_id = ?self.schema_id,
@@ -147,6 +158,7 @@ impl Handler<Self> for ValidationSchema {
                         match validation_req.content().get_namespace() {
                             Ok(namespace) => namespace,
                             Err(e) => {
+                                observe("rejected");
                                 warn!(
                                     msg_type = "NetworkRequest",
                                     error = %e,
@@ -156,6 +168,7 @@ impl Handler<Self> for ValidationSchema {
                             }
                         };
                     if !ns.contains(&namespace) {
+                        observe("rejected");
                         warn!(
                             msg_type = "NetworkRequest",
                             sender = %sender,
@@ -165,6 +178,7 @@ impl Handler<Self> for ValidationSchema {
                         return Ok(());
                     }
                 } else {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -223,6 +237,7 @@ impl Handler<Self> for ValidationSchema {
                     Ok(child) => child,
                     Err(e) => {
                         if let ActorError::Exists { .. } = e {
+                            observe("rejected");
                             warn!(
                                 msg_type = "NetworkRequest",
                                 error = %e,
@@ -254,6 +269,7 @@ impl Handler<Self> for ValidationSchema {
                         "Failed to send request to validator"
                     );
                 } else {
+                    observe("delegated");
                     debug!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -268,6 +284,9 @@ impl Handler<Self> for ValidationSchema {
                 init_state,
                 current_roles,
             } => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_schema_event("validation_schema", "update");
+                }
                 self.creators = creators;
                 self.gov_version = gov_version;
                 self.sn = sn;
@@ -290,6 +309,9 @@ impl Handler<Self> for ValidationSchema {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_schema_event("validation_schema", "child_fault");
+        }
         error!(
             governance_id = %self.governance_id,
             schema_id = ?self.schema_id,

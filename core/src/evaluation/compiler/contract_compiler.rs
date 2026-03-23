@@ -12,6 +12,7 @@ use tracing::{Span, debug, error, info_span};
 use ave_common::identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
 
 use super::{CompilerResponse, CompilerSupport};
+use crate::metrics::try_core_metrics;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContractCompiler {
@@ -132,6 +133,13 @@ impl Handler<Self> for ContractCompiler {
                         "Contract compiled and validated successfully"
                     );
                 } else {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_contract_prepare(
+                            "registered",
+                            "skipped",
+                            std::time::Duration::default(),
+                        );
+                    }
                     debug!(
                         msg_type = "Compile",
                         contract_name = %contract_name,

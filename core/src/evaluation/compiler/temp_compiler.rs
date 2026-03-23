@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -13,6 +14,7 @@ use tracing::{Span, error, info_span};
 use ave_common::identity::HashAlgorithm;
 
 use super::{CompilerResponse, CompilerSupport};
+use crate::metrics::try_core_metrics;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TempCompiler {
@@ -70,6 +72,7 @@ impl Handler<Self> for TempCompiler {
                 initial_value,
                 contract_path,
             } => {
+                let started_at = Instant::now();
                 let _ = fs::remove_dir_all(&contract_path).await;
                 if let Err(e) = CompilerSupport::compile_fresh(
                     self.hash,
@@ -80,6 +83,13 @@ impl Handler<Self> for TempCompiler {
                 )
                 .await
                 {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_contract_prepare(
+                            "temporary",
+                            "error",
+                            started_at.elapsed(),
+                        );
+                    }
                     error!(
                         msg_type = "Compile",
                         error = %e,
@@ -89,6 +99,14 @@ impl Handler<Self> for TempCompiler {
                     );
                     let _ = fs::remove_dir_all(&contract_path).await;
                     return Ok(CompilerResponse::Error(e));
+                }
+
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_prepare(
+                        "temporary",
+                        "recompiled",
+                        started_at.elapsed(),
+                    );
                 }
 
                 if let Err(e) = fs::remove_dir_all(&contract_path).await {

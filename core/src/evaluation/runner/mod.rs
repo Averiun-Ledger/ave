@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -33,6 +34,7 @@ use crate::{
     model::common::contract::{
         MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
     },
+    metrics::try_core_metrics,
 };
 
 type AddRemoveChangeSchema = (
@@ -1476,8 +1478,15 @@ impl Handler<Self> for Runner {
         msg: RunnerMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
+        let started_at = Instant::now();
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
             Ok((result, compilations)) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_execution(
+                        "success",
+                        started_at.elapsed(),
+                    );
+                }
                 debug!(
                     msg_type = "Execute",
                     approval_required = result.approval_required,
@@ -1491,6 +1500,12 @@ impl Handler<Self> for Runner {
                 })
             }
             Err(e) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_contract_execution(
+                        "error",
+                        started_at.elapsed(),
+                    );
+                }
                 error!(
                     msg_type = "Execute",
                     error = %e,

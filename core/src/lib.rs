@@ -11,6 +11,7 @@ pub mod external_db;
 pub mod governance;
 pub mod helpers;
 pub mod manual_distribution;
+pub mod metrics;
 pub mod model;
 pub mod node;
 pub mod request;
@@ -161,6 +162,7 @@ impl Api {
 
         let spec = config.spec.map(MachineSpec::from);
         let network_metrics = network::metrics::register(registry);
+        crate::metrics::register(registry);
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,

@@ -25,6 +25,7 @@ use crate::governance::witnesses_register::{
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
+use crate::metrics::try_core_metrics;
 use crate::model::common::node::get_subject_data;
 use crate::model::common::subject::acquire_subject;
 use crate::node::SubjectData;
@@ -131,6 +132,18 @@ pub struct TrackerSync {
 const MAX_STALLED_UPDATE_CHECKS: u8 = 3;
 
 impl TrackerSync {
+    fn observe_round(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_tracker_sync_round(result);
+        }
+    }
+
+    fn observe_update(result: &'static str) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_tracker_sync_update(result);
+        }
+    }
+
     pub fn new(
         governance_id: DigestIdentifier,
         our_key: Arc<PublicKey>,
@@ -450,6 +463,7 @@ impl TrackerSync {
                 if current_sn
                     .is_some_and(|current_sn| current_sn >= active_update.item.target_sn)
                 {
+                    Self::observe_update("completed");
                     continue;
                 }
 
@@ -464,6 +478,7 @@ impl TrackerSync {
                 if active_update.stalled_checks < MAX_STALLED_UPDATE_CHECKS {
                     still_running.push(active_update);
                 } else {
+                    Self::observe_update("stalled");
                     warn!(
                         governance_id = %self.governance_id,
                         subject_id = %active_update.item.subject_id,
@@ -495,6 +510,7 @@ impl TrackerSync {
                     .await;
             }
 
+            Self::observe_round("completed");
             return self.finish_cycle(ctx).await;
         }
 
@@ -509,6 +525,7 @@ impl TrackerSync {
                 self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             self.request_tracker_update(&peer, &item.subject_id, last_seen_sn)
                 .await?;
+            Self::observe_update("launched");
             active_batch.push(ActiveUpdate {
                 item,
                 last_seen_sn,
@@ -532,11 +549,13 @@ impl TrackerSync {
         }
 
         let Some(peer) = self.select_peer(ctx).await? else {
+            Self::observe_round("no_peer");
             self.schedule_tick(ctx).await?;
             return Ok(());
         };
 
         let governance_version = self.get_governance_version(ctx).await?;
+        Self::observe_round("started");
         self.start_fetch(ctx, peer, governance_version, None).await
     }
 
@@ -636,6 +655,7 @@ impl Handler<Self> for TrackerSync {
         match msg {
             TrackerSyncMessage::Tick => {
                 if let Err(error) = self.handle_tick(ctx).await {
+                    Self::observe_round("error");
                     warn!(
                         governance_id = %self.governance_id,
                         error = %error,
@@ -652,6 +672,7 @@ impl Handler<Self> for TrackerSync {
                 );
 
                 if timed_out {
+                    Self::observe_round("timeout");
                     warn!(
                         governance_id = %self.governance_id,
                         request_nonce = request_nonce,
@@ -708,6 +729,7 @@ impl Handler<Self> for TrackerSync {
                     local_governance_version.max(governance_version);
 
                 if effective_governance_version != active_governance_version {
+                    Self::observe_round("gov_changed");
                     self.start_fetch(
                         ctx,
                         active_peer,
@@ -730,6 +752,7 @@ impl Handler<Self> for TrackerSync {
                         )
                         .await?;
                     } else {
+                        Self::observe_round("completed");
                         self.finish_cycle(ctx).await?;
                     }
                     return Ok(TrackerSyncResponse::None);

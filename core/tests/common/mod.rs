@@ -7,8 +7,7 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     request::{
-        ConfirmRequest, CreateRequest, EventRequest, FactRequest,
-        RejectRequest, TransferRequest,
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest, TransferRequest
     },
     response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB},
 };
@@ -304,6 +303,7 @@ pub async fn create_and_authorize_governance(
     governance_id
 }
 
+#[allow(dead_code)]
 pub async fn create_subject(
     node: &Api,
     governance_id: DigestIdentifier,
@@ -355,6 +355,7 @@ pub async fn emit_fact(
     Ok(request_id)
 }
 
+#[allow(dead_code)]
 pub async fn emit_fact_signed(
     node: &Api,
     keys: &KeyPair,
@@ -608,6 +609,25 @@ pub async fn emit_reject(
     wait_request_state: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = EventRequest::Reject(RejectRequest { subject_id });
+    let response = node.own_request(request).await?;
+    // state of request
+    if !wait_request_state {
+        return Ok(());
+    }
+
+    let request_id = response.request_id;
+    wait_request(node, request_id.clone()).await.unwrap();
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn emit_eol(
+    node: &Api,
+    subject_id: DigestIdentifier,
+    wait_request_state: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = EventRequest::EOL(EOLRequest { subject_id });
     let response = node.own_request(request).await?;
     // state of request
     if !wait_request_state {

@@ -34,6 +34,7 @@ use crate::governance::events::GovernanceEvent;
 use crate::governance::model::{HashThisRole, RoleTypes};
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
+use crate::metrics::try_core_metrics;
 use crate::model::common::node::{get_subject_data, i_owner_new_owner};
 use crate::model::common::subject::{get_gov, get_version};
 use crate::model::common::{
@@ -184,6 +185,10 @@ impl RequestHandler {
         subject_id: &DigestIdentifier,
         request_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_request_invalid();
+        }
+
         self.on_event(
             RequestHandlerEvent::Invalid {
                 subject_id: subject_id.to_owned(),

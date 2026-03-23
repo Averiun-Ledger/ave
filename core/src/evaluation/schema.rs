@@ -18,6 +18,7 @@ use tracing::{Span, debug, error, info_span, warn};
 use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::common::{emit_fail, node::try_to_update},
 };
 
@@ -83,7 +84,13 @@ impl Handler<Self> for EvaluationSchema {
                 info,
                 sender,
             } => {
+                let observe = |result: &'static str| {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_schema_event("evaluation_schema", result);
+                    }
+                };
                 if sender != evaluation_req.signature().signer {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -95,6 +102,7 @@ impl Handler<Self> for EvaluationSchema {
 
                 if self.governance_id != evaluation_req.content().governance_id
                 {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         expected_governance_id = %self.governance_id,
@@ -105,6 +113,7 @@ impl Handler<Self> for EvaluationSchema {
                 }
 
                 if self.schema_id != evaluation_req.content().schema_id {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         expected_schema_id = ?self.schema_id,
@@ -116,6 +125,7 @@ impl Handler<Self> for EvaluationSchema {
 
                 if let Some(ns) = self.creators.get(&sender) {
                     if !ns.contains(&evaluation_req.content().namespace) {
+                        observe("rejected");
                         warn!(
                             msg_type = "NetworkRequest",
                             sender = %sender,
@@ -125,6 +135,7 @@ impl Handler<Self> for EvaluationSchema {
                         return Ok(());
                     }
                 } else {
+                    observe("rejected");
                     warn!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -172,6 +183,7 @@ impl Handler<Self> for EvaluationSchema {
                                 error = %e,
                                 "Evaluator actor already exists"
                             );
+                            observe("rejected");
                             return Ok(());
                         } else {
                             error!(
@@ -198,6 +210,7 @@ impl Handler<Self> for EvaluationSchema {
                         "Failed to send request to evaluator"
                     );
                 } else {
+                    observe("delegated");
                     debug!(
                         msg_type = "NetworkRequest",
                         sender = %sender,
@@ -211,6 +224,9 @@ impl Handler<Self> for EvaluationSchema {
                 gov_version,
                 init_state,
             } => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_schema_event("evaluation_schema", "update");
+                }
                 self.creators = creators;
                 self.gov_version = gov_version;
                 self.sn = sn;
@@ -232,6 +248,9 @@ impl Handler<Self> for EvaluationSchema {
         error: ActorError,
         ctx: &mut ActorContext<Self>,
     ) -> ave_actors::ChildAction {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_schema_event("evaluation_schema", "child_fault");
+        }
         error!(
             governance_id = %self.governance_id,
             schema_id = ?self.schema_id,

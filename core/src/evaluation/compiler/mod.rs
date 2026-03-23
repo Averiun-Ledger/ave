@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
+    time::Instant,
 };
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
@@ -23,6 +24,7 @@ use crate::model::common::contract::{
     MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime,
     generate_linker,
 };
+use crate::metrics::try_core_metrics;
 
 pub mod contract_compiler;
 pub mod contract_register;
@@ -79,6 +81,16 @@ impl CompilerSupport {
     const ARTIFACT_WASM: &'static str = "contract.wasm";
     const ARTIFACT_PRECOMPILED: &'static str = "contract.cwasm";
     const LEGACY_ARTIFACT_METADATA: &'static str = "contract.json";
+
+    fn observe_contract_prepare(
+        kind: &'static str,
+        result: &'static str,
+        started_at: Instant,
+    ) {
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_contract_prepare(kind, result, started_at.elapsed());
+        }
+    }
 
     fn compilation_toml() -> String {
         include_str!("contract_Cargo.toml").to_owned()
@@ -617,240 +629,266 @@ impl CompilerSupport {
         contract_path: &Path,
         initial_value: Value,
     ) -> Result<(Arc<Module>, ContractArtifactRecord), CompilerError> {
-        let contract_hash =
-            hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
-                CompilerError::SerializationError {
-                    context: "contract hash",
+        let started_at = Instant::now();
+        let result = async {
+            let contract_hash =
+                hash_borsh(&*hash.hasher(), &contract).map_err(|e| {
+                    CompilerError::SerializationError {
+                        context: "contract hash",
+                        details: e.to_string(),
+                    }
+                })?;
+            let manifest = Self::compilation_toml();
+            let manifest_hash =
+                hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
+                    CompilerError::SerializationError {
+                        context: "contract manifest hash",
+                        details: e.to_string(),
+                    }
+                })?;
+
+            Self::prepare_contract_project(contract, contract_path).await?;
+
+            let wasm_runtime = Self::wasm_runtime(ctx).await?;
+            let (engine_fingerprint, toolchain_fingerprint) =
+                Self::contract_environment(hash, &wasm_runtime).await?;
+
+            let parent_path = ctx.path().parent();
+            let register_path =
+                ActorPath::from(format!("{}/contract_register", parent_path));
+            let register = ctx
+                .system()
+                .get_actor::<ContractRegister>(&register_path)
+                .await
+                .map_err(|e| CompilerError::ContractRegisterFailed {
                     details: e.to_string(),
+                })?;
+
+            let persisted = match register
+                .ask(ContractRegisterMessage::GetMetadata {
+                    contract_name: contract_name.to_owned(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Metadata(metadata)) => metadata,
+                Ok(ContractRegisterResponse::Contracts(_)) => None,
+                Ok(ContractRegisterResponse::Ok) => None,
+                Err(e) => {
+                    return Err(CompilerError::ContractRegisterFailed {
+                        details: e.to_string(),
+                    });
                 }
-            })?;
-        let manifest = Self::compilation_toml();
-        let manifest_hash =
-            hash_borsh(&*hash.hasher(), &manifest).map_err(|e| {
-                CompilerError::SerializationError {
-                    context: "contract manifest hash",
-                    details: e.to_string(),
-                }
-            })?;
+            };
 
-        Self::prepare_contract_project(contract, contract_path).await?;
-
-        let wasm_runtime = Self::wasm_runtime(ctx).await?;
-        let (engine_fingerprint, toolchain_fingerprint) =
-            Self::contract_environment(hash, &wasm_runtime).await?;
-
-        let parent_path = ctx.path().parent();
-        let register_path =
-            ActorPath::from(format!("{}/contract_register", parent_path));
-        let register = ctx
-            .system()
-            .get_actor::<ContractRegister>(&register_path)
-            .await
-            .map_err(|e| CompilerError::ContractRegisterFailed {
-                details: e.to_string(),
-            })?;
-
-        let persisted = match register
-            .ask(ContractRegisterMessage::GetMetadata {
-                contract_name: contract_name.to_owned(),
-            })
-            .await
-        {
-            Ok(ContractRegisterResponse::Metadata(metadata)) => metadata,
-            Ok(ContractRegisterResponse::Contracts(_)) => None,
-            Ok(ContractRegisterResponse::Ok) => None,
-            Err(e) => {
-                return Err(CompilerError::ContractRegisterFailed {
-                    details: e.to_string(),
-                });
-            }
-        };
-
-        if let Some(persisted) = persisted
-            && Self::metadata_matches(
-                &persisted,
-                &contract_hash,
-                &manifest_hash,
-                &engine_fingerprint,
-                &toolchain_fingerprint,
-            )
-        {
-            match Self::load_artifact_precompiled(contract_path).await {
-                Ok(precompiled_bytes) => {
-                    let precompiled_hash = Self::hash_bytes(
-                        hash,
-                        &precompiled_bytes,
-                        "persisted cwasm artifact",
-                    )?;
-                    if precompiled_hash == persisted.cwasm_hash {
-                        match Self::deserialize_precompiled(
-                            &wasm_runtime,
+            if let Some(persisted) = persisted
+                && Self::metadata_matches(
+                    &persisted,
+                    &contract_hash,
+                    &manifest_hash,
+                    &engine_fingerprint,
+                    &toolchain_fingerprint,
+                )
+            {
+                match Self::load_artifact_precompiled(contract_path).await {
+                    Ok(precompiled_bytes) => {
+                        let precompiled_hash = Self::hash_bytes(
+                            hash,
                             &precompiled_bytes,
-                        ) {
-                            Ok(module) => {
-                                match Self::validate_module(
-                                    ctx,
-                                    &module,
-                                    ValueWrapper(initial_value.clone()),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        return Ok((
-                                            Arc::new(module),
-                                            persisted,
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        debug!(
-                                            error = %error,
-                                            path = %contract_path.display(),
-                                            "Persisted precompiled contract is invalid, retrying from wasm artifact"
-                                        );
+                            "persisted cwasm artifact",
+                        )?;
+                        if precompiled_hash == persisted.cwasm_hash {
+                            match Self::deserialize_precompiled(
+                                &wasm_runtime,
+                                &precompiled_bytes,
+                            ) {
+                                Ok(module) => {
+                                    match Self::validate_module(
+                                        ctx,
+                                        &module,
+                                        ValueWrapper(initial_value.clone()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            return Ok((
+                                                Arc::new(module),
+                                                persisted,
+                                                "cwasm_hit",
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            debug!(
+                                                error = %error,
+                                                path = %contract_path.display(),
+                                                "Persisted precompiled contract is invalid, retrying from wasm artifact"
+                                            );
+                                        }
                                     }
                                 }
+                                Err(error) => {
+                                    debug!(
+                                        error = %error,
+                                        path = %contract_path.display(),
+                                        "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
+                                    );
+                                }
                             }
-                            Err(error) => {
-                                debug!(
-                                    error = %error,
-                                    path = %contract_path.display(),
-                                    "Persisted precompiled contract can not be deserialized, retrying from wasm artifact"
-                                );
-                            }
+                        } else {
+                            debug!(
+                                expected = %persisted.cwasm_hash,
+                                actual = %precompiled_hash,
+                                path = %contract_path.display(),
+                                "Persisted precompiled artifact hash mismatch, retrying from wasm artifact"
+                            );
                         }
-                    } else {
+                    }
+                    Err(error) => {
                         debug!(
-                            expected = %persisted.cwasm_hash,
-                            actual = %precompiled_hash,
+                            error = %error,
                             path = %contract_path.display(),
-                            "Persisted precompiled artifact hash mismatch, retrying from wasm artifact"
+                            "Persisted precompiled artifact can not be read, retrying from wasm artifact"
                         );
                     }
                 }
-                Err(error) => {
-                    debug!(
-                        error = %error,
-                        path = %contract_path.display(),
-                        "Persisted precompiled artifact can not be read, retrying from wasm artifact"
-                    );
-                }
-            }
 
-            match Self::load_artifact_wasm(contract_path).await {
-                Ok(wasm_bytes) => {
-                    let wasm_hash = Self::hash_bytes(
-                        hash,
-                        &wasm_bytes,
-                        "persisted wasm artifact",
-                    )?;
-                    if wasm_hash == persisted.wasm_hash {
-                        match Self::precompile_module(
-                            &wasm_runtime,
+                match Self::load_artifact_wasm(contract_path).await {
+                    Ok(wasm_bytes) => {
+                        let wasm_hash = Self::hash_bytes(
+                            hash,
                             &wasm_bytes,
-                        ) {
-                            Ok((precompiled_bytes, module)) => {
-                                match Self::validate_module(
-                                    ctx,
-                                    &module,
-                                    ValueWrapper(initial_value.clone()),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        Self::persist_artifact(
-                                            contract_path,
-                                            &wasm_bytes,
-                                            &precompiled_bytes,
-                                        )
-                                        .await?;
-                                        let refreshed_record =
-                                            Self::build_contract_record(
-                                                hash,
-                                                contract_hash.clone(),
-                                                manifest_hash.clone(),
+                            "persisted wasm artifact",
+                        )?;
+                        if wasm_hash == persisted.wasm_hash {
+                            match Self::precompile_module(
+                                &wasm_runtime,
+                                &wasm_bytes,
+                            ) {
+                                Ok((precompiled_bytes, module)) => {
+                                    match Self::validate_module(
+                                        ctx,
+                                        &module,
+                                        ValueWrapper(initial_value.clone()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            Self::persist_artifact(
+                                                contract_path,
                                                 &wasm_bytes,
                                                 &precompiled_bytes,
-                                                engine_fingerprint.clone(),
-                                                toolchain_fingerprint.clone(),
-                                            )?;
-
-                                        register
-                                            .tell(
-                                                ContractRegisterMessage::SetMetadata {
-                                                    contract_name: contract_name
-                                                        .to_owned(),
-                                                    metadata: refreshed_record
-                                                        .clone(),
-                                                },
                                             )
-                                            .await
-                                            .map_err(|e| {
-                                                CompilerError::ContractRegisterFailed {
-                                                    details: e.to_string(),
-                                                }
-                                            })?;
+                                            .await?;
+                                            let refreshed_record =
+                                                Self::build_contract_record(
+                                                    hash,
+                                                    contract_hash.clone(),
+                                                    manifest_hash.clone(),
+                                                    &wasm_bytes,
+                                                    &precompiled_bytes,
+                                                    engine_fingerprint.clone(),
+                                                    toolchain_fingerprint
+                                                        .clone(),
+                                                )?;
 
-                                        return Ok((
-                                            Arc::new(module),
-                                            refreshed_record,
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        debug!(
-                                            error = %error,
-                                            path = %contract_path.display(),
-                                            "Persisted wasm artifact is invalid, recompiling"
-                                        );
+                                            register
+                                                .tell(
+                                                    ContractRegisterMessage::SetMetadata {
+                                                        contract_name: contract_name
+                                                            .to_owned(),
+                                                        metadata: refreshed_record
+                                                            .clone(),
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    CompilerError::ContractRegisterFailed {
+                                                        details: e.to_string(),
+                                                    }
+                                                })?;
+
+                                            return Ok((
+                                                Arc::new(module),
+                                                refreshed_record,
+                                                "wasm_hit",
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            debug!(
+                                                error = %error,
+                                                path = %contract_path.display(),
+                                                "Persisted wasm artifact is invalid, recompiling"
+                                            );
+                                        }
                                     }
                                 }
+                                Err(error) => {
+                                    debug!(
+                                        error = %error,
+                                        path = %contract_path.display(),
+                                        "Persisted wasm artifact can not be precompiled, recompiling"
+                                    );
+                                }
                             }
-                            Err(error) => {
-                                debug!(
-                                    error = %error,
-                                    path = %contract_path.display(),
-                                    "Persisted wasm artifact can not be precompiled, recompiling"
-                                );
-                            }
+                        } else {
+                            debug!(
+                                expected = %persisted.wasm_hash,
+                                actual = %wasm_hash,
+                                path = %contract_path.display(),
+                                "Persisted wasm artifact hash mismatch, recompiling"
+                            );
                         }
-                    } else {
+                    }
+                    Err(error) => {
                         debug!(
-                            expected = %persisted.wasm_hash,
-                            actual = %wasm_hash,
+                            error = %error,
                             path = %contract_path.display(),
-                            "Persisted wasm artifact hash mismatch, recompiling"
+                            "Persisted contract artifact can not be read, recompiling"
                         );
                     }
                 }
-                Err(error) => {
-                    debug!(
-                        error = %error,
-                        path = %contract_path.display(),
-                        "Persisted contract artifact can not be read, recompiling"
-                    );
-                }
+            }
+
+            let (module, metadata) = Self::compile_fresh(
+                hash,
+                ctx,
+                contract,
+                contract_path,
+                initial_value,
+            )
+            .await?;
+
+            register
+                .tell(ContractRegisterMessage::SetMetadata {
+                    contract_name: contract_name.to_owned(),
+                    metadata: metadata.clone(),
+                })
+                .await
+                .map_err(|e| CompilerError::ContractRegisterFailed {
+                    details: e.to_string(),
+                })?;
+
+            Ok((module, metadata, "recompiled"))
+        }
+        .await;
+
+        match result {
+            Ok((module, metadata, prepare_result)) => {
+                Self::observe_contract_prepare(
+                    "registered",
+                    prepare_result,
+                    started_at,
+                );
+                Ok((module, metadata))
+            }
+            Err(error) => {
+                Self::observe_contract_prepare(
+                    "registered",
+                    "error",
+                    started_at,
+                );
+                Err(error)
             }
         }
-
-        let (module, metadata) = Self::compile_fresh(
-            hash,
-            ctx,
-            contract,
-            contract_path,
-            initial_value,
-        )
-        .await?;
-
-        register
-            .tell(ContractRegisterMessage::SetMetadata {
-                contract_name: contract_name.to_owned(),
-                metadata: metadata.clone(),
-            })
-            .await
-            .map_err(|e| CompilerError::ContractRegisterFailed {
-                details: e.to_string(),
-            })?;
-
-        Ok((module, metadata))
     }
 
     fn check_result(
