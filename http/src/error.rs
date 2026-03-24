@@ -80,6 +80,9 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         // ── 403 Forbidden ──────────────────────────────────────
         CoreError::Forbidden(_) => StatusCode::FORBIDDEN,
 
+        // ── 503 Service Unavailable ───────────────────────────
+        CoreError::SafeMode(_) => StatusCode::SERVICE_UNAVAILABLE,
+
         // ── 404 Not Found ──────────────────────────────────────
         CoreError::RequestNotFound(_)
         | CoreError::ApprovalNotFound(_)

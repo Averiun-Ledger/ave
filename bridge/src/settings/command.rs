@@ -1,6 +1,6 @@
 use std::env;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -24,6 +24,10 @@ pub struct Args {
     /// API key to be used for sink authentication (alternative to password-based auth).
     #[arg(short = 'S', long, default_value_t = String::default())]
     pub sink_api_key: String,
+
+    /// Start the node in safe mode, disabling mutating operations.
+    #[arg(short = 'm', long, action = ArgAction::SetTrue)]
+    pub safe_mode: bool,
 }
 
 pub fn build_sink_password() -> String {
@@ -44,4 +48,13 @@ pub fn build_key_password() -> String {
 
 pub fn build_config_path() -> String {
     env::var("AVE_CONFIG").unwrap_or_default()
+}
+
+pub fn build_safe_mode() -> Option<bool> {
+    let value = env::var("AVE_SAFE_MODE").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

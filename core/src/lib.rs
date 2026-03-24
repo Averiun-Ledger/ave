@@ -88,6 +88,7 @@ compile_error!(
 pub struct Api {
     peer_id: String,
     public_key: String,
+    safe_mode: bool,
     db: Arc<ExternalDB>,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
@@ -122,7 +123,21 @@ fn actor_communication_error(actor: &'static str, err: ActorError) -> Error {
     })
 }
 
+fn safe_mode_error() -> Error {
+    Error::SafeMode(
+        "node is running in safe mode; mutating operations are disabled"
+            .to_string(),
+    )
+}
+
 impl Api {
+    fn ensure_mutations_allowed(&self) -> Result<(), Error> {
+        if self.safe_mode {
+            return Err(safe_mode_error());
+        }
+        Ok(())
+    }
+
     /// Creates a new `Api`.
     pub async fn build(
         keys: KeyPair,
@@ -274,6 +289,7 @@ impl Api {
             Self {
                 public_key: keys.public_key().to_string(),
                 peer_id,
+                safe_mode: config.safe_mode,
                 db: ext_db,
                 request: request_actor,
                 auth: auth_actor,
@@ -385,6 +401,7 @@ impl Api {
         &self,
         request: Signed<EventRequest>,
     ) -> Result<RequestData, Error> {
+        self.ensure_mutations_allowed()?;
         let response = self
             .request
             .ask(RequestHandlerMessage::NewRequest { request })
@@ -411,6 +428,7 @@ impl Api {
         &self,
         request: EventRequest,
     ) -> Result<RequestData, Error> {
+        self.ensure_mutations_allowed()?;
         let response = self
             .node
             .ask(NodeMessage::SignRequest(Box::new(
@@ -520,6 +538,7 @@ impl Api {
         subject_id: DigestIdentifier,
         state: ApprovalStateRes,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         if state == ApprovalStateRes::Obsolete {
             warn!("Cannot set approval state to Obsolete");
             return Err(Error::InvalidApprovalState("Obsolete".to_string()));
@@ -556,6 +575,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         self.request
             .tell(RequestHandlerMessage::AbortRequest { subject_id })
             .await
@@ -657,6 +677,7 @@ impl Api {
         subject_id: DigestIdentifier,
         witnesses: AuthWitness,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         self.auth
             .tell(AuthMessage::NewAuth {
                 subject_id,
@@ -727,6 +748,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         self.auth
             .tell(AuthMessage::DeleteAuth { subject_id })
             .await
@@ -744,6 +766,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         let response = self
             .auth
             .ask(AuthMessage::Update {
@@ -778,6 +801,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
         self.manual_dis
             .ask(ManualDistributionMessage::Update(subject_id.clone()))
             .await

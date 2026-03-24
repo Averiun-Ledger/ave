@@ -85,6 +85,17 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    fn ensure_mutations_allowed(&self) -> Result<(), BridgeError> {
+        if self.config.node.safe_mode {
+            return Err(Error::SafeMode(
+                "node is running in safe mode; mutating operations are disabled"
+                    .to_string(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub async fn build(
         settings: &Config,
         password: &str,
@@ -227,6 +238,7 @@ impl Bridge {
         &self,
         request: BridgeSignedEventRequest,
     ) -> Result<RequestDataRes, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let event: EventRequest =
             conversions::bridge_to_event_request(request.request)?;
         let result = if let Some(signature) = request.signature {
@@ -279,6 +291,7 @@ impl Bridge {
         subject_id: String,
         state: ApprovalStateRes,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -289,6 +302,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -332,6 +346,7 @@ impl Bridge {
         subject_id: String,
         witnesses: Vec<String>,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -380,6 +395,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -390,6 +406,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 
@@ -402,6 +419,7 @@ impl Bridge {
         &self,
         subject_id: String,
     ) -> Result<String, BridgeError> {
+        self.ensure_mutations_allowed()?;
         let subject_id = DigestIdentifier::from_str(&subject_id)
             .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
 

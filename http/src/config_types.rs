@@ -303,6 +303,8 @@ pub struct AveConfigHttp {
     pub contracts_path: String,
     /// Whether to automatically accept all events (development mode)
     pub always_accept: bool,
+    /// Whether the node is running in safe mode
+    pub safe_mode: bool,
     /// Garbage collector interval in seconds
     pub tracking_size: usize,
     /// Is a service node
@@ -345,6 +347,7 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
             network: NetworkConfigHttp::from(value.network),
             contracts_path: value.contracts_path.to_string_lossy().to_string(),
             always_accept: value.always_accept,
+            safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
             is_service: value.is_service,
             sync: SyncConfigHttp {

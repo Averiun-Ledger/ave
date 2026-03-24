@@ -102,6 +102,10 @@ pub enum Error {
     #[error("Insufficient permissions: {0}")]
     Forbidden(String),
 
+    /// Node is running in safe mode and mutating operations are disabled.
+    #[error("Safe mode: {0}")]
+    SafeMode(String),
+
     /// Authentication subject operation failed.
     #[error("Authentication operation failed: {0}")]
     AuthOperation(String),
