@@ -206,6 +206,7 @@ pub mod tests {
             contracts_path: contracts_path,
             always_accept: false,
             tracking_size: 100,
+            safe_mode: false,
             is_service: true,
             sync: SyncConfig {
                 governance: GovernanceSyncConfig {

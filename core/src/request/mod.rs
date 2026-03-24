@@ -860,21 +860,8 @@ impl Actor for RequestHandler {
             return Err(e);
         }
 
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
         else {
-            error!("External database helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
-
-        let tracking_size = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.tracking_size
-        } else {
             error!(
                 helper = "config",
                 "Config helper not found during pre_start"
@@ -885,24 +872,36 @@ impl Actor for RequestHandler {
             });
         };
 
-        let tracking = match ctx
-            .create_child("tracking", RequestTracking::new(tracking_size))
-            .await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "Failed to create tracking child during pre_start"
-                );
-                return Err(e);
-            }
-        };
+        if !config.safe_mode {
+            let Some(ext_db): Option<Arc<ExternalDB>> =
+                ctx.system().get_helper("ext_db").await
+            else {
+                error!("External database helper not found");
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_string(),
+                    reason: "Not found".to_string(),
+                });
+            };
 
-        let sink =
-            Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
+            let tracking = match ctx
+                .create_child("tracking", RequestTracking::new(config.tracking_size))
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create tracking child during pre_start"
+                    );
+                    return Err(e);
+                }
+            };
 
-        ctx.system().run_sink(sink).await;
+            let sink =
+                Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
+
+            ctx.system().run_sink(sink).await;
+        }
 
         let Some((hash, network)) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
@@ -913,6 +912,10 @@ impl Actor for RequestHandler {
             ctx.system().crash_system();
             return Err(ActorError::FunctionalCritical { description: e });
         };
+
+        if config.safe_mode {
+            return Ok(());
+        }
 
         for (subject_id, request_id) in self.handling.clone() {
             let governance_id = get_subject_data(ctx, &subject_id)

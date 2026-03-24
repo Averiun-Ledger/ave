@@ -33,7 +33,7 @@ use ave_bridge::{
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{FromRequestParts, Path, Query},
     http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -1176,7 +1176,7 @@ pub fn build_routes(
     main_route_catalog!(append_catalog_route, main_routes);
     let main_routes = main_routes.layer(
         ServiceBuilder::new()
-            .layer(Extension(bridge.clone()))
+            .layer(Extension(bridge))
             .layer(Extension(proxy.clone())),
     );
 
@@ -1219,10 +1219,7 @@ pub fn build_routes(
             app = app.merge(doc_routes);
         }
 
-        app.layer(middleware::from_fn_with_state(
-            bridge,
-            safe_mode_layer,
-        ))
+        app
     } else {
         let app = main_routes;
         #[cfg(feature = "prometheus")]
@@ -1231,33 +1228,8 @@ pub fn build_routes(
         if let Some(doc_routes) = doc_routes {
             app = app.merge(doc_routes);
         }
-        app.layer(middleware::from_fn_with_state(
-            bridge,
-            safe_mode_layer,
-        ))
+        app
     }
-}
-
-pub async fn safe_mode_layer(
-    State(bridge): State<Arc<Bridge>>,
-    req: Request<Body>,
-    next: middleware::Next,
-) -> Response {
-    if bridge.get_config().node.safe_mode
-        && safe_mode_blocks_request(req.method(), req.uri().path())
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error:
-                    "node is running in safe mode; mutating operations are disabled"
-                        .to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    next.run(req).await
 }
 
 pub async fn permission_layer(
@@ -1346,58 +1318,6 @@ pub fn permission_for(method: &Method, path: &str) -> Option<PermissionResult> {
     main_route_catalog!(match_catalog_route, method, path);
     auth_route_catalog!(match_catalog_route, method, path);
     None
-}
-
-macro_rules! match_mutating_catalog_route {
-    ($method:expr, $path:expr, get, $template:literal, $handler:path, $($rest:tt)*) => {};
-    ($method:expr, $path:expr, external_get, $template:literal, $handler:ident, $($rest:tt)*) => {};
-    ($method:expr, $path:expr, post, $template:literal, $handler:path, $($rest:tt)*) => {
-        if RouteMethodSpec::Post.matches($method)
-            && path_matches_template($template, $path)
-        {
-            return true;
-        }
-    };
-    ($method:expr, $path:expr, put, $template:literal, $handler:path, $($rest:tt)*) => {
-        if RouteMethodSpec::Put.matches($method)
-            && path_matches_template($template, $path)
-        {
-            return true;
-        }
-    };
-    ($method:expr, $path:expr, patch, $template:literal, $handler:path, $($rest:tt)*) => {
-        if RouteMethodSpec::Patch.matches($method)
-            && path_matches_template($template, $path)
-        {
-            return true;
-        }
-    };
-    ($method:expr, $path:expr, delete, $template:literal, $handler:path, $($rest:tt)*) => {
-        if RouteMethodSpec::Delete.matches($method)
-            && path_matches_template($template, $path)
-        {
-            return true;
-        }
-    };
-}
-
-macro_rules! match_mutating_public_route {
-    ($method:expr, $path:expr, post, "/login", $handler:path) => {};
-    ($method:expr, $path:expr, get, $template:literal, $handler:path) => {};
-    ($method:expr, $path:expr, post, $template:literal, $handler:path) => {
-        if RouteMethodSpec::Post.matches($method)
-            && path_matches_template($template, $path)
-        {
-            return true;
-        }
-    };
-}
-
-fn safe_mode_blocks_request(method: &Method, path: &str) -> bool {
-    main_route_catalog!(match_mutating_catalog_route, method, path);
-    auth_route_catalog!(match_mutating_catalog_route, method, path);
-    public_auth_route_catalog!(match_mutating_public_route, method, path);
-    false
 }
 
 #[cfg(test)]

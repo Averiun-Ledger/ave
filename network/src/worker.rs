@@ -141,6 +141,9 @@ where
     /// Node type.
     node_type: NodeType,
 
+    /// Safe mode keeps the worker alive but isolated from peers.
+    safe_mode: bool,
+
     /// List of boot noodes.
     boot_nodes: HashMap<PeerId, Vec<Multiaddr>>,
 
@@ -219,6 +222,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let external_addresses = convert_addresses(&config.external_addresses)?;
 
         let node_type = config.node_type.clone();
+        let safe_mode = config.safe_mode;
 
         // Resolve machine sizing from the declared spec, or auto-detect from host.
         let ResolvedSpec { ram_mb, cpu_cores } = resolve_spec(machine_spec);
@@ -305,6 +309,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             graceful_token,
             crash_token,
             node_type,
+            safe_mode,
             boot_nodes,
             retry_boot_nodes: HashMap::new(),
             pending_outbound_messages: HashMap::default(),
@@ -334,6 +339,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     fn metric_handle(&self) -> Option<&NetworkMetrics> {
         self.metrics.as_deref()
+    }
+
+    const fn is_safe_mode(&self) -> bool {
+        self.safe_mode
     }
 
     fn pending_outbound_messages_len(&self) -> usize {
@@ -444,6 +453,13 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn schedule_retry(&mut self, peer: PeerId, schedule_type: ScheduleType) {
+        if self.is_safe_mode() {
+            self.peer_action.remove(&peer);
+            self.retry_by_peer.remove(&peer);
+            self.refresh_runtime_metrics();
+            return;
+        }
+
         if self.peer_action.contains_key(&peer) {
             return;
         }
@@ -569,6 +585,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         peer: PeerId,
         message: Bytes,
     ) -> Result<(), Error> {
+        if self.is_safe_mode() {
+            debug!(
+                target: TARGET,
+                peer_id = %peer,
+                size = message.len(),
+                "safe mode active; dropping outbound message"
+            );
+            return Ok(());
+        }
+
         if message.len() > self.max_app_message_bytes {
             warn!(
                 target: TARGET,
@@ -928,13 +954,20 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
 
         // Finish pre routing state, activating random walk (if node is a bootstrap).
-        self.swarm.behaviour_mut().finish_prerouting_state();
+        if !self.is_safe_mode() {
+            self.swarm.behaviour_mut().finish_prerouting_state();
+        }
         // Run main loop.
         self.run_main().await;
     }
 
     /// Run connection to bootstrap node.
     pub async fn run_connection(&mut self) -> Result<(), Error> {
+        if self.is_safe_mode() {
+            self.change_state(NetworkState::Running).await;
+            return Ok(());
+        }
+
         // If is the first node of ave network.
         if self.node_type == NodeType::Bootstrap && self.boot_nodes.is_empty() {
             self.change_state(NetworkState::Running).await;
@@ -1421,6 +1454,15 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     async fn handle_command(&mut self, command: Command) {
         match command {
             Command::SendMessage { peer, message } => {
+                if self.is_safe_mode() {
+                    debug!(
+                        target: TARGET,
+                        peer_id = %peer,
+                        size = message.len(),
+                        "safe mode active; ignoring send command"
+                    );
+                    return;
+                }
                 if let Err(error) = self.send_message(peer, message) {
                     error!(target: TARGET, error = %error, "failed to deliver message");
                     self.send_event(NetworkEvent::Error(error)).await;
@@ -1483,6 +1525,79 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
+        if self.is_safe_mode() {
+            match event {
+                SwarmEvent::Behaviour(BehaviourEvent::ReqresMessage {
+                    peer_id,
+                    ..
+                }) => {
+                    debug!(
+                        target: TARGET,
+                        peer_id = %peer_id,
+                        "safe mode active; dropping inbound reqres message"
+                    );
+                    self.swarm
+                        .behaviour_mut()
+                        .close_connections(&peer_id, None);
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Identified {
+                    peer_id,
+                    connection_id,
+                    ..
+                }) => {
+                    debug!(
+                        target: TARGET,
+                        peer_id = %peer_id,
+                        "safe mode active; closing identified peer"
+                    );
+                    self.swarm
+                        .behaviour_mut()
+                        .close_connections(&peer_id, Some(connection_id));
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::IdentifyError {
+                    peer_id,
+                    ..
+                }) => {
+                    self.swarm
+                        .behaviour_mut()
+                        .close_connections(&peer_id, None);
+                }
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    connection_id,
+                    ..
+                } => {
+                    debug!(
+                        target: TARGET,
+                        peer_id = %peer_id,
+                        "safe mode active; closing established connection"
+                    );
+                    self.swarm
+                        .behaviour_mut()
+                        .close_connections(&peer_id, Some(connection_id));
+                }
+                SwarmEvent::OutgoingConnectionError { .. }
+                | SwarmEvent::ConnectionClosed { .. }
+                | SwarmEvent::IncomingConnectionError { .. }
+                | SwarmEvent::IncomingConnection { .. }
+                | SwarmEvent::ListenerClosed { .. }
+                | SwarmEvent::Dialing { .. }
+                | SwarmEvent::NewExternalAddrCandidate { .. }
+                | SwarmEvent::ExternalAddrConfirmed { .. }
+                | SwarmEvent::ExternalAddrExpired { .. }
+                | SwarmEvent::NewExternalAddrOfPeer { .. }
+                | SwarmEvent::NewListenAddr { .. }
+                | SwarmEvent::ExpiredListenAddr { .. }
+                | SwarmEvent::ListenerError { .. }
+                | SwarmEvent::Behaviour(BehaviourEvent::ReqresFailure { .. })
+                | SwarmEvent::Behaviour(BehaviourEvent::ClosestPeer { .. })
+                | SwarmEvent::Behaviour(BehaviourEvent::Dummy) => {}
+                _ => {}
+            }
+            self.refresh_runtime_metrics();
+            return;
+        }
+
         match event {
             SwarmEvent::Behaviour(event) => {
                 match event {

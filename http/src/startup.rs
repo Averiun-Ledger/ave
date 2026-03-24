@@ -735,6 +735,7 @@ pub async fn run() -> Result<(), StartupError> {
     } else {
         config.node.safe_mode
     };
+    config.node.network.safe_mode = config.node.safe_mode;
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 

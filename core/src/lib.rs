@@ -94,8 +94,8 @@ pub struct Api {
     node: ActorRef<Node>,
     auth: ActorRef<Auth>,
     monitor: ActorRef<Monitor>,
-    manual_dis: ActorRef<ManualDistribution>,
-    tracking: ActorRef<RequestTracking>,
+    manual_dis: Option<ActorRef<ManualDistribution>>,
+    tracking: Option<ActorRef<RequestTracking>>,
 }
 
 fn preserve_functional_actor_error<F>(err: ActorError, fallback: F) -> Error
@@ -141,7 +141,7 @@ impl Api {
     /// Creates a new `Api`.
     pub async fn build(
         keys: KeyPair,
-        config: AveBaseConfig,
+        mut config: AveBaseConfig,
         sink_auth: SinkAuth,
         registry: &mut Registry,
         password: &str,
@@ -162,6 +162,8 @@ impl Api {
             error!(error = %e, "Failed to create system");
             e
         })?;
+
+        config.network.safe_mode = config.safe_mode;
 
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
@@ -231,13 +233,24 @@ impl Api {
                 }
             })?;
 
-        let manual_dis_actor: ActorRef<ManualDistribution> = system
-            .get_actor(&ActorPath::from("/user/node/manual_distribution"))
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to get manual_distribution actor");
-                e
-            })?;
+        let manual_dis_actor = if config.safe_mode {
+            None
+        } else {
+            Some(
+                system
+                    .get_actor(&ActorPath::from(
+                        "/user/node/manual_distribution",
+                    ))
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            error = %e,
+                            "Failed to get manual_distribution actor"
+                        );
+                        e
+                    })?,
+            )
+        };
 
         let auth_actor: ActorRef<Auth> = system
             .get_actor(&ActorPath::from("/user/node/auth"))
@@ -264,13 +277,19 @@ impl Api {
                 }
             })?;
 
-        let tracking_actor: ActorRef<RequestTracking> = system
-            .get_actor(&ActorPath::from("/user/request/tracking"))
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to get tracking actor");
-                e
-            })?;
+        let tracking_actor = if config.safe_mode {
+            None
+        } else {
+            Some(
+                system
+                    .get_actor(&ActorPath::from("/user/request/tracking"))
+                    .await
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to get tracking actor");
+                        e
+                    })?,
+            )
+        };
 
         let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db").await
         else {
@@ -593,8 +612,13 @@ impl Api {
         &self,
         request_id: DigestIdentifier,
     ) -> Result<RequestInfo, Error> {
-        let response = self
-            .tracking
+        let Some(tracking) = &self.tracking else {
+            return Err(Error::SafeMode(
+                "request tracking is unavailable while node is running in safe mode"
+                    .to_string(),
+            ));
+        };
+        let response = tracking
             .ask(RequestTrackingMessage::SearchRequest(request_id.clone()))
             .await
             .map_err(|e| {
@@ -621,8 +645,13 @@ impl Api {
     pub async fn all_request_state(
         &self,
     ) -> Result<Vec<RequestInfoExtend>, Error> {
-        let response = self
-            .tracking
+        let Some(tracking) = &self.tracking else {
+            return Err(Error::SafeMode(
+                "request tracking is unavailable while node is running in safe mode"
+                    .to_string(),
+            ));
+        };
+        let response = tracking
             .ask(RequestTrackingMessage::AllRequests)
             .await
             .map_err(|e| {
@@ -802,7 +831,10 @@ impl Api {
         subject_id: DigestIdentifier,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
-        self.manual_dis
+        let Some(manual_dis) = &self.manual_dis else {
+            return Err(safe_mode_error());
+        };
+        manual_dis
             .ask(ManualDistributionMessage::Update(subject_id.clone()))
             .await
             .map_err(|e| {

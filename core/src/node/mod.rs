@@ -725,6 +725,16 @@ impl Actor for Node {
             return Err(e);
         }
 
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            error!("Config helper not found");
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not found".to_string(),
+            });
+        };
+        let safe_mode = config.safe_mode;
         let Some(network): Option<Arc<NetworkSender>> =
             ctx.system().get_helper("network").await
         else {
@@ -735,48 +745,51 @@ impl Actor for Node {
             });
         };
 
-        let register_actor = match ctx.create_child("register", Register).await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(error = %e, "Failed to create register child");
+        if !safe_mode {
+            let register_actor =
+                match ctx.create_child("register", Register).await {
+                    Ok(actor) => actor,
+                    Err(e) => {
+                        error!(error = %e, "Failed to create register child");
+                        return Err(e);
+                    }
+                };
+
+            let Some(ext_db): Option<Arc<ExternalDB>> =
+                ctx.system().get_helper("ext_db").await
+            else {
+                error!("External DB helper not found");
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_string(),
+                    reason: "Not found".to_string(),
+                });
+            };
+
+            let sink =
+                Sink::new(register_actor.subscribe(), ext_db.get_register());
+            ctx.system().run_sink(sink).await;
+
+            if let Err(e) = ctx
+                .create_child(
+                    "manual_distribution",
+                    ManualDistribution::new(self.our_key.clone()),
+                )
+                .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to create manual_distribution child"
+                );
                 return Err(e);
             }
-        };
 
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External DB helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
-
-        let sink = Sink::new(register_actor.subscribe(), ext_db.get_register());
-        ctx.system().run_sink(sink).await;
-
-        if let Err(e) = ctx
-            .create_child(
-                "manual_distribution",
-                ManualDistribution::new(self.our_key.clone()),
-            )
-            .await
-        {
-            error!(
-                error = %e,
-                "Failed to create manual_distribution child"
-            );
-            return Err(e);
-        }
-
-        if let Err(e) = self.create_distributors(ctx, &network).await {
-            error!(
-                error = %e,
-                "Failed to create distributors"
-            );
-            return Err(e);
+            if let Err(e) = self.create_distributors(ctx, &network).await {
+                error!(
+                    error = %e,
+                    "Failed to create distributors"
+                );
+                return Err(e);
+            }
         }
 
         let Some(hash) = self.hash else {
@@ -814,13 +827,13 @@ impl Actor for Node {
             return Err(e);
         }
 
-        if let Err(e) = ctx
-            .create_child(
-                "auth",
-                Auth::initial((network.clone(), self.our_key.clone())),
-            )
-            .await
-        {
+            if let Err(e) = ctx
+                .create_child(
+                    "auth",
+                    Auth::initial((network.clone(), self.our_key.clone())),
+                )
+                .await
+            {
             error!(
                 error = %e,
                 "Failed to create auth child"
@@ -828,15 +841,16 @@ impl Actor for Node {
             return Err(e);
         }
 
-        if let Err(e) = ctx
-            .create_child(
-                "distributor",
-                DistriWorker {
-                    our_key: self.our_key.clone(),
-                    network,
-                },
-            )
-            .await
+        if !safe_mode
+            && let Err(e) = ctx
+                .create_child(
+                    "distributor",
+                    DistriWorker {
+                        our_key: self.our_key.clone(),
+                        network,
+                    },
+                )
+                .await
         {
             error!(
                 error = %e,

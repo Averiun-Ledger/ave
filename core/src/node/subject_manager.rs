@@ -78,11 +78,13 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         governance_ids: Vec<DigestIdentifier>,
     ) -> Result<(), ActorError> {
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
             return Err(ActorError::Helper {
-                name: "ext_db".to_owned(),
+                name: "config".to_owned(),
                 reason: "Not found".to_owned(),
             });
         };
@@ -100,8 +102,19 @@ impl SubjectManager {
                 )
                 .await?;
 
-            let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-            ctx.system().run_sink(sink).await;
+            if !safe_mode {
+                let Some(ext_db): Option<Arc<ExternalDB>> =
+                    ctx.system().get_helper("ext_db").await
+                else {
+                    return Err(ActorError::Helper {
+                        name: "ext_db".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
+                };
+
+                let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
+                ctx.system().run_sink(sink).await;
+            }
         }
 
         Ok(())
@@ -321,6 +334,21 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Tracker>,
     ) -> Result<(), ActorError> {
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            return Ok(());
+        }
+
         let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
@@ -340,6 +368,21 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Governance>,
     ) -> Result<(), ActorError> {
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            return Ok(());
+        }
+
         let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {

@@ -509,6 +509,66 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn up_approver_only(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        if !self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Approver,
+        }) {
+            return Ok(());
+        }
+
+        let always_accept = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.always_accept
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let pass_votation = if always_accept {
+            VotationType::AlwaysAccept
+        } else {
+            VotationType::Manual
+        };
+
+        let owner = *self.our_key == self.subject_metadata.owner;
+        let i_new_owner =
+            self.subject_metadata.new_owner == Some((*self.our_key).clone());
+
+        let node_key =
+            if (owner && self.subject_metadata.new_owner.is_none())
+                || i_new_owner
+            {
+                (*self.our_key).clone()
+            } else {
+                self.subject_metadata
+                    .new_owner
+                    .clone()
+                    .unwrap_or_else(|| self.subject_metadata.owner.clone())
+            };
+
+        let init_approver = InitApprPersist {
+            our_key: self.our_key.clone(),
+            node_key,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            pass_votation,
+            helpers: (*hash, network.clone()),
+        };
+
+        ctx.create_child("approver", ApprPersist::initial(init_approver))
+            .await?;
+
+        Ok(())
+    }
+
     async fn current_validation_roles(
         &self,
         ctx: &ActorContext<Self>,
@@ -2246,6 +2306,41 @@ impl Actor for Governance {
                 "Failed to initialize governance store"
             );
             return Err(e);
+        }
+
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            let Some(hash) = self.hash else {
+                error!("Hash algorithm not found");
+                return Err(ActorError::FunctionalCritical {
+                    description: "Hash algorithm is None".to_string(),
+                });
+            };
+
+            let Some(network) = ctx
+                .system()
+                .get_helper::<Arc<NetworkSender>>("network")
+                .await
+            else {
+                error!("Network helper not found");
+                return Err(ActorError::Helper {
+                    name: "network".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            self.up_approver_only(ctx, &hash, &network).await?;
+            return Ok(());
         }
 
         let Some(hash) = self.hash else {

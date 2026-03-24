@@ -737,6 +737,19 @@ impl Actor for Tracker {
             return Err(e);
         }
 
+        let Some(config): Option<crate::system::ConfigHelper> =
+            ctx.system().get_helper("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if config.safe_mode {
+            return Ok(());
+        }
+
         let our_key = self.our_key.clone();
 
         if self.subject_metadata.active {
