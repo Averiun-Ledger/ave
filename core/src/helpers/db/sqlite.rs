@@ -328,6 +328,26 @@ const SQL_EOL_REGISTER_SUBJECT: &str = r#"
     WHERE governance_id = ?1 AND subject_id = ?2
 "#;
 
+const SQL_DELETE_SUBJECT_STATE: &str = r#"
+    DELETE FROM subjects
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_EVENTS_SUBJECT: &str = r#"
+    DELETE FROM events
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_ABORTS_SUBJECT: &str = r#"
+    DELETE FROM aborts
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_REGISTER_SUBJECT: &str = r#"
+    DELETE FROM register_subjects
+    WHERE subject_id = ?1
+"#;
+
 const SQL_GET_REGISTER_GOVS: &str = r#"
     SELECT governance_id, active, name, description
     FROM register_govs
@@ -454,6 +474,7 @@ enum WriteCommand {
     SubjectState(Metadata),
     Abort(RequestTrackingEvent),
     Register(RegisterEvent),
+    DeleteSubject(String),
 }
 
 struct WriteJob {
@@ -1269,6 +1290,13 @@ impl SqliteLocal {
             .register_prometheus_metrics(registry);
     }
 
+    pub async fn delete_subject(
+        &self,
+        subject_id: &str,
+    ) -> Result<(), DatabaseError> {
+        self.writer.delete_subject(subject_id.to_owned()).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         self.writer.shutdown().await?;
 
@@ -1357,6 +1385,13 @@ impl SqliteWriteStore {
         event: RegisterEvent,
     ) -> Result<(), DatabaseError> {
         self.enqueue(WriteCommand::Register(event)).await
+    }
+
+    async fn delete_subject(
+        &self,
+        subject_id: String,
+    ) -> Result<(), DatabaseError> {
+        self.enqueue(WriteCommand::DeleteSubject(subject_id)).await
     }
 
     async fn enqueue(
@@ -1564,6 +1599,18 @@ fn persist_write_batch(
     let mut eol_register_subject_stmt = tx
         .prepare_cached(SQL_EOL_REGISTER_SUBJECT)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_subject_state_stmt = tx
+        .prepare_cached(SQL_DELETE_SUBJECT_STATE)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_events_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_EVENTS_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_aborts_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_ABORTS_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_register_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_REGISTER_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     for job in jobs {
         match &job.command {
@@ -1628,9 +1675,32 @@ fn persist_write_batch(
                     )?
                 }
             },
+            WriteCommand::DeleteSubject(subject_id) => {
+                touched_subjects.push(subject_id.clone());
+                delete_by_subject_with_stmt(
+                    &mut delete_subject_state_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_events_subject_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_aborts_subject_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_register_subject_stmt,
+                    subject_id,
+                )?;
+            }
         }
     }
 
+    drop(delete_register_subject_stmt);
+    drop(delete_aborts_subject_stmt);
+    drop(delete_events_subject_stmt);
+    drop(delete_subject_state_stmt);
     drop(eol_register_subject_stmt);
     drop(upsert_register_subject_stmt);
     drop(eol_register_gov_stmt);
@@ -3513,6 +3583,16 @@ fn eol_register_subject_with_stmt(
     subject_id: &str,
 ) -> Result<(), DatabaseError> {
     stmt.execute(params![governance_id, subject_id])
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
+fn delete_by_subject_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    subject_id: &str,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![subject_id])
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     Ok(())

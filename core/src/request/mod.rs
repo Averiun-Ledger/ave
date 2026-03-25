@@ -764,6 +764,50 @@ impl RequestHandler {
 
         actor.tell(RequestManagerMessage::ManualAbort).await
     }
+
+    async fn purge_request_manager(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalCritical {
+                description:
+                    "Request handler helpers are not initialized"
+                        .to_string(),
+            });
+        };
+
+        let governance_id = get_subject_data(ctx, subject_id)
+            .await?
+            .and_then(|data| data.get_governance_id());
+        let request_manager_init = InitRequestManager {
+            our_key: self.our_key.clone(),
+            subject_id: subject_id.clone(),
+            governance_id,
+            helpers: (hash, network),
+        };
+
+        let actor = match ctx
+            .create_child(
+                &subject_id.to_string(),
+                RequestManager::initial(request_manager_init),
+            )
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<RequestManager>(&subject_id.to_string())
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
+
+        actor.ask(RequestManagerMessage::PurgeStorage).await?;
+        actor.ask_stop().await?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -790,6 +834,9 @@ pub enum RequestHandlerMessage {
         subject_id: DigestIdentifier,
     },
     EndHandling {
+        subject_id: DigestIdentifier,
+    },
+    PurgeSubject {
         subject_id: DigestIdentifier,
     },
     AbortRequest {
@@ -825,6 +872,9 @@ pub enum RequestHandlerEvent {
         subject_id: DigestIdentifier,
     },
     FinishHandling {
+        subject_id: DigestIdentifier,
+    },
+    PurgeSubject {
         subject_id: DigestIdentifier,
     },
     EventToHandling {
@@ -1009,6 +1059,17 @@ impl Handler<Self> for RequestHandler {
             ),
             RequestHandlerMessage::AbortRequest { subject_id } => {
                 self.manual_abort_request(ctx, &subject_id).await?;
+                Ok(RequestHandlerResponse::None)
+            }
+            RequestHandlerMessage::PurgeSubject { subject_id } => {
+                self.purge_request_manager(ctx, &subject_id).await?;
+                self.on_event(
+                    RequestHandlerEvent::PurgeSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
                 Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::ChangeApprovalState {
@@ -1399,6 +1460,10 @@ impl PersistentActor for RequestHandler {
             }
             RequestHandlerEvent::FinishHandling { subject_id } => {
                 self.handling.remove(subject_id);
+            }
+            RequestHandlerEvent::PurgeSubject { subject_id } => {
+                self.handling.remove(subject_id);
+                self.in_queue.remove(subject_id);
             }
         };
 

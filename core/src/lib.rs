@@ -56,7 +56,7 @@ use request::{
 use system::system;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
 use crate::approval::request::ApprovalReq;
@@ -66,6 +66,9 @@ use crate::helpers::db::{
 };
 use crate::model::common::node::SignTypesNode;
 use crate::node::InitParamsNode;
+use crate::node::subject_manager::{
+    SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+};
 use crate::request::tracking::{
     RequestTracking, RequestTrackingMessage, RequestTrackingResponse,
 };
@@ -89,9 +92,12 @@ pub struct Api {
     peer_id: String,
     public_key: String,
     safe_mode: bool,
+    deleting_subject:
+        Arc<tokio::sync::Mutex<Option<DigestIdentifier>>>,
     db: Arc<ExternalDB>,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
+    subject_manager: ActorRef<SubjectManager>,
     auth: ActorRef<Auth>,
     monitor: ActorRef<Monitor>,
     manual_dis: Option<ActorRef<ManualDistribution>>,
@@ -130,10 +136,50 @@ fn safe_mode_error() -> Error {
     )
 }
 
+fn safe_mode_required_error(operation: &'static str) -> Error {
+    Error::SafeMode(format!(
+        "{operation} is only available while node is running in safe mode"
+    ))
+}
+
 impl Api {
+    async fn begin_subject_deletion(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), Error> {
+        {
+            let mut deleting = self.deleting_subject.lock().await;
+            if let Some(active_subject_id) = deleting.as_ref() {
+                return Err(Error::InvalidRequestState(format!(
+                    "subject deletion already in progress for '{}'",
+                    active_subject_id
+                )));
+            }
+            *deleting = Some(subject_id.clone());
+        }
+        Ok(())
+    }
+
+    async fn end_subject_deletion(&self, subject_id: &DigestIdentifier) {
+        let mut deleting = self.deleting_subject.lock().await;
+        if deleting.as_ref() == Some(subject_id) {
+            *deleting = None;
+        }
+    }
+
     fn ensure_mutations_allowed(&self) -> Result<(), Error> {
         if self.safe_mode {
             return Err(safe_mode_error());
+        }
+        Ok(())
+    }
+
+    fn ensure_safe_mode_required(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), Error> {
+        if !self.safe_mode {
+            return Err(safe_mode_required_error(operation));
         }
         Ok(())
     }
@@ -260,6 +306,14 @@ impl Api {
                 e
             })?;
 
+        let subject_manager_actor: ActorRef<SubjectManager> = system
+            .get_actor(&ActorPath::from("/user/node/subject_manager"))
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to get subject_manager actor");
+                e
+            })?;
+
         let request_actor = system
             .create_root_actor(
                 "request",
@@ -309,10 +363,12 @@ impl Api {
                 public_key: keys.public_key().to_string(),
                 peer_id,
                 safe_mode: config.safe_mode,
+                deleting_subject: Arc::new(tokio::sync::Mutex::new(None)),
                 db: ext_db,
                 request: request_actor,
                 auth: auth_actor,
                 node: node_actor,
+                subject_manager: subject_manager_actor,
                 monitor: newtork_monitor_actor,
                 manual_dis: manual_dis_actor,
                 tracking: tracking_actor,
@@ -845,6 +901,137 @@ impl Api {
             })?;
 
         Ok("Manual distribution in progress".to_owned())
+    }
+
+    pub async fn delete_subject(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.ensure_safe_mode_required("subject deletion")?;
+        self.begin_subject_deletion(&subject_id).await?;
+
+        let result = async {
+            let node_response = self
+                .node
+                .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+                .await
+                .map_err(|e| actor_communication_error("node", e))?;
+
+            let NodeResponse::SubjectData(subject_data) = node_response else {
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_string(),
+                    expected: "NodeResponse::SubjectData".to_string(),
+                    received: "other".to_string(),
+                });
+            };
+
+            let Some(subject_data) = subject_data else {
+                return Err(Error::SubjectNotFound(subject_id.to_string()));
+            };
+
+            match subject_data {
+                node::SubjectData::Governance { .. } => {
+                    info!(
+                        subject_id = %subject_id,
+                        subject_type = "governance",
+                        "Deleting subject"
+                    );
+                    Err(Error::NotImplemented(
+                        "governance deletion is not implemented yet"
+                            .to_string(),
+                    ))
+                }
+                node::SubjectData::Tracker { .. } => {
+                    info!(
+                        subject_id = %subject_id,
+                        subject_type = "tracker",
+                        "Deleting subject"
+                    );
+                    let mut cleanup_errors = Vec::new();
+
+                    match self
+                        .request
+                        .ask(RequestHandlerMessage::PurgeSubject {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(RequestHandlerResponse::None) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "request: unexpected response {other:?}"
+                        )),
+                        Err(err) => cleanup_errors.push(format!("request: {err}")),
+                    }
+
+                    match self
+                        .auth
+                        .ask(AuthMessage::DeleteAuth {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(AuthResponse::None) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "auth: unexpected response {other:?}"
+                        )),
+                        Err(err) => cleanup_errors.push(format!("auth: {err}")),
+                    }
+
+                    if let Err(err) =
+                        self.db.delete_subject(&subject_id.to_string()).await
+                    {
+                        cleanup_errors.push(format!("external_db: {err}"));
+                    }
+
+                    match self
+                        .subject_manager
+                        .ask(SubjectManagerMessage::DeleteTracker {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(SubjectManagerResponse::DeleteTracker) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "subject_manager: unexpected response {other:?}"
+                        )),
+                        Err(err) => cleanup_errors
+                            .push(format!("subject_manager: {err}")),
+                    }
+
+                    match self
+                        .node
+                        .ask(NodeMessage::DeleteSubject(subject_id.clone()))
+                        .await
+                    {
+                        Ok(NodeResponse::Ok) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "node: unexpected response {other:?}"
+                        )),
+                        Err(err) => {
+                            cleanup_errors.push(format!("node: {err}"))
+                        }
+                    }
+
+                    if cleanup_errors.is_empty() {
+                        info!(
+                            subject_id = %subject_id,
+                            subject_type = "tracker",
+                            "Subject deleted successfully"
+                        );
+                        Ok("Tracker deleted successfully".to_owned())
+                    } else {
+                        Err(Error::Internal(format!(
+                            "tracker deletion completed partially: {}",
+                            cleanup_errors.join("; ")
+                        )))
+                    }
+                }
+            }
+        }
+        .await;
+
+        self.end_subject_deletion(&subject_id).await;
+        result
     }
 
     ///////// Register

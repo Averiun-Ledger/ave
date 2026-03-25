@@ -202,6 +202,16 @@ impl BorshDeserialize for Node {
 }
 
 impl Node {
+    fn get_subject_data(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Option<SubjectData> {
+        self.owned_subjects
+            .get(subject_id)
+            .or_else(|| self.known_subjects.get(subject_id))
+            .cloned()
+    }
+
     /// Adds a subject to the node's owned subjects.
     pub fn transfer_subject(&mut self, data: TransferSubject) {
         if data.new_owner == *self.our_key {
@@ -263,6 +273,19 @@ impl Node {
         } else {
             self.known_subjects.insert(subject_id, data);
         }
+    }
+
+    pub fn delete_subject(
+        &mut self,
+        subject_id: &DigestIdentifier,
+    ) {
+        self
+            .owned_subjects
+            .remove(subject_id)
+            .or_else(|| self.known_subjects.remove(subject_id));
+
+        self.transfer_subjects.remove(subject_id);
+        self.reject_subjects.remove(subject_id);
     }
 
     fn sign<T: BorshSerialize>(
@@ -625,6 +648,7 @@ pub enum NodeMessage {
         data: SubjectData,
     },
     GetSubjectData(DigestIdentifier),
+    DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
     AuthData(DigestIdentifier),
@@ -642,6 +666,7 @@ impl Message for NodeMessage {
         matches!(
             self,
             Self::TransferSubject(..)
+                | Self::DeleteSubject(..)
                 | Self::RejectTransfer(..)
                 | Self::ConfirmTransfer(..)
                 | Self::EOLSubject { .. }
@@ -680,6 +705,7 @@ pub enum NodeEvent {
         subject_id: DigestIdentifier,
         data: SubjectData,
     },
+    DeleteSubject(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
@@ -978,22 +1004,14 @@ impl Handler<Self> for Node {
                 Ok(NodeResponse::SubjectData(subject_data))
             }
             NodeMessage::GetSubjectData(subject_id) => {
-                let data = if let Some(data) =
-                    self.owned_subjects.get(&subject_id)
-                {
-                    Some(data.clone())
-                } else if let Some(data) = self.known_subjects.get(&subject_id)
-                {
-                    Some(data.clone())
-                } else {
+                let data = self.get_subject_data(&subject_id);
+                if data.is_none() {
                     debug!(
                         msg_type = "GetSubjectData",
                         subject_id = %subject_id,
                         "Subject not found"
                     );
-
-                    None
-                };
+                }
 
                 debug!(
                     msg_type = "GetSubjectData",
@@ -1002,6 +1020,21 @@ impl Handler<Self> for Node {
                 );
 
                 Ok(NodeResponse::SubjectData(data))
+            }
+            NodeMessage::DeleteSubject(subject_id) => {
+                self.on_event(
+                    NodeEvent::DeleteSubject(subject_id.clone()),
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject deleted from node state"
+                );
+
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::PendingTransfers => {
                 let transfers: Vec<TransferSubject> = self
@@ -1317,6 +1350,14 @@ impl PersistentActor for Node {
                     "Applied subject registration"
                 );
             }
+            NodeEvent::DeleteSubject(subject_id) => {
+                self.delete_subject(subject_id);
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Applied subject deletion"
+                );
+            }
             NodeEvent::RejectTransfer(subject_id) => {
                 self.delete_transfer(subject_id);
                 debug!(
@@ -1342,6 +1383,3 @@ impl PersistentActor for Node {
 
 #[async_trait]
 impl Storable for Node {}
-
-#[cfg(test)]
-pub mod tests {}

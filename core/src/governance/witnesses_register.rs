@@ -147,6 +147,9 @@ pub enum WitnessesRegisterMessage {
         sn: u64,
         gov_version: u64,
     },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     Reject {
         subject_id: DigestIdentifier,
         sn: u64,
@@ -171,6 +174,7 @@ impl Message for WitnessesRegisterMessage {
                 | Self::Create { .. }
                 | Self::Transfer { .. }
                 | Self::Confirm { .. }
+                | Self::DeleteSubject { .. }
                 | Self::Reject { .. }
         )
     }
@@ -217,6 +221,9 @@ pub enum WitnessesRegisterEvent {
         subject_id: DigestIdentifier,
         sn: u64,
         gov_version: u64,
+    },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
     },
     Reject {
         subject_id: DigestIdentifier,
@@ -1050,6 +1057,21 @@ impl Handler<Self> for WitnessesRegister {
                     "The transfer was confirmed"
                 );
             }
+            WitnessesRegisterMessage::DeleteSubject { subject_id } => {
+                self.on_event(
+                    WitnessesRegisterEvent::DeleteSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Witness subject entry deleted"
+                );
+            }
             WitnessesRegisterMessage::Access {
                 subject_id,
                 node,
@@ -1445,6 +1467,15 @@ impl PersistentActor for WitnessesRegister {
                         "Subject not found in register"
                     );
                 };
+            }
+            WitnessesRegisterEvent::DeleteSubject { subject_id } => {
+                self.subjects.remove(subject_id);
+
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Witness subject entry deleted from state"
+                );
             }
             WitnessesRegisterEvent::Reject {
                 subject_id,

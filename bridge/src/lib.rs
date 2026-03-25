@@ -396,6 +396,16 @@ impl Bridge {
         Ok(self.api.update_subject(subject_id).await?)
     }
 
+    pub async fn delete_subject(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        let subject_id = DigestIdentifier::from_str(&subject_id)
+            .map_err(|e| BridgeError::InvalidSubjectId(e.to_string()))?;
+
+        Ok(self.api.delete_subject(subject_id).await?)
+    }
+
     ///////// manual distribution
     ////////////////////////////
     pub async fn post_manual_distribution(

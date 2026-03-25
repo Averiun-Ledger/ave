@@ -664,8 +664,19 @@ async fn test_superadmin_all_endpoints_access() {
         .expect("No api_key in service key response")
         .to_string();
 
+    let superadmin_mgmt_overrides: &[(&str, &str, bool)] = &[];
+    let superadmin_service_overrides: &[(&str, &str, bool)] =
+        &[("delete", "/maintenance/subjects/{subject_id}", false)];
+
     // Test with management key - should have access to EVERYTHING
-    test_node_endpoints(&client, &base_url, &mgmt_key, true, &[]).await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        &mgmt_key,
+        true,
+        superadmin_mgmt_overrides,
+    )
+    .await;
     test_user_endpoints(&client, &base_url, &mgmt_key, true, true).await;
     test_admin_users_endpoints(&client, &base_url, &mgmt_key, true).await;
     test_admin_roles_endpoints(&client, &base_url, &mgmt_key, true, true).await;
@@ -675,7 +686,14 @@ async fn test_superadmin_all_endpoints_access() {
 
     // Test with service key - should have access to node endpoints and /me (except /me/api-keys)
     // but NO access to /admin/* endpoints (service keys cannot carry admin permissions)
-    test_node_endpoints(&client, &base_url, &service_key, true, &[]).await;
+    test_node_endpoints(
+        &client,
+        &base_url,
+        &service_key,
+        true,
+        superadmin_service_overrides,
+    )
+    .await;
     test_user_endpoints(&client, &base_url, &service_key, true, false).await;
     test_admin_users_endpoints(&client, &base_url, &service_key, false).await;
     test_admin_roles_endpoints(&client, &base_url, &service_key, false, true)
@@ -1113,8 +1131,10 @@ async fn test_manager_role_endpoints_access() {
     // But NOT to Node-Keys or Admin-* resources
 
     // Manager has node_request:all, node_subject:all, node_system:all, node_management:get
-    let manager_overrides: &[(&str, &str, bool)] =
-        &[("get", "/sink-events/{subject_id}", false)];
+    let manager_overrides: &[(&str, &str, bool)] = &[
+        ("get", "/sink-events/{subject_id}", false),
+        ("delete", "/maintenance/subjects/{subject_id}", false),
+    ];
 
     // Test with management key - full Node access including /config
     test_user_endpoints(&client, &base_url, test_mgmt_key, true, true).await;

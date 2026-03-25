@@ -249,6 +249,7 @@ INSERT OR IGNORE INTO resources (name, description, is_system) VALUES
     ('node_sink', 'Ledger sink replay endpoints', 1),
     ('node_request', 'Ledger request submission endpoints', 1),
     ('user_api_key', 'User self-service API key endpoints', 1),
+    ('node_maintenance', 'Safe-mode maintenance endpoints for destructive operations', 1),
     ('node_management', 'Node configuration and metrics endpoints', 1);
 
 -- =============================================================================

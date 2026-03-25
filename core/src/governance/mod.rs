@@ -27,12 +27,15 @@ use crate::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
             RoleRegisterResponse,
         },
-        sn_register::SnRegister,
-        subject_register::{SubjectRegister, SubjectRegisterMessage},
+        sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
+        subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse, WitnessesType,
         },
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
@@ -2248,6 +2251,154 @@ impl Governance {
 
         Ok(())
     }
+
+    async fn delete_tracker_references(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        let subject_register = match ctx
+            .create_child("subject_register", SubjectRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SubjectRegister>("subject_register").await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("subject_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("subject_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(subject_register) = subject_register {
+            match subject_register
+                .ask(SubjectRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SubjectRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "subject_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("subject_register: {error}"))
+                }
+            }
+
+            if let Err(error) = subject_register.ask_stop().await {
+                cleanup_errors.push(format!("subject_register stop: {error}"));
+            }
+        }
+
+        let sn_register = match ctx
+            .create_child("sn_register", SnRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SnRegister>("sn_register").await {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!("sn_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("sn_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(sn_register) = sn_register {
+            match sn_register
+                .ask(SnRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SnRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "sn_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("sn_register: {error}"))
+                }
+            }
+
+            if let Err(error) = sn_register.ask_stop().await {
+                cleanup_errors.push(format!("sn_register stop: {error}"));
+            }
+        }
+
+        let witnesses_register = match ctx
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<WitnessesRegister>("witnesses_register")
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "witnesses_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("witnesses_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(witnesses_register) = witnesses_register {
+            match witnesses_register
+                .ask(WitnessesRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(WitnessesRegisterResponse::Ok) => {}
+                Ok(_) => cleanup_errors.push(
+                    "witnesses_register: unexpected response".to_owned(),
+                ),
+                Err(error) => {
+                    cleanup_errors.push(format!("witnesses_register: {error}"))
+                }
+            }
+
+            if let Err(error) = witnesses_register.ask_stop().await {
+                cleanup_errors.push(format!(
+                    "witnesses_register stop: {error}"
+                ));
+            }
+        }
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
+    }
 }
 
 /// Governance command.
@@ -2256,6 +2407,7 @@ pub enum GovernanceMessage {
     GetMetadata,
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
+    DeleteTrackerReferences { subject_id: DigestIdentifier },
     UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
     GetVersion,
@@ -2587,6 +2739,19 @@ impl Handler<Self> for Governance {
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),
             )),
+            GovernanceMessage::DeleteTrackerReferences { subject_id } => {
+                self.delete_tracker_references(ctx, subject_id.clone())
+                    .await?;
+
+                debug!(
+                    msg_type = "DeleteTrackerReferences",
+                    subject_id = %subject_id,
+                    governance_id = %self.subject_metadata.subject_id,
+                    "Tracker references deleted from governance"
+                );
+
+                Ok(GovernanceResponse::Ok)
+            }
             GovernanceMessage::UpdateLedger { events } => {
                 let events_count = events.len();
                 if let Err(e) =

@@ -1408,6 +1408,64 @@ pub async fn add_governance_member_as_witness(
     body
 }
 
+pub async fn add_tracker_fact_mod_one(
+    client: &Client,
+    server: &TestServer,
+    api_key: Option<&str>,
+    subject_id: &str,
+    data: u32,
+) -> Value {
+    let (status, body) = make_request(
+        client,
+        &server.url("/request"),
+        "POST",
+        api_key,
+        Some(json!({
+            "request": {
+                "event": "fact",
+                "data": {
+                    "subject_id": subject_id,
+                    "payload": {
+                        "ModOne": {
+                            "data": data
+                        }
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "tracker fact failed: {body}");
+    body
+}
+
+pub async fn transfer_subject(
+    client: &Client,
+    server: &TestServer,
+    api_key: Option<&str>,
+    subject_id: &str,
+    new_owner: &str,
+) -> Value {
+    let (status, body) = make_request(
+        client,
+        &server.url("/request"),
+        "POST",
+        api_key,
+        Some(json!({
+            "request": {
+                "event": "transfer",
+                "data": {
+                    "subject_id": subject_id,
+                    "new_owner": new_owner
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "transfer request failed: {body}");
+    body
+}
+
 pub async fn wait_request_finish(
     client: &Client,
     server: &TestServer,

@@ -32,7 +32,7 @@ use crate::governance::model::{
 use crate::governance::role_register::RoleDataRegister;
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
-use crate::model::common::send_to_tracking;
+use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::common::subject::{
     acquire_subject, create_subject, get_gov, get_gov_sn,
     get_last_ledger_event, get_metadata, make_obsolete, update_ledger,
@@ -1716,6 +1716,7 @@ pub enum RequestManagerMessage {
         sn: u64,
     },
     ManualAbort,
+    PurgeStorage,
     Reboot {
         request_id: DigestIdentifier,
         governance_id: DigestIdentifier,
@@ -2049,6 +2050,17 @@ impl Handler<Self> for RequestManager {
                         );
                     }
                 }
+
+                return Ok(());
+            }
+            RequestManagerMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    subject_id = %self.subject_id,
+                    "Purged request manager storage"
+                );
 
                 return Ok(());
             }

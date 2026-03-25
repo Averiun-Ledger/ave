@@ -573,6 +573,34 @@ pub async fn post_update_subject(
     Ok(Json(bridge.post_update_subject(subject_id).await?))
 }
 
+/// Delete a subject in maintenance mode
+///
+/// Schedules the deletion workflow for a subject. This endpoint is only
+/// available while the node is running in safe mode.
+#[utoipa::path(
+    delete,
+    path = "/maintenance/subjects/{subject_id}",
+    operation_id = "deleteSubject",
+    tag = "Node",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Subject deletion accepted", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 503, description = "Safe mode required", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn delete_subject(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    Path(subject_id): Path<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.delete_subject(subject_id).await?))
+}
+
 ///////// manual distribution
 ////////////////////////////
 
@@ -889,6 +917,7 @@ pub enum Resource {
     User,
     NodeSystem,
     NodeSubject,
+    NodeMaintenance,
     NodeSink,
     NodeRequest,
     UserApiKey,
@@ -901,6 +930,7 @@ impl Resource {
             Self::User => "user",
             Self::NodeSystem => "node_system",
             Self::NodeSubject => "node_subject",
+            Self::NodeMaintenance => "node_maintenance",
             Self::NodeSink => "node_sink",
             Self::NodeRequest => "node_request",
             Self::UserApiKey => "user_api_key",
@@ -1002,6 +1032,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/auth/{subject_id}", get_witnesses_subject, require NodeSubject Get);
         $callback!($($args)*, delete, "/auth/{subject_id}", delete_auth_subject, require NodeSubject Delete);
         $callback!($($args)*, post, "/update/{subject_id}", post_update_subject, require NodeSubject Post);
+        $callback!($($args)*, delete, "/maintenance/subjects/{subject_id}", delete_subject, require NodeMaintenance Delete);
         $callback!($($args)*, post, "/manual-distribution/{subject_id}", post_manual_distribution, require NodeSubject Post);
         $callback!($($args)*, get, "/subjects", get_all_govs, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{governance_id}", get_all_subjs, require NodeSubject Get);
@@ -1318,7 +1349,7 @@ pub async fn permission_layer(
         }
     };
 
-    // Block service keys from admin and key management endpoints outright
+    // Block service keys from admin, key management, and maintenance endpoints outright
     if !auth_ctx.is_management_key
         && (req.uri().path().starts_with("/admin")
             || req.uri().path().starts_with("/me/api-keys"))
@@ -1345,6 +1376,18 @@ pub async fn permission_layer(
         }
         Some(PermissionResult::AllowAny) => {}
         Some(PermissionResult::Require(resource, action)) => {
+            if resource == Resource::NodeMaintenance
+                && !auth_ctx.is_management_key
+            {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "Maintenance endpoints require a management API key"
+                            .into(),
+                    }),
+                )
+                    .into_response();
+            }
             if let Err(resp) =
                 check_permission(&auth_ctx, resource.as_str(), action.as_str())
             {
@@ -1556,6 +1599,34 @@ mod tests {
 
         let status = call(&app, Method::GET, "/sink-events/abc", ctx).await;
         assert_ne!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn manager_role_cannot_access_maintenance_delete() {
+        let db = build_db();
+        let ctx = auth_ctx_for_role(&db, "manager");
+        let app = router();
+
+        let status =
+            call(&app, Method::DELETE, "/maintenance/subjects/abc", ctx).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn service_keys_cannot_access_maintenance_delete() {
+        let db = build_db();
+        let mut ctx = (*auth_ctx_for_role(&db, "superadmin")).clone();
+        ctx.is_management_key = false;
+        let app = router();
+
+        let status = call(
+            &app,
+            Method::DELETE,
+            "/maintenance/subjects/abc",
+            Arc::new(ctx),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

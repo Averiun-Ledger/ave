@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use ave_bridge::ave_common::identity::{KeyPair, keys::Ed25519Signer};
+use futures::future::join_all;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use test_log::test;
@@ -8,9 +9,9 @@ use test_log::test;
 use crate::common::{
     TestPersistencePaths, TestServer, TestServerOptions,
     add_example_schema_to_governance, add_governance_member_as_witness,
-    create_governance, create_subject, login, make_request,
-    server_auth_route_catalog, server_main_route_catalog,
-    server_public_auth_route_catalog, wait_request_finish,
+    add_tracker_fact_mod_one, create_governance, create_subject, login,
+    make_request, server_auth_route_catalog, server_main_route_catalog,
+    server_public_auth_route_catalog, transfer_subject, wait_request_finish,
 };
 
 pub mod common;
@@ -28,6 +29,7 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
         | ("post", "/manual-distribution/{subject_id}")
         | ("put", "/auth/{subject_id}")
         | ("delete", "/auth/{subject_id}")
+        | ("delete", "/maintenance/subjects/{subject_id}")
         | ("patch", "/approval/{subject_id}") => true,
         _ => false,
     }
@@ -70,6 +72,21 @@ struct AuthEnv {
     _dirs: Vec<tempfile::TempDir>,
     admin_api_key: String,
     fixture: AuthFixture,
+}
+
+#[derive(Debug)]
+struct TrackerDeleteFixture {
+    governance_id: String,
+    tracker_id: String,
+    second_tracker_id: Option<String>,
+    auth_witness: String,
+    transfer_owner: String,
+}
+
+struct TrackerDeleteEnv {
+    server: TestServer,
+    _dirs: Vec<tempfile::TempDir>,
+    fixture: TrackerDeleteFixture,
 }
 
 
@@ -131,6 +148,60 @@ async fn wait_network_running(
     panic!(
         "network did not reach running state in safe mode; last_status={last_status}, last_body={last_body}"
     );
+}
+
+async fn assert_events_endpoint_missing_or_empty(
+    client: &Client,
+    server: &TestServer,
+    subject_id: &str,
+) {
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/events/{subject_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+
+    if status == StatusCode::OK {
+        let events = body["events"].as_array().cloned().unwrap_or_default();
+        assert!(events.is_empty(), "{body}");
+    } else {
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+}
+
+async fn assert_auth_endpoint_missing(
+    client: &Client,
+    server: &TestServer,
+    subject_id: &str,
+) {
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/auth/{subject_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+}
+
+async fn assert_sink_events_endpoint_missing(
+    client: &Client,
+    server: &TestServer,
+    subject_id: &str,
+) {
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/sink-events/{subject_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
 }
 
 async fn accept_approval(
@@ -471,6 +542,190 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
     })
 }
 
+async fn setup_tracker_delete_env_without_auth(
+    with_second_tracker: bool,
+    tracker_fact_count: u32,
+) -> Option<TrackerDeleteEnv> {
+    let normal_options = TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        node: None,
+        safe_mode: false,
+        node_type: "Bootstrap".to_string(),
+        persistence: None,
+    };
+    let Some((server, dirs)) =
+        TestServer::build_with_options(normal_options).await
+    else {
+        return None;
+    };
+
+    let client = Client::new();
+    let auth_witness = KeyPair::Ed25519(Ed25519Signer::generate().ok()?)
+        .public_key()
+        .to_string();
+    let transfer_owner = MEMBER_PUBLIC_KEY.to_string();
+
+    let governance_body = create_governance(&client, &server, None).await;
+    let governance_id = governance_body["subject_id"].as_str()?.to_string();
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        governance_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let schema_body = add_example_schema_to_governance(
+        &client,
+        &server,
+        None,
+        &governance_id,
+        MEMBER_PUBLIC_KEY,
+    )
+    .await;
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        schema_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let tracker_body = create_subject(
+        &client,
+        &server,
+        None,
+        &governance_id,
+        "Example1",
+        "Deleteable Tracker",
+    )
+    .await;
+    let tracker_id = tracker_body["subject_id"].as_str()?.to_string();
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        tracker_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/auth/{tracker_id}")),
+        "PUT",
+        None,
+        Some(json!([auth_witness])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for index in 0..tracker_fact_count.max(1) {
+        let fact_body = add_tracker_fact_mod_one(
+            &client,
+            &server,
+            None,
+            &tracker_id,
+            index + 1,
+        )
+        .await;
+        wait_request_finish(
+            &client,
+            &server,
+            None,
+            fact_body["request_id"].as_str()?,
+        )
+        .await;
+    }
+
+    let transfer_body = transfer_subject(
+        &client,
+        &server,
+        None,
+        &tracker_id,
+        &transfer_owner,
+    )
+    .await;
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        transfer_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let second_tracker_id = if with_second_tracker {
+        let body = create_subject(
+            &client,
+            &server,
+            None,
+            &governance_id,
+            "Example1",
+            "Deleteable Tracker 2",
+        )
+        .await;
+        let second_tracker_id = body["subject_id"].as_str()?.to_string();
+        wait_request_finish(
+            &client,
+            &server,
+            None,
+            body["request_id"].as_str()?,
+        )
+        .await;
+
+        let fact_body = add_tracker_fact_mod_one(
+            &client,
+            &server,
+            None,
+            &second_tracker_id,
+            99,
+        )
+        .await;
+        wait_request_finish(
+            &client,
+            &server,
+            None,
+            fact_body["request_id"].as_str()?,
+        )
+        .await;
+
+        Some(second_tracker_id)
+    } else {
+        None
+    };
+
+    let persistence = TestPersistencePaths::from_tempdirs(&dirs);
+    server.shutdown().await;
+
+    let safe_options = TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        node: Some(("12D3KooWNode1".to_string(), 65535)),
+        safe_mode: true,
+        node_type: "Addressable".to_string(),
+        persistence: Some(persistence),
+    };
+    let Some((safe_server, _)) =
+        TestServer::build_with_options(safe_options).await
+    else {
+        return None;
+    };
+
+    wait_network_running(&client, &safe_server, None).await;
+
+    Some(TrackerDeleteEnv {
+        server: safe_server,
+        _dirs: dirs,
+        fixture: TrackerDeleteFixture {
+            governance_id,
+            tracker_id,
+            second_tracker_id,
+            auth_witness,
+            transfer_owner,
+        },
+    })
+}
+
 #[test(tokio::test)]
 async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     let Some(env) = setup_node_env_without_auth().await else {
@@ -689,6 +944,102 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["events"].is_array(), "{body}");
 
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.tracker_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let message = body.as_str().unwrap_or_default().to_ascii_lowercase();
+    assert!(message.contains("tracker deleted successfully"), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/subjects/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subjects = body.as_array().cloned().unwrap_or_default();
+    assert!(subjects.is_empty(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.tracker_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.governance_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("governance deletion is not implemented yet")
+    );
+
+    let mut missing_subject_id = fixture.tracker_id.clone();
+    let replacement = if missing_subject_id.ends_with('A') {
+        'B'
+    } else {
+        'A'
+    };
+    missing_subject_id.pop();
+    missing_subject_id.push(replacement);
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{missing_subject_id}"
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found")
+    );
+
     let (status, body) =
         make_request(&client, &env.server.url("/config"), "GET", None, None)
             .await;
@@ -807,6 +1158,229 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
     )
     .await;
+}
+
+#[test(tokio::test)]
+async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
+    let Some(env) = setup_tracker_delete_env_without_auth(false, 1).await else {
+        return;
+    };
+    let client = Client::new();
+    let fixture = &env.fixture;
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["subject_id"], json!(fixture.tracker_id));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/subjects/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subjects = body.as_array().cloned().unwrap_or_default();
+    assert!(subjects.iter().any(|item| item["subject_id"] == fixture.tracker_id));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/events/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = body["events"].as_array().cloned().unwrap_or_default();
+    assert!(!events.is_empty(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/sink-events/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body["events"].as_array().cloned().unwrap_or_default().is_empty(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/auth/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let witnesses = body.as_array().cloned().unwrap_or_default();
+    assert!(witnesses.iter().any(|value| value == &json!(fixture.auth_witness)));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/pending-transfers"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let transfers = body.as_array().cloned().unwrap_or_default();
+    assert!(transfers.iter().any(|item| item["subject_id"] == fixture.tracker_id));
+    assert!(transfers.iter().any(|item| item["new_owner"] == fixture.transfer_owner));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.tracker_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/subjects/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subjects = body.as_array().cloned().unwrap_or_default();
+    assert!(subjects.iter().all(|item| item["subject_id"] != fixture.tracker_id));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/pending-transfers"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let transfers = body.as_array().cloned().unwrap_or_default();
+    assert!(transfers.iter().all(|item| item["subject_id"] != fixture.tracker_id));
+
+    assert_sink_events_endpoint_missing(
+        &client,
+        &env.server,
+        &fixture.tracker_id,
+    )
+    .await;
+
+    assert_events_endpoint_missing_or_empty(&client, &env.server, &fixture.tracker_id)
+        .await;
+    assert_auth_endpoint_missing(&client, &env.server, &fixture.tracker_id)
+        .await;
+}
+
+#[test(tokio::test)]
+async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_delete() {
+    let Some(env) = setup_tracker_delete_env_without_auth(true, 6).await else {
+        return;
+    };
+    let client = Client::new();
+    let fixture = &env.fixture;
+    let second_tracker_id = fixture.second_tracker_id.clone().expect("second tracker");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/pending-transfers"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let transfers = body.as_array().cloned().unwrap_or_default();
+    assert!(transfers.iter().any(|item| item["subject_id"] == fixture.tracker_id));
+    assert!(transfers.iter().any(|item| item["new_owner"] == fixture.transfer_owner));
+
+    let delete_urls: Vec<_> = (0..12)
+        .map(|index| {
+            let subject_id = if index % 2 == 0 {
+                fixture.tracker_id.clone()
+            } else {
+                second_tracker_id.clone()
+            };
+            env.server
+                .url(&format!("/maintenance/subjects/{subject_id}"))
+        })
+        .collect();
+
+    let responses = join_all(delete_urls.into_iter().map(|url| {
+        let client = client.clone();
+        async move {
+            client
+                .delete(url)
+                .send()
+                .await
+                .expect("delete request")
+        }
+    }))
+    .await;
+
+    let statuses: Vec<_> = responses.iter().map(|response| response.status()).collect();
+    assert!(
+        statuses.iter().any(|status| *status == StatusCode::OK),
+        "expected at least one delete to succeed, got {statuses:?}"
+    );
+    assert!(
+        statuses.iter().any(|status| *status == StatusCode::CONFLICT),
+        "expected at least one delete to be rejected while another is in progress, got {statuses:?}"
+    );
+
+    let conflict_body = responses
+        .into_iter()
+        .find(|response| response.status() == StatusCode::CONFLICT)
+        .expect("conflict response")
+        .json::<Value>()
+        .await
+        .expect("conflict body");
+    assert!(
+        conflict_body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deletion already in progress"),
+        "{conflict_body}"
+    );
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/pending-transfers"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let transfers = body.as_array().cloned().unwrap_or_default();
+    assert!(transfers.iter().all(|item| item["subject_id"] != fixture.tracker_id));
 }
 
 #[test(tokio::test)]

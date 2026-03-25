@@ -120,6 +120,9 @@ pub enum SubjectRegisterMessage {
         schema_id: SchemaType,
         gov_version: u64,
     },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     UpdateSubject {
         new_owner: PublicKey,
         old_owner: PublicKey,
@@ -135,6 +138,7 @@ impl Message for SubjectRegisterMessage {
         match self {
             Self::RegisterData { .. }
             | Self::CreateSubject { .. }
+            | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
             Self::Check { .. } | Self::GetSubjectsByOwnerSchema { .. } => false,
         }
@@ -162,6 +166,9 @@ pub enum SubjectRegisterEvent {
         subject_id: DigestIdentifier,
         namespace: String,
         schema_id: SchemaType,
+    },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
     },
     UpdateSubject {
         new_owner: PublicKey,
@@ -276,6 +283,23 @@ impl Handler<Self> for SubjectRegister {
                     creator = %creator,
                     schema_id = ?schema_id,
                     "Subject created in register"
+                );
+
+                Ok(SubjectRegisterResponse::Ok)
+            }
+            SubjectRegisterMessage::DeleteSubject { subject_id } => {
+                self.on_event(
+                    SubjectRegisterEvent::DeleteSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject removed from register"
                 );
 
                 Ok(SubjectRegisterResponse::Ok)
@@ -400,6 +424,17 @@ impl PersistentActor for SubjectRegister {
                     subject_id = %subject_id,
                     creator = %creator,
                     "Subject added to register state"
+                );
+            }
+            SubjectRegisterEvent::DeleteSubject { subject_id } => {
+                for (_, subjects) in self.register.values_mut() {
+                    subjects.remove(subject_id);
+                }
+
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject removed from register state"
                 );
             }
             SubjectRegisterEvent::UpdateSubject {

@@ -9,7 +9,7 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        common::{emit_fail, get_last_event},
+        common::{emit_fail, get_last_event, purge_storage},
         event::{Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
@@ -690,6 +690,7 @@ pub enum TrackerMessage {
     GetMetadata,
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
+    PurgeStorage,
     UpdateLedger { events: Vec<SignedLedger> },
 }
 
@@ -826,6 +827,17 @@ impl Handler<Self> for Tracker {
             TrackerMessage::GetMetadata => Ok(TrackerResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),
             )),
+            TrackerMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Tracker storage purged"
+                );
+
+                Ok(TrackerResponse::Ok)
+            }
             TrackerMessage::UpdateLedger { events } => {
                 let events_count = events.len();
                 if let Err(e) =
