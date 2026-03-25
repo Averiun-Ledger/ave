@@ -31,6 +31,8 @@ pub struct Config {
     pub contracts_path: PathBuf,
     /// Approval mode.
     pub always_accept: bool,
+    /// Safe mode disables mutating operations while allowing queries.
+    pub safe_mode: bool,
     /// Tracking lru cache size
     pub tracking_size: usize,
     /// Is a service node
@@ -52,6 +54,7 @@ impl Default for Config {
             network: Default::default(),
             contracts_path: PathBuf::new(),
             always_accept: Default::default(),
+            safe_mode: false,
             tracking_size: 100,
             is_service: false,
             sync: Default::default(),

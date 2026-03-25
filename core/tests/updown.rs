@@ -18,7 +18,8 @@ use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, emit_approve, emit_eol, node_running, wait_request_state,
+    PORT_COUNTER, create_node, emit_approve, emit_eol, node_running,
+    wait_request_state,
 };
 
 #[test(tokio::test)]
@@ -509,7 +510,6 @@ async fn gov_life() {
         .await
         .unwrap();
 
-
     node_bootstrap.token.cancel();
     join_all(node_bootstrap.handler.iter_mut()).await;
 
@@ -805,7 +805,6 @@ async fn tracker_life() {
         .await
         .unwrap();
 
-
     node_new_owner.token.cancel();
     join_all(node_new_owner.handler.iter_mut()).await;
 
@@ -1036,14 +1035,9 @@ async fn tracker_life() {
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
 
-    emit_confirm(
-        &bootstrap,
-        subject_id.clone(),
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    emit_confirm(&bootstrap, subject_id.clone(), None, true)
+        .await
+        .unwrap();
 
     let _state = get_subject(&bootstrap, subject_id.clone(), Some(5))
         .await
@@ -1091,7 +1085,6 @@ async fn tracker_life() {
         .await
         .unwrap();
 
-
     node_bootstrap.token.cancel();
     join_all(node_bootstrap.handler.iter_mut()).await;
 
@@ -1116,7 +1109,6 @@ async fn tracker_life() {
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
-
 
     let _state = get_subject(&bootstrap, subject_id.clone(), Some(6))
         .await
@@ -1335,9 +1327,10 @@ async fn not_node_role() {
         }
     });
 
-    let request_id = emit_fact(&bootstrap, subject_id.clone(), json.clone(), false)
-        .await
-        .unwrap();
+    let request_id =
+        emit_fact(&bootstrap, subject_id.clone(), json.clone(), false)
+            .await
+            .unwrap();
 
     let _ = wait_request_state(
         &bootstrap,

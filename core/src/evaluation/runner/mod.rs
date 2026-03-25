@@ -31,10 +31,10 @@ use crate::{
         },
         model::{HashThisRole, RoleTypes, Schema},
     },
+    metrics::try_core_metrics,
     model::common::contract::{
         MAX_FUEL, MemoryManager, WasmLimits, WasmRuntime, generate_linker,
     },
-    metrics::try_core_metrics,
 };
 
 type AddRemoveChangeSchema = (
@@ -355,7 +355,9 @@ impl Runner {
 
         let Some(contracts) = ctx
             .system()
-            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>("contracts")
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
             .await
         else {
             return Err(RunnerError::MissingHelper { name: "contracts" });

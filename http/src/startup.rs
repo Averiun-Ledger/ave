@@ -18,7 +18,7 @@ use ave_bridge::{
         build_config,
         command::{
             Args, build_auth_password, build_config_path, build_key_password,
-            build_sink_api_key, build_sink_password,
+            build_safe_mode, build_sink_api_key, build_sink_password,
         },
     },
 };
@@ -159,6 +159,7 @@ fn log_effective_configuration(
     } else {
         info!(target: TARGET, "  config    : {}", config_path);
     }
+    info!(target: TARGET, "  safe mode : {}", config.node.safe_mode);
 
     info!(target: TARGET, "[secrets]");
     info!(
@@ -721,12 +722,20 @@ pub async fn run() -> Result<(), StartupError> {
         config_path = build_config_path();
     }
 
-    let config = build_config(&config_path).map_err(|error| {
+    let mut config = build_config(&config_path).map_err(|error| {
         StartupError::ConfigLoad {
             path: config_path.clone(),
             message: error.to_string(),
         }
     })?;
+    config.node.safe_mode = if args.safe_mode {
+        true
+    } else if let Some(safe_mode) = build_safe_mode() {
+        safe_mode
+    } else {
+        config.node.safe_mode
+    };
+    config.node.network.safe_mode = config.node.safe_mode;
     auth::request_meta::validate_proxy_config(&config.http.proxy)
         .map_err(StartupError::ProxyConfig)?;
 

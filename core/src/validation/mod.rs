@@ -5,7 +5,9 @@ use crate::{
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
     model::{
-        common::{abort_req, emit_fail, send_reboot_to_req, take_random_signers},
+        common::{
+            abort_req, emit_fail, send_reboot_to_req, take_random_signers,
+        },
         event::{ValidationData, ValidationMetadata},
     },
     request::manager::{RebootType, RequestManager, RequestManagerMessage},

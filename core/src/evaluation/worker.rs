@@ -153,10 +153,7 @@ impl EvalWorker {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
                 Ok(false)
             }
-            std::cmp::Ordering::Greater => {
-                Ok(true)
-            }
-
+            std::cmp::Ordering::Greater => Ok(true),
         }
     }
 

@@ -9,13 +9,13 @@ use crate::{
     },
     governance::model::Quorum,
     helpers::network::service::NetworkSender,
+    metrics::try_core_metrics,
     model::{
         common::{
             abort_req, emit_fail, send_reboot_to_req, take_random_signers,
         },
         event::{EvaluationData, EvaluationResponse},
     },
-    metrics::try_core_metrics,
     request::manager::{RebootType, RequestManager, RequestManagerMessage},
 };
 use ave_actors::{

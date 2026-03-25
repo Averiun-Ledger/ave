@@ -133,6 +133,7 @@ fn is_admin_account(
         "admin_api_key",
         "admin_system",
         "user_api_key",
+        "node_maintenance",
     ];
 
     let effective_permissions = db.get_effective_permissions(user.id)?;

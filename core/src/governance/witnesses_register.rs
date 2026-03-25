@@ -6,7 +6,7 @@ use crate::governance::sn_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
-use crate::model::common::{Interval, IntervalSet, emit_fail};
+use crate::model::common::{Interval, IntervalSet, emit_fail, purge_storage};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -99,6 +99,7 @@ pub struct OldOwnerData {
 
 #[derive(Debug, Clone)]
 pub enum WitnessesRegisterMessage {
+    PurgeStorage,
     GetSnGov,
     GetTrackerSnCreator {
         subject_id: DigestIdentifier,
@@ -147,6 +148,9 @@ pub enum WitnessesRegisterMessage {
         sn: u64,
         gov_version: u64,
     },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     Reject {
         subject_id: DigestIdentifier,
         sn: u64,
@@ -164,13 +168,15 @@ impl Message for WitnessesRegisterMessage {
     fn is_critical(&self) -> bool {
         matches!(
             self,
-            Self::UpdateCreatorsWitnessesFact { .. }
+            Self::PurgeStorage
+                | Self::UpdateCreatorsWitnessesFact { .. }
                 | Self::UpdateCreatorsWitnessesConfirm { .. }
                 | Self::UpdateSn { .. }
                 | Self::UpdateSnGov { .. }
                 | Self::Create { .. }
                 | Self::Transfer { .. }
                 | Self::Confirm { .. }
+                | Self::DeleteSubject { .. }
                 | Self::Reject { .. }
         )
     }
@@ -218,6 +224,9 @@ pub enum WitnessesRegisterEvent {
         sn: u64,
         gov_version: u64,
     },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     Reject {
         subject_id: DigestIdentifier,
         sn: u64,
@@ -228,9 +237,15 @@ pub enum WitnessesRegisterEvent {
 impl Event for WitnessesRegisterEvent {}
 
 pub enum WitnessesRegisterResponse {
-    Access { sn: Option<u64> },
-    GovSn { sn: u64 },
-    TrackerCreatorSn { data: Option<(PublicKey, u64)> },
+    Access {
+        sn: Option<u64>,
+    },
+    GovSn {
+        sn: u64,
+    },
+    TrackerCreatorSn {
+        data: Option<(PublicKey, u64)>,
+    },
     CurrentWitnessSubjects {
         governance_version: u64,
         items: Vec<CurrentWitnessSubject>,
@@ -633,10 +648,12 @@ impl WitnessesRegister {
         namespace: &Namespace,
     ) -> bool {
         let has_match = |witness_data: &HashMap<Namespace, IntervalData>| {
-            witness_data.iter().any(|(current_namespace, (_, current_lo))| {
-                current_lo.is_some()
-                    && current_namespace.is_ancestor_or_equal_of(namespace)
-            })
+            witness_data
+                .iter()
+                .any(|(current_namespace, (_, current_lo))| {
+                    current_lo.is_some()
+                        && current_namespace.is_ancestor_or_equal_of(namespace)
+                })
         };
 
         self.witnesses
@@ -713,8 +730,10 @@ impl WitnessesRegister {
         governance_version: u64,
         after_subject_id: Option<DigestIdentifier>,
         limit: usize,
-    ) -> Result<(Vec<CurrentWitnessSubject>, Option<DigestIdentifier>), ActorError>
-    {
+    ) -> Result<
+        (Vec<CurrentWitnessSubject>, Option<DigestIdentifier>),
+        ActorError,
+    > {
         let mut subjects = BTreeMap::new();
 
         for ((creator, namespace, schema_id), creator_witnesses) in
@@ -731,10 +750,7 @@ impl WitnessesRegister {
 
             let current_subjects = self
                 .get_subjects_for_owner_schema(
-                    ctx,
-                    creator,
-                    schema_id,
-                    namespace,
+                    ctx, creator, schema_id, namespace,
                 )
                 .await?;
 
@@ -824,6 +840,16 @@ impl Handler<Self> for WitnessesRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
+            WitnessesRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Witnesses register storage purged"
+                );
+
+                return Ok(WitnessesRegisterResponse::Ok);
+            }
             WitnessesRegisterMessage::ListCurrentWitnessSubjects {
                 node,
                 governance_version,
@@ -840,13 +866,11 @@ impl Handler<Self> for WitnessesRegister {
                     )
                     .await?;
 
-                return Ok(
-                    WitnessesRegisterResponse::CurrentWitnessSubjects {
-                        governance_version: self.gov_sn,
-                        items,
-                        next_cursor,
-                    },
-                );
+                return Ok(WitnessesRegisterResponse::CurrentWitnessSubjects {
+                    governance_version: self.gov_sn,
+                    items,
+                    next_cursor,
+                });
             }
             WitnessesRegisterMessage::GetTrackerSnCreator { subject_id } => {
                 let data = self
@@ -1048,6 +1072,21 @@ impl Handler<Self> for WitnessesRegister {
                     sn = sn,
                     gov_version = gov_version,
                     "The transfer was confirmed"
+                );
+            }
+            WitnessesRegisterMessage::DeleteSubject { subject_id } => {
+                self.on_event(
+                    WitnessesRegisterEvent::DeleteSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Witness subject entry deleted"
                 );
             }
             WitnessesRegisterMessage::Access {
@@ -1445,6 +1484,15 @@ impl PersistentActor for WitnessesRegister {
                         "Subject not found in register"
                     );
                 };
+            }
+            WitnessesRegisterEvent::DeleteSubject { subject_id } => {
+                self.subjects.remove(subject_id);
+
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Witness subject entry deleted from state"
+                );
             }
             WitnessesRegisterEvent::Reject {
                 subject_id,

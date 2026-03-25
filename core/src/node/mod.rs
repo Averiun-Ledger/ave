@@ -202,6 +202,16 @@ impl BorshDeserialize for Node {
 }
 
 impl Node {
+    fn get_subject_data(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Option<SubjectData> {
+        self.owned_subjects
+            .get(subject_id)
+            .or_else(|| self.known_subjects.get(subject_id))
+            .cloned()
+    }
+
     /// Adds a subject to the node's owned subjects.
     pub fn transfer_subject(&mut self, data: TransferSubject) {
         if data.new_owner == *self.our_key {
@@ -263,6 +273,34 @@ impl Node {
         } else {
             self.known_subjects.insert(subject_id, data);
         }
+    }
+
+    pub fn delete_subject(&mut self, subject_id: &DigestIdentifier) {
+        self.owned_subjects
+            .remove(subject_id)
+            .or_else(|| self.known_subjects.remove(subject_id));
+
+        self.transfer_subjects.remove(subject_id);
+        self.reject_subjects.remove(subject_id);
+    }
+
+    fn governance_trackers(
+        &self,
+        governance_id: &DigestIdentifier,
+    ) -> Vec<DigestIdentifier> {
+        self.owned_subjects
+            .iter()
+            .chain(self.known_subjects.iter())
+            .filter_map(|(subject_id, data)| match data {
+                SubjectData::Tracker {
+                    governance_id: tracker_governance_id,
+                    ..
+                } if tracker_governance_id == governance_id => {
+                    Some(subject_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn sign<T: BorshSerialize>(
@@ -625,6 +663,8 @@ pub enum NodeMessage {
         data: SubjectData,
     },
     GetSubjectData(DigestIdentifier),
+    GovernanceTrackers(DigestIdentifier),
+    DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
     AuthData(DigestIdentifier),
@@ -642,6 +682,7 @@ impl Message for NodeMessage {
         matches!(
             self,
             Self::TransferSubject(..)
+                | Self::DeleteSubject(..)
                 | Self::RejectTransfer(..)
                 | Self::ConfirmTransfer(..)
                 | Self::EOLSubject { .. }
@@ -655,6 +696,7 @@ pub enum NodeResponse {
     Governances(Vec<DigestIdentifier>),
     SinkEvents(SinkEventsPage),
     SubjectData(Option<SubjectData>),
+    GovernanceTrackers(Vec<DigestIdentifier>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
     IOwnerNewOwner {
@@ -680,6 +722,7 @@ pub enum NodeEvent {
         subject_id: DigestIdentifier,
         data: SubjectData,
     },
+    DeleteSubject(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
@@ -725,6 +768,16 @@ impl Actor for Node {
             return Err(e);
         }
 
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            error!("Config helper not found");
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not found".to_string(),
+            });
+        };
+        let safe_mode = config.safe_mode;
         let Some(network): Option<Arc<NetworkSender>> =
             ctx.system().get_helper("network").await
         else {
@@ -735,48 +788,51 @@ impl Actor for Node {
             });
         };
 
-        let register_actor = match ctx.create_child("register", Register).await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(error = %e, "Failed to create register child");
+        if !safe_mode {
+            let register_actor =
+                match ctx.create_child("register", Register).await {
+                    Ok(actor) => actor,
+                    Err(e) => {
+                        error!(error = %e, "Failed to create register child");
+                        return Err(e);
+                    }
+                };
+
+            let Some(ext_db): Option<Arc<ExternalDB>> =
+                ctx.system().get_helper("ext_db").await
+            else {
+                error!("External DB helper not found");
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_string(),
+                    reason: "Not found".to_string(),
+                });
+            };
+
+            let sink =
+                Sink::new(register_actor.subscribe(), ext_db.get_register());
+            ctx.system().run_sink(sink).await;
+
+            if let Err(e) = ctx
+                .create_child(
+                    "manual_distribution",
+                    ManualDistribution::new(self.our_key.clone()),
+                )
+                .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to create manual_distribution child"
+                );
                 return Err(e);
             }
-        };
 
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External DB helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
-
-        let sink = Sink::new(register_actor.subscribe(), ext_db.get_register());
-        ctx.system().run_sink(sink).await;
-
-        if let Err(e) = ctx
-            .create_child(
-                "manual_distribution",
-                ManualDistribution::new(self.our_key.clone()),
-            )
-            .await
-        {
-            error!(
-                error = %e,
-                "Failed to create manual_distribution child"
-            );
-            return Err(e);
-        }
-
-        if let Err(e) = self.create_distributors(ctx, &network).await {
-            error!(
-                error = %e,
-                "Failed to create distributors"
-            );
-            return Err(e);
+            if let Err(e) = self.create_distributors(ctx, &network).await {
+                error!(
+                    error = %e,
+                    "Failed to create distributors"
+                );
+                return Err(e);
+            }
         }
 
         let Some(hash) = self.hash else {
@@ -828,15 +884,16 @@ impl Actor for Node {
             return Err(e);
         }
 
-        if let Err(e) = ctx
-            .create_child(
-                "distributor",
-                DistriWorker {
-                    our_key: self.our_key.clone(),
-                    network,
-                },
-            )
-            .await
+        if !safe_mode
+            && let Err(e) = ctx
+                .create_child(
+                    "distributor",
+                    DistriWorker {
+                        our_key: self.our_key.clone(),
+                        network,
+                    },
+                )
+                .await
         {
             error!(
                 error = %e,
@@ -964,22 +1021,14 @@ impl Handler<Self> for Node {
                 Ok(NodeResponse::SubjectData(subject_data))
             }
             NodeMessage::GetSubjectData(subject_id) => {
-                let data = if let Some(data) =
-                    self.owned_subjects.get(&subject_id)
-                {
-                    Some(data.clone())
-                } else if let Some(data) = self.known_subjects.get(&subject_id)
-                {
-                    Some(data.clone())
-                } else {
+                let data = self.get_subject_data(&subject_id);
+                if data.is_none() {
                     debug!(
                         msg_type = "GetSubjectData",
                         subject_id = %subject_id,
                         "Subject not found"
                     );
-
-                    None
-                };
+                }
 
                 debug!(
                     msg_type = "GetSubjectData",
@@ -988,6 +1037,33 @@ impl Handler<Self> for Node {
                 );
 
                 Ok(NodeResponse::SubjectData(data))
+            }
+            NodeMessage::GovernanceTrackers(governance_id) => {
+                let trackers = self.governance_trackers(&governance_id);
+
+                debug!(
+                    msg_type = "GovernanceTrackers",
+                    governance_id = %governance_id,
+                    count = trackers.len(),
+                    "Governance tracker association check completed"
+                );
+
+                Ok(NodeResponse::GovernanceTrackers(trackers))
+            }
+            NodeMessage::DeleteSubject(subject_id) => {
+                self.on_event(
+                    NodeEvent::DeleteSubject(subject_id.clone()),
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject deleted from node state"
+                );
+
+                Ok(NodeResponse::Ok)
             }
             NodeMessage::PendingTransfers => {
                 let transfers: Vec<TransferSubject> = self
@@ -1303,6 +1379,14 @@ impl PersistentActor for Node {
                     "Applied subject registration"
                 );
             }
+            NodeEvent::DeleteSubject(subject_id) => {
+                self.delete_subject(subject_id);
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Applied subject deletion"
+                );
+            }
             NodeEvent::RejectTransfer(subject_id) => {
                 self.delete_transfer(subject_id);
                 debug!(
@@ -1328,6 +1412,3 @@ impl PersistentActor for Node {
 
 #[async_trait]
 impl Storable for Node {}
-
-#[cfg(test)]
-pub mod tests {}

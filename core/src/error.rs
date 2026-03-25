@@ -87,6 +87,13 @@ pub enum Error {
     #[error("Governance '{0}' not found")]
     GovernanceNotFound(String),
 
+    /// Governance still has trackers associated and cannot be deleted.
+    #[error("Governance '{governance_id}' still has trackers associated")]
+    GovernanceHasTrackers {
+        governance_id: String,
+        trackers: Vec<String>,
+    },
+
     /// Invalid subject identifier.
     #[error("Invalid subject identifier: {0}")]
     InvalidSubjectId(String),
@@ -101,6 +108,10 @@ pub enum Error {
     /// Insufficient permissions for operation.
     #[error("Insufficient permissions: {0}")]
     Forbidden(String),
+
+    /// Node is running in safe mode and mutating operations are disabled.
+    #[error("Safe mode: {0}")]
+    SafeMode(String),
 
     /// Authentication subject operation failed.
     #[error("Authentication operation failed: {0}")]

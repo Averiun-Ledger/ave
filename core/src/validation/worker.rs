@@ -118,13 +118,8 @@ impl ValiWorker {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
                 Ok(false)
             }
-            std::cmp::Ordering::Greater => {
-                Ok(true)
-            }
-
+            std::cmp::Ordering::Greater => Ok(true),
         }
-
-        
     }
 
     fn check_data(
@@ -602,9 +597,7 @@ impl ValiWorker {
             let (eval_data, appro_data) = if gov_version == self.gov_version {
                 (
                     self.current_evaluation_roles(),
-                    approval
-                        .as_ref()
-                        .map(|_| self.current_approval_roles()),
+                    approval.as_ref().map(|_| self.current_approval_roles()),
                 )
             } else {
                 get_actual_roles_register(

@@ -289,13 +289,13 @@ impl Intermediary {
                         actor
                             .tell(TrackerSyncMessage::NetworkRequest(
                                 TrackerSyncNetworkRequest {
-                                request_nonce,
-                                governance_version,
-                                after_subject_id,
-                                limit,
-                                info: message.info,
-                                sender: sender.clone(),
-                                receiver_actor,
+                                    request_nonce,
+                                    governance_version,
+                                    after_subject_id,
+                                    limit,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                    receiver_actor,
                                 },
                             ))
                             .await
@@ -322,11 +322,11 @@ impl Intermediary {
                         actor
                             .tell(TrackerSyncMessage::NetworkResponse(
                                 TrackerSyncNetworkResponse {
-                                peer: sender.clone(),
-                                request_nonce,
-                                governance_version,
-                                items,
-                                next_cursor,
+                                    peer: sender.clone(),
+                                    request_nonce,
+                                    governance_version,
+                                    items,
+                                    next_cursor,
                                 },
                             ))
                             .await

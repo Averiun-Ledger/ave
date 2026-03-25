@@ -3,11 +3,7 @@ use std::time::Duration;
 
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{
-        counter::Counter,
-        family::Family,
-        histogram::Histogram,
-    },
+    metrics::{counter::Counter, family::Family, histogram::Histogram},
     registry::Registry,
 };
 
@@ -88,8 +84,8 @@ impl CoreMetrics {
             request_phase_duration_seconds: Family::new_with_constructor(
                 || {
                     Histogram::new(vec![
-                        0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0,
-                        30.0, 60.0, 120.0, 300.0,
+                        0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                        60.0, 120.0, 300.0,
                     ])
                 },
             ),
@@ -103,8 +99,8 @@ impl CoreMetrics {
             contract_executions: Family::default(),
             contract_execution_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
-                    0.25, 0.5, 1.0, 2.0, 5.0,
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                    0.5, 1.0, 2.0, 5.0,
                 ])
             }),
             tracker_sync_rounds: Family::default(),
@@ -401,7 +397,8 @@ mod tests {
         metrics.register_into(&mut registry);
 
         metrics.observe_request_terminal("aborted", Duration::from_millis(30));
-        metrics.observe_request_phase("distribution", Duration::from_millis(12));
+        metrics
+            .observe_request_phase("distribution", Duration::from_millis(12));
         metrics.observe_contract_prepare(
             "temporary",
             "recompiled",

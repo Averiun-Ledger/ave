@@ -9,7 +9,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::{db::Storable, model::common::emit_fail};
+use crate::{
+    db::Storable,
+    model::common::{emit_fail, purge_storage},
+};
 
 use super::ContractArtifactRecord;
 
@@ -34,6 +37,7 @@ impl ContractRegister {
 
 #[derive(Debug, Clone)]
 pub enum ContractRegisterMessage {
+    PurgeStorage,
     GetMetadata {
         contract_name: String,
     },
@@ -49,7 +53,12 @@ pub enum ContractRegisterMessage {
 
 impl Message for ContractRegisterMessage {
     fn is_critical(&self) -> bool {
-        matches!(self, Self::SetMetadata { .. } | Self::DeleteMetadata { .. })
+        matches!(
+            self,
+            Self::PurgeStorage
+                | Self::SetMetadata { .. }
+                | Self::DeleteMetadata { .. }
+        )
     }
 }
 
@@ -63,12 +72,7 @@ pub enum ContractRegisterResponse {
 impl Response for ContractRegisterResponse {}
 
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub enum ContractRegisterEvent {
     DeleteMetadata {
@@ -114,21 +118,24 @@ impl Handler<Self> for ContractRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<ContractRegisterResponse, ActorError> {
         match msg {
-            ContractRegisterMessage::ListContracts => Ok(
-                ContractRegisterResponse::Contracts(
+            ContractRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                Ok(ContractRegisterResponse::Ok)
+            }
+            ContractRegisterMessage::ListContracts => {
+                Ok(ContractRegisterResponse::Contracts(
                     self.contracts.keys().cloned().collect(),
-                ),
-            ),
-            ContractRegisterMessage::GetMetadata { contract_name } => Ok(
-                ContractRegisterResponse::Metadata(
+                ))
+            }
+            ContractRegisterMessage::GetMetadata { contract_name } => {
+                Ok(ContractRegisterResponse::Metadata(
                     self.contracts.get(&contract_name).cloned(),
-                ),
-            ),
+                ))
+            }
             ContractRegisterMessage::DeleteMetadata { contract_name } => {
                 self.on_event(
-                    ContractRegisterEvent::DeleteMetadata {
-                        contract_name,
-                    },
+                    ContractRegisterEvent::DeleteMetadata { contract_name },
                     ctx,
                 )
                 .await;

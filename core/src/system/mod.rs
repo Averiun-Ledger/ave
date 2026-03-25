@@ -14,9 +14,9 @@ use ave_actors::{
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
-use wasmtime::Module;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use wasmtime::Module;
 
 pub mod error;
 
@@ -24,6 +24,7 @@ pub mod error;
 pub struct ConfigHelper {
     pub contracts_path: PathBuf,
     pub always_accept: bool,
+    pub safe_mode: bool,
     pub tracking_size: usize,
     pub sync_governance: GovernanceSyncConfig,
     pub sync_tracker: TrackerSyncConfig,
@@ -34,6 +35,7 @@ impl From<Config> for ConfigHelper {
         Self {
             contracts_path: value.contracts_path,
             always_accept: value.always_accept,
+            safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
             sync_governance: value.sync.governance,
             sync_tracker: value.sync.tracker,
@@ -204,6 +206,7 @@ pub mod tests {
             contracts_path: contracts_path,
             always_accept: false,
             tracking_size: 100,
+            safe_mode: false,
             is_service: true,
             sync: SyncConfig {
                 governance: GovernanceSyncConfig {

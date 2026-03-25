@@ -50,9 +50,7 @@ impl Actor for TempCompiler {
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
         parent_span.map_or_else(
             || info_span!("TempCompiler", id),
-            |parent_span| {
-                info_span!(parent: parent_span, "TempCompiler", id)
-            },
+            |parent_span| info_span!(parent: parent_span, "TempCompiler", id),
         )
     }
 }

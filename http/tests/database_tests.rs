@@ -18,7 +18,29 @@ use ave_bridge::auth::{
     ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, SessionConfig,
 };
 use ave_http::auth::{RotateApiKeyParams, database::AuthDatabase};
+use std::collections::BTreeSet;
 use tempfile::TempDir;
+
+#[test]
+fn database_tests_route_inputs_exist_in_http_catalog() {
+    let mut catalog = common::server_main_route_catalog();
+    catalog.extend(common::server_auth_route_catalog());
+    catalog.extend(common::server_public_auth_route_catalog());
+
+    let expected: BTreeSet<(String, String)> = [
+        ("get".to_string(), "/peer-id".to_string()),
+        ("post".to_string(), "/login".to_string()),
+        ("post".to_string(), "/change-password".to_string()),
+    ]
+    .into_iter()
+    .collect();
+
+    let missing: Vec<_> = expected.difference(&catalog).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "Database tests reference routes that do not exist in server.rs: {missing:?}"
+    );
+}
 
 async fn create_test_db_with_rate_limit(
     rate_limit: RateLimitConfig,

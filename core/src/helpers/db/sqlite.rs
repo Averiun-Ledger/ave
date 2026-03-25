@@ -19,10 +19,7 @@ use ave_common::response::{
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{
-        counter::Counter,
-        family::Family,
-        gauge::Gauge,
-        histogram::Histogram,
+        counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
     },
     registry::Registry,
 };
@@ -328,6 +325,31 @@ const SQL_EOL_REGISTER_SUBJECT: &str = r#"
     WHERE governance_id = ?1 AND subject_id = ?2
 "#;
 
+const SQL_DELETE_SUBJECT_STATE: &str = r#"
+    DELETE FROM subjects
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_EVENTS_SUBJECT: &str = r#"
+    DELETE FROM events
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_ABORTS_SUBJECT: &str = r#"
+    DELETE FROM aborts
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_REGISTER_SUBJECT: &str = r#"
+    DELETE FROM register_subjects
+    WHERE subject_id = ?1
+"#;
+
+const SQL_DELETE_REGISTER_GOV: &str = r#"
+    DELETE FROM register_govs
+    WHERE governance_id = ?1
+"#;
+
 const SQL_GET_REGISTER_GOVS: &str = r#"
     SELECT governance_id, active, name, description
     FROM register_govs
@@ -454,6 +476,7 @@ enum WriteCommand {
     SubjectState(Metadata),
     Abort(RequestTrackingEvent),
     Register(RegisterEvent),
+    DeleteSubject(String),
 }
 
 struct WriteJob {
@@ -495,8 +518,7 @@ struct SqliteMetrics {
 #[derive(Debug)]
 struct DbPrometheusMetrics {
     reader_wait_seconds: Histogram,
-    read_query_seconds:
-        Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
+    read_query_seconds: Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
     writer_queue_depth: Gauge,
     writer_batch_size: Histogram,
     writer_batch_duration_seconds: Histogram,
@@ -568,8 +590,8 @@ impl DbPrometheusMetrics {
                 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
             ]),
             writer_batch_duration_seconds: Histogram::new(vec![
-                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-                1.0, 2.0, 5.0,
+                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+                2.0, 5.0,
             ]),
             writer_batch_retries_total: Counter::default(),
             writer_failures_total: Family::default(),
@@ -1161,7 +1183,7 @@ impl ReadStore for SqliteReadStore {
         self.with_reader("governances", move |conn| {
             get_governances_from_conn(conn, active)
         })
-            .await
+        .await
     }
 
     async fn get_subjects(
@@ -1269,6 +1291,13 @@ impl SqliteLocal {
             .register_prometheus_metrics(registry);
     }
 
+    pub async fn delete_subject(
+        &self,
+        subject_id: &str,
+    ) -> Result<(), DatabaseError> {
+        self.writer.delete_subject(subject_id.to_owned()).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         self.writer.shutdown().await?;
 
@@ -1357,6 +1386,13 @@ impl SqliteWriteStore {
         event: RegisterEvent,
     ) -> Result<(), DatabaseError> {
         self.enqueue(WriteCommand::Register(event)).await
+    }
+
+    async fn delete_subject(
+        &self,
+        subject_id: String,
+    ) -> Result<(), DatabaseError> {
+        self.enqueue(WriteCommand::DeleteSubject(subject_id)).await
     }
 
     async fn enqueue(
@@ -1564,6 +1600,21 @@ fn persist_write_batch(
     let mut eol_register_subject_stmt = tx
         .prepare_cached(SQL_EOL_REGISTER_SUBJECT)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_subject_state_stmt = tx
+        .prepare_cached(SQL_DELETE_SUBJECT_STATE)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_events_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_EVENTS_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_aborts_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_ABORTS_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_register_subject_stmt = tx
+        .prepare_cached(SQL_DELETE_REGISTER_SUBJECT)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut delete_register_gov_stmt = tx
+        .prepare_cached(SQL_DELETE_REGISTER_GOV)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     for job in jobs {
         match &job.command {
@@ -1628,9 +1679,37 @@ fn persist_write_batch(
                     )?
                 }
             },
+            WriteCommand::DeleteSubject(subject_id) => {
+                touched_subjects.push(subject_id.clone());
+                delete_by_subject_with_stmt(
+                    &mut delete_subject_state_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_events_subject_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_aborts_subject_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_register_subject_stmt,
+                    subject_id,
+                )?;
+                delete_by_subject_with_stmt(
+                    &mut delete_register_gov_stmt,
+                    subject_id,
+                )?;
+            }
         }
     }
 
+    drop(delete_register_gov_stmt);
+    drop(delete_register_subject_stmt);
+    drop(delete_aborts_subject_stmt);
+    drop(delete_events_subject_stmt);
+    drop(delete_subject_state_stmt);
     drop(eol_register_subject_stmt);
     drop(upsert_register_subject_stmt);
     drop(eol_register_gov_stmt);
@@ -3518,6 +3597,16 @@ fn eol_register_subject_with_stmt(
     Ok(())
 }
 
+fn delete_by_subject_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    subject_id: &str,
+) -> Result<(), DatabaseError> {
+    stmt.execute(params![subject_id])
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl Subscriber<SignedLedger> for SqliteWriteStore {
     async fn notify(&self, event: SignedLedger) {
@@ -3680,7 +3769,10 @@ mod tests {
         encode(&mut text, &registry).expect("encode metrics");
 
         assert_eq!(
-            metric_value(&text, "external_db_writer_batch_duration_seconds_count"),
+            metric_value(
+                &text,
+                "external_db_writer_batch_duration_seconds_count"
+            ),
             1.0
         );
     }

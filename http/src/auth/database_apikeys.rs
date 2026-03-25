@@ -839,6 +839,7 @@ impl AuthDatabase {
                 "admin_api_key",
                 "admin_system",
                 "user_api_key",
+                "node_maintenance",
             ];
             permissions
                 .retain(|p| !admin_resources.contains(&p.resource.as_str()));

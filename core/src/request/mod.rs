@@ -764,6 +764,49 @@ impl RequestHandler {
 
         actor.tell(RequestManagerMessage::ManualAbort).await
     }
+
+    async fn purge_request_manager(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let Some((hash, network)) = self.helpers.clone() else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Request handler helpers are not initialized"
+                    .to_string(),
+            });
+        };
+
+        let governance_id = get_subject_data(ctx, subject_id)
+            .await?
+            .and_then(|data| data.get_governance_id());
+        let request_manager_init = InitRequestManager {
+            our_key: self.our_key.clone(),
+            subject_id: subject_id.clone(),
+            governance_id,
+            helpers: (hash, network),
+        };
+
+        let actor = match ctx
+            .create_child(
+                &subject_id.to_string(),
+                RequestManager::initial(request_manager_init),
+            )
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<RequestManager>(&subject_id.to_string())
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
+
+        actor.ask(RequestManagerMessage::PurgeStorage).await?;
+        actor.ask_stop().await?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -790,6 +833,9 @@ pub enum RequestHandlerMessage {
         subject_id: DigestIdentifier,
     },
     EndHandling {
+        subject_id: DigestIdentifier,
+    },
+    PurgeSubject {
         subject_id: DigestIdentifier,
     },
     AbortRequest {
@@ -827,6 +873,9 @@ pub enum RequestHandlerEvent {
     FinishHandling {
         subject_id: DigestIdentifier,
     },
+    PurgeSubject {
+        subject_id: DigestIdentifier,
+    },
     EventToHandling {
         subject_id: DigestIdentifier,
         request_id: DigestIdentifier,
@@ -860,21 +909,9 @@ impl Actor for RequestHandler {
             return Err(e);
         }
 
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
-            error!("External database helper not found");
-            return Err(ActorError::Helper {
-                name: "ext_db".to_string(),
-                reason: "Not found".to_string(),
-            });
-        };
-
-        let tracking_size = if let Some(config) =
+        let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config").await
-        {
-            config.tracking_size
-        } else {
+        else {
             error!(
                 helper = "config",
                 "Config helper not found during pre_start"
@@ -885,24 +922,39 @@ impl Actor for RequestHandler {
             });
         };
 
-        let tracking = match ctx
-            .create_child("tracking", RequestTracking::new(tracking_size))
-            .await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "Failed to create tracking child during pre_start"
-                );
-                return Err(e);
-            }
-        };
+        if !config.safe_mode {
+            let Some(ext_db): Option<Arc<ExternalDB>> =
+                ctx.system().get_helper("ext_db").await
+            else {
+                error!("External database helper not found");
+                return Err(ActorError::Helper {
+                    name: "ext_db".to_string(),
+                    reason: "Not found".to_string(),
+                });
+            };
 
-        let sink =
-            Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
+            let tracking = match ctx
+                .create_child(
+                    "tracking",
+                    RequestTracking::new(config.tracking_size),
+                )
+                .await
+            {
+                Ok(actor) => actor,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create tracking child during pre_start"
+                    );
+                    return Err(e);
+                }
+            };
 
-        ctx.system().run_sink(sink).await;
+            let sink =
+                Sink::new(tracking.subscribe(), ext_db.get_request_tracking());
+
+            ctx.system().run_sink(sink).await;
+        }
 
         let Some((hash, network)) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
@@ -913,6 +965,10 @@ impl Actor for RequestHandler {
             ctx.system().crash_system();
             return Err(ActorError::FunctionalCritical { description: e });
         };
+
+        if config.safe_mode {
+            return Ok(());
+        }
 
         for (subject_id, request_id) in self.handling.clone() {
             let governance_id = get_subject_data(ctx, &subject_id)
@@ -1006,6 +1062,17 @@ impl Handler<Self> for RequestHandler {
             ),
             RequestHandlerMessage::AbortRequest { subject_id } => {
                 self.manual_abort_request(ctx, &subject_id).await?;
+                Ok(RequestHandlerResponse::None)
+            }
+            RequestHandlerMessage::PurgeSubject { subject_id } => {
+                self.purge_request_manager(ctx, &subject_id).await?;
+                self.on_event(
+                    RequestHandlerEvent::PurgeSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
                 Ok(RequestHandlerResponse::None)
             }
             RequestHandlerMessage::ChangeApprovalState {
@@ -1396,6 +1463,10 @@ impl PersistentActor for RequestHandler {
             }
             RequestHandlerEvent::FinishHandling { subject_id } => {
                 self.handling.remove(subject_id);
+            }
+            RequestHandlerEvent::PurgeSubject { subject_id } => {
+                self.handling.remove(subject_id);
+                self.in_queue.remove(subject_id);
             }
         };
 

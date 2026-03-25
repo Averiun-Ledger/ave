@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::CeilingMap;
-use crate::{db::Storable, model::common::emit_fail};
+use crate::{
+    db::Storable,
+    model::common::{emit_fail, purge_storage},
+};
 
 #[derive(
     Clone,
@@ -49,6 +52,10 @@ pub struct SnRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
+    PurgeStorage,
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     RegisterSn {
         subject_id: DigestIdentifier,
         gov_version: u64,
@@ -62,7 +69,12 @@ pub enum SnRegisterMessage {
 
 impl Message for SnRegisterMessage {
     fn is_critical(&self) -> bool {
-        matches!(self, Self::RegisterSn { .. })
+        matches!(
+            self,
+            Self::PurgeStorage
+                | Self::RegisterSn { .. }
+                | Self::DeleteSubject { .. }
+        )
     }
 }
 
@@ -85,6 +97,9 @@ impl Response for SnRegisterResponse {}
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum SnRegisterEvent {
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     RegisterSn {
         subject_id: DigestIdentifier,
         gov_version: u64,
@@ -135,6 +150,30 @@ impl Handler<Self> for SnRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SnRegisterResponse, ActorError> {
         match msg {
+            SnRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(msg_type = "PurgeStorage", "Sn register storage purged");
+
+                Ok(SnRegisterResponse::Ok)
+            }
+            SnRegisterMessage::DeleteSubject { subject_id } => {
+                self.on_event(
+                    SnRegisterEvent::DeleteSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Sn register entry deleted"
+                );
+
+                Ok(SnRegisterResponse::Ok)
+            }
             SnRegisterMessage::GetSn {
                 subject_id,
                 gov_version,
@@ -221,6 +260,15 @@ impl PersistentActor for SnRegister {
     /// Change node state.
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match event {
+            SnRegisterEvent::DeleteSubject { subject_id } => {
+                self.register.remove(subject_id);
+
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Sn register state deleted"
+                );
+            }
             SnRegisterEvent::RegisterSn {
                 subject_id,
                 gov_version,

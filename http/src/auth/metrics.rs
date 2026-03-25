@@ -3,8 +3,7 @@ use std::sync::Arc;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{
-        counter::Counter, family::Family, gauge::Gauge,
-        histogram::Histogram,
+        counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
     },
     registry::Registry,
 };

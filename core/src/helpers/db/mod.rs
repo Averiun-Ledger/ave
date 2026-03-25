@@ -192,6 +192,18 @@ impl ExternalDB {
         }
     }
 
+    pub async fn delete_subject(
+        &self,
+        subject_id: &str,
+    ) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.delete_subject(subject_id).await
+            }
+        }
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]

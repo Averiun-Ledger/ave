@@ -263,6 +263,10 @@ impl Display for MemoryLimitsConfig {
 #[serde(rename_all = "snake_case")]
 /// Network config
 pub struct Config {
+    /// Safe mode keeps the network worker alive but isolated from peers.
+    #[serde(default)]
+    pub safe_mode: bool,
+
     /// The node type.
     pub node_type: NodeType,
 
@@ -318,6 +322,7 @@ impl Config {
         boot_nodes: Vec<RoutingNode>,
     ) -> Self {
         Self {
+            safe_mode: false,
             boot_nodes,
             node_type,
             listen_addresses,
@@ -361,6 +366,7 @@ const fn default_max_pending_inbound_bytes_total() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            safe_mode: false,
             node_type: NodeType::default(),
             listen_addresses: Vec::default(),
             external_addresses: Vec::default(),

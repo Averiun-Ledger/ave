@@ -358,7 +358,8 @@ impl Handler<Self> for Approval {
                             "Quorum reached, approval accepted"
                         );
                     } else if self.approvers.is_empty()
-                        && let Err(e) = self.send_approval_to_req(ctx, false).await
+                        && let Err(e) =
+                            self.send_approval_to_req(ctx, false).await
                     {
                         error!(
                             msg_type = "Response",

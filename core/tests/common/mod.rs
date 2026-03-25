@@ -7,7 +7,8 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     request::{
-        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest, RejectRequest, TransferRequest
+        ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
+        RejectRequest, TransferRequest,
     },
     response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB},
 };
@@ -114,6 +115,7 @@ pub async fn create_node(
         },
         network: network_config,
         contracts_path,
+        safe_mode: false,
         always_accept,
         tracking_size: 100,
         sync: SyncConfig {

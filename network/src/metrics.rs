@@ -7,10 +7,7 @@ use crate::utils::NetworkState;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{
-        counter::Counter,
-        family::Family,
-        gauge::Gauge,
-        histogram::Histogram,
+        counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
     },
     registry::Registry,
 };
@@ -134,8 +131,7 @@ impl NetworkMetrics {
             state: Family::default(),
             bootstrap_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
-                    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0,
-                    80.0,
+                    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0,
                 ])
             }),
             pending_message_age_seconds: Histogram::new(vec![
@@ -415,10 +411,7 @@ impl NetworkMetrics {
         kind: &'static str,
     ) {
         self.reqres_failures_total
-            .get_or_create(&ReqResFailureLabels {
-                direction,
-                kind,
-            })
+            .get_or_create(&ReqResFailureLabels { direction, kind })
             .inc();
     }
 

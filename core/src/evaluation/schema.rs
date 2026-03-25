@@ -86,7 +86,8 @@ impl Handler<Self> for EvaluationSchema {
             } => {
                 let observe = |result: &'static str| {
                     if let Some(metrics) = try_core_metrics() {
-                        metrics.observe_schema_event("evaluation_schema", result);
+                        metrics
+                            .observe_schema_event("evaluation_schema", result);
                     }
                 };
                 if sender != evaluation_req.signature().signer {

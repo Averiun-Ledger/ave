@@ -9,6 +9,7 @@ use crate::{
     model::common::{
         emit_fail,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
+        purge_storage,
         subject::get_metadata,
     },
     subject::RequestSubjectData,
@@ -244,14 +245,12 @@ impl ApprPersist {
                 description: "Helpers are None".to_owned(),
             });
         };
-        let approval_req_hash =
-            hash_borsh(&*hash.hasher(), request.content()).map_err(|e| {
-                ActorError::FunctionalCritical {
-                    description: format!(
-                        "Can not obtain approval request hash {}",
-                        e
-                    ),
-                }
+        let approval_req_hash = hash_borsh(&*hash.hasher(), request.content())
+            .map_err(|e| ActorError::FunctionalCritical {
+                description: format!(
+                    "Can not obtain approval request hash {}",
+                    e
+                ),
             })?;
 
         let req_subject_data_hash = hash_borsh(
@@ -283,6 +282,7 @@ impl ApprPersist {
 #[derive(Debug, Clone)]
 pub enum ApprPersistMessage {
     MakeObsolete,
+    PurgeStorage,
     // Mensaje para aprobar localmente
     LocalApproval {
         request_id: DigestIdentifier,
@@ -305,7 +305,7 @@ pub enum ApprPersistMessage {
 
 impl Message for ApprPersistMessage {
     fn is_critical(&self) -> bool {
-        matches!(self, Self::MakeObsolete)
+        matches!(self, Self::MakeObsolete | Self::PurgeStorage)
     }
 }
 
@@ -378,6 +378,17 @@ impl Handler<Self> for ApprPersist {
         ctx: &mut ActorContext<Self>,
     ) -> Result<ApprPersistResponse, ActorError> {
         match msg {
+            ApprPersistMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    subject_id = %self.subject_id,
+                    "Approval storage purged"
+                );
+
+                return Ok(ApprPersistResponse::Ok);
+            }
             ApprPersistMessage::GetApproval { state } => {
                 let res = if let Some(req) = &self.request
                     && let Some(req_state) = &self.state

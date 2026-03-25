@@ -14,7 +14,9 @@ use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::CeilingMap;
 use crate::{
-    db::Storable, governance::model::CreatorQuantity, model::common::emit_fail,
+    db::Storable,
+    governance::model::CreatorQuantity,
+    model::common::{emit_fail, purge_storage},
 };
 
 #[derive(
@@ -98,6 +100,7 @@ impl SubjectRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterMessage {
+    PurgeStorage,
     Check {
         creator: PublicKey,
         gov_version: u64,
@@ -120,6 +123,9 @@ pub enum SubjectRegisterMessage {
         schema_id: SchemaType,
         gov_version: u64,
     },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
+    },
     UpdateSubject {
         new_owner: PublicKey,
         old_owner: PublicKey,
@@ -133,8 +139,10 @@ pub enum SubjectRegisterMessage {
 impl Message for SubjectRegisterMessage {
     fn is_critical(&self) -> bool {
         match self {
-            Self::RegisterData { .. }
+            Self::PurgeStorage
+            | Self::RegisterData { .. }
             | Self::CreateSubject { .. }
+            | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
             Self::Check { .. } | Self::GetSubjectsByOwnerSchema { .. } => false,
         }
@@ -162,6 +170,9 @@ pub enum SubjectRegisterEvent {
         subject_id: DigestIdentifier,
         namespace: String,
         schema_id: SchemaType,
+    },
+    DeleteSubject {
+        subject_id: DigestIdentifier,
     },
     UpdateSubject {
         new_owner: PublicKey,
@@ -215,6 +226,16 @@ impl Handler<Self> for SubjectRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {
         match msg {
+            SubjectRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Subject register storage purged"
+                );
+
+                return Ok(SubjectRegisterResponse::Ok);
+            }
             SubjectRegisterMessage::GetSubjectsByOwnerSchema {
                 owner,
                 schema_id,
@@ -276,6 +297,23 @@ impl Handler<Self> for SubjectRegister {
                     creator = %creator,
                     schema_id = ?schema_id,
                     "Subject created in register"
+                );
+
+                Ok(SubjectRegisterResponse::Ok)
+            }
+            SubjectRegisterMessage::DeleteSubject { subject_id } => {
+                self.on_event(
+                    SubjectRegisterEvent::DeleteSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject removed from register"
                 );
 
                 Ok(SubjectRegisterResponse::Ok)
@@ -400,6 +438,17 @@ impl PersistentActor for SubjectRegister {
                     subject_id = %subject_id,
                     creator = %creator,
                     "Subject added to register state"
+                );
+            }
+            SubjectRegisterEvent::DeleteSubject { subject_id } => {
+                for (_, subjects) in self.register.values_mut() {
+                    subjects.remove(subject_id);
+                }
+
+                debug!(
+                    event_type = "DeleteSubject",
+                    subject_id = %subject_id,
+                    "Subject removed from register state"
                 );
             }
             SubjectRegisterEvent::UpdateSubject {

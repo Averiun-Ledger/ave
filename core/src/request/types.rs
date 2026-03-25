@@ -1,8 +1,10 @@
 use std::{collections::HashSet, fmt::Display};
 
 use crate::{
-    evaluation::request::EvaluationReq, governance::model::Quorum,
-    model::event::EvaluationData, subject::SignedLedger,
+    evaluation::request::EvaluationReq,
+    governance::model::Quorum,
+    model::event::EvaluationData,
+    subject::SignedLedger,
     validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 

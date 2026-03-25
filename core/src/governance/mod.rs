@@ -27,17 +27,22 @@ use crate::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
             RoleRegisterResponse,
         },
-        sn_register::SnRegister,
-        subject_register::{SubjectRegister, SubjectRegisterMessage},
+        sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
+        subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        },
         tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage, WitnessesType,
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse, WitnessesType,
         },
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
     model::{
-        common::{emit_fail, get_last_event, subject::make_obsolete},
+        common::{
+            emit_fail, get_last_event, purge_storage, subject::make_obsolete,
+        },
         event::{Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
@@ -56,8 +61,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
-    Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Message, Response, Sink,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -509,6 +514,65 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn up_approver_only(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        if !self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Approver,
+        }) {
+            return Ok(());
+        }
+
+        let always_accept = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.always_accept
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let pass_votation = if always_accept {
+            VotationType::AlwaysAccept
+        } else {
+            VotationType::Manual
+        };
+
+        let owner = *self.our_key == self.subject_metadata.owner;
+        let i_new_owner =
+            self.subject_metadata.new_owner == Some((*self.our_key).clone());
+
+        let node_key = if (owner && self.subject_metadata.new_owner.is_none())
+            || i_new_owner
+        {
+            (*self.our_key).clone()
+        } else {
+            self.subject_metadata
+                .new_owner
+                .clone()
+                .unwrap_or_else(|| self.subject_metadata.owner.clone())
+        };
+
+        let init_approver = InitApprPersist {
+            our_key: self.our_key.clone(),
+            node_key,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            pass_votation,
+            helpers: (*hash, network.clone()),
+        };
+
+        ctx.create_child("approver", ApprPersist::initial(init_approver))
+            .await?;
+
+        Ok(())
+    }
+
     async fn current_validation_roles(
         &self,
         ctx: &ActorContext<Self>,
@@ -526,9 +590,8 @@ impl Governance {
                     "/user/node/subject_manager/{}/role_register",
                     self.subject_metadata.subject_id
                 )),
-                expected:
-                    "RoleRegisterResponse::CurrentValidationRoles"
-                        .to_owned(),
+                expected: "RoleRegisterResponse::CurrentValidationRoles"
+                    .to_owned(),
             }),
         }
     }
@@ -953,8 +1016,9 @@ impl Governance {
             });
         };
 
-        let contract_register =
-            ctx.get_child::<ContractRegister>("contract_register").await?;
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
 
         let prefix = format!("{}_", self.subject_metadata.subject_id);
         let mut allowed: HashSet<String> = schemas
@@ -1001,15 +1065,18 @@ impl Governance {
             }
         })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not iterate contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
-            }
-        })? {
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not iterate contracts directory {}: {}",
+                        contracts_dir.display(),
+                        e
+                    ),
+                })?
+        {
             let file_name = entry.file_name().to_string_lossy().to_string();
             if !file_name.starts_with(&prefix) {
                 continue;
@@ -1025,6 +1092,100 @@ impl Governance {
                 if !is_temp {
                     allowed.remove(&file_name);
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn delete_all_contract_artifacts(
+        &self,
+        ctx: &ActorContext<Self>,
+        contract_register: &ActorRef<ContractRegister>,
+    ) -> Result<(), ActorError> {
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let Some(contracts) = ctx
+            .system()
+            .get_helper::<Arc<RwLock<HashMap<String, Arc<Module>>>>>(
+                "contracts",
+            )
+            .await
+        else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let prefix = format!("{}_", self.subject_metadata.subject_id);
+
+        let registered: Vec<String> = match contract_register
+            .ask(ContractRegisterMessage::ListContracts)
+            .await?
+        {
+            ContractRegisterResponse::Contracts(contracts) => contracts,
+            _ => Vec::new(),
+        };
+
+        for contract_name in registered {
+            if contract_name.starts_with(&prefix) {
+                contract_register
+                    .ask(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: contract_name.clone(),
+                    })
+                    .await?;
+                let mut contracts = contracts.write().await;
+                contracts.remove(&contract_name);
+            }
+        }
+
+        let contracts_dir = config.contracts_path.join("contracts");
+        if !contracts_dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not read contracts directory {}: {}",
+                    contracts_dir.display(),
+                    e
+                ),
+            }
+        })?;
+
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not iterate contracts directory {}: {}",
+                        contracts_dir.display(),
+                        e
+                    ),
+                })?
+        {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.starts_with(&prefix) {
+                let path = entry.path();
+                fs::remove_dir_all(&path).await.map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not remove contract directory {}: {}",
+                            path.display(),
+                            e
+                        ),
+                    }
+                })?;
             }
         }
 
@@ -1135,15 +1296,16 @@ impl Governance {
                 network: network.clone(),
                 current_roles: crate::validation::worker::CurrentWorkerRoles {
                     approval: current_roles.approval,
-                    evaluation: crate::governance::role_register::RoleDataRegister {
-                        workers: current_roles
-                            .schema
-                            .evaluation
-                            .iter()
-                            .map(|role| role.key.clone())
-                            .collect(),
-                        quorum: current_roles.schema.evaluation_quorum,
-                    },
+                    evaluation:
+                        crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
                 },
                 stop: false,
             };
@@ -1450,11 +1612,8 @@ impl Governance {
         for (id, schema) in schemas {
             let actor_name = format!("{}_contract_compiler", id);
 
-            let compiler =
-                ctx.create_child(
-                    &actor_name,
-                    ContractCompiler::new(*hash),
-                )
+            let compiler = ctx
+                .create_child(&actor_name, ContractCompiler::new(*hash))
                 .await?;
 
             let Schema {
@@ -1491,7 +1650,8 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1512,8 +1672,9 @@ impl Governance {
             });
         };
 
-        let contract_register =
-            ctx.get_child::<ContractRegister>("contract_register").await?;
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
 
         for schema_id in schemas.iter() {
             let actor = ctx
@@ -1537,10 +1698,8 @@ impl Governance {
                 contracts.remove(&contract_name);
             }
 
-            let contract_path = config
-                .contracts_path
-                .join("contracts")
-                .join(&contract_name);
+            let contract_path =
+                config.contracts_path.join("contracts").join(&contract_name);
             let _ = fs::remove_dir_all(contract_path).await;
         }
 
@@ -2188,6 +2347,456 @@ impl Governance {
 
         Ok(())
     }
+
+    async fn delete_tracker_references(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        let subject_register = match ctx
+            .create_child("subject_register", SubjectRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SubjectRegister>("subject_register").await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("subject_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("subject_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(subject_register) = subject_register {
+            match subject_register
+                .ask(SubjectRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SubjectRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "subject_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("subject_register: {error}"))
+                }
+            }
+
+            if let Err(error) = subject_register.ask_stop().await {
+                cleanup_errors.push(format!("subject_register stop: {error}"));
+            }
+        }
+
+        let sn_register = match ctx
+            .create_child("sn_register", SnRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SnRegister>("sn_register").await {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("sn_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("sn_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(sn_register) = sn_register {
+            match sn_register
+                .ask(SnRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SnRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "sn_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("sn_register: {error}"))
+                }
+            }
+
+            if let Err(error) = sn_register.ask_stop().await {
+                cleanup_errors.push(format!("sn_register stop: {error}"));
+            }
+        }
+
+        let witnesses_register = match ctx
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<WitnessesRegister>("witnesses_register")
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "witnesses_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("witnesses_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(witnesses_register) = witnesses_register {
+            match witnesses_register
+                .ask(WitnessesRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(WitnessesRegisterResponse::Ok) => {}
+                Ok(_) => cleanup_errors
+                    .push("witnesses_register: unexpected response".to_owned()),
+                Err(error) => {
+                    cleanup_errors.push(format!("witnesses_register: {error}"))
+                }
+            }
+
+            if let Err(error) = witnesses_register.ask_stop().await {
+                cleanup_errors
+                    .push(format!("witnesses_register stop: {error}"));
+            }
+        }
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
+    }
+
+    async fn delete_governance_storage(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Approver,
+        }) {
+            let hash = self.hash.map_or_else(
+                || {
+                    cleanup_errors
+                        .push("approver init: missing hash".to_owned());
+                    None
+                },
+                Some,
+            );
+
+            let network = ctx
+                .system()
+                .get_helper::<Arc<NetworkSender>>("network")
+                .await
+                .map_or_else(
+                    || {
+                        cleanup_errors.push(
+                            "approver init: missing network helper".to_owned(),
+                        );
+                        None
+                    },
+                    Some,
+                );
+
+            if let (Some(hash), Some(network)) = (hash, network) {
+                let approver = match ctx
+                    .get_child::<ApprPersist>("approver")
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(_) => match self
+                        .up_approver_only(ctx, &hash, &network)
+                        .await
+                    {
+                        Ok(()) => match ctx
+                            .get_child::<ApprPersist>("approver")
+                            .await
+                        {
+                            Ok(actor) => Some(actor),
+                            Err(error) => {
+                                cleanup_errors
+                                    .push(format!("approver lookup: {error}"));
+                                None
+                            }
+                        },
+                        Err(error) => {
+                            cleanup_errors.push(format!("approver: {error}"));
+                            None
+                        }
+                    },
+                };
+
+                if let Some(approver) = approver {
+                    match approver
+                        .ask(crate::approval::persist::ApprPersistMessage::PurgeStorage)
+                        .await
+                    {
+                        Ok(crate::approval::persist::ApprPersistResponse::Ok) => {}
+                        Ok(_) => cleanup_errors
+                            .push("approver: unexpected response".to_owned()),
+                        Err(error) => {
+                            cleanup_errors.push(format!("approver: {error}"))
+                        }
+                    }
+
+                    if let Err(error) = approver.ask_stop().await {
+                        cleanup_errors.push(format!("approver stop: {error}"));
+                    }
+                }
+            }
+        }
+
+        let contract_register = match ctx
+            .create_child("contract_register", ContractRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<ContractRegister>("contract_register")
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("contract_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("contract_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(contract_register) = contract_register {
+            if let Err(error) = self
+                .delete_all_contract_artifacts(ctx, &contract_register)
+                .await
+            {
+                cleanup_errors.push(format!("contract_artifacts: {error}"));
+            }
+
+            match contract_register
+                .ask(ContractRegisterMessage::PurgeStorage)
+                .await
+            {
+                Ok(ContractRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "contract_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("contract_register: {error}"))
+                }
+            }
+
+            if let Err(error) = contract_register.ask_stop().await {
+                cleanup_errors.push(format!("contract_register stop: {error}"));
+            }
+        }
+
+        let role_register = match ctx
+            .create_child("role_register", RoleRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<RoleRegister>("role_register").await {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("role_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("role_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(role_register) = role_register {
+            match role_register.ask(RoleRegisterMessage::PurgeStorage).await {
+                Ok(RoleRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "role_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("role_register: {error}"))
+                }
+            }
+
+            if let Err(error) = role_register.ask_stop().await {
+                cleanup_errors.push(format!("role_register stop: {error}"));
+            }
+        }
+
+        let subject_register = match ctx
+            .create_child("subject_register", SubjectRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SubjectRegister>("subject_register").await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("subject_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("subject_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(subject_register) = subject_register {
+            match subject_register
+                .ask(SubjectRegisterMessage::PurgeStorage)
+                .await
+            {
+                Ok(SubjectRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "subject_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("subject_register: {error}"))
+                }
+            }
+
+            if let Err(error) = subject_register.ask_stop().await {
+                cleanup_errors.push(format!("subject_register stop: {error}"));
+            }
+        }
+
+        let sn_register = match ctx
+            .create_child("sn_register", SnRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<SnRegister>("sn_register").await {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("sn_register lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("sn_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(sn_register) = sn_register {
+            match sn_register.ask(SnRegisterMessage::PurgeStorage).await {
+                Ok(SnRegisterResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "sn_register: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("sn_register: {error}"))
+                }
+            }
+
+            if let Err(error) = sn_register.ask_stop().await {
+                cleanup_errors.push(format!("sn_register stop: {error}"));
+            }
+        }
+
+        let witnesses_register = match ctx
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<WitnessesRegister>("witnesses_register")
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!(
+                            "witnesses_register lookup: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("witnesses_register: {error}"));
+                None
+            }
+        };
+
+        if let Some(witnesses_register) = witnesses_register {
+            match witnesses_register
+                .ask(WitnessesRegisterMessage::PurgeStorage)
+                .await
+            {
+                Ok(WitnessesRegisterResponse::Ok) => {}
+                Ok(_) => cleanup_errors
+                    .push("witnesses_register: unexpected response".to_owned()),
+                Err(error) => {
+                    cleanup_errors.push(format!("witnesses_register: {error}"))
+                }
+            }
+
+            if let Err(error) = witnesses_register.ask_stop().await {
+                cleanup_errors
+                    .push(format!("witnesses_register stop: {error}"));
+            }
+        }
+
+        if let Err(error) = purge_storage(ctx).await {
+            cleanup_errors.push(format!("governance: {error}"));
+        }
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
+    }
 }
 
 /// Governance command.
@@ -2196,6 +2805,8 @@ pub enum GovernanceMessage {
     GetMetadata,
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
+    DeleteTrackerReferences { subject_id: DigestIdentifier },
+    DeleteGovernanceStorage,
     UpdateLedger { events: Vec<SignedLedger> },
     GetGovernance,
     GetVersion,
@@ -2246,6 +2857,41 @@ impl Actor for Governance {
                 "Failed to initialize governance store"
             );
             return Err(e);
+        }
+
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            let Some(hash) = self.hash else {
+                error!("Hash algorithm not found");
+                return Err(ActorError::FunctionalCritical {
+                    description: "Hash algorithm is None".to_string(),
+                });
+            };
+
+            let Some(network) = ctx
+                .system()
+                .get_helper::<Arc<NetworkSender>>("network")
+                .await
+            else {
+                error!("Network helper not found");
+                return Err(ActorError::Helper {
+                    name: "network".to_owned(),
+                    reason: "Not found".to_owned(),
+                });
+            };
+
+            self.up_approver_only(ctx, &hash, &network).await?;
+            return Ok(());
         }
 
         let Some(hash) = self.hash else {
@@ -2492,6 +3138,30 @@ impl Handler<Self> for Governance {
             GovernanceMessage::GetMetadata => Ok(GovernanceResponse::Metadata(
                 Box::new(Metadata::from(self.clone())),
             )),
+            GovernanceMessage::DeleteTrackerReferences { subject_id } => {
+                self.delete_tracker_references(ctx, subject_id.clone())
+                    .await?;
+
+                debug!(
+                    msg_type = "DeleteTrackerReferences",
+                    subject_id = %subject_id,
+                    governance_id = %self.subject_metadata.subject_id,
+                    "Tracker references deleted from governance"
+                );
+
+                Ok(GovernanceResponse::Ok)
+            }
+            GovernanceMessage::DeleteGovernanceStorage => {
+                self.delete_governance_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "DeleteGovernanceStorage",
+                    governance_id = %self.subject_metadata.subject_id,
+                    "Governance storage deleted"
+                );
+
+                Ok(GovernanceResponse::Ok)
+            }
             GovernanceMessage::UpdateLedger { events } => {
                 let events_count = events.len();
                 if let Err(e) =

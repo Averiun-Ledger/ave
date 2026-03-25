@@ -13,12 +13,17 @@ use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    governance::{Governance, GovernanceMessage, data::GovernanceData},
+    governance::{
+        Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData,
+    },
     helpers::db::ExternalDB,
     model::event::{Protocols, ValidationMetadata},
     node::{Node, NodeMessage, NodeResponse, SubjectData},
     subject::{SignedLedger, SubjectMetadata},
-    tracker::{InitParamsTracker, Tracker, TrackerInit, TrackerMessage},
+    tracker::{
+        InitParamsTracker, Tracker, TrackerInit, TrackerMessage,
+        TrackerResponse,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +40,12 @@ pub enum SubjectManagerMessage {
         subject_id: DigestIdentifier,
         requester: String,
     },
+    DeleteTracker {
+        subject_id: DigestIdentifier,
+    },
+    DeleteGovernance {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -43,6 +54,8 @@ impl Message for SubjectManagerMessage {}
 pub enum SubjectManagerResponse {
     Up,
     Finish,
+    DeleteTracker,
+    DeleteGovernance,
 }
 
 impl Response for SubjectManagerResponse {}
@@ -78,11 +91,15 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         governance_ids: Vec<DigestIdentifier>,
     ) -> Result<(), ActorError> {
-        let Some(ext_db): Option<Arc<ExternalDB>> =
-            ctx.system().get_helper("ext_db").await
-        else {
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
             return Err(ActorError::Helper {
-                name: "ext_db".to_owned(),
+                name: "config".to_owned(),
                 reason: "Not found".to_owned(),
             });
         };
@@ -100,8 +117,19 @@ impl SubjectManager {
                 )
                 .await?;
 
-            let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
-            ctx.system().run_sink(sink).await;
+            if !safe_mode {
+                let Some(ext_db): Option<Arc<ExternalDB>> =
+                    ctx.system().get_helper("ext_db").await
+                else {
+                    return Err(ActorError::Helper {
+                        name: "ext_db".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
+                };
+
+                let sink = Sink::new(actor.subscribe(), ext_db.get_subject());
+                ctx.system().run_sink(sink).await;
+            }
         }
 
         Ok(())
@@ -162,6 +190,199 @@ impl SubjectManager {
         self.subjects.remove(&subject_id);
 
         Ok(())
+    }
+
+    async fn delete_tracker(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        let tracker = match ctx
+            .create_child(
+                &subject_id.to_string(),
+                Tracker::initial(InitParamsTracker {
+                    data: None,
+                    hash: self.hash,
+                    is_service: self.is_service,
+                    public_key: self.our_key.clone(),
+                }),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<Tracker>(&subject_id.to_string()).await {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors.push(format!("tracker lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("tracker: {error}"));
+                None
+            }
+        };
+
+        if let Some(tracker) = tracker {
+            match tracker.ask(TrackerMessage::PurgeStorage).await {
+                Ok(TrackerResponse::Ok) => {}
+                Ok(other) => cleanup_errors
+                    .push(format!("tracker: unexpected response {other:?}")),
+                Err(error) => cleanup_errors.push(format!("tracker: {error}")),
+            }
+
+            if let Err(error) = tracker.ask_stop().await {
+                cleanup_errors.push(format!("tracker stop: {error}"));
+            }
+        }
+
+        self.subjects.remove(&subject_id);
+
+        let governance_id = match ctx.get_parent::<Node>().await {
+            Ok(node) => match node
+                .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+                .await
+            {
+                Ok(NodeResponse::SubjectData(Some(SubjectData::Tracker {
+                    governance_id,
+                    ..
+                }))) => Some(governance_id),
+                Ok(NodeResponse::SubjectData(Some(
+                    SubjectData::Governance { .. },
+                ))) => {
+                    cleanup_errors.push(format!(
+                        "subject '{}' is governance, not tracker",
+                        subject_id
+                    ));
+                    None
+                }
+                Ok(NodeResponse::SubjectData(None)) => {
+                    cleanup_errors.push(format!(
+                        "subject '{}' not found in node",
+                        subject_id
+                    ));
+                    None
+                }
+                Ok(other) => {
+                    cleanup_errors
+                        .push(format!("node: unexpected response {other:?}"));
+                    None
+                }
+                Err(error) => {
+                    cleanup_errors.push(format!("node: {error}"));
+                    None
+                }
+            },
+            Err(error) => {
+                cleanup_errors.push(format!("node parent: {error}"));
+                None
+            }
+        };
+
+        if let Some(governance_id) = governance_id {
+            match ctx
+                .get_child::<Governance>(&governance_id.to_string())
+                .await
+            {
+                Ok(governance) => {
+                    match governance
+                        .ask(GovernanceMessage::DeleteTrackerReferences {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(GovernanceResponse::Ok) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "governance: unexpected response {other:?}"
+                        )),
+                        Err(error) => {
+                            cleanup_errors.push(format!("governance: {error}"))
+                        }
+                    }
+                }
+                Err(error) => {
+                    cleanup_errors.push(format!("governance lookup: {error}"));
+                }
+            }
+        }
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
+    }
+
+    async fn delete_governance(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        let governance = match ctx
+            .create_child(
+                &subject_id.to_string(),
+                Governance::initial((
+                    None,
+                    self.our_key.clone(),
+                    self.hash,
+                    self.is_service,
+                )),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx.get_child::<Governance>(&subject_id.to_string()).await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("governance lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("governance: {error}"));
+                None
+            }
+        };
+
+        if let Some(governance) = governance {
+            match governance
+                .ask(GovernanceMessage::DeleteGovernanceStorage)
+                .await
+            {
+                Ok(GovernanceResponse::Ok) => {}
+                Ok(other) => cleanup_errors
+                    .push(format!("governance: unexpected response {other:?}")),
+                Err(error) => {
+                    cleanup_errors.push(format!("governance: {error}"))
+                }
+            }
+
+            if let Err(error) = governance.ask_stop().await {
+                cleanup_errors.push(format!("governance stop: {error}"));
+            }
+        }
+
+        self.subjects.remove(&subject_id);
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
     }
 
     async fn load_tracker(
@@ -321,6 +542,23 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Tracker>,
     ) -> Result<(), ActorError> {
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            return Ok(());
+        }
+
         let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
@@ -340,6 +578,23 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Governance>,
     ) -> Result<(), ActorError> {
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
+        {
+            config.safe_mode
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        if safe_mode {
+            return Ok(());
+        }
+
         let Some(ext_db): Option<Arc<ExternalDB>> =
             ctx.system().get_helper("ext_db").await
         else {
@@ -437,6 +692,22 @@ impl Handler<Self> for SubjectManager {
                 );
                 self.finish(ctx, subject_id, requester).await?;
                 Ok(SubjectManagerResponse::Finish)
+            }
+            SubjectManagerMessage::DeleteTracker { subject_id } => {
+                debug!(
+                    subject_id = %subject_id,
+                    "Tracker delete requested"
+                );
+                self.delete_tracker(ctx, subject_id).await?;
+                Ok(SubjectManagerResponse::DeleteTracker)
+            }
+            SubjectManagerMessage::DeleteGovernance { subject_id } => {
+                debug!(
+                    subject_id = %subject_id,
+                    "Governance delete requested"
+                );
+                self.delete_governance(ctx, subject_id).await?;
+                Ok(SubjectManagerResponse::DeleteGovernance)
             }
         }
     }
