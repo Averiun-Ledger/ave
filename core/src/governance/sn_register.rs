@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::CeilingMap;
-use crate::{db::Storable, model::common::emit_fail};
+use crate::{db::Storable, model::common::{emit_fail, purge_storage}};
 
 #[derive(
     Clone,
@@ -49,6 +49,7 @@ pub struct SnRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
+    PurgeStorage,
     DeleteSubject {
         subject_id: DigestIdentifier,
     },
@@ -65,7 +66,10 @@ pub enum SnRegisterMessage {
 
 impl Message for SnRegisterMessage {
     fn is_critical(&self) -> bool {
-        matches!(self, Self::RegisterSn { .. } | Self::DeleteSubject { .. })
+        matches!(
+            self,
+            Self::PurgeStorage | Self::RegisterSn { .. } | Self::DeleteSubject { .. }
+        )
     }
 }
 
@@ -141,6 +145,16 @@ impl Handler<Self> for SnRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SnRegisterResponse, ActorError> {
         match msg {
+            SnRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Sn register storage purged"
+                );
+
+                Ok(SnRegisterResponse::Ok)
+            }
             SnRegisterMessage::DeleteSubject { subject_id } => {
                 self.on_event(
                     SnRegisterEvent::DeleteSubject {

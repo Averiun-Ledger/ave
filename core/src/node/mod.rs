@@ -288,6 +288,25 @@ impl Node {
         self.reject_subjects.remove(subject_id);
     }
 
+    fn governance_trackers(
+        &self,
+        governance_id: &DigestIdentifier,
+    ) -> Vec<DigestIdentifier> {
+        self.owned_subjects
+            .iter()
+            .chain(self.known_subjects.iter())
+            .filter_map(|(subject_id, data)| match data {
+                SubjectData::Tracker {
+                    governance_id: tracker_governance_id,
+                    ..
+                } if tracker_governance_id == governance_id => {
+                    Some(subject_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn sign<T: BorshSerialize>(
         &self,
         content: &T,
@@ -648,6 +667,7 @@ pub enum NodeMessage {
         data: SubjectData,
     },
     GetSubjectData(DigestIdentifier),
+    GovernanceTrackers(DigestIdentifier),
     DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
@@ -680,6 +700,7 @@ pub enum NodeResponse {
     Governances(Vec<DigestIdentifier>),
     SinkEvents(SinkEventsPage),
     SubjectData(Option<SubjectData>),
+    GovernanceTrackers(Vec<DigestIdentifier>),
     PendingTransfers(Vec<TransferSubject>),
     SignRequest(Signature),
     IOwnerNewOwner {
@@ -1020,6 +1041,18 @@ impl Handler<Self> for Node {
                 );
 
                 Ok(NodeResponse::SubjectData(data))
+            }
+            NodeMessage::GovernanceTrackers(governance_id) => {
+                let trackers = self.governance_trackers(&governance_id);
+
+                debug!(
+                    msg_type = "GovernanceTrackers",
+                    governance_id = %governance_id,
+                    count = trackers.len(),
+                    "Governance tracker association check completed"
+                );
+
+                Ok(NodeResponse::GovernanceTrackers(trackers))
             }
             NodeMessage::DeleteSubject(subject_id) => {
                 self.on_event(

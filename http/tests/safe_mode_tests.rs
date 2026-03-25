@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use ave_bridge::ave_common::identity::{KeyPair, keys::Ed25519Signer};
 use futures::future::join_all;
@@ -20,28 +20,32 @@ const MEMBER_PUBLIC_KEY: &str =
     "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
 
 fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
-    match (method, path) {
-        ("get", "/request") | ("get", "/request/{request_id}") => true,
-        ("get", _) => true,
-        ("post", "/request")
-        | ("post", "/request-abort/{subject_id}")
-        | ("post", "/update/{subject_id}")
-        | ("post", "/manual-distribution/{subject_id}")
-        | ("put", "/auth/{subject_id}")
-        | ("delete", "/auth/{subject_id}")
-        | ("delete", "/maintenance/subjects/{subject_id}")
-        | ("patch", "/approval/{subject_id}") => true,
-        _ => false,
-    }
+    matches!(
+        (method, path),
+        ("get", "/request")
+            | ("get", "/request/{request_id}")
+            | ("get", _)
+            | ("post", "/request")
+            | ("post", "/request-abort/{subject_id}")
+            | ("post", "/update/{subject_id}")
+            | ("post", "/manual-distribution/{subject_id}")
+            | ("put", "/auth/{subject_id}")
+            | ("delete", "/auth/{subject_id}")
+            | ("delete", "/maintenance/subjects/{subject_id}")
+            | ("patch", "/approval/{subject_id}")
+    )
 }
 
 fn safe_mode_auth_route_classified(method: &str, path: &str) -> bool {
-    match (method, path) {
-        ("post", "/login") => true,
-        ("get", _) => true,
-        ("post", _) | ("put", _) | ("patch", _) | ("delete", _) => true,
-        _ => false,
-    }
+    matches!(
+        (method, path),
+        ("post", "/login")
+            | ("get", _)
+            | ("post", _)
+            | ("put", _)
+            | ("patch", _)
+            | ("delete", _)
+    )
 }
 
 
@@ -87,6 +91,19 @@ struct TrackerDeleteEnv {
     server: TestServer,
     _dirs: Vec<tempfile::TempDir>,
     fixture: TrackerDeleteFixture,
+}
+
+#[derive(Debug)]
+struct GovernanceDeleteFixture {
+    governance_id: String,
+    tracker_ids: Vec<String>,
+    auth_witness: String,
+}
+
+struct GovernanceDeleteEnv {
+    server: TestServer,
+    _dirs: Vec<tempfile::TempDir>,
+    fixture: GovernanceDeleteFixture,
 }
 
 
@@ -247,11 +264,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         node_type: "Bootstrap".to_string(),
         persistence: None,
     };
-    let Some((server, dirs)) =
-        TestServer::build_with_options(normal_options).await
-    else {
-        return None;
-    };
+    let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
     let client = Client::new();
     let pending_member_public_key =
@@ -335,11 +348,7 @@ async fn setup_node_env_without_auth() -> Option<NodeEnv> {
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
     };
-    let Some((safe_server, _)) =
-        TestServer::build_with_options(safe_options).await
-    else {
-        return None;
-    };
+    let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 
     wait_network_running(&client, &safe_server, None).await;
 
@@ -363,11 +372,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         node_type: "Bootstrap".to_string(),
         persistence: None,
     };
-    let Some((server, dirs)) =
-        TestServer::build_with_options(normal_options).await
-    else {
-        return None;
-    };
+    let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
     let client = Client::new();
     let admin_api_key = login(&server, &client, "admin", "AdminPass123!")
@@ -510,11 +515,7 @@ async fn setup_auth_env_with_auth() -> Option<AuthEnv> {
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
     };
-    let Some((safe_server, _)) =
-        TestServer::build_with_options(safe_options).await
-    else {
-        return None;
-    };
+    let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 
     let safe_admin_api_key = login(
         &safe_server,
@@ -554,11 +555,7 @@ async fn setup_tracker_delete_env_without_auth(
         node_type: "Bootstrap".to_string(),
         persistence: None,
     };
-    let Some((server, dirs)) =
-        TestServer::build_with_options(normal_options).await
-    else {
-        return None;
-    };
+    let (server, dirs) = TestServer::build_with_options(normal_options).await?;
 
     let client = Client::new();
     let auth_witness = KeyPair::Ed25519(Ed25519Signer::generate().ok()?)
@@ -705,11 +702,7 @@ async fn setup_tracker_delete_env_without_auth(
         node_type: "Addressable".to_string(),
         persistence: Some(persistence),
     };
-    let Some((safe_server, _)) =
-        TestServer::build_with_options(safe_options).await
-    else {
-        return None;
-    };
+    let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
 
     wait_network_running(&client, &safe_server, None).await;
 
@@ -722,6 +715,125 @@ async fn setup_tracker_delete_env_without_auth(
             second_tracker_id,
             auth_witness,
             transfer_owner,
+        },
+    })
+}
+
+async fn setup_governance_delete_env_without_auth(
+    tracker_count: usize,
+) -> Option<GovernanceDeleteEnv> {
+    let normal_options = TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        node: None,
+        safe_mode: false,
+        node_type: "Bootstrap".to_string(),
+        persistence: None,
+    };
+    let (server, dirs) = TestServer::build_with_options(normal_options).await?;
+
+    let client = Client::new();
+    let auth_witness = KeyPair::Ed25519(Ed25519Signer::generate().ok()?)
+        .public_key()
+        .to_string();
+
+    let governance_body = create_governance(&client, &server, None).await;
+    let governance_id = governance_body["subject_id"].as_str()?.to_string();
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        governance_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/auth/{governance_id}")),
+        "PUT",
+        None,
+        Some(json!([auth_witness])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let schema_body = add_example_schema_to_governance(
+        &client,
+        &server,
+        None,
+        &governance_id,
+        MEMBER_PUBLIC_KEY,
+    )
+    .await;
+    wait_request_finish(
+        &client,
+        &server,
+        None,
+        schema_body["request_id"].as_str()?,
+    )
+    .await;
+
+    let mut tracker_ids = Vec::new();
+    for index in 0..tracker_count {
+        let tracker_body = create_subject(
+            &client,
+            &server,
+            None,
+            &governance_id,
+            "Example1",
+            &format!("Governance Delete Tracker {}", index + 1),
+        )
+        .await;
+        let tracker_id = tracker_body["subject_id"].as_str()?.to_string();
+        wait_request_finish(
+            &client,
+            &server,
+            None,
+            tracker_body["request_id"].as_str()?,
+        )
+        .await;
+
+        let fact_body = add_tracker_fact_mod_one(
+            &client,
+            &server,
+            None,
+            &tracker_id,
+            (index as u32) + 1,
+        )
+        .await;
+        wait_request_finish(
+            &client,
+            &server,
+            None,
+            fact_body["request_id"].as_str()?,
+        )
+        .await;
+
+        tracker_ids.push(tracker_id);
+    }
+
+    let persistence = TestPersistencePaths::from_tempdirs(&dirs);
+    server.shutdown().await;
+
+    let safe_options = TestServerOptions {
+        enable_auth: false,
+        always_accept: true,
+        node: Some(("12D3KooWNode1".to_string(), 65535)),
+        safe_mode: true,
+        node_type: "Addressable".to_string(),
+        persistence: Some(persistence),
+    };
+    let (safe_server, _) = TestServer::build_with_options(safe_options).await?;
+
+    wait_network_running(&client, &safe_server, None).await;
+
+    Some(GovernanceDeleteEnv {
+        server: safe_server,
+        _dirs: dirs,
+        fixture: GovernanceDeleteFixture {
+            governance_id,
+            tracker_ids,
+            auth_witness,
         },
     })
 }
@@ -1005,27 +1117,18 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        body["error"]
-            .as_str()
+        body.as_str()
             .unwrap_or_default()
-            .contains("governance deletion is not implemented yet")
+            .contains("Governance deleted successfully")
     );
-
-    let mut missing_subject_id = fixture.tracker_id.clone();
-    let replacement = if missing_subject_id.ends_with('A') {
-        'B'
-    } else {
-        'A'
-    };
-    missing_subject_id.pop();
-    missing_subject_id.push(replacement);
 
     let (status, body) = make_request(
         &client,
         &env.server.url(&format!(
-            "/maintenance/subjects/{missing_subject_id}"
+            "/maintenance/subjects/{}",
+            fixture.governance_id
         )),
         "DELETE",
         None,
@@ -1347,11 +1450,11 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
 
     let statuses: Vec<_> = responses.iter().map(|response| response.status()).collect();
     assert!(
-        statuses.iter().any(|status| *status == StatusCode::OK),
+        statuses.contains(&StatusCode::OK),
         "expected at least one delete to succeed, got {statuses:?}"
     );
     assert!(
-        statuses.iter().any(|status| *status == StatusCode::CONFLICT),
+        statuses.contains(&StatusCode::CONFLICT),
         "expected at least one delete to be rejected while another is in progress, got {statuses:?}"
     );
 
@@ -1381,6 +1484,204 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     assert_eq!(status, StatusCode::OK, "{body}");
     let transfers = body.as_array().cloned().unwrap_or_default();
     assert!(transfers.iter().all(|item| item["subject_id"] != fixture.tracker_id));
+}
+
+#[test(tokio::test)]
+async fn safe_mode_governance_delete_lists_pending_trackers() {
+    let Some(env) = setup_governance_delete_env_without_auth(3).await else {
+        return;
+    };
+    let client = Client::new();
+    let fixture = &env.fixture;
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/state/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["subject_id"], json!(fixture.governance_id));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/subjects/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subjects = body.as_array().cloned().unwrap_or_default();
+    assert_eq!(subjects.len(), fixture.tracker_ids.len(), "{body}");
+    for tracker_id in &fixture.tracker_ids {
+        assert!(subjects.iter().any(|item| item["subject_id"] == *tracker_id));
+    }
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/events/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body["events"].as_array().cloned().unwrap_or_default().is_empty(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/sink-events/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body["events"].as_array().cloned().unwrap_or_default().is_empty(), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/auth/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let witnesses = body.as_array().cloned().unwrap_or_default();
+    assert!(witnesses.iter().any(|value| value == &json!(fixture.auth_witness)));
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.governance_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still has trackers associated"),
+        "{body}"
+    );
+
+    let returned_trackers = body["trackers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    let expected_trackers = fixture
+        .tracker_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    assert_eq!(returned_trackers, expected_trackers, "{body}");
+}
+
+#[test(tokio::test)]
+async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted() {
+    let Some(env) = setup_governance_delete_env_without_auth(3).await else {
+        return;
+    };
+    let client = Client::new();
+    let fixture = &env.fixture;
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/subjects"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let governances = body.as_array().cloned().unwrap_or_default();
+    assert!(governances.iter().any(|item| item["governance_id"] == fixture.governance_id));
+
+    for tracker_id in &fixture.tracker_ids {
+        let (status, body) = make_request(
+            &client,
+            &env.server.url(&format!("/maintenance/subjects/{tracker_id}")),
+            "DELETE",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tracker_id}: {body}");
+    }
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!(
+            "/maintenance/subjects/{}",
+            fixture.governance_id
+        )),
+        "DELETE",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let message = body.as_str().unwrap_or_default().to_ascii_lowercase();
+    assert!(message.contains("governance deleted successfully"), "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/state/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url(&format!("/subjects/{}", fixture.governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &env.server.url("/subjects"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let governances = body.as_array().cloned().unwrap_or_default();
+    assert!(governances.iter().all(|item| item["governance_id"] != fixture.governance_id));
+
+    assert_sink_events_endpoint_missing(
+        &client,
+        &env.server,
+        &fixture.governance_id,
+    )
+    .await;
+    assert_events_endpoint_missing_or_empty(
+        &client,
+        &env.server,
+        &fixture.governance_id,
+    )
+    .await;
+    assert_auth_endpoint_missing(&client, &env.server, &fixture.governance_id)
+        .await;
 }
 
 #[test(tokio::test)]

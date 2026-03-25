@@ -6,7 +6,7 @@ use crate::governance::sn_register::{
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
-use crate::model::common::{Interval, IntervalSet, emit_fail};
+use crate::model::common::{Interval, IntervalSet, emit_fail, purge_storage};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
@@ -99,6 +99,7 @@ pub struct OldOwnerData {
 
 #[derive(Debug, Clone)]
 pub enum WitnessesRegisterMessage {
+    PurgeStorage,
     GetSnGov,
     GetTrackerSnCreator {
         subject_id: DigestIdentifier,
@@ -167,7 +168,8 @@ impl Message for WitnessesRegisterMessage {
     fn is_critical(&self) -> bool {
         matches!(
             self,
-            Self::UpdateCreatorsWitnessesFact { .. }
+            Self::PurgeStorage
+                | Self::UpdateCreatorsWitnessesFact { .. }
                 | Self::UpdateCreatorsWitnessesConfirm { .. }
                 | Self::UpdateSn { .. }
                 | Self::UpdateSnGov { .. }
@@ -831,6 +833,16 @@ impl Handler<Self> for WitnessesRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<WitnessesRegisterResponse, ActorError> {
         match msg {
+            WitnessesRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Witnesses register storage purged"
+                );
+
+                return Ok(WitnessesRegisterResponse::Ok);
+            }
             WitnessesRegisterMessage::ListCurrentWitnessSubjects {
                 node,
                 governance_version,

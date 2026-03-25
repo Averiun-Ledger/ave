@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     governance::model::Quorum,
-    model::common::{CeilingMap, Interval, IntervalSet, emit_fail},
+    model::common::{
+        CeilingMap, Interval, IntervalSet, emit_fail, purge_storage,
+    },
 };
 use async_trait::async_trait;
 use ave_actors::{
@@ -125,6 +127,7 @@ pub struct CurrentValidationRoles {
 
 #[derive(Debug, Clone)]
 pub enum RoleRegisterMessage {
+    PurgeStorage,
     GetCurrentValidationRoles {
         schema_id: SchemaType,
     },
@@ -173,7 +176,8 @@ impl Message for RoleRegisterMessage {
     fn is_critical(&self) -> bool {
         matches!(
             self,
-            Self::UpdateVersion { .. }
+            Self::PurgeStorage
+                | Self::UpdateVersion { .. }
                 | Self::UpdateFact { .. }
                 | Self::UpdateConfirm { .. }
         )
@@ -275,6 +279,16 @@ impl Handler<Self> for RoleRegister {
         ctx: &mut ActorContext<Self>,
     ) -> Result<RoleRegisterResponse, ActorError> {
         match msg {
+            RoleRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Role register storage purged"
+                );
+
+                Ok(RoleRegisterResponse::Ok)
+            }
             RoleRegisterMessage::GetCurrentValidationRoles { schema_id } => {
                 let approval = RoleDataRegister {
                     workers: self.approvers.clone(),

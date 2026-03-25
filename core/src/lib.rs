@@ -184,6 +184,101 @@ impl Api {
         Ok(())
     }
 
+    async fn subject_data(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Result<node::SubjectData, Error> {
+        let response = self
+            .node
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+            .await
+            .map_err(|e| actor_communication_error("node", e))?;
+
+        let NodeResponse::SubjectData(subject_data) = response else {
+            return Err(Error::UnexpectedResponse {
+                actor: "node".to_string(),
+                expected: "NodeResponse::SubjectData".to_string(),
+                received: "other".to_string(),
+            });
+        };
+
+        subject_data.ok_or_else(|| Error::SubjectNotFound(subject_id.to_string()))
+    }
+
+    async fn governance_trackers(
+        &self,
+        governance_id: &DigestIdentifier,
+    ) -> Result<Vec<DigestIdentifier>, Error> {
+        let response = self
+            .node
+            .ask(NodeMessage::GovernanceTrackers(governance_id.clone()))
+            .await
+            .map_err(|e| actor_communication_error("node", e))?;
+
+        let NodeResponse::GovernanceTrackers(trackers) = response else {
+            return Err(Error::UnexpectedResponse {
+                actor: "node".to_string(),
+                expected: "NodeResponse::GovernanceTrackers".to_string(),
+                received: "other".to_string(),
+            });
+        };
+
+        Ok(trackers)
+    }
+
+    async fn purge_common_subject_state(
+        &self,
+        subject_id: &DigestIdentifier,
+        cleanup_errors: &mut Vec<String>,
+    ) {
+        match self
+            .request
+            .ask(RequestHandlerMessage::PurgeSubject {
+                subject_id: subject_id.clone(),
+            })
+            .await
+        {
+            Ok(RequestHandlerResponse::None) => {}
+            Ok(other) => cleanup_errors
+                .push(format!("request: unexpected response {other:?}")),
+            Err(err) => cleanup_errors.push(format!("request: {err}")),
+        }
+
+        match self
+            .auth
+            .ask(AuthMessage::DeleteAuth {
+                subject_id: subject_id.clone(),
+            })
+            .await
+        {
+            Ok(AuthResponse::None) => {}
+            Ok(other) => cleanup_errors
+                .push(format!("auth: unexpected response {other:?}")),
+            Err(err) => cleanup_errors.push(format!("auth: {err}")),
+        }
+
+        if let Err(err) = self.db.delete_subject(&subject_id.to_string()).await {
+            cleanup_errors.push(format!("external_db: {err}"));
+        }
+    }
+
+    async fn delete_subject_from_node(
+        &self,
+        subject_id: &DigestIdentifier,
+        cleanup_errors: &mut Vec<String>,
+    ) {
+        match self
+            .node
+            .ask(NodeMessage::DeleteSubject(subject_id.clone()))
+            .await
+        {
+            Ok(NodeResponse::Ok) => {}
+            Ok(other) => cleanup_errors
+                .push(format!("node: unexpected response {other:?}")),
+            Err(err) => cleanup_errors.push(format!("node: {err}")),
+        }
+    }
+
     /// Creates a new `Api`.
     pub async fn build(
         keys: KeyPair,
@@ -911,23 +1006,7 @@ impl Api {
         self.begin_subject_deletion(&subject_id).await?;
 
         let result = async {
-            let node_response = self
-                .node
-                .ask(NodeMessage::GetSubjectData(subject_id.clone()))
-                .await
-                .map_err(|e| actor_communication_error("node", e))?;
-
-            let NodeResponse::SubjectData(subject_data) = node_response else {
-                return Err(Error::UnexpectedResponse {
-                    actor: "node".to_string(),
-                    expected: "NodeResponse::SubjectData".to_string(),
-                    received: "other".to_string(),
-                });
-            };
-
-            let Some(subject_data) = subject_data else {
-                return Err(Error::SubjectNotFound(subject_id.to_string()));
-            };
+            let subject_data = self.subject_data(&subject_id).await?;
 
             match subject_data {
                 node::SubjectData::Governance { .. } => {
@@ -936,10 +1015,59 @@ impl Api {
                         subject_type = "governance",
                         "Deleting subject"
                     );
-                    Err(Error::NotImplemented(
-                        "governance deletion is not implemented yet"
-                            .to_string(),
-                    ))
+                    let trackers = self.governance_trackers(&subject_id).await?;
+                    if !trackers.is_empty() {
+                        return Err(Error::GovernanceHasTrackers {
+                            governance_id: subject_id.to_string(),
+                            trackers: trackers
+                                .into_iter()
+                                .map(|tracker| tracker.to_string())
+                                .collect(),
+                        });
+                    }
+                    let mut cleanup_errors = Vec::new();
+
+                    match self
+                        .subject_manager
+                        .ask(SubjectManagerMessage::DeleteGovernance {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(SubjectManagerResponse::DeleteGovernance) => {}
+                        Ok(other) => cleanup_errors.push(format!(
+                            "subject_manager: unexpected response {other:?}"
+                        )),
+                        Err(err) => cleanup_errors
+                            .push(format!("subject_manager: {err}")),
+                    }
+
+                    self.purge_common_subject_state(
+                        &subject_id,
+                        &mut cleanup_errors,
+                    )
+                    .await;
+
+                    self
+                        .delete_subject_from_node(
+                            &subject_id,
+                            &mut cleanup_errors,
+                        )
+                        .await;
+
+                    if cleanup_errors.is_empty() {
+                        info!(
+                            subject_id = %subject_id,
+                            subject_type = "governance",
+                            "Subject deleted successfully"
+                        );
+                        Ok("Governance deleted successfully".to_owned())
+                    } else {
+                        Err(Error::Internal(format!(
+                            "governance deletion completed partially: {}",
+                            cleanup_errors.join("; ")
+                        )))
+                    }
                 }
                 node::SubjectData::Tracker { .. } => {
                     info!(
@@ -949,39 +1077,11 @@ impl Api {
                     );
                     let mut cleanup_errors = Vec::new();
 
-                    match self
-                        .request
-                        .ask(RequestHandlerMessage::PurgeSubject {
-                            subject_id: subject_id.clone(),
-                        })
-                        .await
-                    {
-                        Ok(RequestHandlerResponse::None) => {}
-                        Ok(other) => cleanup_errors.push(format!(
-                            "request: unexpected response {other:?}"
-                        )),
-                        Err(err) => cleanup_errors.push(format!("request: {err}")),
-                    }
-
-                    match self
-                        .auth
-                        .ask(AuthMessage::DeleteAuth {
-                            subject_id: subject_id.clone(),
-                        })
-                        .await
-                    {
-                        Ok(AuthResponse::None) => {}
-                        Ok(other) => cleanup_errors.push(format!(
-                            "auth: unexpected response {other:?}"
-                        )),
-                        Err(err) => cleanup_errors.push(format!("auth: {err}")),
-                    }
-
-                    if let Err(err) =
-                        self.db.delete_subject(&subject_id.to_string()).await
-                    {
-                        cleanup_errors.push(format!("external_db: {err}"));
-                    }
+                    self.purge_common_subject_state(
+                        &subject_id,
+                        &mut cleanup_errors,
+                    )
+                    .await;
 
                     match self
                         .subject_manager
@@ -998,19 +1098,12 @@ impl Api {
                             .push(format!("subject_manager: {err}")),
                     }
 
-                    match self
-                        .node
-                        .ask(NodeMessage::DeleteSubject(subject_id.clone()))
-                        .await
-                    {
-                        Ok(NodeResponse::Ok) => {}
-                        Ok(other) => cleanup_errors.push(format!(
-                            "node: unexpected response {other:?}"
-                        )),
-                        Err(err) => {
-                            cleanup_errors.push(format!("node: {err}"))
-                        }
-                    }
+                    self
+                        .delete_subject_from_node(
+                            &subject_id,
+                            &mut cleanup_errors,
+                        )
+                        .await;
 
                     if cleanup_errors.is_empty() {
                         info!(

@@ -43,6 +43,9 @@ pub enum SubjectManagerMessage {
     DeleteTracker {
         subject_id: DigestIdentifier,
     },
+    DeleteGovernance {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -52,6 +55,7 @@ pub enum SubjectManagerResponse {
     Up,
     Finish,
     DeleteTracker,
+    DeleteGovernance,
 }
 
 impl Response for SubjectManagerResponse {}
@@ -305,6 +309,75 @@ impl SubjectManager {
                 }
             }
         }
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            })
+        }
+    }
+
+    async fn delete_governance(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        let mut cleanup_errors = Vec::new();
+
+        let governance = match ctx
+            .create_child(
+                &subject_id.to_string(),
+                Governance::initial((
+                    None,
+                    self.our_key.clone(),
+                    self.hash,
+                    self.is_service,
+                )),
+            )
+            .await
+        {
+            Ok(actor) => Some(actor),
+            Err(ActorError::Exists { .. }) => {
+                match ctx
+                    .get_child::<Governance>(&subject_id.to_string())
+                    .await
+                {
+                    Ok(actor) => Some(actor),
+                    Err(error) => {
+                        cleanup_errors
+                            .push(format!("governance lookup: {error}"));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("governance: {error}"));
+                None
+            }
+        };
+
+        if let Some(governance) = governance {
+            match governance
+                .ask(GovernanceMessage::DeleteGovernanceStorage)
+                .await
+            {
+                Ok(GovernanceResponse::Ok) => {}
+                Ok(other) => cleanup_errors.push(format!(
+                    "governance: unexpected response {other:?}"
+                )),
+                Err(error) => {
+                    cleanup_errors.push(format!("governance: {error}"))
+                }
+            }
+
+            if let Err(error) = governance.ask_stop().await {
+                cleanup_errors.push(format!("governance stop: {error}"));
+            }
+        }
+
+        self.subjects.remove(&subject_id);
 
         if cleanup_errors.is_empty() {
             Ok(())
@@ -626,6 +699,14 @@ impl Handler<Self> for SubjectManager {
                 );
                 self.delete_tracker(ctx, subject_id).await?;
                 Ok(SubjectManagerResponse::DeleteTracker)
+            }
+            SubjectManagerMessage::DeleteGovernance { subject_id } => {
+                debug!(
+                    subject_id = %subject_id,
+                    "Governance delete requested"
+                );
+                self.delete_governance(ctx, subject_id).await?;
+                Ok(SubjectManagerResponse::DeleteGovernance)
             }
         }
     }

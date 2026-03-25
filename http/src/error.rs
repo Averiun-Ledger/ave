@@ -10,6 +10,8 @@ use serde::Serialize;
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trackers: Option<Vec<String>>,
 }
 
 /// HTTP error type for the Axum API layer.
@@ -27,9 +29,21 @@ impl From<BridgeError> for HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let status = status_for_bridge_error(&self.0);
-        let message = self.0.to_string();
+        let body = match &self.0 {
+            BridgeError::Core(CoreError::GovernanceHasTrackers {
+                trackers,
+                ..
+            }) => ErrorBody {
+                error: self.0.to_string(),
+                trackers: Some(trackers.clone()),
+            },
+            _ => ErrorBody {
+                error: self.0.to_string(),
+                trackers: None,
+            },
+        };
 
-        (status, Json(ErrorBody { error: message })).into_response()
+        (status, Json(body)).into_response()
     }
 }
 
@@ -96,7 +110,8 @@ const fn status_for_core_error(err: &CoreError) -> StatusCode {
         // ── 409 Conflict ───────────────────────────────────────
         CoreError::InvalidRequestState(_)
         | CoreError::InvalidApprovalState(_)
-        | CoreError::SubjectNotActive(_) => StatusCode::CONFLICT,
+        | CoreError::SubjectNotActive(_)
+        | CoreError::GovernanceHasTrackers { .. } => StatusCode::CONFLICT,
 
         // ── 422 Unprocessable Entity ───────────────────────────
         CoreError::RequestProcessing(_)

@@ -14,7 +14,9 @@ use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::CeilingMap;
 use crate::{
-    db::Storable, governance::model::CreatorQuantity, model::common::emit_fail,
+    db::Storable,
+    governance::model::CreatorQuantity,
+    model::common::{emit_fail, purge_storage},
 };
 
 #[derive(
@@ -98,6 +100,7 @@ impl SubjectRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterMessage {
+    PurgeStorage,
     Check {
         creator: PublicKey,
         gov_version: u64,
@@ -136,7 +139,8 @@ pub enum SubjectRegisterMessage {
 impl Message for SubjectRegisterMessage {
     fn is_critical(&self) -> bool {
         match self {
-            Self::RegisterData { .. }
+            Self::PurgeStorage
+            | Self::RegisterData { .. }
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
@@ -222,6 +226,16 @@ impl Handler<Self> for SubjectRegister {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<SubjectRegisterResponse, ActorError> {
         match msg {
+            SubjectRegisterMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    "Subject register storage purged"
+                );
+
+                return Ok(SubjectRegisterResponse::Ok);
+            }
             SubjectRegisterMessage::GetSubjectsByOwnerSchema {
                 owner,
                 schema_id,

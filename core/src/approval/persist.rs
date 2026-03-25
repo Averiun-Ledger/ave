@@ -7,7 +7,7 @@ use crate::{
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
     model::common::{
-        emit_fail,
+        emit_fail, purge_storage,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
         subject::get_metadata,
     },
@@ -283,6 +283,7 @@ impl ApprPersist {
 #[derive(Debug, Clone)]
 pub enum ApprPersistMessage {
     MakeObsolete,
+    PurgeStorage,
     // Mensaje para aprobar localmente
     LocalApproval {
         request_id: DigestIdentifier,
@@ -305,7 +306,7 @@ pub enum ApprPersistMessage {
 
 impl Message for ApprPersistMessage {
     fn is_critical(&self) -> bool {
-        matches!(self, Self::MakeObsolete)
+        matches!(self, Self::MakeObsolete | Self::PurgeStorage)
     }
 }
 
@@ -378,6 +379,17 @@ impl Handler<Self> for ApprPersist {
         ctx: &mut ActorContext<Self>,
     ) -> Result<ApprPersistResponse, ActorError> {
         match msg {
+            ApprPersistMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeStorage",
+                    subject_id = %self.subject_id,
+                    "Approval storage purged"
+                );
+
+                return Ok(ApprPersistResponse::Ok);
+            }
             ApprPersistMessage::GetApproval { state } => {
                 let res = if let Some(req) = &self.request
                     && let Some(req_state) = &self.state

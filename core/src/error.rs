@@ -87,6 +87,13 @@ pub enum Error {
     #[error("Governance '{0}' not found")]
     GovernanceNotFound(String),
 
+    /// Governance still has trackers associated and cannot be deleted.
+    #[error("Governance '{governance_id}' still has trackers associated")]
+    GovernanceHasTrackers {
+        governance_id: String,
+        trackers: Vec<String>,
+    },
+
     /// Invalid subject identifier.
     #[error("Invalid subject identifier: {0}")]
     InvalidSubjectId(String),
