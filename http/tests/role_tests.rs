@@ -424,11 +424,8 @@ async fn execute_role_endpoint(
     method: &str,
     path: &str,
 ) -> StatusCode {
-    let url = format!(
-        "{}{}",
-        base_url,
-        materialize_role_test_path(method, path)
-    );
+    let url =
+        format!("{}{}", base_url, materialize_role_test_path(method, path));
     let body = role_test_request_body(method, path);
 
     let request = match method {

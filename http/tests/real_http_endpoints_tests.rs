@@ -11,8 +11,8 @@ use serde_json::json;
 
 use crate::common::{
     TestApp, login_app, make_app_request, materialize_role_test_path,
-    role_test_request_body,
-    server_auth_route_catalog, server_public_auth_route_catalog,
+    role_test_request_body, server_auth_route_catalog,
+    server_public_auth_route_catalog,
 };
 use test_log::test;
 

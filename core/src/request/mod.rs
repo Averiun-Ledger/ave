@@ -772,9 +772,8 @@ impl RequestHandler {
     ) -> Result<(), ActorError> {
         let Some((hash, network)) = self.helpers.clone() else {
             return Err(ActorError::FunctionalCritical {
-                description:
-                    "Request handler helpers are not initialized"
-                        .to_string(),
+                description: "Request handler helpers are not initialized"
+                    .to_string(),
             });
         };
 
@@ -910,7 +909,8 @@ impl Actor for RequestHandler {
             return Err(e);
         }
 
-        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
         else {
             error!(
                 helper = "config",
@@ -934,7 +934,10 @@ impl Actor for RequestHandler {
             };
 
             let tracking = match ctx
-                .create_child("tracking", RequestTracking::new(config.tracking_size))
+                .create_child(
+                    "tracking",
+                    RequestTracking::new(config.tracking_size),
+                )
                 .await
             {
                 Ok(actor) => actor,

@@ -131,8 +131,8 @@ where
         RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
         _ => Err(ActorError::UnexpectedResponse {
             path,
-            expected:
-                "RolesRegisterResponse::CurrentValidationRoles".to_string(),
+            expected: "RolesRegisterResponse::CurrentValidationRoles"
+                .to_string(),
         }),
     }
 }

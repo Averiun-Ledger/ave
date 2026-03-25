@@ -19,10 +19,7 @@ use ave_common::response::{
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{
-        counter::Counter,
-        family::Family,
-        gauge::Gauge,
-        histogram::Histogram,
+        counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
     },
     registry::Registry,
 };
@@ -521,8 +518,7 @@ struct SqliteMetrics {
 #[derive(Debug)]
 struct DbPrometheusMetrics {
     reader_wait_seconds: Histogram,
-    read_query_seconds:
-        Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
+    read_query_seconds: Family<ReadQueryLabels, Histogram, fn() -> Histogram>,
     writer_queue_depth: Gauge,
     writer_batch_size: Histogram,
     writer_batch_duration_seconds: Histogram,
@@ -594,8 +590,8 @@ impl DbPrometheusMetrics {
                 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
             ]),
             writer_batch_duration_seconds: Histogram::new(vec![
-                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-                1.0, 2.0, 5.0,
+                0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+                2.0, 5.0,
             ]),
             writer_batch_retries_total: Counter::default(),
             writer_failures_total: Family::default(),
@@ -1187,7 +1183,7 @@ impl ReadStore for SqliteReadStore {
         self.with_reader("governances", move |conn| {
             get_governances_from_conn(conn, active)
         })
-            .await
+        .await
     }
 
     async fn get_subjects(
@@ -3773,7 +3769,10 @@ mod tests {
         encode(&mut text, &registry).expect("encode metrics");
 
         assert_eq!(
-            metric_value(&text, "external_db_writer_batch_duration_seconds_count"),
+            metric_value(
+                &text,
+                "external_db_writer_batch_duration_seconds_count"
+            ),
             1.0
         );
     }

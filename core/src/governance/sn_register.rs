@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
 use crate::model::common::CeilingMap;
-use crate::{db::Storable, model::common::{emit_fail, purge_storage}};
+use crate::{
+    db::Storable,
+    model::common::{emit_fail, purge_storage},
+};
 
 #[derive(
     Clone,
@@ -68,7 +71,9 @@ impl Message for SnRegisterMessage {
     fn is_critical(&self) -> bool {
         matches!(
             self,
-            Self::PurgeStorage | Self::RegisterSn { .. } | Self::DeleteSubject { .. }
+            Self::PurgeStorage
+                | Self::RegisterSn { .. }
+                | Self::DeleteSubject { .. }
         )
     }
 }
@@ -148,10 +153,7 @@ impl Handler<Self> for SnRegister {
             SnRegisterMessage::PurgeStorage => {
                 purge_storage(ctx).await?;
 
-                debug!(
-                    msg_type = "PurgeStorage",
-                    "Sn register storage purged"
-                );
+                debug!(msg_type = "PurgeStorage", "Sn register storage purged");
 
                 Ok(SnRegisterResponse::Ok)
             }

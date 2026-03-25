@@ -103,19 +103,19 @@ impl Handler<Self> for ContractCompiler {
                             initial_value,
                         )
                         .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!(
-                                msg_type = "Compile",
-                                error = %e,
-                                contract_name = %contract_name,
-                                path = %contract_path.display(),
-                                "Contract compilation or validation failed"
-                            );
-                            return Ok(CompilerResponse::Error(e));
-                        }
-                    };
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "Compile",
+                                    error = %e,
+                                    contract_name = %contract_name,
+                                    path = %contract_path.display(),
+                                    "Contract compilation or validation failed"
+                                );
+                                return Ok(CompilerResponse::Error(e));
+                            }
+                        };
 
                     {
                         let contracts =

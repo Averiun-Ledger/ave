@@ -7,8 +7,9 @@ use crate::{
     governance::data::GovernanceData,
     helpers::network::service::NetworkSender,
     model::common::{
-        emit_fail, purge_storage,
+        emit_fail,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
+        purge_storage,
         subject::get_metadata,
     },
     subject::RequestSubjectData,
@@ -244,14 +245,12 @@ impl ApprPersist {
                 description: "Helpers are None".to_owned(),
             });
         };
-        let approval_req_hash =
-            hash_borsh(&*hash.hasher(), request.content()).map_err(|e| {
-                ActorError::FunctionalCritical {
-                    description: format!(
-                        "Can not obtain approval request hash {}",
-                        e
-                    ),
-                }
+        let approval_req_hash = hash_borsh(&*hash.hasher(), request.content())
+            .map_err(|e| ActorError::FunctionalCritical {
+                description: format!(
+                    "Can not obtain approval request hash {}",
+                    e
+                ),
             })?;
 
         let req_subject_data_hash = hash_borsh(

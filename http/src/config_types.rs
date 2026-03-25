@@ -366,14 +366,8 @@ impl From<ave_bridge::AveConfig> for AveConfigHttp {
                         .sync
                         .tracker
                         .response_timeout_secs,
-                    update_batch_size: value
-                        .sync
-                        .tracker
-                        .update_batch_size,
-                    update_timeout_secs: value
-                        .sync
-                        .tracker
-                        .update_timeout_secs,
+                    update_batch_size: value.sync.tracker.update_batch_size,
+                    update_timeout_secs: value.sync.tracker.update_timeout_secs,
                 },
             },
             spec: value.spec.map(MachineSpecHttp::from),

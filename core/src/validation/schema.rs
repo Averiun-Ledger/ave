@@ -16,8 +16,8 @@ use network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
-    governance::role_register::CurrentSchemaRoles,
     Signed,
+    governance::role_register::CurrentSchemaRoles,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
     model::common::{emit_fail, node::try_to_update},
@@ -90,7 +90,8 @@ impl Handler<Self> for ValidationSchema {
             } => {
                 let observe = |result: &'static str| {
                     if let Some(metrics) = try_core_metrics() {
-                        metrics.observe_schema_event("validation_schema", result);
+                        metrics
+                            .observe_schema_event("validation_schema", result);
                     }
                 };
                 if sender != validation_req.signature().signer {

@@ -61,8 +61,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction,
-    Handler, Message, Response, Sink,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, ChildAction, Handler,
+    Message, Response, Sink,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -548,17 +548,16 @@ impl Governance {
         let i_new_owner =
             self.subject_metadata.new_owner == Some((*self.our_key).clone());
 
-        let node_key =
-            if (owner && self.subject_metadata.new_owner.is_none())
-                || i_new_owner
-            {
-                (*self.our_key).clone()
-            } else {
-                self.subject_metadata
-                    .new_owner
-                    .clone()
-                    .unwrap_or_else(|| self.subject_metadata.owner.clone())
-            };
+        let node_key = if (owner && self.subject_metadata.new_owner.is_none())
+            || i_new_owner
+        {
+            (*self.our_key).clone()
+        } else {
+            self.subject_metadata
+                .new_owner
+                .clone()
+                .unwrap_or_else(|| self.subject_metadata.owner.clone())
+        };
 
         let init_approver = InitApprPersist {
             our_key: self.our_key.clone(),
@@ -591,9 +590,8 @@ impl Governance {
                     "/user/node/subject_manager/{}/role_register",
                     self.subject_metadata.subject_id
                 )),
-                expected:
-                    "RoleRegisterResponse::CurrentValidationRoles"
-                        .to_owned(),
+                expected: "RoleRegisterResponse::CurrentValidationRoles"
+                    .to_owned(),
             }),
         }
     }
@@ -1018,8 +1016,9 @@ impl Governance {
             });
         };
 
-        let contract_register =
-            ctx.get_child::<ContractRegister>("contract_register").await?;
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
 
         let prefix = format!("{}_", self.subject_metadata.subject_id);
         let mut allowed: HashSet<String> = schemas
@@ -1066,15 +1065,18 @@ impl Governance {
             }
         })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not iterate contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
-            }
-        })? {
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not iterate contracts directory {}: {}",
+                        contracts_dir.display(),
+                        e
+                    ),
+                })?
+        {
             let file_name = entry.file_name().to_string_lossy().to_string();
             if !file_name.starts_with(&prefix) {
                 continue;
@@ -1160,15 +1162,18 @@ impl Governance {
             }
         })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not iterate contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
-            }
-        })? {
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not iterate contracts directory {}: {}",
+                        contracts_dir.display(),
+                        e
+                    ),
+                })?
+        {
             let file_name = entry.file_name().to_string_lossy().to_string();
             if file_name.starts_with(&prefix) {
                 let path = entry.path();
@@ -1291,15 +1296,16 @@ impl Governance {
                 network: network.clone(),
                 current_roles: crate::validation::worker::CurrentWorkerRoles {
                     approval: current_roles.approval,
-                    evaluation: crate::governance::role_register::RoleDataRegister {
-                        workers: current_roles
-                            .schema
-                            .evaluation
-                            .iter()
-                            .map(|role| role.key.clone())
-                            .collect(),
-                        quorum: current_roles.schema.evaluation_quorum,
-                    },
+                    evaluation:
+                        crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .evaluation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.evaluation_quorum,
+                        },
                 },
                 stop: false,
             };
@@ -1606,11 +1612,8 @@ impl Governance {
         for (id, schema) in schemas {
             let actor_name = format!("{}_contract_compiler", id);
 
-            let compiler =
-                ctx.create_child(
-                    &actor_name,
-                    ContractCompiler::new(*hash),
-                )
+            let compiler = ctx
+                .create_child(&actor_name, ContractCompiler::new(*hash))
                 .await?;
 
             let Schema {
@@ -1647,7 +1650,8 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config").await
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
         else {
             return Err(ActorError::Helper {
                 name: "config".to_string(),
@@ -1668,8 +1672,9 @@ impl Governance {
             });
         };
 
-        let contract_register =
-            ctx.get_child::<ContractRegister>("contract_register").await?;
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
 
         for schema_id in schemas.iter() {
             let actor = ctx
@@ -1693,10 +1698,8 @@ impl Governance {
                 contracts.remove(&contract_name);
             }
 
-            let contract_path = config
-                .contracts_path
-                .join("contracts")
-                .join(&contract_name);
+            let contract_path =
+                config.contracts_path.join("contracts").join(&contract_name);
             let _ = fs::remove_dir_all(contract_path).await;
         }
 
@@ -2404,7 +2407,8 @@ impl Governance {
                 match ctx.get_child::<SnRegister>("sn_register").await {
                     Ok(actor) => Some(actor),
                     Err(error) => {
-                        cleanup_errors.push(format!("sn_register lookup: {error}"));
+                        cleanup_errors
+                            .push(format!("sn_register lookup: {error}"));
                         None
                     }
                 }
@@ -2469,18 +2473,16 @@ impl Governance {
                 .await
             {
                 Ok(WitnessesRegisterResponse::Ok) => {}
-                Ok(_) => cleanup_errors.push(
-                    "witnesses_register: unexpected response".to_owned(),
-                ),
+                Ok(_) => cleanup_errors
+                    .push("witnesses_register: unexpected response".to_owned()),
                 Err(error) => {
                     cleanup_errors.push(format!("witnesses_register: {error}"))
                 }
             }
 
             if let Err(error) = witnesses_register.ask_stop().await {
-                cleanup_errors.push(format!(
-                    "witnesses_register stop: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("witnesses_register stop: {error}"));
             }
         }
 
@@ -2505,7 +2507,8 @@ impl Governance {
         }) {
             let hash = self.hash.map_or_else(
                 || {
-                    cleanup_errors.push("approver init: missing hash".to_owned());
+                    cleanup_errors
+                        .push("approver init: missing hash".to_owned());
                     None
                 },
                 Some,
@@ -2517,24 +2520,32 @@ impl Governance {
                 .await
                 .map_or_else(
                     || {
-                    cleanup_errors
-                        .push("approver init: missing network helper".to_owned());
-                    None
+                        cleanup_errors.push(
+                            "approver init: missing network helper".to_owned(),
+                        );
+                        None
                     },
                     Some,
                 );
 
             if let (Some(hash), Some(network)) = (hash, network) {
-                let approver = match ctx.get_child::<ApprPersist>("approver").await {
+                let approver = match ctx
+                    .get_child::<ApprPersist>("approver")
+                    .await
+                {
                     Ok(actor) => Some(actor),
                     Err(_) => match self
                         .up_approver_only(ctx, &hash, &network)
                         .await
                     {
-                        Ok(()) => match ctx.get_child::<ApprPersist>("approver").await {
+                        Ok(()) => match ctx
+                            .get_child::<ApprPersist>("approver")
+                            .await
+                        {
                             Ok(actor) => Some(actor),
                             Err(error) => {
-                                cleanup_errors.push(format!("approver lookup: {error}"));
+                                cleanup_errors
+                                    .push(format!("approver lookup: {error}"));
                                 None
                             }
                         },
@@ -2571,7 +2582,10 @@ impl Governance {
         {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<ContractRegister>("contract_register").await {
+                match ctx
+                    .get_child::<ContractRegister>("contract_register")
+                    .await
+                {
                     Ok(actor) => Some(actor),
                     Err(error) => {
                         cleanup_errors
@@ -2587,11 +2601,11 @@ impl Governance {
         };
 
         if let Some(contract_register) = contract_register {
-            if let Err(error) =
-                self.delete_all_contract_artifacts(ctx, &contract_register).await
+            if let Err(error) = self
+                .delete_all_contract_artifacts(ctx, &contract_register)
+                .await
             {
-                cleanup_errors
-                    .push(format!("contract_artifacts: {error}"));
+                cleanup_errors.push(format!("contract_artifacts: {error}"));
             }
 
             match contract_register
@@ -2621,7 +2635,8 @@ impl Governance {
                 match ctx.get_child::<RoleRegister>("role_register").await {
                     Ok(actor) => Some(actor),
                     Err(error) => {
-                        cleanup_errors.push(format!("role_register lookup: {error}"));
+                        cleanup_errors
+                            .push(format!("role_register lookup: {error}"));
                         None
                     }
                 }
@@ -2698,7 +2713,8 @@ impl Governance {
                 match ctx.get_child::<SnRegister>("sn_register").await {
                     Ok(actor) => Some(actor),
                     Err(error) => {
-                        cleanup_errors.push(format!("sn_register lookup: {error}"));
+                        cleanup_errors
+                            .push(format!("sn_register lookup: {error}"));
                         None
                     }
                 }
@@ -2756,18 +2772,16 @@ impl Governance {
                 .await
             {
                 Ok(WitnessesRegisterResponse::Ok) => {}
-                Ok(_) => cleanup_errors.push(
-                    "witnesses_register: unexpected response".to_owned(),
-                ),
+                Ok(_) => cleanup_errors
+                    .push("witnesses_register: unexpected response".to_owned()),
                 Err(error) => {
                     cleanup_errors.push(format!("witnesses_register: {error}"))
                 }
             }
 
             if let Err(error) = witnesses_register.ask_stop().await {
-                cleanup_errors.push(format!(
-                    "witnesses_register stop: {error}"
-                ));
+                cleanup_errors
+                    .push(format!("witnesses_register stop: {error}"));
             }
         }
 

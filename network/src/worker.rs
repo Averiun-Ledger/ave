@@ -1589,8 +1589,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 | SwarmEvent::NewListenAddr { .. }
                 | SwarmEvent::ExpiredListenAddr { .. }
                 | SwarmEvent::ListenerError { .. }
-                | SwarmEvent::Behaviour(BehaviourEvent::ReqresFailure { .. })
-                | SwarmEvent::Behaviour(BehaviourEvent::ClosestPeer { .. })
+                | SwarmEvent::Behaviour(BehaviourEvent::ReqresFailure {
+                    ..
+                })
+                | SwarmEvent::Behaviour(BehaviourEvent::ClosestPeer {
+                    ..
+                })
                 | SwarmEvent::Behaviour(BehaviourEvent::Dummy) => {}
                 _ => {}
             }

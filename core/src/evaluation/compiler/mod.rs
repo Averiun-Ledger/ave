@@ -20,11 +20,11 @@ use tokio::{fs, process::Command, sync::RwLock};
 use tracing::debug;
 use wasmtime::{ExternType, Module, Store};
 
+use crate::metrics::try_core_metrics;
 use crate::model::common::contract::{
     MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime,
     generate_linker,
 };
-use crate::metrics::try_core_metrics;
 
 pub mod contract_compiler;
 pub mod contract_register;
@@ -49,12 +49,7 @@ pub struct ContractResult {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct ContractArtifactRecord {
     pub contract_hash: DigestIdentifier,
@@ -88,7 +83,11 @@ impl CompilerSupport {
         started_at: Instant,
     ) {
         if let Some(metrics) = try_core_metrics() {
-            metrics.observe_contract_prepare(kind, result, started_at.elapsed());
+            metrics.observe_contract_prepare(
+                kind,
+                result,
+                started_at.elapsed(),
+            );
         }
     }
 
@@ -96,9 +95,7 @@ impl CompilerSupport {
         include_str!("contract_Cargo.toml").to_owned()
     }
 
-    fn contracts_root(
-        contract_path: &Path,
-    ) -> Result<PathBuf, CompilerError> {
+    fn contracts_root(contract_path: &Path) -> Result<PathBuf, CompilerError> {
         contract_path
             .parent()
             .and_then(Path::parent)
@@ -176,12 +173,11 @@ impl CompilerSupport {
             command.arg("--offline");
         }
 
-        let status = command
-            .status()
-            .await
-            .map_err(|e| CompilerError::CargoBuildFailed {
+        let status = command.status().await.map_err(|e| {
+            CompilerError::CargoBuildFailed {
                 details: e.to_string(),
-            })?;
+            }
+        })?;
 
         if !status.success() {
             return Err(CompilerError::CompilationFailed);
@@ -248,12 +244,12 @@ impl CompilerSupport {
             vendor_dir.exists().then_some(vendor_dir.as_path()),
         );
         let cargo_config_path = Self::cargo_config_path(contract_path);
-        fs::write(&cargo_config_path, cargo_config).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
+        fs::write(&cargo_config_path, cargo_config)
+            .await
+            .map_err(|e| CompilerError::FileWriteFailed {
                 path: cargo_config_path.to_string_lossy().to_string(),
                 details: e.to_string(),
-            }
-        })?;
+            })?;
 
         Ok(())
     }
@@ -262,10 +258,12 @@ impl CompilerSupport {
         contract_path: &Path,
     ) -> Result<Vec<u8>, CompilerError> {
         let wasm_path = Self::artifact_wasm_path(contract_path);
-        fs::read(&wasm_path).await.map_err(|e| CompilerError::FileReadFailed {
-            path: wasm_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })
+        fs::read(&wasm_path)
+            .await
+            .map_err(|e| CompilerError::FileReadFailed {
+                path: wasm_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })
     }
 
     async fn load_artifact_precompiled(
@@ -284,10 +282,12 @@ impl CompilerSupport {
         contracts_root: &Path,
     ) -> Result<Vec<u8>, CompilerError> {
         let wasm_path = Self::build_output_wasm_path(contracts_root);
-        fs::read(&wasm_path).await.map_err(|e| CompilerError::FileReadFailed {
-            path: wasm_path.to_string_lossy().to_string(),
-            details: e.to_string(),
-        })
+        fs::read(&wasm_path)
+            .await
+            .map_err(|e| CompilerError::FileReadFailed {
+                path: wasm_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            })
     }
 
     async fn persist_artifact(
@@ -304,12 +304,12 @@ impl CompilerSupport {
         })?;
 
         let precompiled_path = Self::artifact_precompiled_path(contract_path);
-        fs::write(&precompiled_path, precompiled_bytes).await.map_err(|e| {
-            CompilerError::FileWriteFailed {
+        fs::write(&precompiled_path, precompiled_bytes)
+            .await
+            .map_err(|e| CompilerError::FileWriteFailed {
                 path: precompiled_path.to_string_lossy().to_string(),
                 details: e.to_string(),
-            }
-        })?;
+            })?;
 
         let legacy_metadata_path =
             Self::legacy_artifact_metadata_path(contract_path);
@@ -400,12 +400,11 @@ impl CompilerSupport {
         })?;
 
         let linker = generate_linker(&wasm_runtime.engine)?;
-        let instance =
-            linker.instantiate(&mut store, module).map_err(|e| {
-                CompilerError::InstantiationFailed {
-                    details: e.to_string(),
-                }
-            })?;
+        let instance = linker.instantiate(&mut store, module).map_err(|e| {
+            CompilerError::InstantiationFailed {
+                details: e.to_string(),
+            }
+        })?;
 
         let _main_contract_entrypoint = instance
             .get_typed_func::<(u32, u32, u32, u32), u32>(
@@ -545,8 +544,7 @@ impl CompilerSupport {
         wasm_runtime: &Arc<WasmRuntime>,
     ) -> Result<(DigestIdentifier, DigestIdentifier), CompilerError> {
         let engine_fingerprint = Self::engine_fingerprint(hash, wasm_runtime)?;
-        let toolchain_fingerprint =
-            Self::toolchain_fingerprint(hash).await?;
+        let toolchain_fingerprint = Self::toolchain_fingerprint(hash).await?;
         Ok((engine_fingerprint, toolchain_fingerprint))
     }
 

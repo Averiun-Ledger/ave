@@ -15,12 +15,12 @@ use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
 use crate::auth::{Auth, AuthMessage, AuthResponse};
-use crate::governance::{
-    Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
-};
 use crate::governance::witnesses_register::{
     CurrentWitnessSubject, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
+};
+use crate::governance::{
+    Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
 };
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
@@ -34,12 +34,8 @@ use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 #[derive(Debug, Clone)]
 pub enum TrackerSyncMessage {
     Tick,
-    FetchTimeout {
-        request_nonce: u64,
-    },
-    UpdateTimeout {
-        batch_nonce: u64,
-    },
+    FetchTimeout { request_nonce: u64 },
+    UpdateTimeout { batch_nonce: u64 },
     NetworkRequest(TrackerSyncNetworkRequest),
     NetworkResponse(TrackerSyncNetworkResponse),
 }
@@ -257,11 +253,11 @@ impl TrackerSync {
             });
         };
 
-        governance
-            .get_witnesses(WitnessesData::Gov)
-            .map_err(|e| ActorError::Functional {
+        governance.get_witnesses(WitnessesData::Gov).map_err(|e| {
+            ActorError::Functional {
                 description: e.to_string(),
-            })
+            }
+        })
     }
 
     async fn get_auth_peers(
@@ -408,7 +404,8 @@ impl TrackerSync {
         let mut pending_items = VecDeque::new();
 
         for item in items {
-            let local_sn = self.get_local_tracker_sn(ctx, &item.subject_id).await?;
+            let local_sn =
+                self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             if local_sn.is_none_or(|local_sn| local_sn < item.target_sn) {
                 pending_items.push_back(item);
             }
@@ -454,15 +451,16 @@ impl TrackerSync {
         }
 
         if !state.active_batch.is_empty() {
-            let mut still_running = Vec::with_capacity(state.active_batch.len());
+            let mut still_running =
+                Vec::with_capacity(state.active_batch.len());
             for mut active_update in state.active_batch {
                 let current_sn = self
                     .get_local_tracker_sn(ctx, &active_update.item.subject_id)
                     .await?;
 
-                if current_sn
-                    .is_some_and(|current_sn| current_sn >= active_update.item.target_sn)
-                {
+                if current_sn.is_some_and(|current_sn| {
+                    current_sn >= active_update.item.target_sn
+                }) {
                     Self::observe_update("completed");
                     continue;
                 }
@@ -586,9 +584,8 @@ impl TrackerSync {
         else {
             return Err(ActorError::UnexpectedResponse {
                 path,
-                expected:
-                    "WitnessesRegisterResponse::CurrentWitnessSubjects"
-                        .to_owned(),
+                expected: "WitnessesRegisterResponse::CurrentWitnessSubjects"
+                    .to_owned(),
             });
         };
 
@@ -695,23 +692,25 @@ impl Handler<Self> for TrackerSync {
             TrackerSyncMessage::NetworkRequest(request) => {
                 self.handle_network_request(ctx, request).await?;
             }
-            TrackerSyncMessage::NetworkResponse(TrackerSyncNetworkResponse {
-                peer,
-                request_nonce,
-                governance_version,
-                items,
-                next_cursor,
-            }) => {
-                let (active_peer, active_governance_version) =
-                    match &self.state {
-                        SyncState::Fetching(state)
-                            if state.peer == peer
-                                && state.request_nonce == request_nonce =>
-                        {
-                            (state.peer.clone(), state.governance_version)
-                        }
-                        _ => return Ok(TrackerSyncResponse::None),
-                    };
+            TrackerSyncMessage::NetworkResponse(
+                TrackerSyncNetworkResponse {
+                    peer,
+                    request_nonce,
+                    governance_version,
+                    items,
+                    next_cursor,
+                },
+            ) => {
+                let (active_peer, active_governance_version) = match &self.state
+                {
+                    SyncState::Fetching(state)
+                        if state.peer == peer
+                            && state.request_nonce == request_nonce =>
+                    {
+                        (state.peer.clone(), state.governance_version)
+                    }
+                    _ => return Ok(TrackerSyncResponse::None),
+                };
 
                 debug!(
                     governance_id = %self.governance_id,

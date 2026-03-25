@@ -27,10 +27,10 @@ use axum::{
     extract::ConnectInfo,
     http::{Method, Request},
 };
+use futures::future::join_all;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use futures::future::join_all;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -236,11 +236,17 @@ pub fn parse_route_catalog(
 }
 
 pub fn server_main_route_catalog() -> BTreeSet<(String, String)> {
-    parse_route_catalog(include_str!("../../src/server.rs"), "main_route_catalog")
+    parse_route_catalog(
+        include_str!("../../src/server.rs"),
+        "main_route_catalog",
+    )
 }
 
 pub fn server_auth_route_catalog() -> BTreeSet<(String, String)> {
-    parse_route_catalog(include_str!("../../src/server.rs"), "auth_route_catalog")
+    parse_route_catalog(
+        include_str!("../../src/server.rs"),
+        "auth_route_catalog",
+    )
 }
 
 pub fn server_public_auth_route_catalog() -> BTreeSet<(String, String)> {
@@ -323,9 +329,7 @@ pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
         ("put", "/auth/{subject_id}") => {
             Some(json!(["ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI"]))
         }
-        ("post", "/request") => {
-            Some(json!({"request": {}, "signature": null}))
-        }
+        ("post", "/request") => Some(json!({"request": {}, "signature": null})),
         ("post", "/login") => {
             Some(json!({"username": "admin", "password": "AdminPass123!"}))
         }
@@ -747,7 +751,13 @@ async fn build_test_router(
     enable_auth: bool,
     always_accept: bool,
     node: Option<(String, u16)>,
-) -> (Router, Vec<TempDir>, u16, Vec<JoinHandle<()>>, CancellationToken) {
+) -> (
+    Router,
+    Vec<TempDir>,
+    u16,
+    Vec<JoinHandle<()>>,
+    CancellationToken,
+) {
     build_test_router_with_options(TestServerOptions {
         enable_auth,
         always_accept,
@@ -759,7 +769,13 @@ async fn build_test_router(
 
 async fn build_test_router_with_options(
     options: TestServerOptions,
-) -> (Router, Vec<TempDir>, u16, Vec<JoinHandle<()>>, CancellationToken) {
+) -> (
+    Router,
+    Vec<TempDir>,
+    u16,
+    Vec<JoinHandle<()>>,
+    CancellationToken,
+) {
     let TestServerOptions {
         enable_auth,
         always_accept,
@@ -794,8 +810,7 @@ async fn build_test_router_with_options(
         let keys_dir = tempfile::tempdir().expect("keys temp dir");
         let auth_dir = tempfile::tempdir().expect("auth temp dir");
 
-        let ave_db_path =
-            ave_db_temp_dir.path().to_string_lossy().to_string();
+        let ave_db_path = ave_db_temp_dir.path().to_string_lossy().to_string();
         let external_db_path =
             external_db_temp_dir.path().to_string_lossy().to_string();
         let contracts_path =

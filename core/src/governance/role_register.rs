@@ -99,12 +99,7 @@ pub struct UpdateQuorum {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshDeserialize,
-    BorshSerialize,
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub struct RoleDataRegister {
     pub workers: HashSet<PublicKey>,

@@ -18,8 +18,8 @@ use ave_bridge::auth::{
     ApiKeyConfig, AuthConfig, EndpointRateLimit, LockoutConfig, SessionConfig,
 };
 use ave_http::auth::{RotateApiKeyParams, database::AuthDatabase};
-use tempfile::TempDir;
 use std::collections::BTreeSet;
+use tempfile::TempDir;
 
 #[test]
 fn database_tests_route_inputs_exist_in_http_catalog() {

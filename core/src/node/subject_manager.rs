@@ -91,8 +91,10 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         governance_ids: Vec<DigestIdentifier>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
         {
             config.safe_mode
         } else {
@@ -228,9 +230,8 @@ impl SubjectManager {
         if let Some(tracker) = tracker {
             match tracker.ask(TrackerMessage::PurgeStorage).await {
                 Ok(TrackerResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "tracker: unexpected response {other:?}"
-                )),
+                Ok(other) => cleanup_errors
+                    .push(format!("tracker: unexpected response {other:?}")),
                 Err(error) => cleanup_errors.push(format!("tracker: {error}")),
             }
 
@@ -250,9 +251,9 @@ impl SubjectManager {
                     governance_id,
                     ..
                 }))) => Some(governance_id),
-                Ok(NodeResponse::SubjectData(Some(SubjectData::Governance {
-                    ..
-                }))) => {
+                Ok(NodeResponse::SubjectData(Some(
+                    SubjectData::Governance { .. },
+                ))) => {
                     cleanup_errors.push(format!(
                         "subject '{}' is governance, not tracker",
                         subject_id
@@ -267,9 +268,8 @@ impl SubjectManager {
                     None
                 }
                 Ok(other) => {
-                    cleanup_errors.push(format!(
-                        "node: unexpected response {other:?}"
-                    ));
+                    cleanup_errors
+                        .push(format!("node: unexpected response {other:?}"));
                     None
                 }
                 Err(error) => {
@@ -340,9 +340,7 @@ impl SubjectManager {
         {
             Ok(actor) => Some(actor),
             Err(ActorError::Exists { .. }) => {
-                match ctx
-                    .get_child::<Governance>(&subject_id.to_string())
-                    .await
+                match ctx.get_child::<Governance>(&subject_id.to_string()).await
                 {
                     Ok(actor) => Some(actor),
                     Err(error) => {
@@ -364,9 +362,8 @@ impl SubjectManager {
                 .await
             {
                 Ok(GovernanceResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "governance: unexpected response {other:?}"
-                )),
+                Ok(other) => cleanup_errors
+                    .push(format!("governance: unexpected response {other:?}")),
                 Err(error) => {
                     cleanup_errors.push(format!("governance: {error}"))
                 }
@@ -545,8 +542,10 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Tracker>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
         {
             config.safe_mode
         } else {
@@ -579,8 +578,10 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Governance>,
     ) -> Result<(), ActorError> {
-        let safe_mode = if let Some(config) =
-            ctx.system().get_helper::<crate::system::ConfigHelper>("config").await
+        let safe_mode = if let Some(config) = ctx
+            .system()
+            .get_helper::<crate::system::ConfigHelper>("config")
+            .await
         {
             config.safe_mode
         } else {

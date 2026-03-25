@@ -14,9 +14,9 @@ use ave_actors::{
 use ave_common::identity::hash_borsh;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, task::JoinHandle};
-use wasmtime::Module;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use wasmtime::Module;
 
 pub mod error;
 

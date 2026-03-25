@@ -135,11 +135,7 @@ pub async fn login(
             );
             response
         })?;
-    db.record_request_metrics(
-        "login",
-        "success",
-        request_started.elapsed(),
-    );
+    db.record_request_metrics("login", "success", request_started.elapsed());
 
     // Build user info
     let user_info = UserInfo {

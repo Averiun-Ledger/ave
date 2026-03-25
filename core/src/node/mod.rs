@@ -275,12 +275,8 @@ impl Node {
         }
     }
 
-    pub fn delete_subject(
-        &mut self,
-        subject_id: &DigestIdentifier,
-    ) {
-        self
-            .owned_subjects
+    pub fn delete_subject(&mut self, subject_id: &DigestIdentifier) {
+        self.owned_subjects
             .remove(subject_id)
             .or_else(|| self.known_subjects.remove(subject_id));
 
@@ -874,13 +870,13 @@ impl Actor for Node {
             return Err(e);
         }
 
-            if let Err(e) = ctx
-                .create_child(
-                    "auth",
-                    Auth::initial((network.clone(), self.our_key.clone())),
-                )
-                .await
-            {
+        if let Err(e) = ctx
+            .create_child(
+                "auth",
+                Auth::initial((network.clone(), self.our_key.clone())),
+            )
+            .await
+        {
             error!(
                 error = %e,
                 "Failed to create auth child"

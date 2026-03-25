@@ -1382,8 +1382,9 @@ pub async fn permission_layer(
                 return (
                     StatusCode::FORBIDDEN,
                     Json(ErrorResponse {
-                        error: "Maintenance endpoints require a management API key"
-                            .into(),
+                        error:
+                            "Maintenance endpoints require a management API key"
+                                .into(),
                     }),
                 )
                     .into_response();

@@ -92,8 +92,7 @@ pub struct Api {
     peer_id: String,
     public_key: String,
     safe_mode: bool,
-    deleting_subject:
-        Arc<tokio::sync::Mutex<Option<DigestIdentifier>>>,
+    deleting_subject: Arc<tokio::sync::Mutex<Option<DigestIdentifier>>>,
     db: Arc<ExternalDB>,
     request: ActorRef<RequestHandler>,
     node: ActorRef<Node>,
@@ -202,7 +201,8 @@ impl Api {
             });
         };
 
-        subject_data.ok_or_else(|| Error::SubjectNotFound(subject_id.to_string()))
+        subject_data
+            .ok_or_else(|| Error::SubjectNotFound(subject_id.to_string()))
     }
 
     async fn governance_trackers(
@@ -257,7 +257,8 @@ impl Api {
             Err(err) => cleanup_errors.push(format!("auth: {err}")),
         }
 
-        if let Err(err) = self.db.delete_subject(&subject_id.to_string()).await {
+        if let Err(err) = self.db.delete_subject(&subject_id.to_string()).await
+        {
             cleanup_errors.push(format!("external_db: {err}"));
         }
     }
@@ -1015,7 +1016,8 @@ impl Api {
                         subject_type = "governance",
                         "Deleting subject"
                     );
-                    let trackers = self.governance_trackers(&subject_id).await?;
+                    let trackers =
+                        self.governance_trackers(&subject_id).await?;
                     if !trackers.is_empty() {
                         return Err(Error::GovernanceHasTrackers {
                             governance_id: subject_id.to_string(),
@@ -1048,12 +1050,11 @@ impl Api {
                     )
                     .await;
 
-                    self
-                        .delete_subject_from_node(
-                            &subject_id,
-                            &mut cleanup_errors,
-                        )
-                        .await;
+                    self.delete_subject_from_node(
+                        &subject_id,
+                        &mut cleanup_errors,
+                    )
+                    .await;
 
                     if cleanup_errors.is_empty() {
                         info!(
@@ -1098,12 +1099,11 @@ impl Api {
                             .push(format!("subject_manager: {err}")),
                     }
 
-                    self
-                        .delete_subject_from_node(
-                            &subject_id,
-                            &mut cleanup_errors,
-                        )
-                        .await;
+                    self.delete_subject_from_node(
+                        &subject_id,
+                        &mut cleanup_errors,
+                    )
+                    .await;
 
                     if cleanup_errors.is_empty() {
                         info!(
