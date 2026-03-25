@@ -29,6 +29,7 @@ use axum::{
     extract::{Path, Query},
     http::StatusCode,
 };
+use std::collections::BTreeSet;
 
 fn metric_value(metrics: &str, name: &str) -> f64 {
     metrics
@@ -41,6 +42,27 @@ fn metric_value(metrics: &str, name: &str) -> f64 {
             }
         })
         .unwrap_or(0.0)
+}
+
+#[test]
+fn security_tests_route_inputs_exist_in_http_catalog() {
+    let mut catalog = common::server_main_route_catalog();
+    catalog.extend(common::server_auth_route_catalog());
+    catalog.extend(common::server_public_auth_route_catalog());
+
+    let expected: BTreeSet<(String, String)> = [
+        ("get".to_string(), "/metrics".to_string()),
+        ("get".to_string(), "/peer-id".to_string()),
+        ("post".to_string(), "/login".to_string()),
+    ]
+    .into_iter()
+    .collect();
+
+    let missing: Vec<_> = expected.difference(&catalog).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "Security tests reference routes that do not exist in server.rs: {missing:?}"
+    );
 }
 
 // =============================================================================

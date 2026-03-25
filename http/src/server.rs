@@ -33,7 +33,7 @@ use ave_bridge::{
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path, Query},
+    extract::{FromRequestParts, Path, Query, State},
     http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -46,6 +46,45 @@ use crate::doc::ApiDoc;
 use axum::http::Method;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+#[derive(Clone, Copy)]
+struct AuthSafeMode(bool);
+
+fn auth_safe_mode_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error:
+                "auth mutations are unavailable while node is running in safe mode"
+                    .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+async fn protected_auth_safe_mode_layer(
+    State(auth_safe_mode): State<AuthSafeMode>,
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    if auth_safe_mode.0 && req.method() != Method::GET {
+        return auth_safe_mode_response();
+    }
+
+    next.run(req).await
+}
+
+async fn public_auth_safe_mode_layer(
+    State(auth_safe_mode): State<AuthSafeMode>,
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    if auth_safe_mode.0 && req.uri().path() != "/login" {
+        return auth_safe_mode_response();
+    }
+
+    next.run(req).await
+}
 
 ///////// General
 ////////////////////////////
@@ -1169,6 +1208,7 @@ pub fn build_routes(
         tokio::sync::Mutex<prometheus_client::registry::Registry>,
     >,
 ) -> Router {
+    let auth_safe_mode = AuthSafeMode(bridge.get_config().node.safe_mode);
     let bridge = Arc::new(bridge);
     let proxy = Arc::new(proxy_config);
 
@@ -1193,6 +1233,10 @@ pub fn build_routes(
         let protected_layers = ServiceBuilder::new()
             .layer(Extension(db.clone()))
             .layer(Extension(proxy.clone()))
+            .layer(middleware::from_fn_with_state(
+                auth_safe_mode,
+                protected_auth_safe_mode_layer,
+            ))
             .layer(middleware::from_extractor::<ApiKeyAuthNew>())
             .layer(middleware::from_fn(permission_layer))
             .layer(middleware::from_fn(audit_layer));
@@ -1213,6 +1257,10 @@ pub fn build_routes(
                     .layer(Extension(db))
                     .layer(Extension(proxy)),
             )
+            .layer(middleware::from_fn_with_state(
+                auth_safe_mode,
+                public_auth_safe_mode_layer,
+            ))
             .merge(authed);
 
         if let Some(doc_routes) = doc_routes {

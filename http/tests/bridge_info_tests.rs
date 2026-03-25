@@ -18,7 +18,11 @@ use ave_bridge::ave_common::{
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::common::{TestServer, make_request};
+use crate::common::{
+    TestServer, add_governance_member_as_witness, create_governance,
+    create_subject, make_request, materialize_role_test_path,
+    role_test_request_body, server_main_route_catalog,
+};
 
 pub mod common;
 
@@ -28,113 +32,6 @@ pub mod common;
 // These tests verify that HTTP request/response serialization works correctly
 // for all business logic endpoints. They don't test the business logic itself
 // (that's tested in core), but rather the HTTP layer deserialization.
-
-async fn create_req(client: &Client, server: &TestServer) -> Value {
-    let request = json!({
-        "request": {
-            "event": "create",
-            "data": {
-                "name": "Governance",
-                "description": "A governance",
-                "schema_id": "governance"
-            }
-        }
-    });
-
-    let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
-        "POST",
-        None,
-        Some(request),
-    )
-    .await;
-    assert!(status.is_success());
-
-    body
-}
-
-async fn create_req_schema(
-    client: &Client,
-    server: &TestServer,
-    schema_id: &str,
-    governance_id: &str,
-    name: &str,
-) -> Value {
-    let request = json!({
-        "request": {
-            "event": "create",
-            "data": {
-                "name": name.to_string(),
-                "description": "A subject",
-                "schema_id": schema_id.to_string(),
-                "governance_id": governance_id.to_string()
-            }
-        }
-    });
-
-    let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
-        "POST",
-        None,
-        Some(serde_json::to_value(request).unwrap()),
-    )
-    .await;
-
-    println!("{}", body);
-
-    assert!(status.is_success());
-
-    body
-}
-
-async fn fact_req(
-    client: &Client,
-    server: &TestServer,
-    subject_id: &str,
-    public_key: &str,
-) -> Value {
-    let request = json!({
-        "request": {
-            "event": "fact",
-            "data": {
-                "subject_id": subject_id.to_string(),
-                "payload": {
-                    "members": {
-                    "add": [
-                        {
-                            "name": "Node1",
-                            "key": public_key
-                        }
-                    ]
-                },
-                        "roles": {
-                "governance": {
-                    "add": {
-                        "witness": [
-                            "Node1"
-                        ]
-                    }
-                },
-            }
-                }
-            }
-        }
-    });
-
-    let (status, body) = make_request(
-        &client,
-        &server.url("/request"),
-        "POST",
-        None,
-        Some(serde_json::to_value(request).unwrap()),
-    )
-    .await;
-    assert!(status.is_success());
-
-    body
-}
 
 async fn fact_req_schema(
     client: &Client,
@@ -436,7 +333,7 @@ async fn test_request_deserialization() {
     };
     let client = Client::new();
 
-    let body = create_req(&client, &server).await;
+    let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     let res: Value;
@@ -487,15 +384,21 @@ async fn test_approval_deserialization() {
     };
     let client = Client::new();
 
-    let body = create_req(&client, &server).await;
+    let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
 
-    let body =
-        fact_req(&client, &server, &request_data.subject_id, &public_key).await;
+    let body = add_governance_member_as_witness(
+        &client,
+        &server,
+        None,
+        &request_data.subject_id,
+        &public_key,
+    )
+    .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     let res: Value;
@@ -724,7 +627,7 @@ async fn test_update_and_transfer_deserialization() {
     };
     let client = Client::new();
 
-    let body = create_req(&client, &server).await;
+    let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     let (status, _body) = make_request(
@@ -753,8 +656,14 @@ async fn test_update_and_transfer_deserialization() {
         .public_key()
         .to_string();
 
-    let body =
-        fact_req(&client, &server, &request_data.subject_id, &public_key).await;
+    let body = add_governance_member_as_witness(
+        &client,
+        &server,
+        None,
+        &request_data.subject_id,
+        &public_key,
+    )
+    .await;
 
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
@@ -847,7 +756,7 @@ async fn test_gov_sub_deserialization() {
     };
     let client = Client::new();
 
-    let body = create_req(&client, &server).await;
+    let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let governance_id = request_data.subject_id;
     loop {
@@ -895,44 +804,48 @@ async fn test_gov_sub_deserialization() {
         }
     }
 
-    let body = create_req_schema(
+    let body = create_subject(
         &client,
         &server,
-        "Example1",
+        None,
         &governance_id,
+        "Example1",
         "Subject1_1",
     )
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let subject_id_1_1 = request_data.subject_id;
 
-    let body = create_req_schema(
+    let body = create_subject(
         &client,
         &server,
-        "Example1",
+        None,
         &governance_id,
+        "Example1",
         "Subject2_1",
     )
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let subject_id_2_1 = request_data.subject_id;
 
-    let body = create_req_schema(
+    let body = create_subject(
         &client,
         &server,
-        "Example2",
+        None,
         &governance_id,
+        "Example2",
         "Subject1_2",
     )
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let subject_id_1_2 = request_data.subject_id;
 
-    let body = create_req_schema(
+    let body = create_subject(
         &client,
         &server,
-        "Example2",
+        None,
         &governance_id,
+        "Example2",
         "Subject2_2",
     )
     .await;
@@ -1223,7 +1136,7 @@ async fn test_subject_deserialization() {
     };
     let client = Client::new();
 
-    let body = create_req(&client, &server1).await;
+    let body = create_governance(&client, &server1, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let governance_id = request_data.subject_id;
 
@@ -1293,7 +1206,14 @@ async fn test_subject_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let body = fact_req(&client, &server1, &governance_id, &public_key_2).await;
+    let body = add_governance_member_as_witness(
+        &client,
+        &server1,
+        None,
+        &governance_id,
+        &public_key_2,
+    )
+    .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
 
     loop {
@@ -1983,4 +1903,46 @@ fn test_sink_server_http_fields() {
     let http2: SinkServerHttp = serde_json::from_value(json2).unwrap();
     assert_eq!(http2.queue_policy, "drop_newest");
     assert_eq!(http2.routing_strategy, "ordered_by_subject");
+}
+
+#[test]
+fn bridge_info_tests_cover_declared_main_http_routes() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let Some((server, _dirs)) =
+            TestServer::build(false, false, None).await
+        else {
+            panic!("test server build failed");
+        };
+        let client = Client::new();
+
+        for (method, path) in server_main_route_catalog() {
+            let materialized = materialize_role_test_path(&method, &path);
+            assert!(
+                !materialized.contains('{'),
+                "bridge_info route still has unresolved placeholders: {method} {path} -> {materialized}"
+            );
+            let http_method = method.to_ascii_uppercase();
+
+            let (status, body) = make_request(
+                &client,
+                &server.url(&materialized),
+                &http_method,
+                None,
+                role_test_request_body(&method, &path),
+            )
+            .await;
+
+            assert_ne!(
+                status,
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                "main route not mounted for {method} {path}: {body}"
+            );
+            assert!(
+                status != reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                    && status != reqwest::StatusCode::BAD_GATEWAY,
+                "main route crashed for {method} {path}: {body}"
+            );
+        }
+    });
 }

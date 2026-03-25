@@ -9,7 +9,11 @@
 use reqwest::StatusCode;
 use serde_json::json;
 
-use crate::common::{TestApp, login_app, make_app_request};
+use crate::common::{
+    TestApp, login_app, make_app_request, materialize_role_test_path,
+    role_test_request_body,
+    server_auth_route_catalog, server_public_auth_route_catalog,
+};
 use test_log::test;
 
 pub mod common;
@@ -935,4 +939,45 @@ async fn test_create_role_empty_name() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().is_some());
+}
+
+#[test]
+fn real_http_endpoint_tests_cover_declared_auth_routes() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let (app, _dir) = TestApp::build(true, true, None).await;
+        let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
+
+        let mut catalog = server_auth_route_catalog();
+        catalog.extend(server_public_auth_route_catalog());
+
+        for (method, path) in catalog {
+            let materialized = materialize_role_test_path(&method, &path);
+            assert!(
+                !materialized.contains('{'),
+                "real_http route still has unresolved placeholders: {method} {path} -> {materialized}"
+            );
+
+            let auth = match path.as_str() {
+                "/login" | "/change-password" => None,
+                _ => Some(api_key.as_str()),
+            };
+            let body = role_test_request_body(&method, &path);
+            let http_method = method.to_ascii_uppercase();
+            let (status, response_body) =
+                make_app_request(&app, &materialized, &http_method, auth, body)
+                    .await;
+
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "auth route not mounted for {method} {path}: {response_body}"
+            );
+            assert!(
+                status != StatusCode::INTERNAL_SERVER_ERROR
+                    && status != StatusCode::BAD_GATEWAY,
+                "auth route crashed for {method} {path}: {response_body}"
+            );
+        }
+    });
 }
