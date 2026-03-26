@@ -92,7 +92,7 @@ lru = "0.16.3"
 [dependencies]
 ave-identity = { path = "identity", version = "0.3.0" }
 ave-common = { path = "common", version = "0.8.0" }
-ave-network = { path = "network", version = "0.8.0" }
+ave-network = { path = "network", version = "0.9.0" }
 ave-core = { path = "core", version = "0.9.0", default-features = false }
 ave-bridge = { path = "bridge", version = "0.9.0", default-features = false }
 ave-http = { path = "http", version = "0.9.0", default-features = false, optional = true }

@@ -31,7 +31,7 @@ If you need the complete node stack, use `ave-core` instead.
 
 ```toml
 [dependencies]
-ave-network = "0.8.0"
+ave-network = "0.9.0"
 ```
 
 ## Core concepts

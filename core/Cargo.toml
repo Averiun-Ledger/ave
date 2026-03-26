@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs", "process"] }
 tracing = { workspace = true }
-network = { package = "ave-network", path = "../network", version = "0.8.0" }
+network = { package = "ave-network", path = "../network", version = "0.9.0" }
 rmp-serde = { workspace = true }
 wasmtime = {version = "42.0.1"}
 base64 = { workspace = true }
@@ -38,7 +38,7 @@ prometheus-client = { workspace = true }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
-network = { package = "ave-network", path = "../network", version = "0.8.0", features = ["test"] }
+network = { package = "ave-network", path = "../network", version = "0.9.0", features = ["test"] }
 futures = { workspace = true }
 axum = { workspace = true }
 
