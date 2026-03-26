@@ -13,6 +13,15 @@ Ave is organized as a set of crates that cover the full stack of a node:
 
 This repository is intended both for users who want to run Ave components and for developers who want to inspect, extend, or reuse parts of the stack.
 
+The repository root also publishes the aggregate `ave` crate. That crate re-exports the main workspace crates so consumers can depend on a single package and reach:
+
+- `ave::identity`
+- `ave::common`
+- `ave::network`
+- `ave::core`
+- `ave::bridge`
+- `ave::http` when the `http` feature is enabled
+
 ## What this repository contains
 
 The workspace is split into focused crates:
@@ -155,6 +164,7 @@ The most important configuration areas are:
 
 ## Which crate should I use?
 
+- Use the root `ave` crate if you want one dependency that re-exports the main workspace crates.
 - Use [`ave-http`](./http) if you want a complete HTTP server.
 - Use [`ave-bridge`](./bridge) if you want to embed Ave into an application or daemon.
 - Use [`ave-core`](./core) if you want the runtime engine directly.
@@ -172,6 +182,22 @@ If you are here to understand the internals rather than just use the crates:
 - inspect [`http/src/startup.rs`](./http/src/startup.rs) and [`http/src/server.rs`](./http/src/server.rs) for process startup and HTTP routes
 
 That path gives a reasonable top-down view of how the workspace is assembled.
+
+## Root crate usage
+
+If you prefer to depend on the aggregate crate instead of individual workspace crates:
+
+```toml
+[dependencies]
+ave = "0.9.0"
+```
+
+Enable the HTTP layer re-export only when you need it:
+
+```toml
+[dependencies]
+ave = { version = "0.9.0", features = ["http"] }
+```
 
 ## Open source
 

@@ -1030,6 +1030,27 @@ impl TestServer {
         ))
     }
 
+    pub async fn reopen_with_persistence(
+        persistence: TestPersistencePaths,
+        enable_auth: bool,
+        always_accept: bool,
+        safe_mode: bool,
+        node_type: impl Into<String>,
+        node: Option<(String, u16)>,
+    ) -> Option<Self> {
+        let (server, _) = Self::build_with_options(TestServerOptions {
+            enable_auth,
+            always_accept,
+            node,
+            safe_mode,
+            node_type: node_type.into(),
+            persistence: Some(persistence),
+        })
+        .await?;
+
+        Some(server)
+    }
+
     pub fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }

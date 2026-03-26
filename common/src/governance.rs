@@ -15,7 +15,12 @@ use serde_json::Value;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
+use crate::identity::PublicKey;
 use crate::{Namespace, SchemaType};
+
+fn default_witnesses_creator() -> BTreeSet<String> {
+    BTreeSet::from(["Witnesses".to_owned()])
+}
 
 pub type MemberName = String;
 
@@ -46,7 +51,8 @@ pub struct MemberEvent {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct NewMember {
     pub name: MemberName,
-    pub key: String,
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub key: PublicKey,
 }
 
 ///// Roles /////
@@ -334,6 +340,7 @@ pub struct Role {
 pub struct RoleCreator {
     pub name: String,
     pub namespace: Namespace,
+    #[serde(default = "default_witnesses_creator")]
     pub witnesses: BTreeSet<String>,
     pub quantity: CreatorQuantity,
 }

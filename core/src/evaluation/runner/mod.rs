@@ -27,7 +27,15 @@ use crate::{
         data::GovernanceData,
         events::{
             GovernanceEvent, MemberEvent, PoliciesEvent, RolesEvent,
-            SchemasEvent,
+            SchemasEvent, gov_policie_change_is_empty,
+            gov_role_event_check_data, gov_role_event_is_empty,
+            governance_event_is_empty, member_event_is_empty,
+            policies_event_is_empty, quorum_to_core, roles_event_is_empty,
+            schema_change_is_empty, schema_id_policie_is_empty,
+            schema_id_role_check_data, schema_id_role_is_empty,
+            schema_policie_change_is_empty, schemas_event_is_empty,
+            tracker_schemas_role_event_check_data,
+            tracker_schemas_role_event_is_empty,
         },
         model::{HashThisRole, RoleTypes, Schema},
     },
@@ -455,7 +463,7 @@ impl Runner {
                 },
             })?;
 
-        if event.is_empty() {
+        if governance_event_is_empty(&event) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_fact_gov",
                 kind: error::InvalidEventKind::Empty {
@@ -518,7 +526,7 @@ impl Runner {
         policies_event: PoliciesEvent,
         governance: &mut GovernanceData,
     ) -> Result<(), RunnerError> {
-        if policies_event.is_empty() {
+        if policies_event_is_empty(&policies_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_policies",
                 kind: error::InvalidEventKind::Empty {
@@ -528,7 +536,7 @@ impl Runner {
         }
 
         if let Some(gov) = policies_event.governance {
-            if gov.change.is_empty() {
+            if gov_policie_change_is_empty(&gov.change) {
                 return Err(RunnerError::InvalidEvent {
                     location: "check_policies",
                     kind: error::InvalidEventKind::Empty {
@@ -540,6 +548,7 @@ impl Runner {
             let mut new_policies = governance.policies_gov.clone();
 
             if let Some(approve) = gov.change.approve {
+                let approve = quorum_to_core(&approve);
                 approve.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -561,6 +570,7 @@ impl Runner {
             }
 
             if let Some(evaluate) = gov.change.evaluate {
+                let evaluate = quorum_to_core(&evaluate);
                 evaluate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -582,6 +592,7 @@ impl Runner {
             }
 
             if let Some(validate) = gov.change.validate {
+                let validate = quorum_to_core(&validate);
                 validate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -629,7 +640,7 @@ impl Runner {
                     });
                 }
 
-                if schema.is_empty() {
+                if schema_id_policie_is_empty(&schema) {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_policies",
                         kind: error::InvalidEventKind::Empty {
@@ -649,7 +660,7 @@ impl Runner {
                     });
                 };
 
-                if schema.change.is_empty() {
+                if schema_policie_change_is_empty(&schema.change) {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_policies",
                         kind: error::InvalidEventKind::Empty {
@@ -659,6 +670,7 @@ impl Runner {
                 }
 
                 if let Some(evaluate) = schema.change.evaluate {
+                    let evaluate = quorum_to_core(&evaluate);
                     evaluate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -686,6 +698,7 @@ impl Runner {
                 }
 
                 if let Some(validate) = schema.change.validate {
+                    let validate = quorum_to_core(&validate);
                     validate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -723,7 +736,7 @@ impl Runner {
         roles_event: RolesEvent,
         governance: &mut GovernanceData,
     ) -> Result<(), RunnerError> {
-        if roles_event.is_empty() {
+        if roles_event_is_empty(&roles_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_roles",
                 kind: error::InvalidEventKind::Empty {
@@ -733,7 +746,7 @@ impl Runner {
         }
 
         if let Some(gov) = roles_event.governance {
-            if gov.is_empty() {
+            if gov_role_event_is_empty(&gov) {
                 return Err(RunnerError::InvalidEvent {
                     location: "check_roles",
                     kind: error::InvalidEventKind::Empty {
@@ -744,7 +757,7 @@ impl Runner {
 
             let mut new_roles = governance.roles_gov.clone();
 
-            gov.check_data(governance, &mut new_roles)?;
+            gov_role_event_check_data(&gov, governance, &mut new_roles)?;
 
             governance.roles_gov = new_roles;
         }
@@ -773,7 +786,7 @@ impl Runner {
                     });
                 }
 
-                if schema.is_empty() {
+                if schema_id_role_is_empty(&schema) {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_roles",
                         kind: error::InvalidEventKind::Empty {
@@ -792,7 +805,8 @@ impl Runner {
                     });
                 };
 
-                schema.check_data(
+                schema_id_role_check_data(
+                    &schema,
                     governance,
                     roles_schema,
                     &schema.schema_id,
@@ -803,7 +817,7 @@ impl Runner {
         }
 
         if let Some(tracker_schemas) = roles_event.tracker_schemas {
-            if tracker_schemas.is_empty() {
+            if tracker_schemas_role_event_is_empty(&tracker_schemas) {
                 return Err(RunnerError::InvalidEvent {
                     location: "check_roles",
                     kind: error::InvalidEventKind::Empty {
@@ -814,7 +828,8 @@ impl Runner {
 
             let new_roles = governance.roles_tracker_schemas.clone();
 
-            let new_roles = tracker_schemas.check_data(
+            let new_roles = tracker_schemas_role_event_check_data(
+                &tracker_schemas,
                 governance,
                 new_roles,
                 &SchemaType::TrackerSchemas,
@@ -830,7 +845,7 @@ impl Runner {
         schema_event: &SchemasEvent,
         governance: &mut GovernanceData,
     ) -> Result<AddRemoveChangeSchema, RunnerError> {
-        if schema_event.is_empty() {
+        if schemas_event_is_empty(schema_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_schemas",
                 kind: error::InvalidEventKind::Empty {
@@ -1054,7 +1069,7 @@ impl Runner {
                     });
                 }
 
-                if change_schema.is_empty() {
+                if schema_change_is_empty(&change_schema) {
                     return Err(RunnerError::InvalidEvent {
                         location: "check_schemas",
                         kind: error::InvalidEventKind::Empty {
@@ -1147,7 +1162,7 @@ impl Runner {
         member_event: &MemberEvent,
         governance: &mut GovernanceData,
     ) -> Result<Vec<String>, RunnerError> {
-        if member_event.is_empty() {
+        if member_event_is_empty(member_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_members",
                 kind: error::InvalidEventKind::Empty {

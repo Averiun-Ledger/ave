@@ -11,10 +11,9 @@ use tracing::{Span, error, info_span};
 
 use crate::{
     db::Storable,
+    evaluation::compiler::ContractArtifactRecord,
     model::common::{emit_fail, purge_storage},
 };
-
-use super::ContractArtifactRecord;
 
 #[derive(
     Default,

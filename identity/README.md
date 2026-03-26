@@ -9,6 +9,13 @@ be serialized and parsed without extra metadata.
 This crate is free software and is distributed under the `AGPL-3.0-only`
 license.
 
+## Installation
+
+```toml
+[dependencies]
+ave-identity = "0.3.0"
+```
+
 ## What it includes
 
 - Blake3 digests with compact string encoding

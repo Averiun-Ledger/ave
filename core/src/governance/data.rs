@@ -26,6 +26,8 @@ pub type MemberName = String;
 #[derive(
     Debug,
     Clone,
+    PartialEq,
+    Eq,
     Serialize,
     Deserialize,
     Default,
@@ -58,7 +60,7 @@ impl GovernanceData {
             approver: owner_signers_gov.clone(),
             evaluator: owner_signers_gov.clone(),
             validator: owner_signers_gov.clone(),
-            witness: BTreeSet::new(),
+            witness: owner_signers_gov.clone(),
             issuer: RoleGovIssuer {
                 any: false,
                 signers: owner_signers_gov,

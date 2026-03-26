@@ -20,22 +20,22 @@ use tokio::{fs, process::Command, sync::RwLock};
 use tracing::debug;
 use wasmtime::{ExternType, Module, Store};
 
-use crate::metrics::try_core_metrics;
 use crate::model::common::contract::{
     MAX_FUEL_COMPILATION, MemoryManager, WasmLimits, WasmRuntime,
     generate_linker,
 };
+use crate::{
+    governance::contract_register::{
+        ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
+    },
+    metrics::try_core_metrics,
+};
 
 pub mod contract_compiler;
-pub mod contract_register;
 pub mod error;
 pub mod temp_compiler;
 
 pub use contract_compiler::{ContractCompiler, ContractCompilerMessage};
-pub use contract_register::{
-    ContractRegister, ContractRegisterEvent, ContractRegisterMessage,
-    ContractRegisterResponse,
-};
 pub use temp_compiler::{TempCompiler, TempCompilerMessage};
 
 use error::*;

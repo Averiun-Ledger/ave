@@ -48,6 +48,7 @@ ave-network = "0.8.0"
 
 `Config` defines:
 
+- safe mode (`safe_mode`)
 - node role (`Bootstrap`, `Addressable`, or `Ephemeral`)
 - listen and external addresses
 - boot nodes
@@ -64,6 +65,7 @@ ave-network = "0.8.0"
 
 ```toml
 [network]
+safe_mode = false
 node_type = "bootstrap"
 listen_addresses = ["/ip4/0.0.0.0/tcp/4001"]
 external_addresses = ["/dns4/node.example.com/tcp/4001"]
@@ -78,6 +80,20 @@ value = 0.8
 ```
 
 The memory limit policy can also be disabled or configured as an absolute MB threshold.
+
+## Safe mode
+
+`Config::safe_mode` starts the networking layer in an isolated maintenance mode.
+
+In this mode the worker still starts, listens, and reports `Running`, but it:
+
+- does not bootstrap or dial peers
+- does not send outbound application messages
+- does not deliver inbound application traffic to the runtime
+- closes or discards network traffic instead of participating normally
+
+This is useful when a higher-level runtime wants local queries and maintenance
+operations without joining the peer-to-peer network.
 
 ## Embedding example
 

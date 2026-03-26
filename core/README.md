@@ -51,14 +51,14 @@ Default SQLite-based runtime:
 
 ```toml
 [dependencies]
-ave-core = "0.8.0"
+ave-core = "0.9.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-core = { version = "0.8.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
+ave-core = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
 ```
 
 ## Bootstrap example
@@ -121,6 +121,7 @@ It covers:
 - contract directory
 - sink auth and sink delivery behavior
 - tracking cache sizing
+- safe mode for isolated maintenance tasks
 - machine sizing hints for Wasmtime execution
 
 If no machine sizing is provided, the runtime auto-detects available RAM and CPU cores from the host.
@@ -162,3 +163,13 @@ Public modules are grouped by responsibility:
 ## Operational note
 
 This crate is designed to be embedded by binaries and services rather than used as a collection of isolated helpers. The intended entry point is `Api::build`, not piecemeal construction of internal actors.
+
+## Safe mode and maintenance
+
+`ave-core::config::Config` includes a `safe_mode` flag for isolated maintenance
+work.
+
+When enabled, the runtime keeps read/query operations available but blocks
+normal mutating operations. It also exposes maintenance-only subject deletion
+through the top-level API so trackers and governances can be removed in a
+controlled way without joining the network.

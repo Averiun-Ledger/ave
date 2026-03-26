@@ -212,6 +212,113 @@ async fn assert_sink_events_endpoint_missing(
     assert_ne!(status, StatusCode::OK, "{body}");
 }
 
+async fn reopen_persisted_server_without_auth(
+    persistence: TestPersistencePaths,
+    safe_mode: bool,
+    node_type: &str,
+    node: Option<(String, u16)>,
+) -> Option<TestServer> {
+    TestServer::reopen_with_persistence(
+        persistence,
+        false,
+        true,
+        safe_mode,
+        node_type,
+        node,
+    )
+    .await
+}
+
+async fn assert_tracker_deleted_views(
+    client: &Client,
+    server: &TestServer,
+    governance_id: &str,
+    tracker_id: &str,
+) {
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/state/{tracker_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/subjects/{governance_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subjects = body.as_array().cloned().unwrap_or_default();
+    assert!(subjects.iter().all(|item| item["subject_id"] != tracker_id));
+
+    let (status, body) = make_request(
+        client,
+        &server.url("/pending-transfers"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let transfers = body.as_array().cloned().unwrap_or_default();
+    assert!(
+        transfers
+            .iter()
+            .all(|item| item["subject_id"] != tracker_id)
+    );
+
+    assert_sink_events_endpoint_missing(client, server, tracker_id).await;
+    assert_events_endpoint_missing_or_empty(client, server, tracker_id).await;
+    assert_auth_endpoint_missing(client, server, tracker_id).await;
+}
+
+async fn assert_governance_deleted_views(
+    client: &Client,
+    server: &TestServer,
+    governance_id: &str,
+) {
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/state/{governance_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = make_request(
+        client,
+        &server.url(&format!("/subjects/{governance_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) =
+        make_request(client, &server.url("/subjects"), "GET", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let governances = body.as_array().cloned().unwrap_or_default();
+    assert!(
+        governances
+            .iter()
+            .all(|item| item["governance_id"] != governance_id)
+    );
+
+    assert_sink_events_endpoint_missing(client, server, governance_id).await;
+    assert_events_endpoint_missing_or_empty(client, server, governance_id)
+        .await;
+    assert_auth_endpoint_missing(client, server, governance_id).await;
+}
+
 async fn accept_approval(
     client: &Client,
     server: &TestServer,
@@ -1356,64 +1463,57 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let (status, body) = make_request(
+    assert_tracker_deleted_views(
         &client,
-        &env.server.url(&format!("/state/{}", fixture.tracker_id)),
-        "GET",
-        None,
-        None,
+        &env.server,
+        &fixture.governance_id,
+        &fixture.tracker_id,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
     let (status, body) = make_request(
         &client,
-        &env.server
-            .url(&format!("/subjects/{}", fixture.governance_id)),
+        &env.server.url(&format!("/state/{}", fixture.governance_id)),
         "GET",
         None,
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let subjects = body.as_array().cloned().unwrap_or_default();
-    assert!(
-        subjects
-            .iter()
-            .all(|item| item["subject_id"] != fixture.tracker_id)
-    );
+    assert_eq!(body["subject_id"], json!(fixture.governance_id));
 
-    let (status, body) = make_request(
-        &client,
-        &env.server.url("/pending-transfers"),
-        "GET",
+    let persistence = TestPersistencePaths::from_tempdirs(&env._dirs);
+    let governance_id = fixture.governance_id.clone();
+    let tracker_id = fixture.tracker_id.clone();
+    env.server.shutdown().await;
+
+    let Some(server) = reopen_persisted_server_without_auth(
+        persistence,
+        false,
+        "Bootstrap",
         None,
-        None,
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let transfers = body.as_array().cloned().unwrap_or_default();
-    assert!(
-        transfers
-            .iter()
-            .all(|item| item["subject_id"] != fixture.tracker_id)
-    );
+    .await
+    else {
+        return;
+    };
+    let client = Client::new();
 
-    assert_sink_events_endpoint_missing(
-        &client,
-        &env.server,
-        &fixture.tracker_id,
-    )
-    .await;
-
-    assert_events_endpoint_missing_or_empty(
-        &client,
-        &env.server,
-        &fixture.tracker_id,
-    )
-    .await;
-    assert_auth_endpoint_missing(&client, &env.server, &fixture.tracker_id)
+    assert_tracker_deleted_views(&client, &server, &governance_id, &tracker_id)
         .await;
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/state/{governance_id}")),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["subject_id"], json!(governance_id));
+
+    server.shutdown().await;
 }
 
 #[test(tokio::test)]
@@ -1686,52 +1786,32 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
         "{body}"
     );
 
-    let (status, body) = make_request(
-        &client,
-        &env.server.url(&format!("/state/{}", fixture.governance_id)),
-        "GET",
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-
-    let (status, body) = make_request(
-        &client,
-        &env.server
-            .url(&format!("/subjects/{}", fixture.governance_id)),
-        "GET",
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-
-    let (status, body) =
-        make_request(&client, &env.server.url("/subjects"), "GET", None, None)
-            .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let governances = body.as_array().cloned().unwrap_or_default();
-    assert!(
-        governances
-            .iter()
-            .all(|item| item["governance_id"] != fixture.governance_id)
-    );
-
-    assert_sink_events_endpoint_missing(
+    assert_governance_deleted_views(
         &client,
         &env.server,
         &fixture.governance_id,
     )
     .await;
-    assert_events_endpoint_missing_or_empty(
-        &client,
-        &env.server,
-        &fixture.governance_id,
+
+    let persistence = TestPersistencePaths::from_tempdirs(&env._dirs);
+    let governance_id = fixture.governance_id.clone();
+    env.server.shutdown().await;
+
+    let Some(server) = reopen_persisted_server_without_auth(
+        persistence,
+        false,
+        "Bootstrap",
+        None,
     )
-    .await;
-    assert_auth_endpoint_missing(&client, &env.server, &fixture.governance_id)
-        .await;
+    .await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    assert_governance_deleted_views(&client, &server, &governance_id).await;
+
+    server.shutdown().await;
 }
 
 #[test(tokio::test)]

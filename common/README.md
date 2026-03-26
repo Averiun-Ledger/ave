@@ -9,6 +9,13 @@ crates.
 This crate is free software and is distributed under the `AGPL-3.0-only`
 license.
 
+## Installation
+
+```toml
+[dependencies]
+ave-common = "0.8.0"
+```
+
 ## What it includes
 
 - Ledger event request types
@@ -60,6 +67,8 @@ assert!(request.is_create_event());
 - Bridge types are transport-oriented and can be converted to internal types
   through `common::bridge::conversions`.
 - When `typescript` is enabled, many public types derive `ts-rs` exports.
+- The generated TypeScript package that mirrors this crate's public API lives in
+  [`common/ts`](./ts).
 
 ## Development
 

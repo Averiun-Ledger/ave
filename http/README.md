@@ -42,14 +42,28 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-http = "0.8.0"
+ave-http = "0.9.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-http = { version = "0.8.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-http = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+```
+
+## Running the server
+
+Run the HTTP server with the default feature set:
+
+```bash
+cargo run -p ave-http
+```
+
+Example with RocksDB internal storage:
+
+```bash
+cargo run -p ave-http --no-default-features --features "rocksdb ext-sqlite prometheus"
 ```
 
 ## What is inside
@@ -88,6 +102,19 @@ The HTTP server exposes endpoints for:
 - usage plans and quota extensions
 
 This makes the crate suitable not just as a transport wrapper, but as the operational control plane for an Ave deployment.
+
+## Safe mode and maintenance
+
+When the underlying node is started with `safe_mode = true`, the HTTP layer
+switches into a maintenance-oriented profile:
+
+- runtime mutating endpoints are rejected
+- auth/admin mutations are also blocked, except login
+- query endpoints remain available
+- maintenance deletion is exposed through `DELETE /maintenance/subjects/{subject_id}`
+
+That mode is intended for isolated cleanup and inspection workflows rather than
+normal network participation.
 
 ## OpenAPI and docs
 

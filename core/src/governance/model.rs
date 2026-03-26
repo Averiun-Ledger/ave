@@ -75,6 +75,7 @@ impl RolesGov {
         self.approver.contains(&ReservedWords::Owner.to_string())
             && self.evaluator.contains(&ReservedWords::Owner.to_string())
             && self.validator.contains(&ReservedWords::Owner.to_string())
+            && self.witness.contains(&ReservedWords::Owner.to_string())
             && self
                 .issuer
                 .signers
@@ -1150,6 +1151,8 @@ impl Quorum {
     Serialize,
     Deserialize,
     Clone,
+    PartialEq,
+    Eq,
     Default,
     BorshDeserialize,
     BorshSerialize,

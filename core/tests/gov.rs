@@ -1,8 +1,13 @@
-use std::{str::FromStr, sync::atomic::Ordering};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+    sync::atomic::Ordering,
+};
 
 mod common;
 
 use ave_common::{
+    SchemaType, ValueWrapper,
     bridge::request::ApprovalStateRes,
     identity::{
         PublicKey,
@@ -11,6 +16,11 @@ use ave_common::{
     response::RequestState,
 };
 use ave_core::auth::AuthWitness;
+use ave_core::governance::data::GovernanceData;
+use ave_core::governance::model::{
+    PolicyGov, PolicySchema, Quorum, RoleGovIssuer, RolesGov, RolesSchema,
+    RolesTrackerSchemas, Schema,
+};
 
 use common::{
     create_and_authorize_governance, create_nodes_and_connections,
@@ -19,13 +29,22 @@ use common::{
 };
 use futures::future::join_all;
 use network::{NodeType, RoutingNode};
-use serde_json::json;
+use serde_json::{Value, from_value, json};
 use test_log::test;
 
 use crate::common::{
     PORT_COUNTER, create_node, get_abort_request, node_running,
     wait_request_state,
 };
+
+const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
+const INVALID_EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXp";
+const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
+
+fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
+    let actual: GovernanceData = from_value(actual).unwrap();
+    assert_eq!(actual, expected);
+}
 
 #[test(tokio::test)]
 //  Verificar que update protocol actualiza pasivamente la gobernanza.
@@ -443,7 +462,7 @@ async fn test_invalid_init_state() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -471,9 +490,34 @@ async fn test_invalid_init_state() {
     assert_eq!(state.creator, node.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
+    assert_governance_properties_eq(
         state.properties,
-        json!({"members":{"Owner":node.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"schemas":{},"version":0})
+        GovernanceData {
+            version: 0,
+            members: BTreeMap::from([(
+                "Owner".to_owned(),
+                PublicKey::from_str(&node.public_key()).unwrap(),
+            )]),
+            roles_gov: RolesGov {
+                approver: BTreeSet::from(["Owner".to_owned()]),
+                evaluator: BTreeSet::from(["Owner".to_owned()]),
+                validator: BTreeSet::from(["Owner".to_owned()]),
+                witness: BTreeSet::from(["Owner".to_owned()]),
+                issuer: RoleGovIssuer {
+                    signers: BTreeSet::from(["Owner".to_owned()]),
+                    any: false,
+                },
+            },
+            policies_gov: PolicyGov {
+                approve: Quorum::Majority,
+                evaluate: Quorum::Majority,
+                validate: Quorum::Majority,
+            },
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            policies_schema: BTreeMap::new(),
+        },
     );
 }
 
@@ -494,7 +538,7 @@ async fn test_invalid_contract() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXp",
+                    "contract": INVALID_EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -523,9 +567,34 @@ async fn test_invalid_contract() {
     assert_eq!(state.creator, node.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 0);
-    assert_eq!(
+    assert_governance_properties_eq(
         state.properties,
-        json!({"members":{"Owner":node.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"schemas":{},"version":0})
+        GovernanceData {
+            version: 0,
+            members: BTreeMap::from([(
+                "Owner".to_owned(),
+                PublicKey::from_str(&node.public_key()).unwrap(),
+            )]),
+            roles_gov: RolesGov {
+                approver: BTreeSet::from(["Owner".to_owned()]),
+                evaluator: BTreeSet::from(["Owner".to_owned()]),
+                validator: BTreeSet::from(["Owner".to_owned()]),
+                witness: BTreeSet::from(["Owner".to_owned()]),
+                issuer: RoleGovIssuer {
+                    signers: BTreeSet::from(["Owner".to_owned()]),
+                    any: false,
+                },
+            },
+            policies_gov: PolicyGov {
+                approve: Quorum::Majority,
+                evaluate: Quorum::Majority,
+                validate: Quorum::Majority,
+            },
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            policies_schema: BTreeMap::new(),
+        },
     );
 }
 
@@ -560,7 +629,7 @@ async fn test_governance_and_subject_copy_with_approve() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -784,10 +853,47 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.creator, addressable.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    let expected = GovernanceData {
+        version: 1,
+        members: BTreeMap::from([
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&bootstrap.public_key()).unwrap(),
+            ),
+            (
+                "AveNode3".to_owned(),
+                PublicKey::from_str(&ephimeral.public_key()).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&addressable.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "AveNode2".to_owned(),
+                "AveNode3".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+    assert_governance_properties_eq(state.properties, expected.clone());
 
     let state = get_subject(bootstrap, governance_id.clone(), Some(1))
         .await
@@ -803,10 +909,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.creator, addressable.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
 
     ephimeral
         .update_subject(governance_id.clone())
@@ -826,10 +929,7 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.creator, addressable.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":bootstrap.public_key(),"AveNode3":ephimeral.public_key(),"Owner":addressable.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode2", "AveNode3"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -847,7 +947,7 @@ async fn test_many_schema_in_one_governance() {
             "add": [
                 {
                     "id": "Example1",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -856,7 +956,7 @@ async fn test_many_schema_in_one_governance() {
                 },
                 {
                     "id": "Example2",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -865,7 +965,7 @@ async fn test_many_schema_in_one_governance() {
                 },
                 {
                     "id": "Example3",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -893,10 +993,96 @@ async fn test_many_schema_in_one_governance() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Owner": owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{"Example1":{"evaluate":"majority","validate":"majority"},"Example2":{"evaluate":"majority","validate":"majority"},"Example3":{"evaluate":"majority","validate":"majority"}},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{"Example1":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example2":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"Example3":{"creator":[],"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]}},"schemas":{"Example1":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example2":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}},"Example3":{"contract":"dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==","initial_value":{"one":0,"three":0,"two":0}}},"version":1})
-    );
+    let expected = GovernanceData {
+        version: 1,
+        members: BTreeMap::from([(
+            "Owner".to_owned(),
+            PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+        )]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from(["Owner".to_owned()]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::from([
+            (
+                SchemaType::Type("Example1".to_owned()),
+                Schema {
+                    contract: EXAMPLE_CONTRACT.to_owned(),
+                    initial_value: ValueWrapper(
+                        json!({"one": 0, "two": 0, "three": 0}),
+                    ),
+                },
+            ),
+            (
+                SchemaType::Type("Example2".to_owned()),
+                Schema {
+                    contract: EXAMPLE_CONTRACT.to_owned(),
+                    initial_value: ValueWrapper(
+                        json!({"one": 0, "two": 0, "three": 0}),
+                    ),
+                },
+            ),
+            (
+                SchemaType::Type("Example3".to_owned()),
+                Schema {
+                    contract: EXAMPLE_CONTRACT.to_owned(),
+                    initial_value: ValueWrapper(
+                        json!({"one": 0, "two": 0, "three": 0}),
+                    ),
+                },
+            ),
+        ]),
+        roles_schema: BTreeMap::from([
+            (
+                SchemaType::Type("Example1".to_owned()),
+                RolesSchema::default(),
+            ),
+            (
+                SchemaType::Type("Example2".to_owned()),
+                RolesSchema::default(),
+            ),
+            (
+                SchemaType::Type("Example3".to_owned()),
+                RolesSchema::default(),
+            ),
+        ]),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::from([
+            (
+                SchemaType::Type("Example1".to_owned()),
+                PolicySchema {
+                    evaluate: Quorum::Majority,
+                    validate: Quorum::Majority,
+                },
+            ),
+            (
+                SchemaType::Type("Example2".to_owned()),
+                PolicySchema {
+                    evaluate: Quorum::Majority,
+                    validate: Quorum::Majority,
+                },
+            ),
+            (
+                SchemaType::Type("Example3".to_owned()),
+                PolicySchema {
+                    evaluate: Quorum::Majority,
+                    validate: Quorum::Majority,
+                },
+            ),
+        ]),
+    };
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -983,10 +1169,39 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":fake_node, "Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
-    );
+    let expected = GovernanceData {
+        version: 4,
+        members: BTreeMap::from([
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&fake_node).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from(["Owner".to_owned()]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+    assert_governance_properties_eq(state.properties, expected);
 
     let state = get_subject(owner_governance, governance_id.clone(), None)
         .await
@@ -1001,10 +1216,42 @@ async fn test_transfer_event_governance_1() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":future_owner.public_key(),"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1132,10 +1379,46 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
-    );
+    let expected = GovernanceData {
+        version: 4,
+        members: BTreeMap::from([
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&fake_node).unwrap(),
+            ),
+            (
+                "AveNode_Old".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&future_owner.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "AveNode_Old".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+    assert_governance_properties_eq(state.properties, expected.clone());
 
     let state = get_subject(owner_governance, governance_id.clone(), None)
         .await
@@ -1150,10 +1433,7 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode2":fake_node,"AveNode_Old":owner_governance.public_key(),"Owner":future_owner.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode_Old"]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":4})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1220,9 +1500,34 @@ async fn test_governance_fail_approve() {
     assert_eq!(state.creator, node1.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 1);
-    assert_eq!(
+    assert_governance_properties_eq(
         state.properties,
-        json!({"members":{"Owner":node1.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_schema":{},"schemas":{},"version":0})
+        GovernanceData {
+            version: 0,
+            members: BTreeMap::from([(
+                "Owner".to_owned(),
+                PublicKey::from_str(&node1.public_key()).unwrap(),
+            )]),
+            roles_gov: RolesGov {
+                approver: BTreeSet::from(["Owner".to_owned()]),
+                evaluator: BTreeSet::from(["Owner".to_owned()]),
+                validator: BTreeSet::from(["Owner".to_owned()]),
+                witness: BTreeSet::from(["Owner".to_owned()]),
+                issuer: RoleGovIssuer {
+                    signers: BTreeSet::from(["Owner".to_owned()]),
+                    any: false,
+                },
+            },
+            policies_gov: PolicyGov {
+                approve: Quorum::Majority,
+                evaluate: Quorum::Majority,
+                validate: Quorum::Majority,
+            },
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            policies_schema: BTreeMap::new(),
+        },
     );
 }
 
@@ -1341,6 +1646,55 @@ async fn test_governance_manual_many_approvers() {
     .await
     .unwrap();
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "Approver1".to_owned(),
+                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+            ),
+            (
+                "Approver2".to_owned(),
+                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+            ),
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&fake_node).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Fixed(100),
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1354,10 +1708,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1371,10 +1722,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1388,10 +1736,7 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1", "Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1479,6 +1824,55 @@ async fn test_governance_auto_many_approvers() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "Approver1".to_owned(),
+                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+            ),
+            (
+                "Approver2".to_owned(),
+                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+            ),
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&fake_node).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Fixed(100),
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1492,10 +1886,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1509,10 +1900,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1526,10 +1914,7 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"AveNode1":fake_node,"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1647,6 +2032,51 @@ async fn test_governance_not_quorum_many_approvers() {
     .await
     .unwrap();
 
+    let expected = GovernanceData {
+        version: 1,
+        members: BTreeMap::from([
+            (
+                "Approver1".to_owned(),
+                PublicKey::from_str(&approver_1.public_key()).unwrap(),
+            ),
+            (
+                "Approver2".to_owned(),
+                PublicKey::from_str(&approver_2.public_key()).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "Approver1".to_owned(),
+                "Approver2".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Fixed(100),
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1660,10 +2090,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_1, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1677,10 +2104,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(approver_2, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1694,10 +2118,7 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.creator, owner.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Approver1":approver_1.public_key(),"Approver2":approver_2.public_key(),"Owner":owner.public_key()},"policies_gov":{"approve":{"fixed":100},"evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Approver1","Approver2","Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["Approver1","Approver2"]},"roles_schema":{},"schemas":{},"version":1})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1759,6 +2180,52 @@ async fn test_change_roles_gov() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+            ),
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&fake_node_1).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            validator: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            witness: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1772,10 +2239,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -1789,10 +2253,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["AveNode1","Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["AveNode1","Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 
     let json = json!({
     "roles": {
@@ -1808,6 +2269,46 @@ async fn test_change_roles_gov() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 3,
+        members: BTreeMap::from([
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+            ),
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&fake_node_1).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(3))
         .await
         .unwrap();
@@ -1821,10 +2322,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(3))
         .await
         .unwrap();
@@ -1838,10 +2336,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":3})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 
     let fake_node_2 = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
@@ -1861,6 +2356,50 @@ async fn test_change_roles_gov() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 4,
+        members: BTreeMap::from([
+            (
+                "AveNode1".to_owned(),
+                PublicKey::from_str(&eval_node.public_key()).unwrap(),
+            ),
+            (
+                "AveNode2".to_owned(),
+                PublicKey::from_str(&fake_node_1).unwrap(),
+            ),
+            (
+                "AveNode3".to_owned(),
+                PublicKey::from_str(&fake_node_2).unwrap(),
+            ),
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Majority,
+            validate: Quorum::Majority,
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(4))
         .await
         .unwrap();
@@ -1874,10 +2413,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
-    );
+    assert_governance_properties_eq(state.properties, expected.clone());
     let state = get_subject(eval_node, governance_id.clone(), Some(4))
         .await
         .unwrap();
@@ -1891,10 +2427,7 @@ async fn test_change_roles_gov() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 4);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"AveNode1":eval_node.public_key(),"AveNode2":fake_node_1,"AveNode3":fake_node_2,"Owner":owner_governance.public_key()},"policies_gov":{"approve":"majority","evaluate":"majority","validate":"majority"},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":["AveNode1"]},"roles_schema":{},"schemas":{},"version":4})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -1911,7 +2444,7 @@ async fn test_delete_schema() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -2058,7 +2591,7 @@ async fn test_change_schema() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -2155,7 +2688,7 @@ async fn test_change_schema() {
         "schemas": {
             "change": [{
                 "actual_id": "Example",
-                "new_contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=",
+                "new_contract": CHANGED_SCHEMA_CONTRACT,
                 "new_initial_value": {
                     "data": ""
                 }
@@ -2273,6 +2806,43 @@ async fn test_gov_no_all_validators() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+            (
+                "offline".to_owned(),
+                PublicKey::from_str(&offline_controller).unwrap(),
+            ),
+            ("user".to_owned(), PublicKey::from_str(&user).unwrap()),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from(["Owner".to_owned()]),
+            validator: BTreeSet::from([
+                "Owner".to_owned(),
+                "offline".to_owned(),
+            ]),
+            witness: BTreeSet::from(["Owner".to_owned()]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Fixed(1),
+            validate: Quorum::Fixed(1),
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -2287,10 +2857,7 @@ async fn test_gov_no_all_validators() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner","offline"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -2369,6 +2936,43 @@ async fn test_gov_no_all_evaluators() {
         .await
         .unwrap();
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+            (
+                "offline".to_owned(),
+                PublicKey::from_str(&offline_controller).unwrap(),
+            ),
+            ("user".to_owned(), PublicKey::from_str(&user).unwrap()),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from([
+                "Owner".to_owned(),
+                "offline".to_owned(),
+            ]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from(["Owner".to_owned()]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Fixed(1),
+            validate: Quorum::Fixed(1),
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(2))
         .await
         .unwrap();
@@ -2383,10 +2987,7 @@ async fn test_gov_no_all_evaluators() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 2);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user":user},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }
 
 #[test(tokio::test)]
@@ -2477,6 +3078,43 @@ async fn test_gov_fail_no_all_evaluators() {
             .unwrap();
     }
 
+    let expected = GovernanceData {
+        version: 2,
+        members: BTreeMap::from([
+            (
+                "Owner".to_owned(),
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
+            (
+                "offline".to_owned(),
+                PublicKey::from_str(&offline_controller).unwrap(),
+            ),
+            ("user1".to_owned(), PublicKey::from_str(&keys[0]).unwrap()),
+        ]),
+        roles_gov: RolesGov {
+            approver: BTreeSet::from(["Owner".to_owned()]),
+            evaluator: BTreeSet::from([
+                "Owner".to_owned(),
+                "offline".to_owned(),
+            ]),
+            validator: BTreeSet::from(["Owner".to_owned()]),
+            witness: BTreeSet::from(["Owner".to_owned()]),
+            issuer: RoleGovIssuer {
+                signers: BTreeSet::from(["Owner".to_owned()]),
+                any: false,
+            },
+        },
+        policies_gov: PolicyGov {
+            approve: Quorum::Majority,
+            evaluate: Quorum::Fixed(1),
+            validate: Quorum::Fixed(1),
+        },
+        schemas: BTreeMap::new(),
+        roles_schema: BTreeMap::new(),
+        roles_tracker_schemas: RolesTrackerSchemas::default(),
+        policies_schema: BTreeMap::new(),
+    };
+
     let state = get_subject(owner_governance, governance_id.clone(), Some(3))
         .await
         .unwrap();
@@ -2491,8 +3129,5 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
-    assert_eq!(
-        state.properties,
-        json!({"members":{"Owner":owner_governance.public_key(),"offline":offline_controller,"user1":keys[0]},"policies_gov":{"approve":"majority","evaluate":{"fixed":1},"validate":{"fixed":1}},"policies_schema":{},"roles_tracker_schemas":{"evaluator":[],"issuer":{"any":false,"signers":[]},"validator":[],"witness":[]},"roles_gov":{"approver":["Owner"],"evaluator":["Owner", "offline"],"issuer":{"any":false,"signers":["Owner"]},"validator":["Owner"],"witness":[]},"roles_schema":{},"schemas":{},"version":2})
-    );
+    assert_governance_properties_eq(state.properties, expected);
 }

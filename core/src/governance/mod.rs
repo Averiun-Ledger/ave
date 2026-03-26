@@ -10,15 +10,19 @@ use crate::{
     evaluation::{
         compiler::{
             CompilerResponse, ContractCompiler, ContractCompilerMessage,
-            ContractRegister, ContractRegisterMessage,
-            ContractRegisterResponse,
         },
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
     },
     governance::{
+        contract_register::{
+            ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
+        },
         data::GovernanceData,
-        events::GovernanceEvent,
+        events::{
+            GovernanceEvent, governance_event_roles_update_fact,
+            governance_event_update_creator_change,
+        },
         model::{
             CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
             Schema, WitnessesData,
@@ -86,6 +90,7 @@ use std::{
 use tokio::{fs, sync::RwLock};
 use wasmtime::Module;
 
+pub mod contract_register;
 pub mod data;
 pub mod error;
 pub mod events;
@@ -2311,11 +2316,11 @@ impl Governance {
                             None
                         };
 
-                    let creator_update = governance_event
-                        .update_creator_change(
-                            &self.properties.members,
-                            &self.properties.roles_schema,
-                        );
+                    let creator_update = governance_event_update_creator_change(
+                        &governance_event,
+                        &self.properties.members,
+                        &self.properties.roles_schema,
+                    );
 
                     Some((governance_event, creator_update, rm_roles))
                 } else {
@@ -2330,8 +2335,11 @@ impl Governance {
             self.on_event(event.clone(), ctx).await;
 
             if let Some((event, creator_update, rm_roles)) = update_fact {
-                let update =
-                    event.roles_update_fact(&self.properties.members, rm_roles);
+                let update = governance_event_roles_update_fact(
+                    &event,
+                    &self.properties.members,
+                    rm_roles,
+                );
 
                 self.update_registers_fact(ctx, update, creator_update)
                     .await?;

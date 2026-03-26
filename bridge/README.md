@@ -48,14 +48,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-bridge = "0.8.0"
+ave-bridge = "0.9.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-bridge = { version = "0.8.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-bridge = { version = "0.9.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Bootstrap example
@@ -111,6 +111,7 @@ The `settings` module can load this configuration from JSON, YAML, or TOML and r
 - network queue and memory-limit settings
 - control-list settings
 - address and boot-node consistency
+- safe-mode-related startup consistency
 
 ## HTTP-related types
 
@@ -133,8 +134,22 @@ The `Bridge` facade exposes higher-level methods for common operations, includin
 - querying approvals, requests, subjects, events, and aborts
 - managing auth subjects and witnesses
 - manual distribution and update operations
+- deleting subjects while the node is running in safe mode
 
 This lets application code stay mostly unaware of the actor-system internals in `ave-core`.
+
+## Safe mode
+
+Because `ave-bridge` owns application startup and configuration loading, it is
+also the main integration point for `safe_mode`.
+
+When `settings.node.safe_mode` is enabled, the underlying runtime starts in
+maintenance mode:
+
+- read/query flows remain available
+- mutating runtime operations are blocked
+- subject deletion is enabled for maintenance workflows
+- the network layer is started in isolated mode
 
 ## Re-exports
 
