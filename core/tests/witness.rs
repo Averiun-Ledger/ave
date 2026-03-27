@@ -273,7 +273,7 @@ async fn test_not_access() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -1556,12 +1556,12 @@ async fn test_basic_explicit_witness() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test1"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 },
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -2450,7 +2450,7 @@ async fn test_explicit_witness() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3101,7 +3101,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3180,7 +3180,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3453,12 +3453,12 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 },
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -3612,7 +3612,7 @@ async fn test_explicit_witness_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 },
                             ]
                         },
@@ -3960,7 +3960,7 @@ async fn test_range() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test1"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4043,7 +4043,7 @@ async fn test_range() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": ["Test2"],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4695,7 +4695,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Alice"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -4862,7 +4862,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Owner", "Charlie"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -5069,7 +5069,7 @@ async fn test_multi_source() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Owner"]
+                                    "new_witnesses": [{"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -5689,7 +5689,7 @@ async fn test_more_cases() {
                                 {
                                     "actual_name": "Charlie",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Alice"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6059,7 +6059,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6094,7 +6094,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6254,7 +6254,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Charlie"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Charlie", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6279,7 +6279,7 @@ async fn test_more_cases_2() {
                                 {
                                     "actual_name": "Bob",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6558,7 +6558,7 @@ async fn test_more_cases_3() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Bob"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },
@@ -6584,7 +6584,7 @@ async fn test_more_cases_3() {
                                 {
                                     "actual_name": "Alice",
                                     "actual_namespace": [],
-                                    "new_witnesses": ["Witnesses", "Bob", "Owner"]
+                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Bob", "viewpoints": ["AllViewpoints"]}, {"name": "Owner", "viewpoints": ["AllViewpoints"]}]
                                 }
                             ]
                         },

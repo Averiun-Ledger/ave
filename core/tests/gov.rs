@@ -7,7 +7,7 @@ use std::{
 mod common;
 
 use ave_common::{
-    SchemaType, ValueWrapper,
+    Namespace, SchemaType, ValueWrapper,
     bridge::request::ApprovalStateRes,
     identity::{
         PublicKey,
@@ -18,8 +18,8 @@ use ave_common::{
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
 use ave_core::governance::model::{
-    PolicyGov, PolicySchema, Quorum, RoleGovIssuer, RolesGov, RolesSchema,
-    RolesTrackerSchemas, Schema,
+    CreatorWitness, PolicyGov, PolicySchema, Quorum, RoleCreator,
+    RoleGovIssuer, RolesGov, RolesSchema, RolesTrackerSchemas, Schema,
 };
 
 use common::{
@@ -44,6 +44,10 @@ const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhb
 fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
     let actual: GovernanceData = from_value(actual).unwrap();
     assert_eq!(actual, expected);
+}
+
+fn governance_properties(actual: Value) -> GovernanceData {
+    from_value(actual).unwrap()
 }
 
 #[test(tokio::test)]
@@ -1022,6 +1026,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
             (
@@ -1031,6 +1036,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
             (
@@ -1040,6 +1046,7 @@ async fn test_many_schema_in_one_governance() {
                     initial_value: ValueWrapper(
                         json!({"one": 0, "two": 0, "three": 0}),
                     ),
+                    viewpoints: BTreeSet::new(),
                 },
             ),
         ]),
@@ -3130,4 +3137,560 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.active, true);
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected);
+}
+
+#[test(tokio::test)]
+async fn test_governance_schema_and_creator_viewpoints_state() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
+    let owner = &nodes[0].api;
+
+    let governance_id = create_and_authorize_governance(owner, vec![]).await;
+
+    let alice = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 2
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(2))
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let schema_id = SchemaType::Type("Example".to_owned());
+
+    assert_eq!(governance.version, 2);
+    assert_eq!(
+        governance.schemas.get(&schema_id).unwrap().viewpoints,
+        BTreeSet::from(["agua".to_owned(), "basura".to_owned()])
+    );
+
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from(["Witnesses".to_owned()])
+    );
+    assert_eq!(
+        creator.witness_viewpoints,
+        BTreeSet::from([CreatorWitness {
+            name: "Witnesses".to_owned(),
+            viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+        }])
+    );
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    },
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["NoViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(3))
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from(["Alice".to_owned(), "Witnesses".to_owned()])
+    );
+    assert_eq!(
+        creator.witness_viewpoints,
+        BTreeSet::from([
+            CreatorWitness {
+                name: "Alice".to_owned(),
+                viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
+            },
+            CreatorWitness {
+                name: "Witnesses".to_owned(),
+                viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+            },
+        ])
+    );
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    },
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "schemas": {
+            "change": [
+                {
+                    "actual_id": "Example",
+                    "new_viewpoints": ["agua", "basura", "vidrio"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), Some(4))
+        .await
+        .unwrap();
+    let governance = governance_properties(state.properties);
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(governance.version, 4);
+    assert_eq!(
+        governance.schemas.get(&schema_id).unwrap().viewpoints,
+        BTreeSet::from([
+            "agua".to_owned(),
+            "basura".to_owned(),
+            "vidrio".to_owned()
+        ])
+    );
+    assert_eq!(
+        creator.witness_viewpoints,
+        BTreeSet::from([
+            CreatorWitness {
+                name: "Alice".to_owned(),
+                viewpoints: BTreeSet::from(["agua".to_owned()]),
+            },
+            CreatorWitness {
+                name: "Witnesses".to_owned(),
+                viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+            },
+        ])
+    );
+}
+
+#[test(tokio::test)]
+async fn test_governance_invalid_viewpoints_validation() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
+    let owner = &nodes[0].api;
+
+    let governance_id = create_and_authorize_governance(owner, vec![]).await;
+
+    let alice = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "InvalidDuplicate",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "agua"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(2)).await.unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "InvalidReserved",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["NoViewpoints"]
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(3)).await.unwrap();
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 2
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(4)).await.unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["NoViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(5))
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(6))
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["vidrio"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(7))
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints", "agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(8))
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["AllViewpoints", "agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(9))
+        .await
+        .unwrap();
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Owner",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let _ = get_subject(owner, governance_id.clone(), Some(10))
+        .await
+        .unwrap();
+
+    let state = get_subject(owner, governance_id.clone(), None).await.unwrap();
+    let governance = governance_properties(state.properties);
+    let schema_id = SchemaType::Type("Example".to_owned());
+    let creator = governance
+        .roles_schema
+        .get(&schema_id)
+        .unwrap()
+        .creator
+        .get(&RoleCreator::create("Owner", Namespace::new()))
+        .unwrap();
+
+    assert_eq!(governance.version, 2);
+    assert_eq!(
+        creator.witnesses,
+        BTreeSet::from(["Witnesses".to_owned()])
+    );
+    assert_eq!(
+        creator.witness_viewpoints,
+        BTreeSet::from([CreatorWitness {
+            name: "Witnesses".to_owned(),
+            viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+        }])
+    );
 }

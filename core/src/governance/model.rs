@@ -2,20 +2,24 @@
 //!
 
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
+    Namespace, SchemaType, ValueWrapper,
+    identity::PublicKey,
     schematype::ReservedWords,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use std::{
     collections::{BTreeSet, HashSet},
-    fmt::{self},
-    hash::Hash,
     vec,
 };
 
 pub type MemberName = String;
+
+pub use ave_common::governance::{
+    CreatorQuantity, CreatorWitness, Member, ProtocolTypes, Quorum, Role,
+    RoleCreator,
+};
 
 /// Governance schema.
 #[derive(
@@ -32,6 +36,7 @@ pub type MemberName = String;
 pub struct Schema {
     pub initial_value: ValueWrapper,
     pub contract: String,
+    pub viewpoints: BTreeSet<String>,
 }
 
 pub struct NameCreators {
@@ -484,6 +489,7 @@ impl RolesSchema {
                 .filter(|x| x.name != *remove)
                 .map(|mut c| {
                     c.witnesses.remove(remove);
+                    c.witness_viewpoints.retain(|x| x.name != *remove);
                     c
                 })
                 .collect();
@@ -549,10 +555,42 @@ impl RolesSchema {
                             quantity: x.quantity.clone(),
                             name: new_name.clone(),
                             witnesses: x.witnesses.clone(),
+                            witness_viewpoints: x
+                                .witness_viewpoints
+                                .iter()
+                                .map(|w| {
+                                    if w.name == *old_name {
+                                        CreatorWitness {
+                                            name: new_name.clone(),
+                                            viewpoints: w.viewpoints.clone(),
+                                        }
+                                    } else {
+                                        w.clone()
+                                    }
+                                })
+                                .collect(),
                             namespace: x.namespace.clone(),
                         }
                     } else {
-                        x.clone()
+                        let mut role = x.clone();
+                        if role.witnesses.remove(old_name) {
+                            role.witnesses.insert(new_name.clone());
+                        }
+                        role.witness_viewpoints = role
+                            .witness_viewpoints
+                            .iter()
+                            .map(|w| {
+                                if w.name == *old_name {
+                                    CreatorWitness {
+                                        name: new_name.clone(),
+                                        viewpoints: w.viewpoints.clone(),
+                                    }
+                                } else {
+                                    w.clone()
+                                }
+                            })
+                            .collect();
+                        role
                     }
                 })
                 .collect();
@@ -745,6 +783,7 @@ impl RolesSchema {
                 name: name.to_string(),
                 namespace,
                 witnesses: BTreeSet::default(),
+                witness_viewpoints: BTreeSet::default(),
                 quantity: CreatorQuantity::Infinity,
             })
             .map(|x| x.quantity.clone())
@@ -893,79 +932,6 @@ impl HashThisRole {
     }
 }
 
-/// Governance role.
-#[derive(
-    Debug,
-    Serialize,
-    Deserialize,
-    Clone,
-    PartialEq,
-    Hash,
-    Eq,
-    PartialOrd,
-    Ord,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub struct Role {
-    pub name: String,
-    pub namespace: Namespace,
-}
-
-#[derive(
-    Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize,
-)]
-pub struct RoleCreator {
-    pub name: String,
-    pub namespace: Namespace,
-    #[serde(default = "default_witnesses_creator")]
-    pub witnesses: BTreeSet<String>,
-    pub quantity: CreatorQuantity,
-}
-
-fn default_witnesses_creator() -> BTreeSet<String> {
-    BTreeSet::from([ReservedWords::Witnesses.to_string()])
-}
-
-impl Hash for RoleCreator {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.namespace.hash(state);
-    }
-}
-
-impl PartialOrd for RoleCreator {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RoleCreator {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.name.clone(), self.namespace.clone())
-            .cmp(&(other.name.clone(), other.namespace.clone()))
-    }
-}
-
-impl PartialEq for RoleCreator {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.namespace == other.namespace
-    }
-}
-
-impl Eq for RoleCreator {}
-
-impl RoleCreator {
-    pub fn create(name: &str, namespace: Namespace) -> Self {
-        Self {
-            name: name.to_owned(),
-            namespace,
-            witnesses: BTreeSet::default(),
-            quantity: CreatorQuantity::Infinity,
-        }
-    }
-}
-
 #[derive(
     Debug,
     Serialize,
@@ -996,153 +962,6 @@ pub struct RoleGovIssuer {
 pub struct RoleSchemaIssuer {
     pub signers: BTreeSet<Role>,
     pub any: bool,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Eq,
-    PartialEq,
-    Hash,
-    PartialOrd,
-    Ord,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-pub enum CreatorQuantity {
-    Quantity(u32),
-    Infinity,
-}
-
-impl CreatorQuantity {
-    pub const fn check(&self) -> bool {
-        match self {
-            Self::Quantity(quantity) => *quantity != 0,
-            Self::Infinity => true,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for CreatorQuantity {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-
-        match value {
-            serde_json::Value::String(s) if s == "infinity" => {
-                Ok(Self::Infinity)
-            }
-            serde_json::Value::Number(n) if n.is_u64() => {
-                Ok(Self::Quantity(n.as_u64().ok_or_else(|| {
-                    serde::de::Error::custom(
-                        "Quantity must be a number or 'infinity'",
-                    )
-                })? as u32))
-            }
-            _ => Err(serde::de::Error::custom(
-                "Quantity must be a number or 'infinity'",
-            )),
-        }
-    }
-}
-
-impl Serialize for CreatorQuantity {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Quantity(n) => serializer.serialize_u32(*n),
-            Self::Infinity => serializer.serialize_str("infinity"),
-        }
-    }
-}
-
-/// Governance member.
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
-pub struct Member {
-    pub id: PublicKey,
-    pub name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum ProtocolTypes {
-    Approval,
-    Evaluation,
-    Validation,
-}
-
-impl fmt::Display for ProtocolTypes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Approval => write!(f, "Approval"),
-            Self::Evaluation => write!(f, "Evaluation"),
-            Self::Validation => write!(f, "Validation"),
-        }
-    }
-}
-
-/// Governance quorum.
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Hash,
-    Eq,
-    BorshDeserialize,
-    BorshSerialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum Quorum {
-    #[default]
-    Majority,
-    Fixed(u32),
-    Percentage(u8),
-}
-
-impl Quorum {
-    pub fn check_values(&self) -> Result<(), String> {
-        if let Self::Percentage(percentage) = self
-            && (*percentage == 0_u8 || *percentage > 100_u8)
-        {
-            return Err("the percentage must be between 1 and 100".to_owned());
-        }
-
-        Ok(())
-    }
-
-    pub fn get_signers(&self, total_members: u32, pending: u32) -> u32 {
-        let signers = match self {
-            Self::Fixed(fixed) => {
-                let min = std::cmp::min(fixed, &total_members);
-                *min
-            }
-            Self::Majority => total_members / 2 + 1,
-            Self::Percentage(percentage) => {
-                total_members * (percentage / 100) as u32
-            }
-        };
-
-        std::cmp::min(signers, pending)
-    }
-
-    pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
-        match self {
-            Self::Fixed(fixed) => {
-                let min = std::cmp::min(fixed, &total_members);
-                signers >= *min
-            }
-            Self::Majority => signers > total_members / 2,
-            Self::Percentage(percentage) => {
-                signers >= (total_members * (percentage / 100) as u32)
-            }
-        }
-    }
 }
 
 /// Governance policy.

@@ -6,9 +6,11 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
+    fmt,
     hash::Hash,
 };
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
@@ -16,10 +18,14 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::identity::PublicKey;
-use crate::{Namespace, SchemaType};
+use crate::{Namespace, SchemaType, schematype::ReservedWords};
 
 fn default_witnesses_creator() -> BTreeSet<String> {
     BTreeSet::from(["Witnesses".to_owned()])
+}
+
+fn default_all_viewpoints() -> BTreeSet<String> {
+    BTreeSet::from([ReservedWords::AllViewpoints.to_string()])
 }
 
 pub type MemberName = String;
@@ -180,7 +186,7 @@ pub struct RoleCreatorChange {
     pub actual_name: MemberName,
     pub actual_namespace: Namespace,
     pub new_namespace: Option<Namespace>,
-    pub new_witnesses: Option<BTreeSet<String>>,
+    pub new_witnesses: Option<BTreeSet<CreatorWitness>>,
     pub new_quantity: Option<CreatorQuantity>,
 }
 
@@ -212,6 +218,8 @@ pub struct SchemaAdd {
     pub id: SchemaType,
     pub contract: String,
     pub initial_value: Value,
+    #[serde(default)]
+    pub viewpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -221,6 +229,7 @@ pub struct SchemaChange {
     pub actual_id: SchemaType,
     pub new_contract: Option<String>,
     pub new_initial_value: Option<Value>,
+    pub new_viewpoints: Option<Vec<String>>,
 }
 
 ///// Policies /////
@@ -267,7 +276,16 @@ pub struct SchemaPolicieChange {
 /// Governance-wide quorum policy.
 /// Governance quorum.
 #[derive(
-    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Hash, Eq,
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Hash,
+    Eq,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -279,7 +297,17 @@ pub enum Quorum {
     Percentage(u8),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
+)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export, type = "number | \"infinity\""))]
 pub enum CreatorQuantity {
@@ -324,8 +352,27 @@ impl Serialize for CreatorQuantity {
     }
 }
 
+impl CreatorQuantity {
+    pub const fn check(&self) -> bool {
+        match self {
+            Self::Quantity(quantity) => *quantity != 0,
+            Self::Infinity => true,
+        }
+    }
+}
+
 #[derive(
-    Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq, PartialOrd, Ord,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Hash,
+    Eq,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
 )]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
@@ -334,7 +381,28 @@ pub struct Role {
     pub namespace: Namespace,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    PartialEq,
+    Hash,
+    Eq,
+    PartialOrd,
+    Ord,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct CreatorWitness {
+    pub name: String,
+    #[serde(default = "default_all_viewpoints")]
+    pub viewpoints: BTreeSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, BorshDeserialize, BorshSerialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct RoleCreator {
@@ -342,6 +410,8 @@ pub struct RoleCreator {
     pub namespace: Namespace,
     #[serde(default = "default_witnesses_creator")]
     pub witnesses: BTreeSet<String>,
+    #[serde(default)]
+    pub witness_viewpoints: BTreeSet<CreatorWitness>,
     pub quantity: CreatorQuantity,
 }
 
@@ -372,3 +442,83 @@ impl PartialEq for RoleCreator {
 }
 
 impl Eq for RoleCreator {}
+
+impl RoleCreator {
+    pub fn create(name: &str, namespace: Namespace) -> Self {
+        Self {
+            name: name.to_owned(),
+            namespace,
+            witnesses: BTreeSet::default(),
+            witness_viewpoints: BTreeSet::default(),
+            quantity: CreatorQuantity::Infinity,
+        }
+    }
+}
+
+impl Quorum {
+    pub fn check_values(&self) -> Result<(), String> {
+        if let Self::Percentage(percentage) = self
+            && (*percentage == 0_u8 || *percentage > 100_u8)
+        {
+            return Err("the percentage must be between 1 and 100".to_owned());
+        }
+
+        Ok(())
+    }
+
+    pub fn get_signers(&self, total_members: u32, pending: u32) -> u32 {
+        let signers = match self {
+            Self::Fixed(fixed) => {
+                let min = std::cmp::min(fixed, &total_members);
+                *min
+            }
+            Self::Majority => total_members / 2 + 1,
+            Self::Percentage(percentage) => {
+                total_members * (percentage / 100) as u32
+            }
+        };
+
+        std::cmp::min(signers, pending)
+    }
+
+    pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
+        match self {
+            Self::Fixed(fixed) => {
+                let min = std::cmp::min(fixed, &total_members);
+                signers >= *min
+            }
+            Self::Majority => signers > total_members / 2,
+            Self::Percentage(percentage) => {
+                signers >= (total_members * (percentage / 100) as u32)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct Member {
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub id: PublicKey,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub enum ProtocolTypes {
+    Approval,
+    Evaluation,
+    Validation,
+}
+
+impl fmt::Display for ProtocolTypes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Approval => write!(f, "Approval"),
+            Self::Evaluation => write!(f, "Evaluation"),
+            Self::Validation => write!(f, "Validation"),
+        }
+    }
+}

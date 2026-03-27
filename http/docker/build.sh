@@ -79,6 +79,34 @@ read_choice() {
     printf '%s' "$value"
 }
 
+selected_versions() {
+    local versions=()
+    local seen=""
+    local tag
+    local version
+
+    for tag in "${TAG_ARRAY[@]}"; do
+        version="${tag%%-*}"
+        case " $seen " in
+            *" $version "*) ;;
+            *)
+                versions+=("$version")
+                seen="$seen $version"
+                ;;
+        esac
+    done
+
+    local joined=""
+    for version in "${versions[@]}"; do
+        if [ -n "$joined" ]; then
+            joined="$joined, "
+        fi
+        joined="${joined}${version}"
+    done
+
+    printf '%s' "$joined"
+}
+
 build_image() {
     local arch="$1"
     local tag="$2"
@@ -224,6 +252,7 @@ if [ "$ENVIRONMENT" = "development" ]; then
 
     echo ""
     echo "Development mode enabled:"
+    echo "  - Version: $(selected_versions)"
     echo "  - Tag suffix: -exp"
     echo "  - Cargo profile: $CARGO_PROFILE"
     echo "  - Skip Docker Hub push: yes"
@@ -245,6 +274,7 @@ else
 
     echo ""
     echo "Production mode enabled:"
+    echo "  - Version: $(selected_versions)"
     echo "  - Cargo profile: $CARGO_PROFILE"
     echo "  - Full build for both architectures (AMD64 + ARM64)"
     echo "  - Full build for both databases (SQLite + RocksDB)"

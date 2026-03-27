@@ -1624,6 +1624,7 @@ impl Governance {
             let Schema {
                 contract,
                 initial_value,
+                viewpoints: _,
             } = schema;
 
             let response = compiler

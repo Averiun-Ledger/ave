@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -30,7 +30,7 @@ use crate::{
             SchemasEvent, gov_policie_change_is_empty,
             gov_role_event_check_data, gov_role_event_is_empty,
             governance_event_is_empty, member_event_is_empty,
-            policies_event_is_empty, quorum_to_core, roles_event_is_empty,
+            policies_event_is_empty, roles_event_is_empty,
             schema_change_is_empty, schema_id_policie_is_empty,
             schema_id_role_check_data, schema_id_role_is_empty,
             schema_policie_change_is_empty, schemas_event_is_empty,
@@ -548,7 +548,7 @@ impl Runner {
             let mut new_policies = governance.policies_gov.clone();
 
             if let Some(approve) = gov.change.approve {
-                let approve = quorum_to_core(&approve);
+                let approve = approve.clone();
                 approve.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -570,7 +570,7 @@ impl Runner {
             }
 
             if let Some(evaluate) = gov.change.evaluate {
-                let evaluate = quorum_to_core(&evaluate);
+                let evaluate = evaluate.clone();
                 evaluate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -592,7 +592,7 @@ impl Runner {
             }
 
             if let Some(validate) = gov.change.validate {
-                let validate = quorum_to_core(&validate);
+                let validate = validate.clone();
                 validate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -670,7 +670,7 @@ impl Runner {
                 }
 
                 if let Some(evaluate) = schema.change.evaluate {
-                    let evaluate = quorum_to_core(&evaluate);
+                    let evaluate = evaluate.clone();
                     evaluate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -698,7 +698,7 @@ impl Runner {
                 }
 
                 if let Some(validate) = schema.change.validate {
-                    let validate = quorum_to_core(&validate);
+                    let validate = validate.clone();
                     validate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -845,6 +845,80 @@ impl Runner {
         schema_event: &SchemasEvent,
         governance: &mut GovernanceData,
     ) -> Result<AddRemoveChangeSchema, RunnerError> {
+        fn validate_viewpoints(
+            schema_id: &SchemaType,
+            viewpoints: &[String],
+            field: &str,
+        ) -> Result<BTreeSet<String>, RunnerError> {
+            let mut unique = BTreeSet::new();
+
+            for viewpoint in viewpoints {
+                if viewpoint != viewpoint.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: format!("{field} for schema {}", schema_id),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+
+                if viewpoint.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::Empty {
+                            what: format!("{field} for schema {}", schema_id),
+                        },
+                    });
+                }
+
+                if viewpoint == &ReservedWords::AllViewpoints.to_string() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::ReservedWord {
+                            field: format!("{field} for schema {}", schema_id),
+                            value: ReservedWords::AllViewpoints.to_string(),
+                        },
+                    });
+                }
+
+                if viewpoint == &ReservedWords::NoViewpoints.to_string() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::ReservedWord {
+                            field: format!("{field} for schema {}", schema_id),
+                            value: ReservedWords::NoViewpoints.to_string(),
+                        },
+                    });
+                }
+
+                if viewpoint.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: format!("{field} for schema {}", schema_id),
+                            actual: viewpoint.len(),
+                            max: 100,
+                        },
+                    });
+                }
+
+                if !unique.insert(viewpoint.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_schemas",
+                        kind: error::InvalidEventKind::Duplicate {
+                            what: field.to_owned(),
+                            id: viewpoint.clone(),
+                        },
+                    });
+                }
+            }
+
+            Ok(unique)
+        }
+
         if schemas_event_is_empty(schema_event) {
             return Err(RunnerError::InvalidEvent {
                 location: "check_schemas",
@@ -995,6 +1069,11 @@ impl Runner {
                                 new_schema.initial_value,
                             ),
                             contract: new_schema.contract,
+                            viewpoints: validate_viewpoints(
+                                &new_schema.id,
+                                &new_schema.viewpoints,
+                                "viewpoints",
+                            )?,
                         },
                     )
                     .is_some()
@@ -1148,6 +1227,28 @@ impl Runner {
                     }
 
                     schema_data.initial_value = ValueWrapper(init_value);
+                }
+
+                if let Some(new_viewpoints) = change_schema.new_viewpoints {
+                    let new_viewpoints = validate_viewpoints(
+                        &change_schema.actual_id,
+                        &new_viewpoints,
+                        "new viewpoints",
+                    )?;
+
+                    if new_viewpoints == schema_data.viewpoints {
+                        return Err(RunnerError::InvalidEvent {
+                            location: "check_schemas",
+                            kind: error::InvalidEventKind::SameValue {
+                                what: format!(
+                                    "viewpoints for schema {}",
+                                    change_schema.actual_id
+                                ),
+                            },
+                        });
+                    }
+
+                    schema_data.viewpoints = new_viewpoints;
                 }
 
                 change_schemas.insert(change_schema.actual_id);
