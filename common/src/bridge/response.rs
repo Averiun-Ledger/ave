@@ -154,6 +154,7 @@ pub enum RequestEventDB {
     },
     TrackerFact {
         payload: Value,
+        viewpoints: Vec<String>,
         evaluation_response: EvalResDB,
     },
     GovernanceFact {

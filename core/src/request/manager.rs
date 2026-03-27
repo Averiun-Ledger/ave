@@ -368,6 +368,16 @@ impl RequestManager {
 
                 let init_state =
                     governance_data.get_init_state(&metadata.schema_id)?;
+                let schema_viewpoints = governance_data
+                    .schemas
+                    .get(&metadata.schema_id)
+                    .ok_or_else(|| {
+                        crate::governance::error::GovernanceError::SchemaDoesNotExist {
+                            schema_id: metadata.schema_id.to_string(),
+                        }
+                    })?
+                    .viewpoints
+                    .clone();
 
                 (
                     EvaluateData::TrackerSchemasFact {
@@ -376,6 +386,7 @@ impl RequestManager {
                             metadata.governance_id, metadata.schema_id
                         ),
                         state: metadata.properties.clone(),
+                        schema_viewpoints,
                     },
                     governance_data,
                     Some(init_state),

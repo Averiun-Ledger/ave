@@ -1,6 +1,7 @@
 use crate::{
     evaluation::{response::EvaluatorError, runner::types::EvaluateInfo},
     governance::data::GovernanceData,
+    model::common::viewpoints::validate_fact_viewpoints,
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -10,6 +11,7 @@ use ave_common::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// A struct representing an evaluation request.
 #[derive(
@@ -37,6 +39,15 @@ pub struct EvaluationReq {
 }
 
 impl EvaluationReq {
+    fn validate_fact_viewpoints(
+        fact_viewpoints: &BTreeSet<String>,
+        schema_id: &SchemaType,
+        schema_viewpoints: Option<&BTreeSet<String>>,
+    ) -> Result<(), EvaluatorError> {
+        validate_fact_viewpoints(fact_viewpoints, schema_id, schema_viewpoints)
+            .map_err(EvaluatorError::InvalidEventRequest)
+    }
+
     pub fn build_evaluate_info(
         &self,
         init_state: &Option<ValueWrapper>,
@@ -45,13 +56,25 @@ impl EvaluationReq {
             (
                 EventRequest::Fact(fact_request),
                 EvaluateData::GovFact { state },
-            ) => Ok(EvaluateInfo::GovFact {
-                payload: fact_request.payload.clone(),
-                state: state.clone(),
-            }),
+            ) => {
+                Self::validate_fact_viewpoints(
+                    &fact_request.viewpoints,
+                    &self.schema_id,
+                    None,
+                )?;
+
+                Ok(EvaluateInfo::GovFact {
+                    payload: fact_request.payload.clone(),
+                    state: state.clone(),
+                })
+            }
             (
                 EventRequest::Fact(fact_request),
-                EvaluateData::TrackerSchemasFact { contract, state },
+                EvaluateData::TrackerSchemasFact {
+                    contract,
+                    state,
+                    schema_viewpoints,
+                },
             ) => init_state.as_ref().map_or_else(
                 || {
                     Err(EvaluatorError::InternalError(
@@ -59,6 +82,12 @@ impl EvaluationReq {
                     ))
                 },
                 |init_state| {
+                    Self::validate_fact_viewpoints(
+                        &fact_request.viewpoints,
+                        &self.schema_id,
+                        Some(schema_viewpoints),
+                    )?;
+
                     Ok(EvaluateInfo::TrackerSchemasFact {
                         contract: contract.clone(),
                         init_state: init_state.clone(),
@@ -121,6 +150,7 @@ pub enum EvaluateData {
     TrackerSchemasFact {
         contract: String,
         state: ValueWrapper,
+        schema_viewpoints: BTreeSet<String>,
     },
     TrackerSchemasTransfer {
         state: ValueWrapper,
@@ -159,4 +189,164 @@ pub struct SubjectContext {
     pub schema_id: SchemaType,
     pub is_owner: bool,
     pub namespace: Namespace,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_common::identity::{Signed, keys::{Ed25519Signer, KeyPair}};
+    use serde_json::json;
+
+    #[test]
+    fn test_build_evaluate_info_rejects_governance_fact_viewpoints() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let public_key = KeyPair::Ed25519(signer.clone()).public_key();
+        let request = EventRequest::Fact(ave_common::request::FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: ValueWrapper(json!({ "members": { "add": [] } })),
+            viewpoints: BTreeSet::from(["agua".to_owned()]),
+        });
+
+        let event_request = Signed::new(request, &signer).unwrap();
+
+        let req = EvaluationReq {
+            event_request,
+            governance_id: DigestIdentifier::default(),
+            data: EvaluateData::GovFact {
+                state: GovernanceData::new(public_key.clone()),
+            },
+            sn: 1,
+            gov_version: 0,
+            namespace: Namespace::default(),
+            schema_id: SchemaType::Governance,
+            signer: public_key,
+            signer_is_owner: true,
+        };
+
+        let error = req.build_evaluate_info(&None).unwrap_err();
+        assert!(matches!(
+            error,
+            EvaluatorError::InvalidEventRequest(_)
+        ));
+    }
+
+    #[test]
+    fn test_build_evaluate_info_rejects_unknown_tracker_fact_viewpoint() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let public_key = KeyPair::Ed25519(signer.clone()).public_key();
+        let request = EventRequest::Fact(ave_common::request::FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: ValueWrapper(json!({ "ModOne": { "data": 1 } })),
+            viewpoints: BTreeSet::from(["vidrio".to_owned()]),
+        });
+
+        let event_request = Signed::new(request, &signer).unwrap();
+
+        let req = EvaluationReq {
+            event_request,
+            governance_id: DigestIdentifier::default(),
+            data: EvaluateData::TrackerSchemasFact {
+                contract: "contract".to_owned(),
+                state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+            sn: 1,
+            gov_version: 0,
+            namespace: Namespace::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            signer: public_key,
+            signer_is_owner: true,
+        };
+
+        let error = req
+            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EvaluatorError::InvalidEventRequest(_)
+        ));
+    }
+
+    #[test]
+    fn test_build_evaluate_info_rejects_all_viewpoints_in_tracker_fact() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let public_key = KeyPair::Ed25519(signer.clone()).public_key();
+        let request = EventRequest::Fact(ave_common::request::FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: ValueWrapper(json!({ "ModOne": { "data": 1 } })),
+            viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+        });
+
+        let event_request = Signed::new(request, &signer).unwrap();
+
+        let req = EvaluationReq {
+            event_request,
+            governance_id: DigestIdentifier::default(),
+            data: EvaluateData::TrackerSchemasFact {
+                contract: "contract".to_owned(),
+                state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+            sn: 1,
+            gov_version: 0,
+            namespace: Namespace::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            signer: public_key,
+            signer_is_owner: true,
+        };
+
+        let error = req
+            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EvaluatorError::InvalidEventRequest(_)
+        ));
+    }
+
+    #[test]
+    fn test_build_evaluate_info_rejects_unknown_no_viewpoints_viewpoint() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let public_key = KeyPair::Ed25519(signer.clone()).public_key();
+        let request = EventRequest::Fact(ave_common::request::FactRequest {
+            subject_id: DigestIdentifier::default(),
+            payload: ValueWrapper(json!({ "ModOne": { "data": 1 } })),
+            viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
+        });
+
+        let event_request = Signed::new(request, &signer).unwrap();
+
+        let req = EvaluationReq {
+            event_request,
+            governance_id: DigestIdentifier::default(),
+            data: EvaluateData::TrackerSchemasFact {
+                contract: "contract".to_owned(),
+                state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+            sn: 1,
+            gov_version: 0,
+            namespace: Namespace::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            signer: public_key,
+            signer_is_owner: true,
+        };
+
+        let error = req
+            .build_evaluate_info(&Some(ValueWrapper(json!({}))))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EvaluatorError::InvalidEventRequest(_)
+        ));
+    }
 }

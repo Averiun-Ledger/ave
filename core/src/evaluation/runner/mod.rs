@@ -548,7 +548,6 @@ impl Runner {
             let mut new_policies = governance.policies_gov.clone();
 
             if let Some(approve) = gov.change.approve {
-                let approve = approve.clone();
                 approve.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -570,7 +569,6 @@ impl Runner {
             }
 
             if let Some(evaluate) = gov.change.evaluate {
-                let evaluate = evaluate.clone();
                 evaluate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -592,7 +590,6 @@ impl Runner {
             }
 
             if let Some(validate) = gov.change.validate {
-                let validate = validate.clone();
                 validate.check_values().map_err(|e| {
                     RunnerError::InvalidEvent {
                         location: "check_policies",
@@ -670,7 +667,6 @@ impl Runner {
                 }
 
                 if let Some(evaluate) = schema.change.evaluate {
-                    let evaluate = evaluate.clone();
                     evaluate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -698,7 +694,6 @@ impl Runner {
                 }
 
                 if let Some(validate) = schema.change.validate {
-                    let validate = validate.clone();
                     validate.check_values().map_err(|e| {
                         RunnerError::InvalidEvent {
                             location: "check_policies",
@@ -880,16 +875,6 @@ impl Runner {
                         kind: error::InvalidEventKind::ReservedWord {
                             field: format!("{field} for schema {}", schema_id),
                             value: ReservedWords::AllViewpoints.to_string(),
-                        },
-                    });
-                }
-
-                if viewpoint == &ReservedWords::NoViewpoints.to_string() {
-                    return Err(RunnerError::InvalidEvent {
-                        location: "check_schemas",
-                        kind: error::InvalidEventKind::ReservedWord {
-                            field: format!("{field} for schema {}", schema_id),
-                            value: ReservedWords::NoViewpoints.to_string(),
                         },
                     });
                 }

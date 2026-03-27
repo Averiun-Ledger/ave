@@ -131,6 +131,7 @@ impl From<FactRequest> for BridgeFactRequest {
         Self {
             subject_id: request.subject_id.to_string(),
             payload: request.payload.0,
+            viewpoints: request.viewpoints.into_iter().collect(),
         }
     }
 }
@@ -145,6 +146,7 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
         Ok(Self {
             subject_id,
             payload: ValueWrapper(request.payload),
+            viewpoints: request.viewpoints.into_iter().collect(),
         })
     }
 }
@@ -263,6 +265,7 @@ mod tests {
             subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
                 .to_string(),
             payload: json!({"test": "value"}),
+            viewpoints: vec![],
         };
 
         let fact: Result<FactRequest, _> = bridge_fact.clone().try_into();
@@ -308,6 +311,7 @@ mod tests {
         let bridge_fact = BridgeFactRequest {
             subject_id: "invalid_id".to_string(),
             payload: json!({"test": "value"}),
+            viewpoints: vec![],
         };
 
         let fact: Result<FactRequest, _> = bridge_fact.try_into();

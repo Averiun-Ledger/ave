@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::atomic::Ordering};
+use std::{collections::BTreeSet, str::FromStr, sync::atomic::Ordering};
 
 mod common;
 
@@ -26,6 +26,8 @@ use crate::common::{
     PORT_COUNTER, create_node, emit_fact_signed, get_abort_request,
     node_running, wait_request, wait_request_state,
 };
+
+const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[test(tokio::test)]
 // Compilamos un contrato bajamos y subimos
@@ -3469,6 +3471,7 @@ async fn test_1000_events() {
         let request = EventRequest::Fact(FactRequest {
             subject_id: subject_id_1.clone(),
             payload: ValueWrapper(json),
+            viewpoints: Default::default(),
         });
         let _response = owner_governance.own_request(request).await.unwrap();
     }
@@ -3626,6 +3629,7 @@ async fn test_subj_no_all_validators() {
     let request = EventRequest::Fact(FactRequest {
         subject_id: subject_id_1.clone(),
         payload: ValueWrapper(json),
+        viewpoints: Default::default(),
     });
     let _response = owner_governance.own_request(request).await.unwrap();
 
@@ -3937,6 +3941,7 @@ async fn test_subj_no_all_evaluators() {
     let request = EventRequest::Fact(FactRequest {
         subject_id: subject_id_1.clone(),
         payload: ValueWrapper(json),
+        viewpoints: Default::default(),
     });
     let _response = owner_governance.own_request(request).await.unwrap();
 
@@ -4311,4 +4316,335 @@ async fn test_quantity_creations() {
     }
 
     assert_eq!(error, 3);
+}
+
+#[test(tokio::test)]
+async fn test_tracker_fact_viewpoints_accept_valid_values() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
+
+    let owner_governance = &nodes[0].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![]).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 1
+            }
+        })),
+        viewpoints: BTreeSet::new(),
+    });
+    let response = owner_governance.own_request(request).await.unwrap();
+    wait_request(owner_governance, response.request_id).await.unwrap();
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 2
+            }
+        })),
+        viewpoints: BTreeSet::from(["agua".to_owned()]),
+    });
+    let response = owner_governance.own_request(request).await.unwrap();
+    wait_request(owner_governance, response.request_id).await.unwrap();
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 3
+            }
+        })),
+        viewpoints: BTreeSet::from([
+            "agua".to_owned(),
+            "basura".to_owned(),
+        ]),
+    });
+    let response = owner_governance.own_request(request).await.unwrap();
+    wait_request(owner_governance, response.request_id).await.unwrap();
+
+    let state = get_subject(owner_governance, subject_id.clone(), Some(3))
+        .await
+        .unwrap();
+
+    assert_eq!(state.subject_id, subject_id.to_string());
+    assert_eq!(state.governance_id, governance_id.to_string());
+    assert_eq!(state.sn, 3);
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 3,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+#[test(tokio::test)]
+async fn test_tracker_fact_viewpoints_reject_invalid_values() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
+            .await;
+
+    let owner_governance = &nodes[0].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner_governance, vec![]).await;
+
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                },
+                {
+                    "id": "Plain",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                },
+                {
+                    "schema_id": "Plain",
+                    "add": {
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": 1
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (example_subject_id, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (plain_subject_id, ..) = create_subject(
+        owner_governance,
+        governance_id.clone(),
+        "Plain",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: governance_id.clone(),
+        payload: ValueWrapper(json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "Alice",
+                        "key": owner_governance.public_key()
+                    }
+                ]
+            }
+        })),
+        viewpoints: BTreeSet::from(["agua".to_owned()]),
+    });
+    assert!(owner_governance.own_request(request).await.is_err());
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: plain_subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 1
+            }
+        })),
+        viewpoints: BTreeSet::from(["agua".to_owned()]),
+    });
+    assert!(owner_governance.own_request(request).await.is_err());
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: example_subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 1
+            }
+        })),
+        viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
+    });
+    assert!(owner_governance.own_request(request).await.is_err());
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: example_subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 1
+            }
+        })),
+        viewpoints: BTreeSet::from(["AllViewpoints".to_owned()]),
+    });
+    assert!(owner_governance.own_request(request).await.is_err());
+
+    let request = EventRequest::Fact(FactRequest {
+        subject_id: example_subject_id.clone(),
+        payload: ValueWrapper(json!({
+            "ModOne": {
+                "data": 1
+            }
+        })),
+        viewpoints: BTreeSet::from(["vidrio".to_owned()]),
+    });
+    assert!(owner_governance.own_request(request).await.is_err());
+
+    let state =
+        get_subject(owner_governance, example_subject_id.clone(), Some(0))
+            .await
+            .unwrap();
+    assert_eq!(state.subject_id, example_subject_id.to_string());
+    assert_eq!(state.sn, 0);
+
+    let state = get_subject(owner_governance, plain_subject_id.clone(), Some(0))
+        .await
+        .unwrap();
+    assert_eq!(state.subject_id, plain_subject_id.to_string());
+    assert_eq!(state.sn, 0);
 }

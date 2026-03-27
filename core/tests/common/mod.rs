@@ -342,6 +342,7 @@ pub async fn emit_fact(
     let request = EventRequest::Fact(FactRequest {
         subject_id,
         payload: ValueWrapper(payload_json),
+        viewpoints: Default::default(),
     });
 
     let response = node.own_request(request).await?;
@@ -368,6 +369,7 @@ pub async fn emit_fact_signed(
     let request = EventRequest::Fact(FactRequest {
         subject_id,
         payload: ValueWrapper(payload_json),
+        viewpoints: Default::default(),
     });
 
     let signature = Signature::new(&request, keys).unwrap();

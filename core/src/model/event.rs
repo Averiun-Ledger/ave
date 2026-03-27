@@ -202,6 +202,11 @@ impl Protocols {
                 (
                     RequestEventDB::TrackerFact {
                         payload: fact_request.payload.0.clone(),
+                        viewpoints: fact_request
+                            .viewpoints
+                            .iter()
+                            .cloned()
+                            .collect(),
                         evaluation_response,
                     },
                     event_request.get_subject_id(),

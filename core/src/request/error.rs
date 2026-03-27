@@ -13,6 +13,12 @@ pub enum RequestHandlerError {
     #[error("the payload cannot be deserialized as a governance event")]
     GovFactInvalidEvent,
 
+    #[error("governance fact events cannot define viewpoints")]
+    GovFactViewpointsNotAllowed,
+
+    #[error("invalid tracker fact viewpoints: {0}")]
+    InvalidTrackerFactViewpoints(String),
+
     /// Attempted to mark an approval as obsolete.
     #[error("a user cannot mark a request approval as obsolete")]
     ObsoleteApproval,

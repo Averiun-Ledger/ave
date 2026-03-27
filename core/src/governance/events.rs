@@ -176,8 +176,7 @@ fn validate_creator_witness_viewpoints(
         if witness.viewpoints.is_empty() {
             out.insert(CreatorWitness {
                 name: witness.name.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
+                viewpoints: BTreeSet::new(),
             });
             continue;
         }
@@ -203,32 +202,6 @@ fn validate_creator_witness_viewpoints(
             out.insert(CreatorWitness {
                 name: witness.name.clone(),
                 viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
-            });
-            continue;
-        }
-
-        if witness
-            .viewpoints
-            .contains(&ReservedWords::NoViewpoints.to_string())
-        {
-            if witness.viewpoints.len() != 1 {
-                return Err(RunnerError::InvalidEvent {
-                    location: "SchemaIdRole::check_data",
-                    kind: error::InvalidEventKind::InvalidValue {
-                        field: format!(
-                            "creator witness {} viewpoints in schema {}",
-                            witness.name, schema_id
-                        ),
-                        reason: "NoViewpoints cannot be combined with other viewpoints"
-                            .to_owned(),
-                    },
-                });
-            }
-
-            out.insert(CreatorWitness {
-                name: witness.name.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::NoViewpoints
                     .to_string()]),
             });
             continue;
@@ -275,8 +248,11 @@ fn normalize_creator_witness_viewpoints(
         if !witness_viewpoints.iter().any(|x| x.name == *witness) {
             witness_viewpoints.insert(CreatorWitness {
                 name: witness.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
+                viewpoints: if witness == &ReservedWords::Witnesses.to_string() {
+                    BTreeSet::from([ReservedWords::AllViewpoints.to_string()])
+                } else {
+                    BTreeSet::new()
+                },
             });
         }
     }
@@ -3326,7 +3302,7 @@ pub fn schema_id_role_check_data(
                                 schema_id,
                                 schema_viewpoints,
                                 &members,
-                                &witnesses,
+                                witnesses,
                             )?;
 
                         (

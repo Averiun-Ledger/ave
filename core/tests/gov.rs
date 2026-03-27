@@ -3178,7 +3178,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
                         "two": 0,
                         "three": 0
                     },
-                    "viewpoints": ["agua", "basura"]
+                    "viewpoints": ["agua", "basura", "NoViewpoints"]
                 }
             ]
         },
@@ -3213,7 +3213,11 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
     assert_eq!(governance.version, 2);
     assert_eq!(
         governance.schemas.get(&schema_id).unwrap().viewpoints,
-        BTreeSet::from(["agua".to_owned(), "basura".to_owned()])
+        BTreeSet::from([
+            "NoViewpoints".to_owned(),
+            "agua".to_owned(),
+            "basura".to_owned(),
+        ])
     );
 
     let creator = governance
@@ -3253,7 +3257,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
                                     },
                                     {
                                         "name": "Alice",
-                                        "viewpoints": ["NoViewpoints"]
+                                        "viewpoints": []
                                     }
                                 ]
                             }
@@ -3289,7 +3293,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
         BTreeSet::from([
             CreatorWitness {
                 name: "Alice".to_owned(),
-                viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
+                viewpoints: BTreeSet::new(),
             },
             CreatorWitness {
                 name: "Witnesses".to_owned(),
@@ -3315,7 +3319,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
                                     },
                                     {
                                         "name": "Alice",
-                                        "viewpoints": ["agua"]
+                                        "viewpoints": ["NoViewpoints"]
                                     }
                                 ]
                             }
@@ -3328,7 +3332,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
             "change": [
                 {
                     "actual_id": "Example",
-                    "new_viewpoints": ["agua", "basura", "vidrio"]
+                    "new_viewpoints": ["agua", "basura", "vidrio", "NoViewpoints"]
                 }
             ]
         }
@@ -3354,6 +3358,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
     assert_eq!(
         governance.schemas.get(&schema_id).unwrap().viewpoints,
         BTreeSet::from([
+            "NoViewpoints".to_owned(),
             "agua".to_owned(),
             "basura".to_owned(),
             "vidrio".to_owned()
@@ -3364,7 +3369,7 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
         BTreeSet::from([
             CreatorWitness {
                 name: "Alice".to_owned(),
-                viewpoints: BTreeSet::from(["agua".to_owned()]),
+                viewpoints: BTreeSet::from(["NoViewpoints".to_owned()]),
             },
             CreatorWitness {
                 name: "Witnesses".to_owned(),
@@ -3435,7 +3440,7 @@ async fn test_governance_invalid_viewpoints_validation() {
                         "two": 0,
                         "three": 0
                     },
-                    "viewpoints": ["NoViewpoints"]
+                    "viewpoints": ["AllViewpoints"]
                 }
             ]
         }
@@ -3497,7 +3502,7 @@ async fn test_governance_invalid_viewpoints_validation() {
                                 "new_witnesses": [
                                     {
                                         "name": "Witnesses",
-                                        "viewpoints": ["NoViewpoints"]
+                                        "viewpoints": []
                                     }
                                 ]
                             }
@@ -3528,7 +3533,7 @@ async fn test_governance_invalid_viewpoints_validation() {
                                 "new_witnesses": [
                                     {
                                         "name": "Witnesses",
-                                        "viewpoints": ["agua"]
+                                        "viewpoints": ["NoViewpoints"]
                                     }
                                 ]
                             }
@@ -3558,8 +3563,8 @@ async fn test_governance_invalid_viewpoints_validation() {
                                 "actual_namespace": [],
                                 "new_witnesses": [
                                     {
-                                        "name": "Alice",
-                                        "viewpoints": ["vidrio"]
+                                        "name": "Witnesses",
+                                        "viewpoints": ["agua"]
                                     }
                                 ]
                             }
@@ -3589,8 +3594,8 @@ async fn test_governance_invalid_viewpoints_validation() {
                                 "actual_namespace": [],
                                 "new_witnesses": [
                                     {
-                                        "name": "Witnesses",
-                                        "viewpoints": ["AllViewpoints", "agua"]
+                                        "name": "Alice",
+                                        "viewpoints": ["vidrio"]
                                     }
                                 ]
                             }

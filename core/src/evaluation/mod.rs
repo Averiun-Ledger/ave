@@ -901,6 +901,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: payload.clone(),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -1052,6 +1053,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: payload.clone(),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1172,6 +1174,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1350,6 +1353,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -1574,6 +1578,7 @@ pub mod tests {
                     ]
                 }
             })),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -1897,6 +1902,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let _request_data = emit_request(
@@ -2158,6 +2164,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -2177,11 +2184,13 @@ pub mod tests {
 
         let RequestEventDB::TrackerFact {
             payload: payload_db,
+            viewpoints,
             evaluation_response,
         } = event.event
         else {
             panic!()
         };
+        assert!(viewpoints.is_empty());
 
         let EvalResDB::Patch(_) = evaluation_response else {
             panic!("");
@@ -2260,6 +2269,7 @@ pub mod tests {
         let fact_request = EventRequest::Fact(FactRequest {
             subject_id: subject_id.clone(),
             payload: ValueWrapper(payload.clone()),
+            viewpoints: Default::default(),
         });
 
         let request_data = emit_request(
@@ -2279,11 +2289,13 @@ pub mod tests {
 
         let RequestEventDB::TrackerFact {
             payload: payload_db,
+            viewpoints,
             evaluation_response,
         } = event.event
         else {
             panic!()
         };
+        assert!(viewpoints.is_empty());
 
         let EvalResDB::Error(e) = evaluation_response else {
             panic!("");

@@ -18,14 +18,10 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::identity::PublicKey;
-use crate::{Namespace, SchemaType, schematype::ReservedWords};
+use crate::{Namespace, SchemaType};
 
 fn default_witnesses_creator() -> BTreeSet<String> {
     BTreeSet::from(["Witnesses".to_owned()])
-}
-
-fn default_all_viewpoints() -> BTreeSet<String> {
-    BTreeSet::from([ReservedWords::AllViewpoints.to_string()])
 }
 
 pub type MemberName = String;
@@ -398,7 +394,7 @@ pub struct Role {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct CreatorWitness {
     pub name: String,
-    #[serde(default = "default_all_viewpoints")]
+    #[serde(default)]
     pub viewpoints: BTreeSet<String>,
 }
 

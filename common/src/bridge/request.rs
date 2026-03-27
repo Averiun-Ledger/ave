@@ -267,6 +267,8 @@ pub struct BridgeFactRequest {
     pub subject_id: String,
     /// Changes to be applied to the subject
     pub payload: Value,
+    /// Viewpoints targeted by this fact.
+    pub viewpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

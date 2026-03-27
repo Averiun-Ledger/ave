@@ -35,6 +35,7 @@ use std::ops::Bound::{Included, Unbounded};
 pub mod contract;
 pub mod node;
 pub mod subject;
+pub mod viewpoints;
 
 pub fn check_quorum_signers(
     signers: &HashSet<PublicKey>,

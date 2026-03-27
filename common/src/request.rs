@@ -6,6 +6,7 @@
 use ave_identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::{Namespace, SchemaType, ValueWrapper};
 
@@ -124,6 +125,10 @@ pub struct FactRequest {
     pub subject_id: DigestIdentifier,
     /// JSON payload to append to the subject state.
     pub payload: ValueWrapper,
+    /// Optional viewpoints targeted by this fact.
+    ///
+    /// An empty set means the event is not segmented by viewpoints.
+    pub viewpoints: BTreeSet<String>,
 }
 
 /// Payload for a `Transfer` event.

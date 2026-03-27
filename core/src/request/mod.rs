@@ -39,6 +39,7 @@ use crate::model::common::node::{get_subject_data, i_owner_new_owner};
 use crate::model::common::subject::{get_gov, get_version};
 use crate::model::common::{
     check_subject_creation, emit_fail, send_to_tracking,
+    viewpoints::validate_fact_viewpoints,
 };
 use crate::node::{Node, NodeMessage, NodeResponse, SubjectData};
 use crate::request::manager::InitRequestManager;
@@ -427,6 +428,12 @@ impl RequestHandler {
                 }
             }
             EventRequest::Fact(fact_request) => {
+                if is_gov && !fact_request.viewpoints.is_empty() {
+                    return Err(
+                        RequestHandlerError::GovFactViewpointsNotAllowed,
+                    );
+                }
+
                 if is_gov
                     && serde_json::from_value::<GovernanceEvent>(
                         fact_request.payload.0.clone(),
@@ -440,6 +447,49 @@ impl RequestHandler {
         }
 
         Ok(())
+    }
+
+    async fn check_fact_viewpoints(
+        ctx: &mut ActorContext<Self>,
+        request: &EventRequest,
+        subject_data: &SubjectData,
+    ) -> Result<(), RequestHandlerError> {
+        let EventRequest::Fact(fact_request) = request else {
+            return Ok(());
+        };
+
+        match subject_data {
+            SubjectData::Governance { .. } => validate_fact_viewpoints(
+                &fact_request.viewpoints,
+                &ave_common::SchemaType::Governance,
+                None,
+            )
+            .map_err(RequestHandlerError::InvalidTrackerFactViewpoints),
+            SubjectData::Tracker {
+                governance_id,
+                schema_id,
+                ..
+            } => {
+                let governance = get_gov(ctx, governance_id).await?;
+                let Some(schema) = governance.schemas.get(schema_id) else {
+                    return Err(RequestHandlerError::Actor(
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "schema {} not found in governance {} while validating fact viewpoints",
+                                schema_id, governance_id
+                            ),
+                        },
+                    ));
+                };
+
+                validate_fact_viewpoints(
+                    &fact_request.viewpoints,
+                    schema_id,
+                    Some(&schema.viewpoints),
+                )
+                .map_err(RequestHandlerError::InvalidTrackerFactViewpoints)
+            }
+        }
     }
 
     async fn build_subject_data(
@@ -692,6 +742,9 @@ impl RequestHandler {
             subject_data.clone(),
         )
         .await?;
+
+        Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
+            .await?;
 
         Self::check_creation(ctx, subject_data, &event_request_type, signer)
             .await?;
@@ -1190,6 +1243,21 @@ impl Handler<Self> for RequestHandler {
                         msg_type = "NewRequest",
                         error = %e,
                         "Event request validation failed"
+                    );
+                    return Err(ActorError::from(e));
+                }
+
+                if let Err(e) = Self::check_fact_viewpoints(
+                    ctx,
+                    request.content(),
+                    &subject_data,
+                )
+                .await
+                {
+                    error!(
+                        msg_type = "NewRequest",
+                        error = %e,
+                        "Fact viewpoints validation failed"
                     );
                     return Err(ActorError::from(e));
                 }
