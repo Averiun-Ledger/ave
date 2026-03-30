@@ -27,7 +27,7 @@ pub enum ActorMessage {
         req: Box<Signed<EvaluationReq>>,
     },
     EvaluationRes {
-        res: Signed<EvaluationRes>,
+        res: EvaluationRes,
     },
     ApprovalReq {
         req: Signed<ApprovalReq>,

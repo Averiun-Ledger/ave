@@ -51,7 +51,7 @@ pub struct Evaluation {
     // Quorum
     quorum: Quorum,
     // Actual responses
-    evaluators_response: Vec<EvalRes>,
+    evaluators_response: Vec<(EvalRes, DigestIdentifier)>,
     // Evaluators quantity
     evaluators_quantity: u32,
 
@@ -67,7 +67,7 @@ pub struct Evaluation {
 
     version: u64,
 
-    errors: Vec<EvaluatorError>,
+    errors: Vec<(EvaluatorError, DigestIdentifier)>,
 
     evaluation_request_hash: DigestIdentifier,
 
@@ -133,6 +133,7 @@ impl Evaluation {
                         self.request_id.to_string(),
                         self.version,
                         self.network.clone(),
+                        self.hash,
                     ),
                 )
                 .await?;
@@ -176,9 +177,9 @@ impl Evaluation {
     }
 
     fn check_responses(&self) -> ResponseSummary {
-        let res_set: HashSet<EvalRes> =
+        let res_set: HashSet<(EvalRes, DigestIdentifier)> =
             HashSet::from_iter(self.evaluators_response.iter().cloned());
-        let error_set: HashSet<EvaluatorError> =
+        let error_set: HashSet<(EvaluatorError, DigestIdentifier)> =
             HashSet::from_iter(self.errors.iter().cloned());
 
         if res_set.len() == 1 && error_set.is_empty() {
@@ -199,16 +200,20 @@ impl Evaluation {
                 eval_req_signature: self.request.signature().clone(),
                 eval_req_hash: self.evaluation_request_hash.clone(),
                 evaluators_signatures: self.evaluators_signatures.clone(),
-                response: EvaluationResponse::Ok(
-                    self.evaluators_response[0].clone(),
-                ),
+                response: EvaluationResponse::Ok {
+                    result: self.evaluators_response[0].0.clone(),
+                    result_hash: self.evaluators_response[0].1.clone(),
+                },
             })
         } else {
             Ok(EvaluationData {
                 eval_req_signature: self.request.signature().clone(),
                 eval_req_hash: self.evaluation_request_hash.clone(),
                 evaluators_signatures: self.evaluators_signatures.clone(),
-                response: EvaluationResponse::Error(self.errors[0].clone()),
+                response: EvaluationResponse::Error {
+                    result: self.errors[0].0.clone(),
+                    result_hash: self.errors[0].1.clone(),
+                },
             })
         }
     }
@@ -232,6 +237,56 @@ impl Evaluation {
     fn create_eval_req_hash(&self) -> Result<DigestIdentifier, CryptoError> {
         hash_borsh(&*self.hash.hasher(), &self.request)
     }
+
+    fn ensure_eval_req_hash(
+        &self,
+        eval_req_hash: DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        if eval_req_hash != self.evaluation_request_hash {
+            error!(
+                msg_type = "Response",
+                expected_hash = %self.evaluation_request_hash,
+                received_hash = %eval_req_hash,
+                "Invalid evaluation request hash"
+            );
+            return Err(ActorError::Functional {
+                description:
+                    "Evaluation Response, Invalid evaluation request hash"
+                        .to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn store_response_result(
+        &mut self,
+        result: response::EvaluationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    ) -> Result<(), ActorError> {
+        match result {
+            response::EvaluationResult::Ok {
+                response,
+                eval_req_hash,
+                ..
+            } => {
+                self.ensure_eval_req_hash(eval_req_hash)?;
+                self.evaluators_response.push((response, result_hash));
+            }
+            response::EvaluationResult::Error {
+                error,
+                eval_req_hash,
+                ..
+            } => {
+                self.ensure_eval_req_hash(eval_req_hash)?;
+                self.errors.push((error, result_hash));
+            }
+        }
+
+        self.evaluators_signatures.push(result_hash_signature);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -244,7 +299,6 @@ pub enum EvaluationMessage {
     Response {
         evaluation_res: EvaluationRes,
         sender: PublicKey,
-        signature: Option<Signature>,
     },
 }
 
@@ -340,7 +394,6 @@ impl Handler<Self> for Evaluation {
             EvaluationMessage::Response {
                 evaluation_res,
                 sender,
-                signature,
             } => {
                 if !self.reboot {
                     // If node is in evaluator list
@@ -348,36 +401,15 @@ impl Handler<Self> for Evaluation {
                         // Check type of validation
                         match evaluation_res {
                             EvaluationRes::Response {
-                                response,
-                                eval_req_hash,
-                                ..
+                                result,
+                                result_hash,
+                                result_hash_signature,
                             } => {
-                                let Some(signature) = signature else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Evaluation response without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response solver without signature".to_owned(),
-                                    });
-                                };
-
-                                if eval_req_hash != self.evaluation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.evaluation_request_hash,
-                                        received_hash = %eval_req_hash,
-                                        "Invalid evaluation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response, Invalid evaluation request hash".to_owned(),
-                                    });
-                                }
-
-                                self.evaluators_signatures.push(signature);
-                                self.evaluators_response.push(response);
+                                self.store_response_result(
+                                    result,
+                                    result_hash,
+                                    result_hash_signature,
+                                )?;
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");
@@ -413,38 +445,6 @@ impl Handler<Self> for Evaluation {
                                 );
 
                                 return Ok(());
-                            }
-                            EvaluationRes::Error {
-                                error,
-                                eval_req_hash,
-                                ..
-                            } => {
-                                if let Some(signature) = signature {
-                                    self.evaluators_signatures.push(signature);
-                                } else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Evaluation error without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Error solver without signature".to_owned(),
-                                    });
-                                }
-
-                                if eval_req_hash != self.evaluation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.evaluation_request_hash,
-                                        received_hash = %eval_req_hash,
-                                        "Invalid evaluation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Evaluation Response, Invalid evaluation request hash".to_owned(),
-                                    });
-                                }
-                                self.errors.push(error);
                             }
                             EvaluationRes::Reboot => {
                                 Self::observe_event("reboot");

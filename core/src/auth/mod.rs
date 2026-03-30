@@ -371,6 +371,12 @@ impl Handler<Self> for Auth {
                         return Err(emit_fail(ctx, e).await);
                     };
 
+                    info!(
+                        msg_type = "Update",
+                        subject_id = %subject_id,
+                        "An update is already in progress."
+                    );
+
                     debug!(
                         msg_type = "Update",
                         subject_id = %subject_id,

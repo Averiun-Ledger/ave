@@ -63,8 +63,13 @@ impl From<ProtocolsError> for ActorError {
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub enum EvaluationResponse {
-    Ok(EvaluatorResponse),
-    Error(EvaluatorError),
+    Ok { 
+        result: EvaluatorResponse,
+        result_hash: DigestIdentifier
+    },
+    Error {
+        result: EvaluatorError,
+        result_hash: DigestIdentifier },
 }
 
 #[derive(

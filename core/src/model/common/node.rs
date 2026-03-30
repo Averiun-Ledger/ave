@@ -17,7 +17,7 @@ use ave_common::request::EventRequest;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
-    evaluation::{request::EvaluationReq, response::EvaluationRes},
+    evaluation::{request::EvaluationReq},
     validation::{request::ValidationReq, response::ValidationRes},
 };
 
@@ -29,7 +29,7 @@ pub enum SignTypesNode {
     ApprovalRes(Box<ApprovalRes>),
 
     EvaluationReq(EvaluationReq),
-    EvaluationRes(EvaluationRes),
+    EvaluationSignature(DigestIdentifier),
 
     ValidationReq(Box<ValidationReq>),
     ValidationRes(ValidationRes),

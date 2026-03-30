@@ -670,7 +670,7 @@ impl Handler<Self> for TrackerSync {
 
                 if timed_out {
                     Self::observe_round("timeout");
-                    warn!(
+                    debug!(
                         governance_id = %self.governance_id,
                         request_nonce = request_nonce,
                         "Tracker sync fetch timed out"

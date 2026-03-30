@@ -39,7 +39,7 @@ use serde::Deserialize;
 use std::{io::Cursor, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct Intermediary;
 
@@ -56,13 +56,23 @@ impl Intermediary {
             loop {
                 tokio::select! {
                     command = command_receiver.recv() => {
-                        if let Some(command) = command && let Err(e) = Self::handle_command(command, &system, &network_sender).await
-                                && let IntermediaryError::NetworkSendFailed { .. } = e {
+                        if let Some(command) = command
+                            && let Err(e) = Self::handle_command(command, &system, &network_sender).await
+                        {
+                            match e {
+                                IntermediaryError::NetworkSendFailed { .. } => {
                                     error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
                                     crash_token.cancel();
                                     break;
                                 }
-
+                                _ => {
+                                    warn!(
+                                        error = %e,
+                                        "Intermediary command failed with non-fatal error"
+                                    );
+                                }
+                            }
+                        }
                     },
                     _ = graceful_token.cancelled() => {
                         debug!("Network intermediary cancelled, stopping");

@@ -1,3 +1,4 @@
+use ave_common::identity::Signature;
 use ave_common::{ValueWrapper, identity::DigestIdentifier};
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -18,19 +19,37 @@ use crate::evaluation::runner::error::RunnerError;
     BorshDeserialize,
 )]
 pub enum EvaluationRes {
+    Response {
+        result: EvaluationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    },
+    Abort(String),
+    TimeOut,
+    Reboot,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub enum EvaluationResult {
+    Ok {
+        response: EvaluatorResponse,
+        eval_req_hash: DigestIdentifier,
+        req_subject_data_hash: DigestIdentifier,
+    },
     Error {
         error: EvaluatorError,
         eval_req_hash: DigestIdentifier,
         req_subject_data_hash: DigestIdentifier,
     },
-    Abort(String),
-    TimeOut,
-    Response {
-        response: EvaluatorResponse,
-        eval_req_hash: DigestIdentifier,
-        req_subject_data_hash: DigestIdentifier,
-    },
-    Reboot,
 }
 
 #[derive(
