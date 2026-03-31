@@ -2062,6 +2062,88 @@ pub mod tests {
     }
 
     #[test(tokio::test)]
+    async fn test_replay_sink_events_tracker_abort() {
+        let (
+            _system,
+            node_actor,
+            request_actor,
+            _db,
+            tracking,
+            subject_id,
+            gov_id,
+            _dir,
+        ) = create_tracker().await;
+
+        let aborting_fact = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(json!({
+                "ModThree": {
+                    "data": 50
+                }
+            })),
+        });
+
+        let _request_data = emit_request(
+            aborting_fact,
+            &node_actor,
+            &request_actor,
+            &tracking,
+            true,
+        )
+        .await;
+
+        let replay =
+            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+
+        assert_eq!(replay.events.len(), 2);
+        assert!(!replay.has_more);
+        assert!(replay.next_sn.is_none());
+
+        match &replay.events[0].event {
+            DataToSinkEvent::Create {
+                governance_id,
+                subject_id: replay_subject_id,
+                sn,
+                ..
+            } => {
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(*sn, 0);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+
+        match &replay.events[1].event {
+            DataToSinkEvent::Abort {
+                governance_id,
+                subject_id: replay_subject_id,
+                schema_id,
+                sn,
+            } => {
+                assert_eq!(
+                    governance_id.as_deref(),
+                    Some(gov_id.to_string().as_str())
+                );
+                assert_eq!(replay_subject_id, &subject_id.to_string());
+                assert_eq!(schema_id, &SchemaType::Type("Example".to_owned()));
+                assert_eq!(*sn, 1);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+
+        let abort_page =
+            get_sink_events(&node_actor, &subject_id, 1, None, 100).await;
+        assert_eq!(abort_page.events.len(), 1);
+        match &abort_page.events[0].event {
+            DataToSinkEvent::Abort { sn, .. } => assert_eq!(*sn, 1),
+            other => panic!("Unexpected event: {other:?}"),
+        }
+    }
+
+    #[test(tokio::test)]
     async fn test_replay_sink_events_invalid_range() {
         let (
             _system,

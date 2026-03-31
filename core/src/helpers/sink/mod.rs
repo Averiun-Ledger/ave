@@ -874,6 +874,12 @@ impl AveSink {
                 sn,
                 ..
             } => ("eol", subject_id.as_str(), schema_id.to_string(), *sn),
+            ave_common::DataToSinkEvent::Abort {
+                subject_id,
+                schema_id,
+                sn,
+                ..
+            } => ("abort", subject_id.as_str(), schema_id.to_string(), *sn),
         }
     }
 

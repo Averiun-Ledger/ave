@@ -17,7 +17,10 @@ use crate::{
     db::Storable,
     distribution::worker::DistriWorker,
     governance::{Governance, GovernanceMessage, GovernanceResponse},
-    helpers::{db::ExternalDB, network::service::NetworkSender},
+    helpers::{
+        db::{ExternalDB, ReadStore},
+        network::service::NetworkSender,
+    },
     manual_distribution::ManualDistribution,
     model::common::node::SignTypesNode,
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
@@ -30,6 +33,7 @@ use crate::{
 
 use ave_common::{
     SchemaType,
+    bridge::request::AbortsQuery,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, keys::KeyPair,
     },
@@ -573,11 +577,15 @@ impl Node {
                 let hi_sn = to_sn
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
+                let abort_sns =
+                    Self::collect_abort_sns(ctx, &subject_id, hi_sn).await?;
                 let ledger =
                     Self::collect_governance_ledger(ctx, &subject_id, hi_sn)
                         .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
+                    &metadata,
+                    &abort_sns,
                     &public_key,
                     from_sn,
                     to_sn,
@@ -618,11 +626,16 @@ impl Node {
                     let hi_sn = to_sn
                         .map(|to_sn| to_sn.min(metadata.sn))
                         .unwrap_or(metadata.sn);
+                    let abort_sns =
+                        Self::collect_abort_sns(ctx, &subject_id, hi_sn)
+                            .await?;
                     let ledger =
                         Self::collect_tracker_ledger(ctx, &subject_id, hi_sn)
                             .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
+                        &metadata,
+                        &abort_sns,
                         &public_key,
                         from_sn,
                         to_sn,
@@ -642,6 +655,51 @@ impl Node {
                 result
             }
         }
+    }
+
+    async fn collect_abort_sns(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        hi_sn: u64,
+    ) -> Result<Vec<u64>, ActorError> {
+        let Some(ext_db): Option<Arc<ExternalDB>> =
+            ctx.system().get_helper("ext_db").await
+        else {
+            error!("External DB helper not found");
+            return Err(ActorError::Helper {
+                name: "ext_db".to_string(),
+                reason: "Not found".to_string(),
+            });
+        };
+
+        let aborts = ext_db
+            .get_aborts(
+                &subject_id.to_string(),
+                AbortsQuery {
+                    request_id: None,
+                    sn: None,
+                    quantity: Some(hi_sn.saturating_add(1)),
+                    page: Some(0),
+                    reverse: Some(false),
+                },
+            )
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Failed to load aborts for sink replay: {e}"
+                ),
+            })?;
+
+        let mut abort_sns = aborts
+            .events
+            .into_iter()
+            .filter_map(|abort| abort.sn)
+            .filter(|sn| *sn <= hi_sn)
+            .collect::<Vec<_>>();
+        abort_sns.sort_unstable();
+        abort_sns.dedup();
+
+        Ok(abort_sns)
     }
 }
 

@@ -395,8 +395,34 @@ pub fn build_data_to_sink(
     }
 }
 
+pub fn build_abort_data_to_sink(
+    replay_state: &Metadata,
+    sn: u64,
+    public_key: &str,
+    sink_timestamp: u64,
+) -> DataToSink {
+    DataToSink {
+        event: DataToSinkEvent::Abort {
+            governance_id: if replay_state.schema_id.is_gov() {
+                None
+            } else {
+                Some(replay_state.governance_id.to_string())
+            },
+            subject_id: replay_state.subject_id.to_string(),
+            schema_id: replay_state.schema_id.clone(),
+            sn,
+        },
+        public_key: public_key.to_owned(),
+        event_request_timestamp: sink_timestamp,
+        event_ledger_timestamp: sink_timestamp,
+        sink_timestamp,
+    }
+}
+
 pub fn replay_sink_events(
     ledgers: &[SignedLedger],
+    metadata: &Metadata,
+    abort_sns: &[u64],
     public_key: &str,
     from_sn: u64,
     to_sn: Option<u64>,
@@ -413,6 +439,16 @@ pub fn replay_sink_events(
     let mut events = Vec::new();
     let mut next_sn = None;
     let upper_bound = to_sn.unwrap_or(u64::MAX);
+    let mut abort_iter = abort_sns.iter().copied().peekable();
+
+    let push_abort = |events: &mut Vec<DataToSink>, sn: u64| {
+        events.push(build_abort_data_to_sink(
+            metadata,
+            sn,
+            public_key,
+            sink_timestamp,
+        ));
+    };
 
     for ledger in ledgers {
         if replay_state.is_none() {
@@ -430,51 +466,95 @@ pub fn replay_sink_events(
         };
 
         let sn = ledger.content().sn;
+        while let Some(abort_sn) =
+            abort_iter.next_if(|abort_sn| *abort_sn <= sn)
+        {
+            if abort_sn == sn {
+                continue;
+            }
+            if abort_sn > upper_bound {
+                break;
+            }
+            if abort_sn >= from_sn {
+                if events.len() as u64 >= limit {
+                    next_sn = Some(abort_sn);
+                    break;
+                }
+                push_abort(&mut events, abort_sn);
+            }
+        }
+
+        if next_sn.is_some() {
+            break;
+        }
+
         if sn > upper_bound {
             break;
         }
 
         let is_success = ledger.content().protocols.is_success();
-        if is_success && sn >= from_sn {
+        if sn >= from_sn {
             if events.len() as u64 >= limit {
                 next_sn = Some(sn);
                 break;
             }
 
-            let event_data_ledger =
-                match ledger.content().event_request.content() {
-                    EventRequest::Create(..) => {
-                        let metadata = ledger
-                            .content()
-                            .get_create_metadata()
-                            .map_err(|e| ActorError::Functional {
-                            description: e.to_string(),
-                        })?;
-                        EventLedgerDataForSink::Create {
-                            state: metadata.properties.0,
+            if is_success {
+                let event_data_ledger =
+                    match ledger.content().event_request.content() {
+                        EventRequest::Create(..) => {
+                            let metadata = ledger
+                                .content()
+                                .get_create_metadata()
+                                .map_err(|e| ActorError::Functional {
+                                    description: e.to_string(),
+                                })?;
+                            EventLedgerDataForSink::Create {
+                                state: metadata.properties.0,
+                            }
                         }
-                    }
-                    EventRequest::Fact(..)
-                    | EventRequest::Transfer(..)
-                    | EventRequest::Confirm(..)
-                    | EventRequest::Reject(..)
-                    | EventRequest::EOL(..) => EventLedgerDataForSink::build(
-                        &ledger.content().protocols,
-                        &Value::Null,
-                    ),
-                };
+                        EventRequest::Fact(..)
+                        | EventRequest::Transfer(..)
+                        | EventRequest::Confirm(..)
+                        | EventRequest::Reject(..)
+                        | EventRequest::EOL(..) => {
+                            EventLedgerDataForSink::build(
+                                &ledger.content().protocols,
+                                &Value::Null,
+                            )
+                        }
+                    };
 
-            let data = state.data_for_sink(ledger, event_data_ledger);
-            events.push(build_data_to_sink(
-                data,
-                ledger.content().event_request.content(),
-                public_key,
-                sink_timestamp,
-            ));
+                let data = state.data_for_sink(ledger, event_data_ledger);
+                events.push(build_data_to_sink(
+                    data,
+                    ledger.content().event_request.content(),
+                    public_key,
+                    sink_timestamp,
+                ));
+            } else {
+                push_abort(&mut events, sn);
+            }
         }
 
         if is_success {
             state.apply_success(ledger)?;
+        }
+    }
+
+    if next_sn.is_none() {
+        for abort_sn in abort_iter {
+            if abort_sn > upper_bound {
+                break;
+            }
+            if abort_sn < from_sn {
+                continue;
+            }
+            if events.len() as u64 >= limit {
+                next_sn = Some(abort_sn);
+                break;
+            }
+            push_abort(&mut events, abort_sn);
         }
     }
 

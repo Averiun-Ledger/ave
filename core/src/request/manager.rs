@@ -6,11 +6,11 @@ use ave_actors::{
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp, hash_borsh,
 };
 use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
-use ave_common::{Namespace, SchemaType, ValueWrapper};
+use ave_common::{DataToSinkEvent, Namespace, SchemaType, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,10 @@ use crate::node::SubjectData;
 use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;
 use crate::request::{RequestHandler, RequestHandlerMessage};
-use crate::subject::{Metadata, SignedLedger};
+use crate::subject::{
+    Metadata, SignedLedger,
+    sinkdata::{SinkData, SinkDataMessage},
+};
 
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
 use crate::validation::worker::CurrentRequestRoles;
@@ -1675,9 +1678,60 @@ impl RequestManager {
         )
         .await?;
 
+        if let Some(sn) = sn
+            && let Err(publish_error) =
+                self.publish_abort_to_sink(ctx, sn).await
+        {
+            warn!(
+                request_id = %self.id,
+                subject_id = %self.subject_id,
+                sn = sn,
+                error = %publish_error,
+                "Failed to publish abort to sink"
+            );
+        }
+
         self.on_event(RequestManagerEvent::Finish, ctx).await;
 
         self.end_request(ctx).await?;
+
+        Ok(())
+    }
+
+    async fn publish_abort_to_sink(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        sn: u64,
+    ) -> Result<(), RequestManagerError> {
+        let Some(subject_data) =
+            get_subject_data(ctx, &self.subject_id).await?
+        else {
+            return Ok(());
+        };
+
+        let event = DataToSinkEvent::Abort {
+            governance_id: subject_data
+                .get_governance_id()
+                .map(|governance_id| governance_id.to_string()),
+            subject_id: self.subject_id.to_string(),
+            schema_id: subject_data.get_schema_id(),
+            sn,
+        };
+        let timestamp = TimeStamp::now().as_nanos();
+        let sink_data_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/sink_data",
+            self.subject_id
+        ));
+
+        let sink_data =
+            ctx.system().get_actor::<SinkData>(&sink_data_path).await?;
+        sink_data
+            .tell(SinkDataMessage::Event {
+                event: Box::new(event),
+                event_request_timestamp: timestamp,
+                event_ledger_timestamp: timestamp,
+            })
+            .await?;
 
         Ok(())
     }

@@ -83,6 +83,12 @@ pub enum DataToSinkEvent {
         sn: u64,
         gov_version: u64,
     },
+    Abort {
+        governance_id: Option<String>,
+        subject_id: String,
+        schema_id: SchemaType,
+        sn: u64,
+    },
 }
 
 impl DataToSinkEvent {
@@ -115,6 +121,11 @@ impl DataToSinkEvent {
                 ..
             }
             | Self::Eol {
+                subject_id,
+                schema_id,
+                ..
+            }
+            | Self::Abort {
                 subject_id,
                 schema_id,
                 ..

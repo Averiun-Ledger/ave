@@ -26,6 +26,7 @@ pub enum SinkTypes {
     Confirm,
     Reject,
     EOL,
+    Abort,
     All,
 }
 
@@ -38,6 +39,7 @@ impl Display for SinkTypes {
             Self::Confirm => write!(f, "Confirm"),
             Self::Reject => write!(f, "Reject"),
             Self::EOL => write!(f, "EOL"),
+            Self::Abort => write!(f, "Abort"),
             Self::All => write!(f, "All"),
         }
     }
@@ -52,6 +54,7 @@ impl From<&DataToSink> for SinkTypes {
             DataToSinkEvent::Confirm { .. } => Self::Confirm,
             DataToSinkEvent::Reject { .. } => Self::Reject,
             DataToSinkEvent::Eol { .. } => Self::EOL,
+            DataToSinkEvent::Abort { .. } => Self::Abort,
         }
     }
 }
@@ -65,6 +68,7 @@ impl From<String> for SinkTypes {
             "Confirm" => Self::Confirm,
             "Reject" => Self::Reject,
             "EOL" => Self::EOL,
+            "Abort" => Self::Abort,
             _ => Self::All,
         }
     }
@@ -104,6 +108,11 @@ impl SinkDataMessage {
                     ..
                 }
                 | DataToSinkEvent::Eol {
+                    subject_id,
+                    schema_id,
+                    ..
+                }
+                | DataToSinkEvent::Abort {
                     subject_id,
                     schema_id,
                     ..
@@ -174,6 +183,7 @@ impl Handler<Self> for SinkData {
                 DataToSinkEvent::Confirm { .. } => "Confirm",
                 DataToSinkEvent::Reject { .. } => "Reject",
                 DataToSinkEvent::Eol { .. } => "EOL",
+                DataToSinkEvent::Abort { .. } => "Abort",
             },
         };
 
