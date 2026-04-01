@@ -152,10 +152,14 @@ pub enum RequestEventDB {
         schema_id: String,
         namespace: String,
     },
-    TrackerFact {
+    TrackerFactFull {
         payload: Value,
         viewpoints: Vec<String>,
         evaluation_response: EvalResDB,
+    },
+    TrackerFactOpaque {
+        viewpoints: Vec<String>,
+        evaluation_success: bool,
     },
     GovernanceFact {
         payload: Value,
@@ -179,7 +183,7 @@ impl RequestEventDB {
     pub const fn get_event_type(&self) -> EventRequestType {
         match self {
             Self::Create { .. } => EventRequestType::Create,
-            Self::TrackerFact { .. } | Self::GovernanceFact { .. } => {
+            Self::TrackerFactFull { .. } | Self::GovernanceFact { .. } | Self::TrackerFactOpaque { .. }=> {
                 EventRequestType::Fact
             }
             Self::Transfer { .. } => EventRequestType::Transfer,

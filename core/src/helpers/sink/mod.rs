@@ -844,7 +844,13 @@ impl AveSink {
                 sn,
                 ..
             } => ("create", subject_id.as_str(), schema_id.to_string(), *sn),
-            ave_common::DataToSinkEvent::Fact {
+            ave_common::DataToSinkEvent::FactFull {
+                subject_id,
+                schema_id,
+                sn,
+                ..
+            }
+            | ave_common::DataToSinkEvent::FactOpaque {
                 subject_id,
                 schema_id,
                 sn,

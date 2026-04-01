@@ -245,8 +245,7 @@ impl SinkReplayState {
         event_data_ledger: EventLedgerDataForSink,
     ) -> DataForSink {
         let (issuer, event_request_timestamp) = event
-            .get_issuer_event_request_timestamp()
-            .unwrap_or_default();
+            .get_issuer_event_request_timestamp();
 
         DataForSink {
             gov_id: self.governance_id.clone(),
@@ -266,14 +265,41 @@ impl SinkReplayState {
         }
     }
 
-    fn apply_success(&mut self, event: &Ledger) -> Result<(), ActorError> {
-        match event.content().event_request.content() {
-            EventRequest::Create(..) | EventRequest::Fact(..) => Ok(()),
-            EventRequest::Transfer(transfer_request) => {
+    fn build_replay_data_to_sink(
+        &self,
+        ledger: &Ledger,
+        public_key: &str,
+        sink_timestamp: u64,
+    ) -> Result<DataToSink, ActorError> {
+        let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
+        let data =
+            self.data_for_sink(ledger, replay_parts.event_data_ledger);
+
+        Ok(build_data_to_sink(
+            data,
+            replay_parts.event_request,
+            public_key,
+            sink_timestamp,
+        ))
+    }
+
+    fn apply_success(&mut self, protocols: &Protocols) -> Result<(), ActorError> {
+        match protocols {
+            Protocols::Create { .. }
+            | Protocols::TrackerFactFull { .. }
+            | Protocols::TrackerFactOpaque { .. }
+            | Protocols::GovFact { .. }
+            | Protocols::EOL { .. } => Ok(()),
+            Protocols::Transfer { event_request, .. } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
+                    unreachable!("transfer protocols always carry transfer request");
+                };
                 self.new_owner = Some(transfer_request.new_owner.to_string());
                 Ok(())
             }
-            EventRequest::Confirm(..) => {
+            Protocols::TrackerConfirm { .. } | Protocols::GovConfirm { .. } => {
                 let Some(new_owner) = self.new_owner.take() else {
                     return Err(ActorError::Functional {
                         description:
@@ -284,11 +310,56 @@ impl SinkReplayState {
                 self.owner = new_owner;
                 Ok(())
             }
-            EventRequest::Reject(..) => {
+            Protocols::Reject { .. } => {
                 self.new_owner = None;
                 Ok(())
             }
-            EventRequest::EOL(..) => Ok(()),
+        }
+    }
+}
+
+struct SinkReplayEventParts {
+    event_request: Option<EventRequest>,
+    event_data_ledger: EventLedgerDataForSink,
+}
+
+impl SinkReplayEventParts {
+    fn from_ledger(ledger: &Ledger) -> Result<Self, ActorError> {
+        match &ledger.protocols {
+            Protocols::Create { event_request, .. } => {
+                let metadata = ledger.get_create_metadata().map_err(|e| {
+                    ActorError::Functional {
+                        description: e.to_string(),
+                    }
+                })?;
+
+                Ok(Self {
+                    event_request: Some(event_request.content().clone()),
+                    event_data_ledger: EventLedgerDataForSink::Create {
+                        state: metadata.properties.0,
+                    },
+                })
+            }
+            Protocols::TrackerFactFull { event_request, .. }
+            | Protocols::GovFact { event_request, .. }
+            | Protocols::Transfer { event_request, .. }
+            | Protocols::TrackerConfirm { event_request, .. }
+            | Protocols::GovConfirm { event_request, .. }
+            | Protocols::Reject { event_request, .. }
+            | Protocols::EOL { event_request, .. } => Ok(Self {
+                event_request: Some(event_request.content().clone()),
+                event_data_ledger: EventLedgerDataForSink::build(
+                    &ledger.protocols,
+                    &Value::Null,
+                ),
+            }),
+            Protocols::TrackerFactOpaque { .. } => Ok(Self {
+                event_request: None,
+                event_data_ledger: EventLedgerDataForSink::build(
+                    &ledger.protocols,
+                    &Value::Null,
+                ),
+            }),
         }
     }
 }
@@ -296,45 +367,103 @@ impl SinkReplayState {
 #[derive(Clone)]
 pub enum EventLedgerDataForSink {
     Create { state: Value },
-    FactFull { patch: Value },
-    FactOpaque { viewpoints: Vec<String> },
-    Confirm { patch: Option<Value> },
-    Other,
+    FactFull {
+        patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
+    },
+    FactOpaque {
+        viewpoints: Vec<String>,
+        success: bool,
+    },
+    Transfer {
+        success: bool,
+        error: Option<String>,
+    },
+    Confirm {
+        patch: Option<Value>,
+        success: bool,
+        error: Option<String>,
+    },
+    Reject,
+    Eol,
 }
 
 impl EventLedgerDataForSink {
     pub fn build(protocols: &Protocols, state: &Value) -> Self {
-        // TODO LOs eventos fallidos van al sumidero
         match protocols {
             Protocols::Create { .. } => Self::Create {
                 state: state.clone(),
             },
             Protocols::TrackerFactFull { evaluation, .. }
-            | Protocols::GovFact { evaluation, .. } => Self::FactFull {
-                patch: evaluation
-                    .evaluator_response_ok()
-                    .expect("event is valid")
-                    .patch
-                    .0,
-            },
+            | Protocols::GovFact { evaluation, .. } => {
+                let success = protocols.is_success();
+                let (patch, error) = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Ok {
+                        result,
+                        ..
+                    } if success => (Some(result.patch.0.clone()), None),
+                    crate::model::event::EvaluationResponse::Ok { .. } => {
+                        (None, None)
+                    }
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => (None, Some(result.to_string())),
+                };
+
+                Self::FactFull {
+                    patch,
+                    success,
+                    error,
+                }
+            }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 Self::FactOpaque {
                     viewpoints: evaluation.viewpoints.iter().cloned().collect(),
+                    success: protocols.is_success(),
                 }
             }
-            Protocols::Transfer { .. }
-            | Protocols::Reject { .. }
-            | Protocols::EOL { .. } => Self::Other,
-            Protocols::TrackerConfirm { .. } => Self::Confirm { patch: None },
-            Protocols::GovConfirm { evaluation, .. } => Self::Confirm {
-                patch: Some(
-                    evaluation
-                        .evaluator_response_ok()
-                        .expect("event is valid")
-                        .patch
-                        .0,
-                ),
+            Protocols::Transfer { evaluation, .. } => {
+                let success = protocols.is_success();
+                let error = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => Some(result.to_string()),
+                    crate::model::event::EvaluationResponse::Ok { .. } => None,
+                };
+                Self::Transfer { success, error }
+            }
+            Protocols::Reject { .. } => Self::Reject,
+            Protocols::EOL { .. } => Self::Eol,
+            Protocols::TrackerConfirm { .. } => Self::Confirm {
+                patch: None,
+                success: true,
+                error: None,
             },
+            Protocols::GovConfirm { evaluation, .. } => {
+                let success = protocols.is_success();
+                let (patch, error) = match &evaluation.response {
+                    crate::model::event::EvaluationResponse::Ok {
+                        result,
+                        ..
+                    } if success => (Some(result.patch.0.clone()), None),
+                    crate::model::event::EvaluationResponse::Ok { .. } => {
+                        (None, None)
+                    }
+                    crate::model::event::EvaluationResponse::Error {
+                        result,
+                        ..
+                    } => (None, Some(result.to_string())),
+                };
+
+                Self::Confirm {
+                    patch,
+                    success,
+                    error,
+                }
+            }
         }
     }
 }
@@ -359,20 +488,32 @@ fn data_to_sink_event(
         },
         (
             Some(EventRequest::Fact(fact_request)),
-            EventLedgerDataForSink::FactFull { patch },
+            EventLedgerDataForSink::FactFull {
+                patch,
+                success,
+                error,
+            },
         ) => DataToSinkEvent::FactFull {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
             issuer: data.issuer.to_string(),
             viewpoints: fact_request.viewpoints.iter().cloned().collect(),
             owner: data.owner,
-            payload: fact_request.payload.0.clone(),
+            payload: success.then_some(fact_request.payload.0.clone()),
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
             patch,
+            success,
+            error,
         },
-        (None, EventLedgerDataForSink::FactOpaque { viewpoints }) => {
+        (
+            None,
+            EventLedgerDataForSink::FactOpaque {
+                viewpoints,
+                success,
+            },
+        ) => {
             DataToSinkEvent::FactOpaque {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
@@ -381,11 +522,12 @@ fn data_to_sink_event(
                 schema_id: data.schema_id,
                 sn: data.sn,
                 gov_version: data.gov_version,
+                success,
             }
         }
         (
             Some(EventRequest::Transfer(transfer_request)),
-            EventLedgerDataForSink::Other,
+            EventLedgerDataForSink::Transfer { success, error },
         ) => DataToSinkEvent::Transfer {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
@@ -394,10 +536,16 @@ fn data_to_sink_event(
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
+            success,
+            error,
         },
         (
             Some(EventRequest::Confirm(confirm_request)),
-            EventLedgerDataForSink::Confirm { patch },
+            EventLedgerDataForSink::Confirm {
+                patch,
+                success,
+                error,
+            },
         ) => DataToSinkEvent::Confirm {
             governance_id: data.gov_id,
             subject_id: data.subject_id,
@@ -405,9 +553,11 @@ fn data_to_sink_event(
             sn: data.sn,
             gov_version: data.gov_version,
             patch,
+            success,
+            error,
             name_old_owner: confirm_request.name_old_owner.clone(),
         },
-        (Some(EventRequest::Reject(..)), EventLedgerDataForSink::Other) => {
+        (Some(EventRequest::Reject(..)), EventLedgerDataForSink::Reject) => {
             DataToSinkEvent::Reject {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
@@ -416,7 +566,7 @@ fn data_to_sink_event(
                 gov_version: data.gov_version,
             }
         }
-        (Some(EventRequest::EOL(..)), EventLedgerDataForSink::Other) => {
+        (Some(EventRequest::EOL(..)), EventLedgerDataForSink::Eol) => {
             DataToSinkEvent::Eol {
                 governance_id: data.gov_id,
                 subject_id: data.subject_id,
@@ -470,7 +620,7 @@ pub fn replay_sink_events(
     for ledger in ledgers {
         if replay_state.is_none() {
             let metadata =
-                ledger.content().get_create_metadata().map_err(|e| {
+                ledger.get_create_metadata().map_err(|e| {
                     ActorError::Functional {
                         description: e.to_string(),
                     }
@@ -482,52 +632,27 @@ pub fn replay_sink_events(
             unreachable!("replay state is initialized above");
         };
 
-        let sn = ledger.content().sn;
+        let sn = ledger.sn;
         if sn > upper_bound {
             break;
         }
 
-        let is_success = ledger.content().protocols.is_success();
-        if is_success && sn >= from_sn {
+        let is_success = ledger.protocols.is_success();
+        if sn >= from_sn {
             if events.len() as u64 >= limit {
                 next_sn = Some(sn);
                 break;
             }
 
-            let event_data_ledger =
-                match ledger.content().event_request.content() {
-                    EventRequest::Create(..) => {
-                        let metadata = ledger
-                            .content()
-                            .get_create_metadata()
-                            .map_err(|e| ActorError::Functional {
-                            description: e.to_string(),
-                        })?;
-                        EventLedgerDataForSink::Create {
-                            state: metadata.properties.0,
-                        }
-                    }
-                    EventRequest::Fact(..)
-                    | EventRequest::Transfer(..)
-                    | EventRequest::Confirm(..)
-                    | EventRequest::Reject(..)
-                    | EventRequest::EOL(..) => EventLedgerDataForSink::build(
-                        &ledger.content().protocols,
-                        &Value::Null,
-                    ),
-                };
-
-            let data = state.data_for_sink(ledger, event_data_ledger);
-            events.push(build_data_to_sink(
-                data,
-                ledger.content().event_request.content(),
+            events.push(state.build_replay_data_to_sink(
+                ledger,
                 public_key,
                 sink_timestamp,
-            ));
+            )?);
         }
 
         if is_success {
-            state.apply_success(ledger)?;
+            state.apply_success(&ledger.protocols)?;
         }
     }
 
@@ -749,7 +874,7 @@ where
             }
             (
                 Protocols::TrackerFactOpaque {
-                    subject_id,
+                    data,
                     event_request_hash,
                     evaluation,
                     validation,
@@ -757,10 +882,10 @@ where
                 },
                 false,
             ) => {
-                if subject_id != &subject_metadata.subject_id {
+                if data.subject_id != subject_metadata.subject_id {
                     return Err(SubjectError::SubjectIdMismatch {
                         expected: subject_metadata.subject_id.to_string(),
-                        actual: subject_id.to_string(),
+                        actual: data.subject_id.to_string(),
                     });
                 }
 

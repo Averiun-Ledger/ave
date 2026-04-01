@@ -2143,7 +2143,7 @@ impl Governance {
                         .signature()
                         .timestamp
                         .as_nanos(),
-                    gov_version: first.content().gov_version,
+                    gov_version: first.gov_version,
                     event_data_ledger: EventLedgerDataForSink::build(
                         &first.content().protocols,
                         &self.properties.to_value_wrapper().0,

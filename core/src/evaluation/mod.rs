@@ -963,7 +963,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -1081,7 +1081,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -1237,7 +1237,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -1416,7 +1416,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -1751,7 +1751,7 @@ pub mod tests {
             description,
             schema_id,
             namespace,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -1943,10 +1943,11 @@ pub mod tests {
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
         match &second_page.events[0].payload {
-            DataToSinkEvent::Fact {
+            DataToSinkEvent::FactFull {
                 governance_id,
                 subject_id: replay_subject_id,
                 payload: replay_payload,
+                success,
                 sn,
                 gov_version,
                 ..
@@ -1956,7 +1957,8 @@ pub mod tests {
                     Some(gov_id.to_string().as_str())
                 );
                 assert_eq!(replay_subject_id, &subject_id.to_string());
-                assert_eq!(replay_payload, &payload);
+                assert_eq!(replay_payload.as_ref(), Some(&payload));
+                assert!(*success);
                 assert_eq!(*sn, 1);
                 assert_eq!(*gov_version, 1);
             }
@@ -2049,6 +2051,7 @@ pub mod tests {
                 new_owner,
                 sn,
                 gov_version,
+                ..
             } => {
                 assert_eq!(
                     governance_id.as_deref(),
@@ -2183,11 +2186,11 @@ pub mod tests {
             get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::TrackerFact {
+        let RequestEventDB::TrackerFactFull {
             payload: payload_db,
             viewpoints,
             evaluation_response,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -2288,11 +2291,11 @@ pub mod tests {
             get_subject_state(&db, &request_data.subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::TrackerFact {
+        let RequestEventDB::TrackerFactFull {
             payload: payload_db,
             viewpoints,
             evaluation_response,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -2395,7 +2398,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -2522,7 +2525,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };

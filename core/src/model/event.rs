@@ -14,7 +14,8 @@ use crate::{
 use ave_common::{
     bridge::request::EventRequestType,
     identity::{
-        DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed, TimeStamp, hash_borsh
+        DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
+        TimeStamp, hash_borsh,
     },
     request::EventRequest,
     response::{EvalResDB, LedgerDB, RequestEventDB},
@@ -140,13 +141,22 @@ pub struct ValidationData {
     Hash,
 )]
 pub enum ValidationMetadata {
-    ModifiedHash{
+    ModifiedHash {
         modified_metadata_without_propierties_hash: DigestIdentifier,
         propierties_hash: DigestIdentifier,
         event_request_hash: DigestIdentifier,
         viewpoints_hash: DigestIdentifier,
     },
     Metadata(Box<Metadata>),
+}
+
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct OpaqueData {
+    pub subject_id: DigestIdentifier,
+    pub event_request_timestamp: TimeStamp,
+    pub signer: PublicKey,
 }
 
 #[derive(
@@ -163,10 +173,10 @@ pub enum Protocols {
         validation: ValidationData,
     },
     TrackerFactOpaque {
-        subject_id: DigestIdentifier,
         event_request_hash: DigestIdentifier,
         evaluation: EvaluationDataOpaque,
         validation: ValidationData,
+        data: OpaqueData,
     },
     GovFact {
         event_request: Signed<EventRequest>,
@@ -219,7 +229,13 @@ impl Protocols {
                 let eval_res_opaque = evaluation.response.build_opaque();
 
                 let opaque = Self::TrackerFactOpaque {
-                    subject_id: event_request.content().get_subject_id(),
+                    data: OpaqueData {
+                        subject_id: event_request.content().get_subject_id(),
+                        event_request_timestamp: event_request
+                            .signature()
+                            .timestamp,
+                        signer: event_request.signature().signer.clone(),
+                    },
                     event_request_hash: hash_borsh(
                         &*hash.hasher(),
                         event_request,
@@ -251,12 +267,21 @@ impl Protocols {
 
     pub fn buidl_event_db(
         &self,
-        event_request: &EventRequest,
-    ) -> (RequestEventDB, DigestIdentifier) {
-        match (self, event_request) {
-            (Self::Create { validation }, EventRequest::Create(create)) => {
+    ) -> (RequestEventDB, DigestIdentifier, u64) {
+        match self {
+            Self::Create {
+                validation,
+                event_request,
+            } => {
                 let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
+                else {
+                    unreachable!(
+                        "Unreachable combination is a create event request"
+                    )
+                };
+
+                let EventRequest::Create(create) = event_request.content()
                 else {
                     unreachable!(
                         "Unreachable combination is a create event request"
@@ -271,23 +296,32 @@ impl Protocols {
                         namespace: create.namespace.to_string(),
                     },
                     metadata.subject_id.clone(),
+                    event_request.signature().timestamp.as_nanos(),
                 )
             }
-            (
-                Self::TrackerFact { evaluation, .. },
-                EventRequest::Fact(fact_request),
-            ) => {
+            Self::TrackerFactFull {
+                evaluation,
+                event_request,
+                ..
+            } => {
                 let evaluation_response = match evaluation.response.clone() {
-                    EvaluationResponse::Ok(eval_res) => {
-                        EvalResDB::Patch(eval_res.patch.0)
+                    EvaluationResponse::Ok { result, .. } => {
+                        EvalResDB::Patch(result.patch.0)
                     }
-                    EvaluationResponse::Error(e) => {
-                        EvalResDB::Error(e.to_string())
+                    EvaluationResponse::Error { result, .. } => {
+                        EvalResDB::Error(result.to_string())
                     }
                 };
 
+                let EventRequest::Fact(fact_request) = event_request.content()
+                else {
+                    unreachable!(
+                        "Unreachable combination is a fact event request"
+                    )
+                };
+
                 (
-                    RequestEventDB::TrackerFact {
+                    RequestEventDB::TrackerFactFull {
                         payload: fact_request.payload.0.clone(),
                         viewpoints: fact_request
                             .viewpoints
@@ -296,76 +330,119 @@ impl Protocols {
                             .collect(),
                         evaluation_response,
                     },
-                    event_request.get_subject_id(),
+                    event_request.content().get_subject_id(),
+                    event_request.signature().timestamp.as_nanos(),
                 )
             }
-            (
-                Self::GovFact {
-                    evaluation,
-                    approval,
-                    ..
+            Self::TrackerFactOpaque {
+                evaluation,
+                data,
+                ..
+            } => (
+                RequestEventDB::TrackerFactOpaque {
+                    viewpoints: evaluation.viewpoints.iter().cloned().collect(),
+                    evaluation_success: evaluation.is_ok(),
                 },
-                EventRequest::Fact(fact_request),
-            ) => {
+                data.subject_id.clone(),
+                data.event_request_timestamp.as_nanos(),
+            ),
+            Self::GovFact {
+                evaluation,
+                approval,
+                event_request,
+                ..
+            } => {
                 let (evaluation_response, approval_success) = match evaluation
                     .response
                     .clone()
                 {
-                    EvaluationResponse::Ok(eval_res) => {
+                    EvaluationResponse::Ok { result, .. } => {
                         if let Some(appr) = approval {
                             (
-                                EvalResDB::Patch(eval_res.patch.0),
+                                EvalResDB::Patch(result.patch.0),
                                 Some(appr.approved),
                             )
                         } else {
                             unreachable!(
-                                "In a factual governance event, if the assessment is correct, there should be approval"
+                                "In a fact governance event, if the assessment is correct, there should be approval"
                             )
                         }
                     }
-                    EvaluationResponse::Error(e) => {
-                        (EvalResDB::Error(e.to_string()), None)
+                    EvaluationResponse::Error { result, .. } => {
+                        (EvalResDB::Error(result.to_string()), None)
                     }
                 };
+
+                let EventRequest::Fact(fact_request) = event_request.content()
+                else {
+                    unreachable!(
+                        "Unreachable combination is a fact event request"
+                    )
+                };
+
                 (
                     RequestEventDB::GovernanceFact {
                         payload: fact_request.payload.0.clone(),
                         evaluation_response,
                         approval_success,
                     },
-                    event_request.get_subject_id(),
+                    event_request.content().get_subject_id(),
+                    event_request.signature().timestamp.as_nanos()
                 )
             }
-            (
-                Self::Transfer { evaluation, .. },
-                EventRequest::Transfer(transfer_request),
-            ) => {
-                let evaluation_error = match evaluation.response.clone() {
-                    EvaluationResponse::Ok(_) => None,
-                    EvaluationResponse::Error(e) => Some(e.to_string()),
+            Self::Transfer {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
+                    unreachable!(
+                        "Unreachable combination is a transfer event request"
+                    )
                 };
+
+                let evaluation_error = match evaluation.response.clone() {
+                    EvaluationResponse::Ok { .. } => None,
+                    EvaluationResponse::Error { result, .. } => {
+                        Some(result.to_string())
+                    }
+                };
+
                 (
                     RequestEventDB::Transfer {
                         new_owner: transfer_request.new_owner.to_string(),
                         evaluation_error,
                     },
-                    event_request.get_subject_id(),
+                    event_request.content().get_subject_id(),
+                    event_request.signature().timestamp.as_nanos()
                 )
             }
-            (Self::TrackerConfirm { .. }, EventRequest::Confirm(..)) => (
+            Self::TrackerConfirm { event_request, .. } => (
                 RequestEventDB::TrackerConfirm,
-                event_request.get_subject_id(),
+                event_request.content().get_subject_id(),
+                event_request.signature().timestamp.as_nanos()
             ),
-            (
-                Self::GovConfirm { evaluation, .. },
-                EventRequest::Confirm(confirm_request),
-            ) => {
+            Self::GovConfirm {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Confirm(confirm_request) =
+                    event_request.content()
+                else {
+                    unreachable!(
+                        "Unreachable combination is a confirm event request"
+                    )
+                };
+
                 let evaluation_response = match evaluation.response.clone() {
-                    EvaluationResponse::Ok(eval_res) => {
-                        EvalResDB::Patch(eval_res.patch.0)
+                    EvaluationResponse::Ok { result, .. } => {
+                        EvalResDB::Patch(result.patch.0)
                     }
-                    EvaluationResponse::Error(e) => {
-                        EvalResDB::Error(e.to_string())
+                    EvaluationResponse::Error { result, .. } => {
+                        EvalResDB::Error(result.to_string())
                     }
                 };
                 (
@@ -373,17 +450,19 @@ impl Protocols {
                         name_old_owner: confirm_request.name_old_owner.clone(),
                         evaluation_response,
                     },
-                    event_request.get_subject_id(),
+                    event_request.content().get_subject_id(),
+                    event_request.signature().timestamp.as_nanos()
                 )
             }
-            (Self::Reject { .. }, EventRequest::Reject(..)) => {
-                (RequestEventDB::Reject, event_request.get_subject_id())
-            }
-            (Self::EOL { .. }, EventRequest::EOL(..)) => {
-                (RequestEventDB::EOL, event_request.get_subject_id())
-            }
-            _ => unreachable!(
-                "Unreachable combination of protocol and event request"
+            Self::Reject { event_request, .. } => (
+                RequestEventDB::Reject,
+                event_request.content().get_subject_id(),
+                event_request.signature().timestamp.as_nanos()
+            ),
+            Self::EOL { event_request, .. } => (
+                RequestEventDB::EOL,
+                event_request.content().get_subject_id(),
+                event_request.signature().timestamp.as_nanos()
             ),
         }
     }
@@ -643,36 +722,38 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    pub fn get_issuer_event_request_timestamp(&self) -> Option<(String, u64)> {
+    pub fn get_issuer_event_request_timestamp(&self) -> (String, u64) {
         match &self.protocols {
-            Protocols::TrackerFactOpaque { .. } => {
-                None
-            }
-            Protocols::Create {event_request, .. }
+            Protocols::TrackerFactOpaque { data , .. } => (data.signer.to_string(), data.event_request_timestamp.as_nanos()),
+            Protocols::Create { event_request, .. }
             | Protocols::TrackerFactFull { event_request, .. }
             | Protocols::GovFact { event_request, .. }
             | Protocols::Transfer { event_request, .. }
             | Protocols::TrackerConfirm { event_request, .. }
             | Protocols::GovConfirm { event_request, .. }
             | Protocols::Reject { event_request, .. }
-            | Protocols::EOL { event_request, .. } => {
-                Some((event_request.signature().signer.clone().to_string(), event_request.signature().timestamp.clone().as_nanos()))
-            }
+            | Protocols::EOL { event_request, .. } => (
+                event_request.signature().signer.clone().to_string(),
+                event_request.signature().timestamp.clone().as_nanos(),
+            ),
         }
     }
 
-    pub fn ledger_hash(&self, hash: HashAlgorithm) -> Result<DigestIdentifier, LedgerError> {
+    pub fn ledger_hash(
+        &self,
+        hash: HashAlgorithm,
+    ) -> Result<DigestIdentifier, LedgerError> {
         let protocols_hash = self.protocols.hash_for_ledger(&hash)?;
 
         let ledger_hash = LedgerHash {
             gov_version: self.gov_version,
             sn: self.sn,
             prev_ledger_event_hash: self.prev_ledger_event_hash.clone(),
-            protocols_hash
+            protocols_hash,
         };
-        
+
         hash_borsh(&*hash.hasher(), &ledger_hash)
-                    .map_err(|e| LedgerError::HashingFailed(e.to_string()))
+            .map_err(|e| LedgerError::HashingFailed(e.to_string()))
     }
 
     pub fn get_event_request_type(&self) -> EventRequestType {
@@ -682,9 +763,10 @@ impl Ledger {
             | Protocols::TrackerFactOpaque { .. }
             | Protocols::GovFact { .. } => EventRequestType::Fact,
             Protocols::Transfer { .. } => EventRequestType::Transfer,
-            Protocols::TrackerConfirm {  .. }
-            | Protocols::GovConfirm { .. } => EventRequestType::Confirm,
-            Protocols::Reject {  .. } => EventRequestType::Reject,
+            Protocols::TrackerConfirm { .. } | Protocols::GovConfirm { .. } => {
+                EventRequestType::Confirm
+            }
+            Protocols::Reject { .. } => EventRequestType::Reject,
             Protocols::EOL { .. } => EventRequestType::Eol,
         }
     }
@@ -694,7 +776,7 @@ impl Ledger {
             Protocols::TrackerFactOpaque { .. } => {
                 Err(LedgerError::MissingEventRequest)
             }
-            Protocols::Create {event_request, .. }
+            Protocols::Create { event_request, .. }
             | Protocols::TrackerFactFull { event_request, .. }
             | Protocols::GovFact { event_request, .. }
             | Protocols::Transfer { event_request, .. }
@@ -721,8 +803,8 @@ impl Ledger {
                     event_request.content().get_subject_id()
                 }
             }
-            Protocols::TrackerFactOpaque { subject_id, .. } => {
-                subject_id.clone()
+            Protocols::TrackerFactOpaque { data, .. } => {
+                data.subject_id.clone()
             }
             Protocols::TrackerFactFull { event_request, .. }
             | Protocols::GovFact { event_request, .. }
@@ -737,17 +819,13 @@ impl Ledger {
     }
 
     pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
-        let (event, subject_id) =
-            self.protocols.buidl_event_db(self.event_request.content());
+        let (event, subject_id, event_request_timestamp) =
+            self.protocols.buidl_event_db();
 
         LedgerDB {
             subject_id: subject_id.to_string(),
             sn: self.sn,
-            event_request_timestamp: self
-                .event_request
-                .signature()
-                .timestamp
-                .as_nanos(),
+            event_request_timestamp,
             event_ledger_timestamp: signature_timestamp,
             sink_timestamp: TimeStamp::now().as_nanos(),
             event_type: event.get_event_type(),
@@ -755,7 +833,7 @@ impl Ledger {
         }
     }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {
-        if let Protocols::Create { validation } = &self.protocols
+        if let Protocols::Create { validation, .. } = &self.protocols
             && let ValidationMetadata::Metadata(metadata) =
                 &validation.validation_metadata
         {
