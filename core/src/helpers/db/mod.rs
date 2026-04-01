@@ -1,10 +1,7 @@
 mod error;
 
 use crate::{
-    external_db::DBManager,
-    node::register::RegisterEvent,
-    request::tracking::RequestTrackingEvent,
-    subject::{SignedLedger, sinkdata::SinkDataEvent},
+    external_db::DBManager, model::event::Ledger, node::register::RegisterEvent, request::tracking::RequestTrackingEvent, subject::sinkdata::SinkDataEvent
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -146,7 +143,7 @@ impl ExternalDB {
         }
     }
 
-    pub fn get_subject(&self) -> impl Subscriber<SignedLedger> {
+    pub fn get_subject(&self) -> impl Subscriber<Ledger> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => sqlite_local.writer(),

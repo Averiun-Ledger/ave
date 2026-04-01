@@ -95,6 +95,21 @@ impl EvalCoordinator {
             }
         })?;
 
+        if result_hash_signature.signer != self.node_key {
+            error!(
+                msg_type = "NetworkResponse",
+                expected_signer = %self.node_key,
+                actual_signer = %result_hash_signature.signer,
+                "Evaluation result hash signature signer mismatch"
+            );
+
+            return Err(ActorError::Functional {
+                description:
+                    "Evaluation result hash signature signer mismatch"
+                        .to_string(),
+            });
+        }
+
         Ok(())
     }
 }

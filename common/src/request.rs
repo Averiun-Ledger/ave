@@ -5,7 +5,7 @@
 
 use ave_identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 
 use crate::{Namespace, SchemaType, ValueWrapper};
@@ -128,7 +128,30 @@ pub struct FactRequest {
     /// Optional viewpoints targeted by this fact.
     ///
     /// An empty set means the event is not segmented by viewpoints.
+    #[serde(deserialize_with = "deserialize_unique_viewpoints")]
     pub viewpoints: BTreeSet<String>,
+}
+
+fn deserialize_unique_viewpoints<'de, D>(
+    deserializer: D,
+) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let viewpoints = <Vec<String> as serde::Deserialize>::deserialize(
+        deserializer,
+    )?;
+    let mut unique: BTreeSet<String> = BTreeSet::new();
+
+    for viewpoint in viewpoints {
+        if !unique.insert(viewpoint.clone()) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicated viewpoint '{viewpoint}'"
+            )));
+        }
+    }
+
+    Ok(unique)
 }
 
 /// Payload for a `Transfer` event.
@@ -195,4 +218,24 @@ pub struct EOLRequest {
 )]
 pub struct RejectRequest {
     pub subject_id: DigestIdentifier,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FactRequest;
+    use ave_identity::DigestIdentifier;
+    use serde_json::json;
+
+    #[test]
+    fn test_fact_request_rejects_duplicated_viewpoints() {
+        let subject_id = DigestIdentifier::default().to_string();
+        let error = serde_json::from_value::<FactRequest>(json!({
+            "subject_id": subject_id,
+            "payload": { "ModOne": { "data": 1 } },
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicated viewpoint"));
+    }
 }

@@ -19,11 +19,9 @@ use crate::{
     governance::{Governance, GovernanceMessage, GovernanceResponse},
     helpers::{db::ExternalDB, network::service::NetworkSender},
     manual_distribution::ManualDistribution,
-    model::common::node::SignTypesNode,
+    model::{common::node::SignTypesNode, event::Ledger},
     node::subject_manager::{SubjectManager, SubjectManagerMessage},
-    subject::{
-        SignedLedger, replay_sink_events as replay_ledgers_to_sink_events,
-    },
+    subject::replay_sink_events as replay_ledgers_to_sink_events,
     system::ConfigHelper,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
@@ -415,7 +413,7 @@ impl Node {
         actor: &ave_actors::ActorRef<Tracker>,
         lo_sn: Option<u64>,
         hi_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool), ActorError> {
         let response = actor
             .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
             .await?;
@@ -434,7 +432,7 @@ impl Node {
         actor: &ave_actors::ActorRef<Governance>,
         lo_sn: Option<u64>,
         hi_sn: u64,
-    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool), ActorError> {
         let response = actor
             .ask(GovernanceMessage::GetLedger { lo_sn, hi_sn })
             .await?;
@@ -454,7 +452,7 @@ impl Node {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError> {
+    ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
@@ -470,7 +468,7 @@ impl Node {
             if batch.is_empty() {
                 break;
             }
-            lo_sn = batch.last().map(|event| event.content().sn);
+            lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
             if is_all {
                 break;
@@ -484,7 +482,7 @@ impl Node {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
-    ) -> Result<Vec<SignedLedger>, ActorError> {
+    ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
@@ -504,7 +502,7 @@ impl Node {
             if batch.is_empty() {
                 break;
             }
-            lo_sn = batch.last().map(|event| event.content().sn);
+            lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
             if is_all {
                 break;
@@ -1137,7 +1135,7 @@ impl Handler<Self> for Node {
                     SignTypesNode::EvaluationSignature(_) => "EvaluationRes",
                     SignTypesNode::ApprovalReq(_) => "ApprovalReq",
                     SignTypesNode::ApprovalRes(_) => "ApprovalRes",
-                    SignTypesNode::Ledger(_) => "Ledger",
+                    SignTypesNode::LedgerSeal(_) => "LedgerSeal",
                 };
 
                 let sign = match content {
@@ -1162,7 +1160,7 @@ impl Handler<Self> for Node {
                     SignTypesNode::ApprovalRes(approval_res) => {
                         self.sign(&*approval_res)
                     }
-                    SignTypesNode::Ledger(ledger) => self.sign(&ledger),
+                    SignTypesNode::LedgerSeal(ledger) => self.sign(&ledger),
                 }
                 .map_err(|e| {
                     error!(

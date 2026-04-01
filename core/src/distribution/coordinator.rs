@@ -13,8 +13,7 @@ use crate::{
     ActorMessage, NetworkMessage,
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::{common::emit_fail, network::RetryNetwork},
-    subject::SignedLedger,
+    model::{common::emit_fail, event::Ledger, network::RetryNetwork},
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -46,7 +45,7 @@ pub enum DistriCoordinatorMessage {
     // Enviar a un nodo la replicación.
     NetworkDistribution {
         request_id: String,
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
     },
     // El nodo al que le enviamos la replica la recivió, parar los reintentos.
     NetworkResponse {

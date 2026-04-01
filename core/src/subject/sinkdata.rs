@@ -45,9 +45,10 @@ impl Display for SinkTypes {
 
 impl From<&DataToSink> for SinkTypes {
     fn from(value: &DataToSink) -> Self {
-        match value.event {
+        match value.payload {
             DataToSinkEvent::Create { .. } => Self::Create,
-            DataToSinkEvent::Fact { .. } => Self::Fact,
+            DataToSinkEvent::FactFull { .. }
+            | DataToSinkEvent::FactOpaque { .. } => Self::Fact,
             DataToSinkEvent::Transfer { .. } => Self::Transfer,
             DataToSinkEvent::Confirm { .. } => Self::Confirm,
             DataToSinkEvent::Reject { .. } => Self::Reject,
@@ -77,38 +78,7 @@ impl SinkDataMessage {
                 metadata.subject_id.to_string(),
                 metadata.schema_id.to_string(),
             ),
-            Self::Event { event, .. } => match &**event {
-                DataToSinkEvent::Create {
-                    subject_id,
-                    schema_id,
-                    ..
-                }
-                | DataToSinkEvent::Fact {
-                    subject_id,
-                    schema_id,
-                    ..
-                }
-                | DataToSinkEvent::Transfer {
-                    subject_id,
-                    schema_id,
-                    ..
-                }
-                | DataToSinkEvent::Confirm {
-                    subject_id,
-                    schema_id,
-                    ..
-                }
-                | DataToSinkEvent::Reject {
-                    subject_id,
-                    schema_id,
-                    ..
-                }
-                | DataToSinkEvent::Eol {
-                    subject_id,
-                    schema_id,
-                    ..
-                } => (subject_id.clone(), schema_id.to_string()),
-            },
+            Self::Event { event, .. } => event.get_subject_schema()
         }
     }
 }
@@ -169,7 +139,8 @@ impl Handler<Self> for SinkData {
             SinkDataMessage::UpdateState(..) => "UpdateState",
             SinkDataMessage::Event { event, .. } => match &**event {
                 DataToSinkEvent::Create { .. } => "Create",
-                DataToSinkEvent::Fact { .. } => "Fact",
+                DataToSinkEvent::FactFull { .. } => "FactFull",
+                DataToSinkEvent::FactOpaque { .. } => "FactOpaque",
                 DataToSinkEvent::Transfer { .. } => "Transfer",
                 DataToSinkEvent::Confirm { .. } => "Confirm",
                 DataToSinkEvent::Reject { .. } => "Reject",
@@ -186,7 +157,7 @@ impl Handler<Self> for SinkData {
                 event_request_timestamp,
                 event_ledger_timestamp,
             } => SinkDataEvent::Event(Box::new(DataToSink {
-                event: *event,
+                payload: *event,
                 public_key: self.public_key.clone(),
                 event_request_timestamp,
                 event_ledger_timestamp,
@@ -214,7 +185,7 @@ impl Handler<Self> for SinkData {
     ) {
         let (subject_id, schema_id) = match &event {
             SinkDataEvent::Event(data_to_sink) => {
-                data_to_sink.event.get_subject_schema()
+                data_to_sink.payload.get_subject_schema()
             }
             SinkDataEvent::State(metadata) => (
                 metadata.subject_id.to_string(),

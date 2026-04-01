@@ -9,12 +9,12 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        common::{emit_fail, get_last_event, purge_storage},
-        event::{Protocols, ValidationMetadata},
+        common::{TrackerVisibilityState, emit_fail, get_last_event, purge_storage},
+        event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject,
+        DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
@@ -54,6 +54,8 @@ pub struct Tracker {
     pub namespace: Namespace,
     /// The version of the governance contract that created the subject.
     pub genesis_gov_version: u64,
+    
+    pub visibility_state: TrackerVisibilityState,
     /// The current status of the subject.
     pub properties: ValueWrapper,
 }
@@ -89,6 +91,7 @@ impl BorshSerialize for Tracker {
         BorshSerialize::serialize(&self.governance_id, writer)?;
         BorshSerialize::serialize(&self.namespace, writer)?;
         BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
+        BorshSerialize::serialize(&self.visibility_state, writer)?;
         BorshSerialize::serialize(&self.properties, writer)?;
 
         Ok(())
@@ -104,6 +107,7 @@ impl BorshDeserialize for Tracker {
         let governance_id = DigestIdentifier::deserialize_reader(reader)?;
         let namespace = Namespace::deserialize_reader(reader)?;
         let genesis_gov_version = u64::deserialize_reader(reader)?;
+        let visibility_state = visibility_state::deserialize_reader(reader)?;
         let properties = ValueWrapper::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
@@ -119,6 +123,7 @@ impl BorshDeserialize for Tracker {
             governance_id,
             namespace,
             genesis_gov_version,
+            visibility_state,
             properties,
         })
     }
@@ -271,7 +276,7 @@ impl Subject for Tracker {
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<Option<SignedLedger>, ActorError> {
+    ) -> Result<Option<Ledger>, ActorError> {
         get_last_event(ctx).await
     }
 
@@ -319,7 +324,7 @@ impl Subject for Tracker {
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
     ) -> Result<(), ActorError> {
         let Some(hash) = self.hash else {
             return Err(ActorError::FunctionalCritical {
@@ -454,7 +459,7 @@ impl Tracker {
     async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let mut iter = events.into_iter();
@@ -691,7 +696,7 @@ pub enum TrackerMessage {
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
     PurgeStorage,
-    UpdateLedger { events: Vec<SignedLedger> },
+    UpdateLedger { events: Vec<Ledger> },
 }
 
 impl Message for TrackerMessage {}
@@ -702,11 +707,11 @@ pub enum TrackerResponse {
     Metadata(Box<Metadata>),
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
     },
     LastLedger {
-        ledger_event: Box<Option<SignedLedger>>,
+        ledger_event: Box<Option<Ledger>>,
     },
     Sn(u64),
     Ok,
@@ -715,7 +720,7 @@ impl Response for TrackerResponse {}
 
 #[async_trait]
 impl Actor for Tracker {
-    type Event = SignedLedger;
+    type Event = Ledger;
     type Message = TrackerMessage;
     type Response = TrackerResponse;
 
@@ -872,7 +877,7 @@ impl Handler<Self> for Tracker {
 
     async fn on_event(
         &mut self,
-        event: SignedLedger,
+        event: Ledger,
         ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {
@@ -932,6 +937,7 @@ impl PersistentActor for Tracker {
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
+        self.visibility_state = state.visibility_state;
         self.governance_id = state.governance_id;
         self.namespace = state.namespace;
         self.genesis_gov_version = state.genesis_gov_version;

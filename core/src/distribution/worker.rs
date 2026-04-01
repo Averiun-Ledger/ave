@@ -31,7 +31,6 @@ use crate::{
         event::Ledger,
     },
     node::SubjectData,
-    subject::SignedLedger,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
@@ -64,7 +63,7 @@ impl DistriWorker {
         hi_sn: u64,
         lo_sn: Option<u64>,
         is_gov: bool,
-    ) -> Result<(Vec<SignedLedger>, bool), ActorError> {
+    ) -> Result<(Vec<Ledger>, bool), ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
@@ -336,12 +335,12 @@ pub enum DistriWorkerMessage {
     },
     // Nos llega una replica, guardarla en informar que la hemos recivido
     LastEventDistribution {
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
     LedgerDistribution {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
         info: ComunicateInfo,
         sender: PublicKey,

@@ -6,7 +6,7 @@ use ave_actors::{
 use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::bridge::request::EventRequestType;
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    DigestIdentifier, HashAlgorithm, PublicKey, Signed,
 };
 use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
@@ -39,13 +39,13 @@ use crate::model::common::subject::{
 };
 use crate::model::common::{purge_storage, send_to_tracking};
 use crate::model::event::{
-    ApprovalData, EvaluationData, Ledger, Protocols, ValidationData,
+    ApprovalData, EvaluationData, Ledger, LedgerSeal, Protocols, ValidationData,
 };
 use crate::node::SubjectData;
 use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;
 use crate::request::{RequestHandler, RequestHandlerMessage};
-use crate::subject::{Metadata, SignedLedger};
+use crate::subject::Metadata;
 
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
 use crate::validation::worker::CurrentRequestRoles;
@@ -819,11 +819,7 @@ impl RequestManager {
                 return Err(RequestManagerError::LastLedgerEventNotFound);
             };
 
-            let ledger_hash = hash_borsh(&*hash.hasher(), &last_ledger_event.0)
-                .map_err(|e| RequestManagerError::LedgerHashFailed {
-                    details: e.to_string(),
-                })?;
-
+            let ledger_hash = last_ledger_event.ledger_hash(hash)?;
             let schema_id = metadata.schema_id.clone();
 
             let current_request_roles =
@@ -876,10 +872,9 @@ impl RequestManager {
                     metadata: Box::new(metadata),
                     last_data: Box::new(LastData {
                         vali_data: last_ledger_event
-                            .content()
                             .protocols
                             .get_validation_data(),
-                        gov_version: last_ledger_event.content().gov_version,
+                        gov_version: last_ledger_event.gov_version,
                     }),
                     gov_version,
                     ledger_hash,
@@ -950,47 +945,73 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
         val_req: ValidationReq,
         val_res: ValidationData,
-    ) -> Result<SignedLedger, RequestManagerError> {
-        let ledger = match val_req {
+    ) -> Result<Ledger, RequestManagerError> {
+        let Some((hash, ..)) = self.helpers else {
+            return Err(RequestManagerError::HelpersNotInitialized);
+        };
+
+        let (protocols, ledger_seal) = match val_req {
             ValidationReq::Create {
                 event_request,
                 gov_version,
                 ..
-            } => Ledger {
-                event_request,
-                gov_version,
-                sn: 0,
-                prev_ledger_event_hash: DigestIdentifier::default(),
-                protocols: Protocols::Create {
+            } => {
+                let protocols = Protocols::Create {
+                    event_request,
                     validation: val_res,
-                },
-            },
+                };
+
+                let protocols_hash = protocols.hash_for_ledger(&hash)?;
+
+                let ledger_seal = LedgerSeal {
+                    gov_version,
+                    sn: 0,
+                    prev_ledger_event_hash: DigestIdentifier::default(),
+                    protocols_hash,
+                };
+
+                (protocols, ledger_seal)
+            }
             ValidationReq::Event {
                 actual_protocols,
                 event_request,
+                ledger_hash,
                 metadata,
                 gov_version,
                 sn,
-                ledger_hash,
                 ..
-            } => Ledger {
-                gov_version,
-                sn,
-                prev_ledger_event_hash: ledger_hash,
-                protocols: Protocols::build(
+            } => {
+                let protocols = Protocols::build(
                     metadata.schema_id.is_gov(),
-                    EventRequestType::from(event_request.content()),
+                    event_request,
                     *actual_protocols,
                     val_res,
-                )?,
-                event_request,
-            },
+                )?;
+
+                let protocols_hash = protocols.hash_for_ledger(&hash)?;
+
+                let ledger_seal = LedgerSeal {
+                    gov_version,
+                    sn,
+                    prev_ledger_event_hash: ledger_hash,
+                    protocols_hash,
+                };
+
+                (protocols, ledger_seal)
+            }
         };
 
         let signature =
-            get_sign(ctx, SignTypesNode::Ledger(ledger.clone())).await?;
+            get_sign(ctx, SignTypesNode::LedgerSeal(ledger_seal.clone()))
+                .await?;
 
-        let ledger = SignedLedger(Signed::from_parts(ledger, signature));
+        let ledger = Ledger {
+            gov_version: ledger_seal.gov_version,
+            sn: ledger_seal.sn,
+            prev_ledger_event_hash: ledger_seal.prev_ledger_event_hash,
+            ledger_seal_signature: signature,
+            protocols,
+        };
 
         self.on_event(
             RequestManagerEvent::UpdateState {
@@ -1008,9 +1029,9 @@ impl RequestManager {
     async fn update_subject(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        ledger: SignedLedger,
+        ledger: Ledger,
     ) -> Result<(), RequestManagerError> {
-        if ledger.content().event_request.content().is_create_event() {
+        if ledger.get_event_request_type().is_create_event() {
             if let Err(e) = create_subject(ctx, ledger.clone()).await {
                 if let ActorError::Functional { .. } = e {
                     return Err(RequestManagerError::CheckLimit);
@@ -1047,10 +1068,13 @@ impl RequestManager {
     async fn build_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        ledger: SignedLedger,
+        ledger: Ledger,
     ) -> Result<bool, RequestManagerError> {
         let witnesses = self
-            .build_distribution_data(ctx, ledger.signature().signer.clone())
+            .build_distribution_data(
+                ctx,
+                ledger.ledger_seal_signature.signer.clone(),
+            )
             .await?;
 
         let Some(mut witnesses) = witnesses else {
@@ -1133,7 +1157,7 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
         witnesses: HashSet<PublicKey>,
-        ledger: SignedLedger,
+        ledger: Ledger,
     ) -> Result<(), RequestManagerError> {
         let Some((.., network)) = self.helpers.clone() else {
             return Err(RequestManagerError::HelpersNotInitialized);
@@ -2148,7 +2172,7 @@ impl Handler<Self> for RequestManager {
                         eval_res,
                     } => {
                         if let Err(e) = self
-                                .build_approval(ctx, eval_req, eval_res.evaluator_res().expect("If the status is approval, it means that the evaluator's response is valid"))
+                                .build_approval(ctx, eval_req, eval_res.evaluator_response_ok().expect("If the status is approval, it means that the evaluator's response is valid"))
                                 .await
                             {
                                 error!(
@@ -2305,7 +2329,8 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    if let Some(evaluator_res) = eval_res.evaluator_res()
+                    if let Some(evaluator_res) =
+                        eval_res.evaluator_response_ok()
                         && evaluator_res.appr_required
                     {
                         debug!(

@@ -20,7 +20,10 @@ use crate::subject::Metadata;
 pub enum ValidationRes {
     Response {
         vali_req_hash: DigestIdentifier,
-        modified_metadata_hash: DigestIdentifier,
+        modified_metadata_without_propierties_hash: DigestIdentifier,
+        propierties_hash: DigestIdentifier,
+        event_request_hash: DigestIdentifier,
+        viewpoints_hash: DigestIdentifier,
     },
     Create {
         vali_req_hash: DigestIdentifier,

@@ -18,12 +18,11 @@ use crate::{
             WitnessesRegisterResponse,
         },
     },
-    model::common::{check_subject_creation, node::get_subject_data},
-    node::SubjectData,
-    node::subject_manager::{
+    model::{common::{check_subject_creation, node::get_subject_data}, event::Ledger},
+    node::{SubjectData, subject_manager::{
         SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
-    },
-    subject::{Metadata, SignedLedger},
+    }},
+    subject::Metadata,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 
@@ -56,7 +55,7 @@ pub async fn up_subject<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
@@ -152,7 +151,7 @@ pub async fn acquire_subject<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
     active: bool,
 ) -> Result<SubjectLease, ActorError>
 where
@@ -173,7 +172,7 @@ pub async fn with_subject_up<A, F, Fut, T>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
-    create_ledger: Option<SignedLedger>,
+    create_ledger: Option<Ledger>,
     active: bool,
     operation: F,
 ) -> Result<T, ActorError>
@@ -272,7 +271,7 @@ where
 pub async fn get_last_ledger_event<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
-) -> Result<Option<SignedLedger>, ActorError>
+) -> Result<Option<Ledger>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -317,7 +316,7 @@ where
 pub async fn update_ledger<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
-    events: Vec<SignedLedger>,
+    events: Vec<Ledger>,
 ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
 where
     A: Actor + Handler<A>,
@@ -363,14 +362,17 @@ where
 
 pub async fn create_subject<A>(
     ctx: &mut ActorContext<A>,
-    ledger: SignedLedger,
+    ledger: Ledger,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
 {
     let mut should_finish = true;
-    if let EventRequest::Create(request) =
-        ledger.content().event_request.content().clone()
+    if ledger.get_event_request_type().is_create_event()
+    && let EventRequest::Create(request) =
+        ledger.get_event_request().map_err(|e| {
+            ActorError::Functional { description: e.to_string() }
+        })?
     {
         if request.schema_id.is_gov() {
             should_finish = false;
@@ -378,8 +380,8 @@ where
             check_subject_creation(
                 ctx,
                 &request.governance_id,
-                ledger.signature().signer.clone(),
-                ledger.content().gov_version,
+                ledger.ledger_seal_signature.signer.clone(),
+                ledger.gov_version,
                 request.namespace.to_string(),
                 request.schema_id,
             )
@@ -387,7 +389,7 @@ where
         }
     }
 
-    let subject_id = ledger.content().get_subject_id();
+    let subject_id = ledger.get_subject_id();
     let requester = ctx.path().to_string();
     let lease =
         acquire_subject(ctx, &subject_id, requester, Some(ledger), true)

@@ -1,6 +1,7 @@
 //! Conversions between bridge models and internal domain models.
 
 use std::str::FromStr;
+use std::collections::BTreeSet;
 
 use ave_identity::{DigestIdentifier, PublicKey, Signed};
 
@@ -143,10 +144,19 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
         let subject_id = DigestIdentifier::from_str(&request.subject_id)
             .map_err(|e| ConversionError::InvalidSubjectId(e.to_string()))?;
 
+        let mut viewpoints = BTreeSet::new();
+        for viewpoint in request.viewpoints {
+            if !viewpoints.insert(viewpoint.clone()) {
+                return Err(ConversionError::InvalidViewpoints(format!(
+                    "duplicated viewpoint '{viewpoint}'"
+                )));
+            }
+        }
+
         Ok(Self {
             subject_id,
             payload: ValueWrapper(request.payload),
-            viewpoints: request.viewpoints.into_iter().collect(),
+            viewpoints,
         })
     }
 }
@@ -319,6 +329,22 @@ mod tests {
         assert!(matches!(
             fact.unwrap_err(),
             ConversionError::InvalidSubjectId(_)
+        ));
+    }
+
+    #[test]
+    fn test_fact_request_conversion_rejects_duplicated_viewpoints() {
+        let bridge_fact = BridgeFactRequest {
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
+            payload: json!({"test": "value"}),
+            viewpoints: vec!["agua".to_string(), "agua".to_string()],
+        };
+
+        let fact: Result<FactRequest, _> = bridge_fact.try_into();
+        assert!(matches!(
+            fact.unwrap_err(),
+            ConversionError::InvalidViewpoints(_)
         ));
     }
 }

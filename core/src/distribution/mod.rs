@@ -12,9 +12,8 @@ use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::emit_fail,
+    model::{common::emit_fail, event::Ledger},
     request::manager::{RequestManager, RequestManagerMessage},
-    subject::SignedLedger,
 };
 
 pub mod coordinator;
@@ -63,7 +62,7 @@ impl Distribution {
     async fn create_distributors(
         &self,
         ctx: &mut ActorContext<Self>,
-        ledger: SignedLedger,
+        ledger: Ledger,
         signer: PublicKey,
     ) -> Result<(), ActorError> {
         let child = ctx
@@ -141,7 +140,7 @@ impl Actor for Distribution {
 #[derive(Debug, Clone)]
 pub enum DistributionMessage {
     Create {
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
         witnesses: HashSet<PublicKey>,
     },
     Response {

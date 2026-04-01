@@ -148,7 +148,7 @@ impl ActualProtocols {
     pub fn is_success(&self) -> bool {
         match &self {
             Self::None => true,
-            Self::Eval { eval_data } => eval_data.evaluator_res().is_some(),
+            Self::Eval { eval_data } => eval_data.is_ok(),
             Self::EvalApprove { approval_data, .. } => approval_data.approved,
         }
     }
@@ -171,13 +171,13 @@ impl ActualProtocols {
             | (Self::None, true, EventRequestType::Eol)
             | (Self::None, false, EventRequestType::Eol) => true,
             (Self::Eval { eval_data }, true, EventRequestType::Fact) => {
-                eval_data.evaluator_res().is_none()
+                !eval_data.is_ok()
             }
             (
                 Self::EvalApprove { eval_data, .. },
                 true,
                 EventRequestType::Fact,
-            ) => eval_data.evaluator_res().is_some(),
+            ) => eval_data.is_ok(),
             _ => false,
         }
     }

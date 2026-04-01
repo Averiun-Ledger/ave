@@ -4,11 +4,7 @@ use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    approval::{request::ApprovalReq, response::ApprovalRes},
-    evaluation::{request::EvaluationReq, response::EvaluationRes},
-    governance::witnesses_register::CurrentWitnessSubject,
-    subject::SignedLedger,
-    validation::{request::ValidationReq, response::ValidationRes},
+    approval::{request::ApprovalReq, response::ApprovalRes}, evaluation::{request::EvaluationReq, response::EvaluationRes}, governance::witnesses_register::CurrentWitnessSubject, model::event::Ledger, validation::{request::ValidationReq, response::ValidationRes}
 };
 
 pub mod error;
@@ -36,7 +32,7 @@ pub enum ActorMessage {
         res: Box<Signed<ApprovalRes>>,
     },
     DistributionLastEventReq {
-        ledger: Box<SignedLedger>,
+        ledger: Box<Ledger>,
     },
     DistributionLastEventRes,
     DistributionLedgerReq {
@@ -44,7 +40,7 @@ pub enum ActorMessage {
         subject_id: DigestIdentifier,
     },
     DistributionLedgerRes {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
     },
     DistributionGetLastSn {

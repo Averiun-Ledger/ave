@@ -500,6 +500,7 @@ impl Handler<Self> for Evaluation {
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                return Ok(());
                             }
 
                             let response = match self
@@ -962,7 +963,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -1080,7 +1081,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -1236,7 +1237,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -1415,7 +1416,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -1750,7 +1751,7 @@ pub mod tests {
             description,
             schema_id,
             namespace,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -1851,7 +1852,7 @@ pub mod tests {
         let event = &replay.events[0];
         assert!(!event.public_key.is_empty());
         assert!(event.sink_timestamp > 0);
-        match &event.event {
+        match &event.payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -1919,7 +1920,7 @@ pub mod tests {
         assert_eq!(first_page.events.len(), 1);
         assert!(first_page.has_more);
         assert_eq!(first_page.next_sn, Some(1));
-        match &first_page.events[0].event {
+        match &first_page.events[0].payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -1941,7 +1942,7 @@ pub mod tests {
         assert_eq!(second_page.events.len(), 1);
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
-        match &second_page.events[0].event {
+        match &second_page.events[0].payload {
             DataToSinkEvent::Fact {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -1983,7 +1984,7 @@ pub mod tests {
         assert!(!replay.has_more);
         assert!(replay.next_sn.is_none());
 
-        match &replay.events[0].event {
+        match &replay.events[0].payload {
             DataToSinkEvent::Create {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -2039,7 +2040,7 @@ pub mod tests {
         assert!(!replay.has_more);
         assert!(replay.next_sn.is_none());
 
-        match &replay.events[0].event {
+        match &replay.events[0].payload {
             DataToSinkEvent::Transfer {
                 governance_id,
                 subject_id: replay_subject_id,
@@ -2186,7 +2187,7 @@ pub mod tests {
             payload: payload_db,
             viewpoints,
             evaluation_response,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -2291,7 +2292,7 @@ pub mod tests {
             payload: payload_db,
             viewpoints,
             evaluation_response,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -2394,7 +2395,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -2521,7 +2522,7 @@ pub mod tests {
         let RequestEventDB::Transfer {
             evaluation_error,
             new_owner: new_owner_transfer,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };

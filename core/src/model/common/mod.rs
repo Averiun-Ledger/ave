@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::slice;
 use tracing::error;
@@ -340,6 +340,272 @@ impl IntervalSet {
 
     pub fn iter_mut(&mut self) -> slice::IterMut<'_, Interval> {
         self.intervals.iter_mut()
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerVisibilityMode {
+    Full,
+    Opaque,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerStoredVisibility {
+    Full,
+    Only(BTreeSet<String>),
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct TrackerStoredVisibilityRange {
+    pub interval: Interval,
+    pub visibility: TrackerStoredVisibility,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerStoredVisibilitySpan<'a> {
+    pub interval: Interval,
+    pub visibility: &'a TrackerStoredVisibility,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub enum TrackerEventVisibility {
+    Public,
+    Private(BTreeSet<String>),
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct TrackerEventVisibilityRange {
+    pub interval: Interval,
+    pub visibility: TrackerEventVisibility,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerEventVisibilitySpan<'a> {
+    pub interval: Interval,
+    pub visibility: &'a TrackerEventVisibility,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+)]
+pub struct TrackerVisibilityState {
+    pub mode: TrackerVisibilityMode,
+    // Invariante:
+    // - ordenado por interval.lo
+    // - sin solapes
+    // - fusionado cuando dos rangos consecutivos comparten visibility
+    pub stored_ranges: Vec<TrackerStoredVisibilityRange>,
+    // Invariante:
+    // - ordenado por interval.lo
+    // - sin solapes
+    // - fusionado cuando dos rangos consecutivos comparten visibility
+    pub event_ranges: Vec<TrackerEventVisibilityRange>,
+}
+
+pub struct TrackerStoredVisibilityIter<'a> {
+    ranges: &'a [TrackerStoredVisibilityRange],
+    index: usize,
+    from_sn: u64,
+    to_sn: u64,
+}
+
+pub struct TrackerEventVisibilityIter<'a> {
+    ranges: &'a [TrackerEventVisibilityRange],
+    index: usize,
+    from_sn: u64,
+    to_sn: u64,
+}
+
+impl Default for TrackerVisibilityState {
+    fn default() -> Self {
+        Self {
+            mode: TrackerVisibilityMode::Full,
+            stored_ranges: Vec::new(),
+            event_ranges: Vec::new(),
+        }
+    }
+}
+
+impl TrackerVisibilityState {
+    fn first_overlapping_stored_index(&self, from_sn: u64) -> Option<usize> {
+        if self.stored_ranges.is_empty() {
+            return None;
+        }
+
+        match self
+            .stored_ranges
+            .binary_search_by(|range| range.interval.lo.cmp(&from_sn))
+        {
+            Ok(index) => Some(index),
+            Err(pos) => {
+                if pos == 0 {
+                    return Some(0);
+                }
+
+                let index = pos - 1;
+                if self.stored_ranges[index].interval.contains(from_sn) {
+                    Some(index)
+                } else if pos < self.stored_ranges.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn first_overlapping_event_index(&self, from_sn: u64) -> Option<usize> {
+        if self.event_ranges.is_empty() {
+            return None;
+        }
+
+        match self
+            .event_ranges
+            .binary_search_by(|range| range.interval.lo.cmp(&from_sn))
+        {
+            Ok(index) => Some(index),
+            Err(pos) => {
+                if pos == 0 {
+                    return Some(0);
+                }
+
+                let index = pos - 1;
+                if self.event_ranges[index].interval.contains(from_sn) {
+                    Some(index)
+                } else if pos < self.event_ranges.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn iter_stored(
+        &self,
+        from_sn: u64,
+        to_sn: u64,
+    ) -> TrackerStoredVisibilityIter<'_> {
+        let index = self
+            .first_overlapping_stored_index(from_sn)
+            .unwrap_or(self.stored_ranges.len());
+
+        TrackerStoredVisibilityIter {
+            ranges: &self.stored_ranges,
+            index,
+            from_sn,
+            to_sn,
+        }
+    }
+
+    pub fn iter_events(
+        &self,
+        from_sn: u64,
+        to_sn: u64,
+    ) -> TrackerEventVisibilityIter<'_> {
+        let index = self
+            .first_overlapping_event_index(from_sn)
+            .unwrap_or(self.event_ranges.len());
+
+        TrackerEventVisibilityIter {
+            ranges: &self.event_ranges,
+            index,
+            from_sn,
+            to_sn,
+        }
+    }
+}
+
+impl<'a> Iterator for TrackerStoredVisibilityIter<'a> {
+    type Item = TrackerStoredVisibilitySpan<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.ranges.get(self.index)?;
+        if range.interval.lo > self.to_sn {
+            return None;
+        }
+
+        self.index += 1;
+
+        Some(TrackerStoredVisibilitySpan {
+            interval: Interval::new(
+                range.interval.lo.max(self.from_sn),
+                range.interval.hi.min(self.to_sn),
+            ),
+            visibility: &range.visibility,
+        })
+    }
+}
+
+impl<'a> Iterator for TrackerEventVisibilityIter<'a> {
+    type Item = TrackerEventVisibilitySpan<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.ranges.get(self.index)?;
+        if range.interval.lo > self.to_sn {
+            return None;
+        }
+
+        self.index += 1;
+
+        Some(TrackerEventVisibilitySpan {
+            interval: Interval::new(
+                range.interval.lo.max(self.from_sn),
+                range.interval.hi.min(self.to_sn),
+            ),
+            visibility: &range.visibility,
+        })
     }
 }
 

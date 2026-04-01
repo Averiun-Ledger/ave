@@ -17,9 +17,9 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse, data::GovernanceData,
     },
     helpers::db::ExternalDB,
-    model::event::{Protocols, ValidationMetadata},
+    model::event::{Ledger, Protocols, ValidationMetadata},
     node::{Node, NodeMessage, NodeResponse, SubjectData},
-    subject::{SignedLedger, SubjectMetadata},
+    subject::SubjectMetadata,
     tracker::{
         InitParamsTracker, Tracker, TrackerInit, TrackerMessage,
         TrackerResponse,
@@ -34,7 +34,7 @@ pub enum SubjectManagerMessage {
     Up {
         subject_id: DigestIdentifier,
         requester: String,
-        create_ledger: Option<Box<SignedLedger>>,
+        create_ledger: Option<Box<Ledger>>,
     },
     Finish {
         subject_id: DigestIdentifier,
@@ -140,7 +140,7 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: DigestIdentifier,
         requester: String,
-        create_ledger: Option<Box<SignedLedger>>,
+        create_ledger: Option<Box<Ledger>>,
     ) -> Result<(), ActorError> {
         if let Some(entry) = self.subjects.get_mut(&subject_id) {
             entry.requesters.insert(requester);
@@ -410,7 +410,7 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,
-        ledger: SignedLedger,
+        ledger: Ledger,
     ) -> Result<(), ActorError> {
         let tracker_actor: ActorRef<Tracker> = ctx
             .create_child(
@@ -457,7 +457,7 @@ impl SubjectManager {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         metadata: crate::subject::Metadata,
-        ledger: SignedLedger,
+        ledger: Ledger,
     ) -> Result<(), ActorError> {
         let governance_data = serde_json::from_value::<GovernanceData>(
             metadata.properties.0.clone(),
@@ -513,10 +513,10 @@ impl SubjectManager {
     }
 
     fn metadata_from_create_ledger(
-        ledger: &SignedLedger,
+        ledger: &Ledger,
     ) -> Result<crate::subject::Metadata, ActorError> {
-        match &ledger.content().protocols {
-            Protocols::Create { validation } => {
+        match &ledger.protocols {
+            Protocols::Create { validation, .. } => {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {

@@ -117,6 +117,16 @@ pub enum EventRequestType {
     Eol,
 }
 
+impl EventRequestType {
+    pub fn is_create_event(&self) -> bool {
+        if let EventRequestType::Create = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl From<&EventRequest> for EventRequestType {
     fn from(value: &EventRequest) -> Self {
         match value {

@@ -837,7 +837,7 @@ impl AveSink {
     fn event_id_components(
         data: &DataToSink,
     ) -> (&'static str, &str, String, u64) {
-        match &data.event {
+        match &data.payload {
             ave_common::DataToSinkEvent::Create {
                 subject_id,
                 schema_id,
@@ -1279,7 +1279,7 @@ impl Subscriber<SinkDataEvent> for AveSink {
             SinkDataEvent::State(..) => return,
         };
 
-        let (subject_id, schema_id) = data.event.get_subject_schema();
+        let (subject_id, schema_id) = data.payload.get_subject_schema();
         let Some(servers) = self.0.sinks.get(&schema_id) else {
             debug!(
                 target: TARGET,
@@ -1466,7 +1466,7 @@ mod tests {
 
     fn sample_data(schema_id: SchemaType) -> DataToSink {
         DataToSink {
-            event: DataToSinkEvent::Create {
+            payload: DataToSinkEvent::Create {
                 governance_id: None,
                 subject_id: "subject-1".to_owned(),
                 owner: "owner-1".to_owned(),
@@ -1965,12 +1965,12 @@ mod tests {
         );
 
         let mut first = sample_data(SchemaType::Type("schema-a".to_owned()));
-        if let DataToSinkEvent::Create { subject_id, .. } = &mut first.event {
+        if let DataToSinkEvent::Create { subject_id, .. } = &mut first.payload {
             *subject_id = "subject-1".to_owned();
         }
         let mut second = sample_data(SchemaType::Type("schema-a".to_owned()));
         if let DataToSinkEvent::Create { subject_id, sn, .. } =
-            &mut second.event
+            &mut second.payload
         {
             *subject_id = "subject-2".to_owned();
             *sn = 2;

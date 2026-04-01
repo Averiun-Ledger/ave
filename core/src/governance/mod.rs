@@ -47,11 +47,11 @@ use crate::{
         common::{
             emit_fail, get_last_event, purge_storage, subject::make_obsolete,
         },
-        event::{Protocols, ValidationMetadata},
+        event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata, SignedLedger, Subject,
+        DataForSink, EventLedgerDataForSink, Metadata,  Subject,
         SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
@@ -287,7 +287,7 @@ impl Subject for Governance {
     async fn get_last_ledger(
         &self,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<Option<SignedLedger>, ActorError> {
+    ) -> Result<Option<Ledger>, ActorError> {
         get_last_event(ctx).await
     }
 
@@ -354,7 +354,7 @@ impl Subject for Governance {
     async fn manager_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
     ) -> Result<(), ActorError> {
         let Some(network) = ctx
             .system()
@@ -2080,7 +2080,7 @@ impl Governance {
     async fn verify_new_ledger_events(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        events: Vec<SignedLedger>,
+        events: Vec<Ledger>,
         hash: &HashAlgorithm,
     ) -> Result<(), ActorError> {
         let mut iter = events.into_iter();
@@ -2816,7 +2816,7 @@ pub enum GovernanceMessage {
     GetLastLedger,
     DeleteTrackerReferences { subject_id: DigestIdentifier },
     DeleteGovernanceStorage,
-    UpdateLedger { events: Vec<SignedLedger> },
+    UpdateLedger { events: Vec<Ledger> },
     GetGovernance,
     GetVersion,
 }
@@ -2829,11 +2829,11 @@ pub enum GovernanceResponse {
     Metadata(Box<Metadata>),
     UpdateResult(u64, PublicKey, Option<PublicKey>),
     Ledger {
-        ledger: Vec<SignedLedger>,
+        ledger: Vec<Ledger>,
         is_all: bool,
     },
     LastLedger {
-        ledger_event: Box<Option<SignedLedger>>,
+        ledger_event: Box<Option<Ledger>>,
     },
     Governance(Box<GovernanceData>),
     NewCompilers(Vec<SchemaType>),
@@ -2845,7 +2845,7 @@ impl Response for GovernanceResponse {}
 
 #[async_trait]
 impl Actor for Governance {
-    type Event = SignedLedger;
+    type Event = Ledger;
     type Message = GovernanceMessage;
     type Response = GovernanceResponse;
 
@@ -3210,7 +3210,7 @@ impl Handler<Self> for Governance {
 
     async fn on_event(
         &mut self,
-        event: SignedLedger,
+        event: Ledger,
         ctx: &mut ActorContext<Self>,
     ) {
         if let Err(e) = self.persist(&event, ctx).await {

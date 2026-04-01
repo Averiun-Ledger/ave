@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     approval::response::ApprovalRes,
-    evaluation::response::EvaluationRes,
+    evaluation::response::EvaluationResult,
     governance::{
         data::GovernanceData,
         model::Quorum,
@@ -17,7 +17,7 @@ use crate::{
         },
         event::{ApprovalData, EvaluationData, EvaluationResponse},
     },
-    subject::{Metadata, RequestSubjectData},
+    subject::{Metadata, MetadataWithoutProperties, RequestSubjectData},
     validation::{
         request::{ActualProtocols, LastData},
         response::ValidatorError,
@@ -39,6 +39,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use json_patch::{Patch, patch};
 use network::ComunicateInfo;
+use std::collections::BTreeSet;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
@@ -87,6 +88,33 @@ pub struct ValiWorker {
 }
 
 impl ValiWorker {
+    fn event_request_hash(
+        &self,
+        event_request: &Signed<EventRequest>,
+    ) -> Result<DigestIdentifier, ValidatorError> {
+        hash_borsh(&*self.hash.hasher(), event_request).map_err(|e| {
+            ValidatorError::InternalError {
+                problem: e.to_string(),
+            }
+        })
+    }
+
+    fn viewpoints_hash(
+        &self,
+        event_request: &EventRequest,
+    ) -> Result<DigestIdentifier, ValidatorError> {
+        let viewpoints = match event_request {
+            EventRequest::Fact(fact_request) => fact_request.viewpoints.clone(),
+            _ => BTreeSet::new(),
+        };
+
+        hash_borsh(&*self.hash.hasher(), &viewpoints).map_err(|e| {
+            ValidatorError::InternalError {
+                problem: e.to_string(),
+            }
+        })
+    }
+
     fn current_evaluation_roles(&self) -> RoleDataRegister {
         self.current_roles.evaluation.clone()
     }
@@ -487,28 +515,44 @@ impl ValiWorker {
             });
         }
 
-        let eval_res = match evaluation.response.clone() {
-            EvaluationResponse::Ok(evaluator_response) => {
-                EvaluationRes::Response {
-                    response: evaluator_response,
+        let (eval_result, result_hash) = match evaluation.response.clone() {
+            EvaluationResponse::Ok {
+                result,
+                result_hash,
+            } => (
+                EvaluationResult::Ok {
+                    response: result,
                     eval_req_hash: evaluation.eval_req_hash.clone(),
                     req_subject_data_hash,
-                }
-            }
-            EvaluationResponse::Error(evaluator_error) => {
-                EvaluationRes::Error {
-                    error: evaluator_error,
+                },
+                result_hash,
+            ),
+            EvaluationResponse::Error {
+                result,
+                result_hash,
+            } => (
+                EvaluationResult::Error {
+                    error: result,
                     eval_req_hash: evaluation.eval_req_hash.clone(),
                     req_subject_data_hash,
-                }
-            }
+                },
+                result_hash,
+            ),
         };
 
-        for signature in evaluation.evaluators_signatures.iter() {
-            let signed_res =
-                Signed::from_parts(eval_res.clone(), signature.clone());
+        let eval_result_hash = hash_borsh(&*self.hash.hasher(), &eval_result)
+            .map_err(|e| ValidatorError::InternalError {
+            problem: e.to_string(),
+        })?;
 
-            if signed_res.verify().is_err() {
+        if eval_result_hash != result_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "eval result hash",
+            });
+        }
+
+        for signature in evaluation.evaluators_signatures.iter() {
+            if signature.verify(&eval_result_hash).is_err() {
                 return Err(ValidatorError::InvalidSignature {
                     data: "evaluation",
                 });
@@ -516,7 +560,7 @@ impl ValiWorker {
         }
 
         let appr_required = if let Some(evaluator_res) =
-            evaluation.evaluator_res()
+            evaluation.evaluator_response_ok()
         {
             let json_patch =
                 serde_json::from_value::<Patch>(evaluator_res.patch.0)
@@ -710,8 +754,27 @@ impl ValiWorker {
                 subject_metadata: Box::new(metadata.clone()),
             }
         } else {
-            let hash_metadata =
-                hash_borsh(&*self.hash.hasher(), &metadata.clone()).map_err(
+            let ValidationMetadata::ModifiedHash {
+                event_request_hash,
+                viewpoints_hash,
+                ..
+            } = &last_validation.vali_data.validation_metadata
+            else {
+                return Err(ValidatorError::InvalidData {
+                    value: "last validation metadata",
+                });
+            };
+
+            let meta_wo_props = MetadataWithoutProperties::from(metadata.clone());
+            let meta_wo_props_hash =
+                hash_borsh(&*self.hash.hasher(), &meta_wo_props).map_err(
+                    |e| ValidatorError::InternalError {
+                        problem: e.to_string(),
+                    },
+                )?;
+
+            let propierties_hash  =
+                hash_borsh(&*self.hash.hasher(), &metadata.properties).map_err(
                     |e| ValidatorError::InternalError {
                         problem: e.to_string(),
                     },
@@ -719,7 +782,10 @@ impl ValiWorker {
 
             ValidationRes::Response {
                 vali_req_hash,
-                modified_metadata_hash: hash_metadata,
+                modified_metadata_without_propierties_hash: meta_wo_props_hash,
+                propierties_hash,
+                event_request_hash: event_request_hash.clone(),
+                viewpoints_hash: viewpoints_hash.clone(),
             }
         };
 
@@ -966,15 +1032,32 @@ impl ValiWorker {
                                 problem: e.to_string(),
                             })?;
 
-                    let modified_metadata_hash =
-                        hash_borsh(&*self.hash.hasher(), &modified_metadata)
-                            .map_err(|e| ValidatorError::InternalError {
+                    let meta_wo_props = MetadataWithoutProperties::from(modified_metadata.clone());
+                    let meta_wo_props_hash =
+                        hash_borsh(&*self.hash.hasher(), &meta_wo_props).map_err(
+                            |e| ValidatorError::InternalError {
                                 problem: e.to_string(),
-                            })?;
+                            },
+                        )?;
+
+                    let propierties_hash  =
+                        hash_borsh(&*self.hash.hasher(), &modified_metadata.properties).map_err(
+                            |e| ValidatorError::InternalError {
+                                problem: e.to_string(),
+                            },
+                        )?;
+
+                    let event_request_hash =
+                        self.event_request_hash(event_request)?;
+                    let viewpoints_hash =
+                        self.viewpoints_hash(event_request.content())?;
 
                     Ok(ValidationRes::Response {
                         vali_req_hash,
-                        modified_metadata_hash,
+                        modified_metadata_without_propierties_hash: meta_wo_props_hash,
+                        propierties_hash,
+                        event_request_hash,
+                        viewpoints_hash,
                     })
                 }
             }

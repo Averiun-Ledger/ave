@@ -36,10 +36,11 @@ use tracing::{debug, error};
 use super::{DatabaseError, DbMetricsSnapshot, ReadStore};
 use crate::config::{MachineSpec, resolve_spec};
 use crate::external_db::{DBManager, DBManagerMessage};
+use crate::model::event::Ledger;
 use crate::node::register::RegisterEvent;
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
-use crate::subject::{Metadata, SignedLedger};
+use crate::subject::{Metadata};
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;
@@ -472,7 +473,7 @@ struct CursorAbortsQuery {
 }
 
 enum WriteCommand {
-    SignedLedger(Box<SignedLedger>),
+    Ledger(Box<Ledger>),
     SubjectState(Metadata),
     Abort(RequestTrackingEvent),
     Register(RegisterEvent),
@@ -1361,9 +1362,9 @@ impl SqliteWriteStore {
 
     async fn persist_signed_ledger(
         &self,
-        event: SignedLedger,
+        event: Ledger,
     ) -> Result<(), DatabaseError> {
-        self.enqueue(WriteCommand::SignedLedger(Box::new(event)))
+        self.enqueue(WriteCommand::Ledger(Box::new(event)))
             .await
     }
 
@@ -1618,7 +1619,7 @@ fn persist_write_batch(
 
     for job in jobs {
         match &job.command {
-            WriteCommand::SignedLedger(event) => {
+            WriteCommand::Ledger(event) => {
                 touched_subjects
                     .push(event.content().get_subject_id().to_string());
                 insert_event_with_stmt(&mut insert_event_stmt, event)?
@@ -3395,11 +3396,10 @@ fn register_governance_exists(
 
 fn insert_event_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
-    event: &SignedLedger,
+    event: &Ledger,
 ) -> Result<(), DatabaseError> {
     let event_db = event
-        .content()
-        .build_ledger_db(event.signature().timestamp.as_nanos());
+        .build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos());
 
     let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
         DatabaseError::IntegerConversion(format!(
@@ -3608,10 +3608,10 @@ fn delete_by_subject_with_stmt(
 }
 
 #[async_trait]
-impl Subscriber<SignedLedger> for SqliteWriteStore {
-    async fn notify(&self, event: SignedLedger) {
-        let subject_id = event.content().get_subject_id().to_string();
-        let sn = event.content().sn;
+impl Subscriber<Ledger> for SqliteWriteStore {
+    async fn notify(&self, event: Ledger) {
+        let subject_id = event.get_subject_id().to_string();
+        let sn = event.sn;
 
         if let Err(e) = self.persist_signed_ledger(event).await {
             error!(

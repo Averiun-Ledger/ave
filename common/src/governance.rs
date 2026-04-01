@@ -11,7 +11,7 @@ use std::{
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 #[cfg(feature = "typescript")]
@@ -22,6 +22,61 @@ use crate::{Namespace, SchemaType};
 
 fn default_witnesses_creator() -> BTreeSet<String> {
     BTreeSet::from(["Witnesses".to_owned()])
+}
+
+fn deserialize_unique_string_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values =
+        <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
+    let mut unique = BTreeSet::new();
+
+    for value in &values {
+        if !unique.insert(value.clone()) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicated viewpoint '{value}'"
+            )));
+        }
+    }
+
+    Ok(values)
+}
+
+fn deserialize_unique_string_set<'de, D>(
+    deserializer: D,
+) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = deserialize_unique_string_vec(deserializer)?;
+    Ok(values.into_iter().collect())
+}
+
+fn deserialize_optional_unique_string_vec<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values =
+        <Option<Vec<String>> as serde::Deserialize>::deserialize(deserializer)?;
+
+    values
+        .map(|values| {
+            let mut unique = BTreeSet::new();
+            for value in &values {
+                if !unique.insert(value.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicated viewpoint '{value}'"
+                    )));
+                }
+            }
+            Ok(values)
+        })
+        .transpose()
 }
 
 pub type MemberName = String;
@@ -215,6 +270,7 @@ pub struct SchemaAdd {
     pub contract: String,
     pub initial_value: Value,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_unique_string_vec")]
     pub viewpoints: Vec<String>,
 }
 
@@ -225,6 +281,7 @@ pub struct SchemaChange {
     pub actual_id: SchemaType,
     pub new_contract: Option<String>,
     pub new_initial_value: Option<Value>,
+    #[serde(deserialize_with = "deserialize_optional_unique_string_vec")]
     pub new_viewpoints: Option<Vec<String>>,
 }
 
@@ -395,6 +452,7 @@ pub struct Role {
 pub struct CreatorWitness {
     pub name: String,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_unique_string_set")]
     pub viewpoints: BTreeSet<String>,
 }
 
@@ -488,6 +546,47 @@ impl Quorum {
                 signers >= (total_members * (percentage / 100) as u32)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreatorWitness, SchemaAdd, SchemaChange};
+    use serde_json::json;
+
+    #[test]
+    fn test_schema_add_rejects_duplicated_viewpoints() {
+        let error = serde_json::from_value::<SchemaAdd>(json!({
+            "id": "Example",
+            "contract": "contract",
+            "initial_value": {},
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicated viewpoint"));
+    }
+
+    #[test]
+    fn test_schema_change_rejects_duplicated_viewpoints() {
+        let error = serde_json::from_value::<SchemaChange>(json!({
+            "actual_id": "Example",
+            "new_viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicated viewpoint"));
+    }
+
+    #[test]
+    fn test_creator_witness_rejects_duplicated_viewpoints() {
+        let error = serde_json::from_value::<CreatorWitness>(json!({
+            "name": "pepito",
+            "viewpoints": ["agua", "agua"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicated viewpoint"));
     }
 }
 

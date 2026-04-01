@@ -9,7 +9,7 @@ use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
     auth::{Auth, AuthMessage},
     helpers::network::service::NetworkSender,
-    model::event::Ledger,
+    model::event::LedgerSeal,
     node::SubjectData,
 };
 
@@ -17,7 +17,7 @@ use ave_common::request::EventRequest;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
-    evaluation::{request::EvaluationReq},
+    evaluation::request::EvaluationReq,
     validation::{request::ValidationReq, response::ValidationRes},
 };
 
@@ -35,7 +35,7 @@ pub enum SignTypesNode {
     ValidationRes(ValidationRes),
 
     EventRequest(EventRequest),
-    Ledger(Ledger),
+    LedgerSeal(LedgerSeal),
 }
 
 pub async fn i_owner_new_owner<A>(

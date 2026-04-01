@@ -2,7 +2,10 @@ use ave_actors::ActorError;
 use ave_common::identity::DigestIdentifier;
 use thiserror::Error;
 
-use crate::{governance::error::GovernanceError, model::event::ProtocolsError};
+use crate::{
+    governance::error::GovernanceError,
+    model::error::{LedgerError, ProtocolsError},
+};
 
 #[derive(Debug, Error, Clone)]
 pub enum RequestHandlerError {
@@ -202,6 +205,9 @@ pub enum RequestManagerError {
     // Protocol build errors
     #[error("failed to build protocols: {0}")]
     ProtocolsBuild(#[from] ProtocolsError),
+
+    #[error("ledger error: {0}")]
+    Ledger(#[from] LedgerError),
 
     // Wrapped ActorError for operations that return ActorError
     #[error("actor error: {0}")]

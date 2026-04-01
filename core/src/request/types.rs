@@ -3,8 +3,7 @@ use std::{collections::HashSet, fmt::Display};
 use crate::{
     evaluation::request::EvaluationReq,
     governance::model::Quorum,
-    model::event::EvaluationData,
-    subject::SignedLedger,
+    model::event::{EvaluationData, Ledger},
     validation::{request::ValidationReq, worker::CurrentRequestRoles},
 };
 
@@ -34,10 +33,10 @@ pub enum RequestManagerState {
         signers: HashSet<PublicKey>,
     },
     UpdateSubject {
-        ledger: SignedLedger,
+        ledger: Ledger,
     },
     Distribution {
-        ledger: SignedLedger,
+        ledger: Ledger,
     },
     End,
 }

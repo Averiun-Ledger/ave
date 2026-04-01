@@ -374,7 +374,10 @@ impl Handler<Self> for Validation {
                             }
                             ValidationRes::Response {
                                 vali_req_hash,
-                                modified_metadata_hash,
+                                modified_metadata_without_propierties_hash,
+                                propierties_hash,
+                                event_request_hash,
+                                viewpoints_hash,
                             } => {
                                 let Some(signature) = signature else {
                                     error!(
@@ -401,9 +404,12 @@ impl Handler<Self> for Validation {
                                 }
 
                                 self.validators_response.push(
-                                    ValidationMetadata::ModifiedHash(
-                                        modified_metadata_hash,
-                                    ),
+                                    ValidationMetadata::ModifiedHash {
+                                        modified_metadata_without_propierties_hash,
+                                        propierties_hash,
+                                        event_request_hash,
+                                        viewpoints_hash,
+                                    },
                                 );
                                 self.validators_signatures.push(signature);
                             }
@@ -479,6 +485,7 @@ impl Handler<Self> for Validation {
                                 }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                return Ok(());
                             }
 
                             let validation_data = self.build_validation_data();
@@ -791,7 +798,7 @@ pub mod tests {
             description,
             schema_id,
             namespace,
-        } = event.event
+        } = event.data
         else {
             panic!()
         };
@@ -922,7 +929,7 @@ pub mod tests {
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::EOL = event.event else {
+        let RequestEventDB::EOL = event.data else {
             panic!()
         };
 
