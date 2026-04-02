@@ -203,8 +203,16 @@ impl DistriWorker {
         } else {
             // Es un Tracker - verificar rol de witness si no está autorizado
             if !auth {
-                let governance_id =
-                    governance_id.expect("governance_id is Some for Trackers");
+                let Some(governance_id) = governance_id else {
+                    error!(
+                        subject_id = %subject_id,
+                        "Tracker subject is missing governance_id during authorization check"
+                    );
+                    return Err(DistributorError::MissingGovernanceId {
+                        subject_id: subject_id.clone(),
+                    }
+                    .into());
+                };
                 let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
                     DistributorError::GetGovernanceFailed {
                         details: e.to_string(),
@@ -433,35 +441,94 @@ impl Handler<Self> for DistriWorker {
                 sender,
                 receiver_actor,
             } => {
-                let witness_ok = self
+                let auth_ok = match self
                     .check_witness(ctx, &subject_id, sender.clone())
                     .await
-                    .is_ok();
-                let auth_ok = if witness_ok {
-                    true
-                } else {
-                    let auth_path = ActorPath::from("/user/node/auth");
-                    match ctx
-                        .system()
-                        .get_actor::<crate::auth::Auth>(&auth_path)
-                        .await
-                    {
-                        Ok(auth_actor) => match auth_actor
-                            .ask(crate::auth::AuthMessage::GetAuth {
-                                subject_id: subject_id.clone(),
-                            })
-                            .await
-                        {
-                            Ok(crate::auth::AuthResponse::Witnesses(
-                                witnesses,
-                            )) => witnesses.contains(&sender),
-                            _ => false,
-                        },
-                        Err(_) => false,
+                {
+                    Ok(..) => true,
+                    Err(e) => {
+                        if matches!(e, ActorError::Functional { .. }) {
+                            warn!(
+                                msg_type = "GetGovernanceVersion",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                error = %e,
+                                "Witness check failed, falling back to auth state"
+                            );
+
+                            let auth_path = ActorPath::from("/user/node/auth");
+                            let auth_actor = match ctx
+                                .system()
+                                .get_actor::<crate::auth::Auth>(&auth_path)
+                                .await
+                            {
+                                Ok(auth_actor) => auth_actor,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "GetGovernanceVersion",
+                                        subject_id = %subject_id,
+                                        sender = %sender,
+                                        error = %e,
+                                        "Failed to get auth actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
+                            };
+
+                            match auth_actor
+                                .ask(crate::auth::AuthMessage::GetAuth {
+                                    subject_id: subject_id.clone(),
+                                })
+                                .await
+                            {
+                                Ok(crate::auth::AuthResponse::Witnesses(
+                                    witnesses,
+                                )) => witnesses.contains(&sender),
+                                Ok(response) => {
+                                    error!(
+                                        msg_type = "GetGovernanceVersion",
+                                        subject_id = %subject_id,
+                                        sender = %sender,
+                                        response = ?response,
+                                        "Unexpected response from auth actor"
+                                    );
+                                    return Err(ActorError::UnexpectedResponse {
+                                        path: auth_path,
+                                        expected: "AuthResponse::Witnesses"
+                                            .to_owned(),
+                                    });
+                                }
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "GetGovernanceVersion",
+                                        subject_id = %subject_id,
+                                        sender = %sender,
+                                        error = %e,
+                                        "Failed to query auth actor"
+                                    );
+                                    return Err(emit_fail(ctx, e).await);
+                                }
+                            }
+                        } else {
+                            error!(
+                                msg_type = "GetGovernanceVersion",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                error = %e,
+                                "Witness check failed"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
                     }
                 };
 
                 if !auth_ok {
+                    warn!(
+                        msg_type = "GetGovernanceVersion",
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        "Sender does not have access to governance version"
+                    );
                     return Err(DistributorError::SenderNoAccess.into());
                 }
 
@@ -501,6 +568,13 @@ impl Handler<Self> for DistriWorker {
                     })
                     .await
                 {
+                    error!(
+                        msg_type = "GetGovernanceVersion",
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        error = %e,
+                        "Failed to send governance version response to network"
+                    );
                     return Err(emit_fail(ctx, e).await);
                 }
             }
@@ -924,7 +998,16 @@ impl Handler<Self> for DistriWorker {
                     } else {
                         let request = create_ledger
                             .get_create_event()
-                            .ok_or(DistributorError::EmptyEvents)?;
+                            .ok_or_else(|| {
+                                error!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    "Create ledger is missing create event payload"
+                                );
+                                DistributorError::MissingCreateEventInCreateLedger {
+                                    subject_id: subject_id.clone(),
+                                }
+                            })?;
 
                         if let Err(e) = check_subject_creation(
                             ctx,

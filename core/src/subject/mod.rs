@@ -457,13 +457,26 @@ impl SinkReplayState {
                 let EventRequest::Transfer(transfer_request) =
                     event_request.content()
                 else {
-                    unreachable!("transfer protocols always carry transfer request");
+                    error!(
+                        subject_id = %self.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type while replaying transfer event"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "Replay transfer event must carry a Transfer request"
+                                .to_owned(),
+                    });
                 };
                 self.new_owner = Some(transfer_request.new_owner.to_string());
                 Ok(())
             }
             Protocols::TrackerConfirm { .. } | Protocols::GovConfirm { .. } => {
                 let Some(new_owner) = self.new_owner.take() else {
+                    error!(
+                        subject_id = %self.subject_id,
+                        "Replay confirm event without pending new owner"
+                    );
                     return Err(ActorError::Functional {
                         description:
                             "Replay confirm event without pending new owner"

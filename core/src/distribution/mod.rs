@@ -6,7 +6,7 @@ use ave_actors::{
     NotPersistentActor,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::coordinator::{DistriCoordinator, DistriCoordinatorMessage},
@@ -189,17 +189,29 @@ impl Handler<Self> for Distribution {
                 );
             }
             DistributionMessage::Response { sender } => {
+                let removed = self.check_witness(sender.clone());
+                let remaining_witnesses = self.witnesses.len();
+
+                if !removed {
+                    warn!(
+                        msg_type = "Response",
+                        subject_id = %self.subject_id,
+                        sender = %sender,
+                        remaining_witnesses = remaining_witnesses,
+                        "Ignoring response from unexpected or already-processed witness"
+                    );
+                    return Ok(());
+                }
+
                 debug!(
                     msg_type = "Response",
                     subject_id = %self.subject_id,
                     sender = %sender,
-                    remaining_witnesses = self.witnesses.len(),
+                    remaining_witnesses = remaining_witnesses,
                     "Distribution response received"
                 );
 
-                if self.check_witness(sender.clone())
-                    && self.witnesses.is_empty()
-                {
+                if remaining_witnesses == 0 {
                     Self::observe_event("success");
                     debug!(
                         msg_type = "Response",

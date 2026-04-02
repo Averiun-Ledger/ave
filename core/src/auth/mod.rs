@@ -242,6 +242,11 @@ impl Handler<Self> for Auth {
 
                     return Ok(AuthResponse::Witnesses(witnesses.clone()));
                 } else {
+                    debug!(
+                        msg_type = "GetAuth",
+                        subject_id = %subject_id,
+                        "Subject is not authorized"
+                    );
                     return Err(ActorError::Functional {
                         description: "The subject has not been authorized"
                             .to_owned(),
@@ -281,6 +286,12 @@ impl Handler<Self> for Auth {
                         msg_type = "NewAuth",
                         subject_id = %subject_id,
                         "New auth created successfully"
+                    );
+                } else {
+                    warn!(
+                        msg_type = "NewAuth",
+                        witness = ?witness,
+                        "Ignoring auth creation with empty subject_id"
                     );
                 }
             }
@@ -339,7 +350,18 @@ impl Handler<Self> for Auth {
                         description: "The subject has no witnesses to try to ask for an update".to_owned(),
                     });
                 } else if witnesses.len() == 1 {
-                    let objetive = witnesses.iter().next().expect("len is 1");
+                    let Some(objetive) = witnesses.iter().next() else {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            "Witness set became empty while selecting single update target"
+                        );
+                        return Err(ActorError::FunctionalCritical {
+                            description:
+                                "Witness set became empty while selecting single update target"
+                                    .to_owned(),
+                        });
+                    };
                     let info = ComunicateInfo {
                         receiver: objetive.clone(),
                         request_id: String::default(),
@@ -380,7 +402,7 @@ impl Handler<Self> for Auth {
                     debug!(
                         msg_type = "Update",
                         subject_id = %subject_id,
-                        "Update message sent to single witness"
+                        "Update request sent to single witness"
                     );
                 } else {
                     let data = UpdateNew {

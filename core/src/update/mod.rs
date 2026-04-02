@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, debug, error, info_span, warn};
 use updater::{Updater, UpdaterMessage};
 
 use crate::{
@@ -233,6 +233,7 @@ impl Handler<Self> for Update {
                                 Err(e) => {
                                     error!(
                                         msg_type = "Response",
+                                        error = %e,
                                         path = %request_path,
                                         subject_id = %self.subject_id,
                                         "Request actor not found"
@@ -251,6 +252,14 @@ impl Handler<Self> for Update {
 
                         ctx.stop(None).await;
                     }
+                } else {
+                    warn!(
+                        msg_type = "Response",
+                        subject_id = %self.subject_id,
+                        sender = %sender,
+                        sn = sn,
+                        "Ignoring response from unexpected or already-processed witness"
+                    );
                 }
             }
         };

@@ -2193,7 +2193,18 @@ impl Governance {
                 }
             };
 
-            let event_request = event.get_event_request().expect("It has been previously verified that all events have the event_request set to clear.");
+            let Some(event_request) = event.get_event_request() else {
+                error!(
+                    subject_id = %self.subject_metadata.subject_id,
+                    sn = event.sn,
+                    "Governance replay event is missing clear event_request"
+                );
+                return Err(ActorError::Functional {
+                    description:
+                        "Governance replay event is missing clear event_request"
+                            .to_owned(),
+                });
+            };
 
             let (update_fact, update_confirm) = if last_event_is_ok {
                 match &event_request {

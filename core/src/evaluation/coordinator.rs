@@ -157,8 +157,10 @@ impl Handler<Self> for EvalCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             EvalCoordinatorMessage::EndRetry => {
-                debug!(
+                warn!(
                     node_key = %self.node_key,
+                    request_id = %self.request_id,
+                    version = self.version,
                     "Retry exhausted, notifying parent and stopping"
                 );
 
@@ -295,7 +297,9 @@ impl Handler<Self> for EvalCoordinator {
                                 "Evaluation response sender mismatch"
                             );
                         return Err(ActorError::Functional {
-                            description: "We received an evaluation where the request indicates one subject but the info indicates another".to_string()
+                            description:
+                                "We received an evaluation response from an unexpected sender"
+                                    .to_string(),
                         });
                     }
 
@@ -333,6 +337,7 @@ impl Handler<Self> for EvalCoordinator {
                         Err(e) => {
                             error!(
                                 msg_type = "NetworkResponse",
+                                error = %e,
                                 path = %ctx.path().parent(),
                                 "Evaluation actor not found"
                             );
@@ -346,12 +351,17 @@ impl Handler<Self> for EvalCoordinator {
                             .get_child::<RetryActor<RetryNetwork>>("retry")
                             .await
                         else {
+                            debug!(
+                                msg_type = "NetworkResponse",
+                                sender = %sender,
+                                "Retry actor not found while closing evaluation coordinator"
+                            );
                             // Aquí me da igual, porque al parar este actor para el hijo
                             break 'retry;
                         };
 
                         if let Err(e) = retry.tell(RetryMessage::End).await {
-                            error!(
+                            warn!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 "Failed to end retry actor"

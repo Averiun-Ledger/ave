@@ -72,7 +72,7 @@ impl Handler<Self> for Updater {
     ) -> Result<(), ActorError> {
         match msg {
             UpdaterMessage::EndRetry => {
-                debug!(
+                warn!(
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -100,6 +100,7 @@ impl Handler<Self> for Updater {
                     }
                     Err(e) => {
                         error!(
+                            error = %e,
                             path = %ctx.path().parent(),
                             "Update actor not found"
                         );
@@ -177,63 +178,77 @@ impl Handler<Self> for Updater {
                 };
             }
             UpdaterMessage::NetworkResponse { sn, sender } => {
-                if sender == self.node_key {
-                    match ctx.get_parent::<Update>().await {
-                        Ok(update_actor) => {
-                            if let Err(e) = update_actor
-                                .tell(UpdateMessage::Response {
-                                    sender: self.node_key.clone(),
-                                    sn,
-                                })
-                                .await
-                            {
-                                error!(
-                                    msg_type = "NetworkResponse",
-                                    error = %e,
-                                    "Failed to send response to update actor"
-                                );
-                                return Err(emit_fail(ctx, e).await);
-                            }
-                        }
-                        Err(e) => {
+                if sender != self.node_key {
+                    warn!(
+                        msg_type = "NetworkResponse",
+                        expected_node = %self.node_key,
+                        sender = %sender,
+                        "Ignoring update response from unexpected sender"
+                    );
+                    return Ok(());
+                }
+
+                match ctx.get_parent::<Update>().await {
+                    Ok(update_actor) => {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::Response {
+                                sender: self.node_key.clone(),
+                                sn,
+                            })
+                            .await
+                        {
                             error!(
                                 msg_type = "NetworkResponse",
-                                path = %ctx.path().parent(),
-                                "Update actor not found"
+                                error = %e,
+                                "Failed to send response to update actor"
                             );
                             return Err(emit_fail(ctx, e).await);
                         }
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "NetworkResponse",
+                            error = %e,
+                            path = %ctx.path().parent(),
+                            "Update actor not found"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+                };
+
+                'retry: {
+                    let Ok(retry) = ctx
+                        .get_child::<RetryActor<RetryNetwork>>("retry")
+                        .await
+                    else {
+                        debug!(
+                            msg_type = "NetworkResponse",
+                            sender = %sender,
+                            "Retry actor not found while closing updater"
+                        );
+                        // Aquí me da igual, porque al parar este actor para el hijo
+                        break 'retry;
                     };
 
-                    'retry: {
-                        let Ok(retry) = ctx
-                            .get_child::<RetryActor<RetryNetwork>>("retry")
-                            .await
-                        else {
-                            // Aquí me da igual, porque al parar este actor para el hijo
-                            break 'retry;
-                        };
-
-                        if let Err(e) = retry.tell(RetryMessage::End).await {
-                            warn!(
-                                msg_type = "NetworkResponse",
-                                error = %e,
-                                "Failed to end retry actor"
-                            );
-                            // Aquí me da igual, porque al parar este actor para el hijo
-                            break 'retry;
-                        };
-                    }
-
-                    debug!(
-                        msg_type = "NetworkResponse",
-                        sn = sn,
-                        sender = %sender,
-                        "Network response processed successfully"
-                    );
-
-                    ctx.stop(None).await;
+                    if let Err(e) = retry.tell(RetryMessage::End).await {
+                        warn!(
+                            msg_type = "NetworkResponse",
+                            error = %e,
+                            "Failed to end retry actor"
+                        );
+                        // Aquí me da igual, porque al parar este actor para el hijo
+                        break 'retry;
+                    };
                 }
+
+                debug!(
+                    msg_type = "NetworkResponse",
+                    sn = sn,
+                    sender = %sender,
+                    "Network response processed successfully"
+                );
+
+                ctx.stop(None).await;
             }
         };
 

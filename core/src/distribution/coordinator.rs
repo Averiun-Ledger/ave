@@ -73,7 +73,7 @@ impl Handler<Self> for DistriCoordinator {
                         "witness_timeout",
                     );
                 }
-                debug!(
+                warn!(
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -234,6 +234,11 @@ impl Handler<Self> for DistriCoordinator {
                         .get_child::<RetryActor<RetryNetwork>>("retry")
                         .await
                     else {
+                        debug!(
+                            msg_type = "NetworkResponse",
+                            sender = %sender,
+                            "Retry actor not found while closing distribution coordinator"
+                        );
                         break 'retry;
                     };
 

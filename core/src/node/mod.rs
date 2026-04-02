@@ -1026,13 +1026,13 @@ impl Handler<Self> for Node {
                         subject_id = %subject_id,
                         "Subject not found"
                     );
+                } else {
+                    debug!(
+                        msg_type = "GetSubjectData",
+                        subject_id = %subject_id,
+                        "Subject data retrieved successfully"
+                    );
                 }
-
-                debug!(
-                    msg_type = "GetSubjectData",
-                    subject_id = %subject_id,
-                    "Subject data retrieved successfully"
-                );
 
                 Ok(NodeResponse::SubjectData(data))
             }
@@ -1244,6 +1244,7 @@ impl Handler<Self> for Node {
                         error!(
                             msg_type = "AuthData",
                             subject_id = %subject_id,
+                            error = %e,
                             "Auth actor not found"
                         );
                         ctx.system().crash_system();

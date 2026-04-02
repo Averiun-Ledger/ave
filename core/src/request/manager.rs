@@ -324,7 +324,7 @@ impl RequestManager {
         let request_type = EventRequestType::from(request.content());
         let (evaluate_data, governance_data, init_state) = match (
             is_gov,
-            request_type,
+            request_type.clone(),
         ) {
             (true, EventRequestType::Fact) => {
                 let state =
@@ -406,9 +406,15 @@ impl RequestManager {
                     None,
                 )
             }
-            _ => unreachable!(
-                "It was previously verified that the matched cases are the only possible ones"
-            ),
+            _ => {
+                error!(
+                    request_id = %self.id,
+                    is_gov = is_gov,
+                    request_type = ?request_type,
+                    "Invalid event request type for evaluation state"
+                );
+                return Err(RequestManagerError::InvalidEventRequestForEvaluation);
+            }
         };
 
         let (signers, quorum) = governance_data.get_quorum_and_signers(
@@ -619,6 +625,23 @@ impl RequestManager {
         ) = self.build_validation_data(ctx, eval, appro_data).await?;
 
         if signers.is_empty() {
+            let governance_id = vali_req.get_governance_id().map_err(|error| {
+                error!(
+                    request_id = %self.id,
+                    schema_id = %schema_id,
+                    error = %error,
+                    "Validation request has invalid governance_id"
+                );
+                RequestManagerError::ActorError(
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Validation request has invalid governance_id: {}",
+                            error
+                        ),
+                    },
+                )
+            })?;
+
             warn!(
                 request_id = %self.id,
                 schema_id = %schema_id,
@@ -627,7 +650,7 @@ impl RequestManager {
 
             return Err(RequestManagerError::NoValidatorsAvailable {
                 schema_id: schema_id.to_string(),
-                governance_id: vali_req.get_governance_id().expect("The build process verified that the event request is valid")
+                governance_id,
             });
         }
 
@@ -1253,7 +1276,20 @@ impl RequestManager {
                     .await?;
             };
         } else if witnesses.len() == 1 {
-            let objetive = witnesses.iter().next().expect("len is 1");
+            let Some(objetive) = witnesses.iter().next() else {
+                error!(
+                    request_id = %self.id,
+                    governance_id = %governance_id,
+                    "Witness set became empty while selecting single reboot target"
+                );
+                return Err(RequestManagerError::ActorError(
+                    ActorError::FunctionalCritical {
+                        description:
+                            "Witness set became empty while selecting single reboot target"
+                                .to_owned(),
+                    },
+                ));
+            };
             let info = ComunicateInfo {
                 receiver: objetive.clone(),
                 request_id: String::default(),
@@ -2171,8 +2207,30 @@ impl Handler<Self> for RequestManager {
                         eval_req,
                         eval_res,
                     } => {
+                        let Some(evaluator_res) =
+                            eval_res.evaluator_response_ok()
+                        else {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Approval",
+                                "Approval state is missing a successful evaluator response"
+                            );
+                            self.match_error(
+                                ctx,
+                                RequestManagerError::InvalidRequestState {
+                                    expected:
+                                        "approval state with successful evaluator response",
+                                    got:
+                                        "approval state without successful evaluator response",
+                                },
+                            )
+                            .await;
+                            return Ok(());
+                        };
+
                         if let Err(e) = self
-                                .build_approval(ctx, eval_req, eval_res.evaluator_response_ok().expect("If the status is approval, it means that the evaluator's response is valid"))
+                                .build_approval(ctx, eval_req, evaluator_res)
                                 .await
                             {
                                 error!(
