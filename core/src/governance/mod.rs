@@ -51,7 +51,7 @@ use crate::{
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
     subject::{
-        DataForSink, EventLedgerDataForSink, Metadata,  Subject,
+        DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata,
         error::SubjectError,
         sinkdata::{SinkData, SinkDataMessage},
@@ -70,7 +70,7 @@ use ave_actors::{
 };
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
     schematype::ReservedWords,
 };
@@ -2118,6 +2118,10 @@ impl Governance {
 
             self.first_role_register(ctx).await?;
 
+            let (issuer, event_request_timestamp) =
+                first.get_issuer_event_request_timestamp();
+            let event_request = first.get_event_request();
+
             Self::event_to_sink(
                 ctx,
                 DataForSink {
@@ -2127,29 +2131,19 @@ impl Governance {
                     owner: self.subject_metadata.owner.to_string(),
                     namespace: String::default(),
                     schema_id: self.subject_metadata.schema_id.clone(),
-                    issuer: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .signer
-                        .to_string(),
+                    issuer,
                     event_ledger_timestamp: first
-                        .signature()
+                        .ledger_seal_signature
                         .timestamp
                         .as_nanos(),
-                    event_request_timestamp: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .timestamp
-                        .as_nanos(),
+                    event_request_timestamp,
                     gov_version: first.gov_version,
                     event_data_ledger: EventLedgerDataForSink::build(
-                        &first.content().protocols,
+                        &first.protocols,
                         &self.properties.to_value_wrapper().0,
                     ),
                 },
-                first.content().event_request.content(),
+                event_request,
             )
             .await?;
 
@@ -2158,7 +2152,7 @@ impl Governance {
 
         for event in iter {
             let actual_ledger_hash =
-                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                last_ledger.ledger_hash(*hash).map_err(|e| {
                     ActorError::FunctionalCritical {
                         description: format!(
                             "Can not creacte actual ledger event hash: {}",
@@ -2166,12 +2160,10 @@ impl Governance {
                         ),
                     }
                 })?;
+
             let last_data = LastData {
-                gov_version: last_ledger.content().gov_version,
-                vali_data: last_ledger
-                    .content()
-                    .protocols
-                    .get_validation_data(),
+                gov_version: last_ledger.gov_version,
+                vali_data: last_ledger.protocols.get_validation_data(),
             };
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
@@ -2181,6 +2173,8 @@ impl Governance {
                 actual_ledger_hash,
                 last_data,
                 hash,
+                true,
+                false
             )
             .await
             {
@@ -2197,8 +2191,11 @@ impl Governance {
                     }
                 }
             };
+
+            let event_request = event.get_event_request().expect("It has been previously verified that all events have the event_request set to clear.");
+
             let (update_fact, update_confirm) = if last_event_is_ok {
-                match event.content().event_request.content().clone() {
+                match &event_request {
                     EventRequest::Transfer(transfer_request) => {
                         self.transfer(
                             ctx,
@@ -2233,66 +2230,31 @@ impl Governance {
                     _ => {}
                 };
 
-                Self::event_to_sink(
-                    ctx,
-                    DataForSink {
-                        gov_id: None,
-                        subject_id: self
-                            .subject_metadata
-                            .subject_id
-                            .to_string(),
-                        sn: self.subject_metadata.sn,
-                        owner: self.subject_metadata.owner.to_string(),
-                        namespace: String::default(),
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        issuer: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .signer
-                            .to_string(),
-                        event_ledger_timestamp: event
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        event_request_timestamp: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        gov_version: event.content().gov_version,
-                        event_data_ledger: EventLedgerDataForSink::build(
-                            &event.content().protocols,
-                            &self.properties.to_value_wrapper().0,
-                        ),
-                    },
-                    event.content().event_request.content(),
-                )
-                .await?;
-
-                let update_confirm = if let EventRequest::Confirm(..) =
-                    &event.content().event_request.content()
-                {
-                    self.confirm(ctx, event.signature().signer.clone(), 0)
+                let update_confirm =
+                    if let EventRequest::Confirm(..) = &event_request {
+                        self.confirm(
+                            ctx,
+                            event.ledger_seal_signature.signer.clone(),
+                            0,
+                        )
                         .await?;
 
-                    if let Some(new_owner_key) =
-                        &self.subject_metadata.new_owner
-                    {
-                        Some(self.properties.roles_update_remove_confirm(
-                            &self.subject_metadata.owner,
-                            new_owner_key,
-                        ))
+                        if let Some(new_owner_key) =
+                            &self.subject_metadata.new_owner
+                        {
+                            Some(self.properties.roles_update_remove_confirm(
+                                &self.subject_metadata.owner,
+                                new_owner_key,
+                            ))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
 
                 let update_fact = if let EventRequest::Fact(fact_request) =
-                    &event.content().event_request.content()
+                    &event_request
                 {
                     let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
                             ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
@@ -2334,6 +2296,33 @@ impl Governance {
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
+
+            let (issuer, event_request_timestamp) =
+                event.get_issuer_event_request_timestamp();
+            Self::event_to_sink(
+                ctx,
+                DataForSink {
+                    gov_id: None,
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    sn: self.subject_metadata.sn,
+                    owner: self.subject_metadata.owner.to_string(),
+                    namespace: String::default(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    issuer,
+                    event_ledger_timestamp: event
+                        .ledger_seal_signature
+                        .timestamp
+                        .as_nanos(),
+                    event_request_timestamp,
+                    gov_version: event.gov_version,
+                    event_data_ledger: EventLedgerDataForSink::build(
+                        &event.protocols,
+                        &self.properties.to_value_wrapper().0,
+                    ),
+                },
+                Some(event_request.clone()),
+            )
+            .await?;
 
             if let Some((event, creator_update, rm_roles)) = update_fact {
                 let update = governance_event_roles_update_fact(
@@ -3208,11 +3197,7 @@ impl Handler<Self> for Governance {
         }
     }
 
-    async fn on_event(
-        &mut self,
-        event: Ledger,
-        ctx: &mut ActorContext<Self>,
-    ) {
+    async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
                 error = %e,
@@ -3287,11 +3272,22 @@ impl PersistentActor for Governance {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match (
-            event.content().event_request.content(),
-            &event.content().protocols,
-        ) {
-            (EventRequest::Create(..), Protocols::Create { validation }) => {
+        match &event.protocols {
+            Protocols::Create { validation, event_request } => {
+                if let EventRequest::Create(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance create apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In create event, event request must be Create"
+                            .to_owned(),
+                    });
+                };
+
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
@@ -3325,15 +3321,28 @@ impl PersistentActor for Governance {
 
                 return Ok(());
             }
-            (
-                EventRequest::Fact(..),
                 Protocols::GovFact {
                     evaluation,
                     approval,
+                    event_request,
                     ..
-                },
-            ) => {
-                if let Some(eval_res) = evaluation.evaluator_res() {
+                }
+             => {
+                if let EventRequest::Fact(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Fact",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance fact apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In fact event, event request must be Fact"
+                            .to_owned(),
+                    });
+                };
+
+                if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
                             self.apply_patch(eval_res.patch)?;
@@ -3361,11 +3370,24 @@ impl PersistentActor for Governance {
                     }
                 }
             }
-            (
-                EventRequest::Transfer(transfer_request),
-                Protocols::Transfer { evaluation, .. },
-            ) => {
-                if evaluation.evaluator_res().is_some() {
+            
+                Protocols::Transfer { evaluation, event_request, .. }
+             => {
+                let EventRequest::Transfer(transfer_request) = event_request.content() else {
+                    error!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance transfer apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In transfer event, event request must be Transfer"
+                                .to_owned(),
+                    });
+                };
+
+                if evaluation.evaluator_response_ok().is_some() {
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
@@ -3376,11 +3398,25 @@ impl PersistentActor for Governance {
                     );
                 }
             }
-            (
-                EventRequest::Confirm(..),
-                Protocols::GovConfirm { evaluation, .. },
-            ) => {
-                if let Some(eval_res) = evaluation.evaluator_res() {
+            
+                Protocols::GovConfirm { evaluation, event_request, .. }
+             => {
+                if let EventRequest::Confirm(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance confirm apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In confirm event, event request must be Confirm"
+                                .to_owned(),
+                    });
+                };
+
+                if let Some(eval_res) = evaluation.evaluator_response_ok() {
                     if let Some(new_owner) =
                         self.subject_metadata.new_owner.take()
                     {
@@ -3405,7 +3441,21 @@ impl PersistentActor for Governance {
                     }
                 }
             }
-            (EventRequest::Reject(..), Protocols::Reject { .. }) => {
+            Protocols::Reject { event_request, .. } => {
+                if let EventRequest::Reject(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Reject",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance reject apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In reject event, event request must be Reject"
+                            .to_owned(),
+                    });
+                };
+
                 self.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
@@ -3413,7 +3463,21 @@ impl PersistentActor for Governance {
                     "Applied reject event"
                 );
             }
-            (EventRequest::EOL(..), Protocols::EOL { .. }) => {
+            Protocols::EOL { event_request, .. } => {
+                if let EventRequest::EOL(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "EOL",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for governance eol apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In EOL event, event request must be EOL"
+                            .to_owned(),
+                    });
+                };
+
                 self.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
@@ -3433,13 +3497,13 @@ impl PersistentActor for Governance {
             }
         }
 
-        if event.content().protocols.is_success() {
+        if event.protocols.is_success() {
             self.properties.version += 1;
         }
 
         self.subject_metadata.sn += 1;
         self.subject_metadata.prev_ledger_event_hash =
-            event.content().prev_ledger_event_hash.clone();
+            event.prev_ledger_event_hash.clone();
 
         Ok(())
     }

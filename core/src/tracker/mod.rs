@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     db::Storable,
@@ -9,7 +9,11 @@ use crate::{
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
-        common::{TrackerVisibilityState, emit_fail, get_last_event, purge_storage},
+        common::{
+            TrackerEventVisibility, TrackerStoredVisibility,
+            TrackerVisibilityMode, TrackerVisibilityState, emit_fail,
+            get_last_event, purge_storage,
+        },
         event::{Ledger, Protocols, ValidationMetadata},
     },
     node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
@@ -28,7 +32,7 @@ use ave_actors::{
 };
 use ave_common::{
     Namespace, ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
 };
 
@@ -54,7 +58,7 @@ pub struct Tracker {
     pub namespace: Namespace,
     /// The version of the governance contract that created the subject.
     pub genesis_gov_version: u64,
-    
+
     pub visibility_state: TrackerVisibilityState,
     /// The current status of the subject.
     pub properties: ValueWrapper,
@@ -107,7 +111,7 @@ impl BorshDeserialize for Tracker {
         let governance_id = DigestIdentifier::deserialize_reader(reader)?;
         let namespace = Namespace::deserialize_reader(reader)?;
         let genesis_gov_version = u64::deserialize_reader(reader)?;
-        let visibility_state = visibility_state::deserialize_reader(reader)?;
+        let visibility_state = TrackerVisibilityState::deserialize_reader(reader)?;
         let properties = ValueWrapper::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
@@ -376,6 +380,40 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
+    fn public_visibilities() -> (
+        TrackerStoredVisibility,
+        TrackerEventVisibility,
+    ) {
+        (
+            TrackerStoredVisibility::Full,
+            TrackerEventVisibility::Public,
+        )
+    }
+
+    fn fact_visibilities(
+        viewpoints: &BTreeSet<String>,
+        opaque: bool,
+    ) -> (
+        TrackerStoredVisibility,
+        TrackerEventVisibility,
+    ) {
+        let event_visibility = if viewpoints.is_empty() {
+            TrackerEventVisibility::Public
+        } else {
+            TrackerEventVisibility::Private(viewpoints.clone())
+        };
+
+        let stored_visibility = if opaque {
+            TrackerStoredVisibility::None
+        } else if viewpoints.is_empty() {
+            TrackerStoredVisibility::Full
+        } else {
+            TrackerStoredVisibility::Only(viewpoints.clone())
+        };
+
+        (stored_visibility, event_visibility)
+    }
+
     async fn create(
         &self,
         ctx: &ActorContext<Self>,
@@ -488,7 +526,7 @@ impl Tracker {
                 });
             }
 
-            self.create(ctx, first.content().gov_version).await?;
+            self.create(ctx, first.gov_version).await?;
 
             self.on_event(first.clone(), ctx).await;
 
@@ -505,6 +543,10 @@ impl Tracker {
             )
             .await?;
 
+            let (issuer, event_request_timestamp) =
+                first.get_issuer_event_request_timestamp();
+            let event_request = first.get_event_request();
+
             Self::event_to_sink(
                 ctx,
                 DataForSink {
@@ -514,29 +556,19 @@ impl Tracker {
                     owner: self.subject_metadata.owner.to_string(),
                     namespace: self.namespace.to_string(),
                     schema_id: self.subject_metadata.schema_id.clone(),
-                    issuer: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .signer
-                        .to_string(),
+                    issuer,
                     event_ledger_timestamp: first
-                        .signature()
+                        .ledger_seal_signature
                         .timestamp
                         .as_nanos(),
-                    event_request_timestamp: first
-                        .content()
-                        .event_request
-                        .signature()
-                        .timestamp
-                        .as_nanos(),
-                    gov_version: first.content().gov_version,
+                    event_request_timestamp,
+                    gov_version: first.gov_version,
                     event_data_ledger: EventLedgerDataForSink::build(
-                        &first.content().protocols,
+                        &first.protocols,
                         &self.properties.0,
                     ),
                 },
-                first.content().event_request.content(),
+                event_request,
             )
             .await?;
 
@@ -547,7 +579,7 @@ impl Tracker {
 
         for event in pending {
             let actual_ledger_hash =
-                hash_borsh(&*hash.hasher(), &last_ledger.0).map_err(|e| {
+                last_ledger.ledger_hash(*hash).map_err(|e| {
                     ActorError::FunctionalCritical {
                         description: format!(
                             "Can not creacte actual ledger event hash: {}",
@@ -555,12 +587,10 @@ impl Tracker {
                         ),
                     }
                 })?;
+
             let last_data = LastData {
-                gov_version: last_ledger.content().gov_version,
-                vali_data: last_ledger
-                    .content()
-                    .protocols
-                    .get_validation_data(),
+                gov_version: last_ledger.gov_version,
+                vali_data: last_ledger.protocols.get_validation_data(),
             };
 
             let last_gov_version = last_data.gov_version;
@@ -572,6 +602,8 @@ impl Tracker {
                 actual_ledger_hash,
                 last_data,
                 hash,
+                self.visibility_state.is_full(),
+                self.service,
             )
             .await
             {
@@ -589,92 +621,84 @@ impl Tracker {
                 }
             };
 
-            let event_gov_version = event.content().gov_version;
+            let event_gov_version = event.gov_version;
+
+            let event_request = event.get_event_request();
 
             if last_event_is_ok {
                 if last_gov_version != event_gov_version {
                     self.register_gov_version_sn(ctx, last_gov_version).await?;
                 }
+                if let Some(event_request) = &event_request {
+                    match event_request {
+                        EventRequest::Transfer(transfer_request) => {
+                            self.transfer(
+                                ctx,
+                                transfer_request.new_owner.clone(),
+                                event.gov_version,
+                            )
+                            .await?;
+                        }
+                        EventRequest::Reject(..) => {
+                            self.reject(ctx, event.gov_version).await?;
+                        }
+                        EventRequest::Confirm(..) => {
+                            self.confirm(
+                                ctx,
+                                event.ledger_seal_signature.signer.clone(),
+                                event.gov_version,
+                            )
+                            .await?;
+                        }
+                        EventRequest::EOL(..) => {
+                            self.eol(ctx).await?;
 
-                match event.content().event_request.content().clone() {
-                    EventRequest::Transfer(transfer_request) => {
-                        self.transfer(
-                            ctx,
-                            transfer_request.new_owner,
-                            event.content().gov_version,
-                        )
-                        .await?;
-                    }
-                    EventRequest::Reject(..) => {
-                        self.reject(ctx, event.content().gov_version).await?;
-                    }
-                    EventRequest::Confirm(..) => {
-                        self.confirm(
-                            ctx,
-                            event.signature().signer.clone(),
-                            event.content().gov_version,
-                        )
-                        .await?;
-                    }
-                    EventRequest::EOL(..) => {
-                        self.eol(ctx).await?;
-
-                        Self::register(
-                            ctx,
-                            RegisterMessage::EOLSubj {
-                                gov_id: self.governance_id.to_string(),
-                                subj_id: self
-                                    .subject_metadata
-                                    .subject_id
-                                    .to_string(),
-                            },
-                        )
-                        .await?
-                    }
-                    _ => {}
-                };
-
-                Self::event_to_sink(
-                    ctx,
-                    DataForSink {
-                        gov_id: Some(self.governance_id.to_string()),
-                        subject_id: self
-                            .subject_metadata
-                            .subject_id
-                            .to_string(),
-                        sn: self.subject_metadata.sn,
-                        owner: self.subject_metadata.owner.to_string(),
-                        namespace: self.namespace.to_string(),
-                        schema_id: self.subject_metadata.schema_id.clone(),
-                        issuer: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .signer
-                            .to_string(),
-                        event_ledger_timestamp: event
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        event_request_timestamp: event
-                            .content()
-                            .event_request
-                            .signature()
-                            .timestamp
-                            .as_nanos(),
-                        gov_version: event.content().gov_version,
-                        event_data_ledger: EventLedgerDataForSink::build(
-                            &event.content().protocols,
-                            &self.properties.0,
-                        ),
-                    },
-                    event.content().event_request.content(),
-                )
-                .await?;
+                            Self::register(
+                                ctx,
+                                RegisterMessage::EOLSubj {
+                                    gov_id: self.governance_id.to_string(),
+                                    subj_id: self
+                                        .subject_metadata
+                                        .subject_id
+                                        .to_string(),
+                                },
+                            )
+                            .await?
+                        }
+                        _ => {}
+                    };
+                }
             }
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
+
+            let (issuer, event_request_timestamp) =
+                event.get_issuer_event_request_timestamp();
+            Self::event_to_sink(
+                ctx,
+                DataForSink {
+                    gov_id: Some(self.governance_id.to_string()),
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    sn: self.subject_metadata.sn,
+                    owner: self.subject_metadata.owner.to_string(),
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    issuer,
+                    event_ledger_timestamp: event
+                        .ledger_seal_signature
+                        .timestamp
+                        .as_nanos(),
+                    event_request_timestamp,
+                    gov_version: event.gov_version,
+                    event_data_ledger: EventLedgerDataForSink::build(
+                        &event.protocols,
+                        &self.properties.0,
+                    ),
+                },
+                event_request,
+            )
+            .await?;
 
             // Registrar la gov_version del evento con el sn ya actualizado.
             // Necesario cuando varios eventos comparten la misma gov_version:
@@ -875,11 +899,7 @@ impl Handler<Self> for Tracker {
         }
     }
 
-    async fn on_event(
-        &mut self,
-        event: Ledger,
-        ctx: &mut ActorContext<Self>,
-    ) {
+    async fn on_event(&mut self, event: Ledger, ctx: &mut ActorContext<Self>) {
         if let Err(e) = self.persist(&event, ctx).await {
             error!(
                 error = %e,
@@ -956,20 +976,41 @@ impl PersistentActor for Tracker {
             genesis_gov_version: init.genesis_gov_version,
             governance_id: init.governance_id,
             namespace: init.namespace,
+            visibility_state: TrackerVisibilityState::default()
         }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match (
-            event.content().event_request.content(),
-            &event.content().protocols,
-        ) {
-            (EventRequest::Create(..), Protocols::Create { validation }) => {
+        match &event.protocols
+         {
+            Protocols::Create { validation, event_request } => {
+                if let EventRequest::Create(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Create",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker create apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In create event, event request must be Create"
+                            .to_owned(),
+                    });
+                }
+
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
                     self.subject_metadata = SubjectMetadata::new(metadata);
                     self.properties = metadata.properties.clone();
+                    self.visibility_state = TrackerVisibilityState::default();
+                    let (stored_visibility, event_visibility) =
+                        Self::public_visibilities();
+                    self.visibility_state.record_event(
+                        event.sn,
+                        stored_visibility,
+                        event_visibility,
+                    );
 
                     debug!(
                         event_type = "Create",
@@ -987,24 +1028,99 @@ impl PersistentActor for Tracker {
 
                 return Ok(());
             }
-            (
-                EventRequest::Fact(..),
-                Protocols::TrackerFact { evaluation, .. },
-            ) => {
-                if let Some(eval_res) = evaluation.evaluator_res() {
-                    self.apply_patch(eval_res.patch)?;
-                    debug!(
+            Protocols::TrackerFactFull { evaluation,event_request,  .. } => {
+                let EventRequest::Fact(fact_request) = event_request.content() else {
+                    error!(
                         event_type = "Fact",
                         subject_id = %self.subject_metadata.subject_id,
-                        "Applied fact event with patch"
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker fact apply"
                     );
+                    return Err(ActorError::Functional {
+                        description: "In fact event, event request must be Fact"
+                            .to_owned(),
+                    });
+                };
+
+                let (stored_visibility, event_visibility) =
+                    Self::fact_visibilities(&fact_request.viewpoints, false);
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+
+                if let Some(eval_res) = evaluation.evaluator_response_ok() {
+                    if self.visibility_state.is_full() {
+                        self.apply_patch(eval_res.patch)?;
+                        debug!(
+                            event_type = "Fact",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Applied fact event with patch"
+                        );
+                    } else {
+                        debug!(
+                            event_type = "Fact",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Tracker is not in full mode, fact patch not applied"
+                        );
+                    }
                 }
             }
-            (
-                EventRequest::Transfer(transfer_request),
-                Protocols::Transfer { evaluation, .. },
-            ) => {
-                if evaluation.evaluator_res().is_some() {
+            Protocols::TrackerFactOpaque { evaluation, .. } => {
+                if evaluation.is_ok() {
+                    self.visibility_state
+                        .set_mode(TrackerVisibilityMode::Opaque);
+                }
+                let (stored_visibility, event_visibility) =
+                    Self::fact_visibilities(&evaluation.viewpoints, true);
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+                debug!(
+                    event_type = "FactOpaque",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Applied tracker opaque fact event"
+                );
+            }
+            Protocols::Transfer { evaluation, event_request, .. }=> {
+                let EventRequest::Transfer(transfer_request) = event_request.content() else {
+                    error!(
+                        event_type = "Transfer",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker transfer apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In transfer event, event request must be Transfer"
+                                .to_owned(),
+                    });
+                };
+
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+
+                if evaluation.evaluator_response_ok().is_some() {
+                    if self.visibility_state.is_full()
+                        && let Some(eval_res) =
+                            evaluation.evaluator_response_ok()
+                    {
+                        self.apply_patch(eval_res.patch)?;
+                    } else if !self.visibility_state.is_full() {
+                        debug!(
+                            event_type = "Transfer",
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Tracker is not in full mode, transfer patch not applied"
+                        );
+                    }
                     self.subject_metadata.new_owner =
                         Some(transfer_request.new_owner.clone());
                     debug!(
@@ -1015,7 +1131,30 @@ impl PersistentActor for Tracker {
                     );
                 }
             }
-            (EventRequest::Confirm(..), Protocols::TrackerConfirm { .. }) => {
+            Protocols::TrackerConfirm { event_request, .. } => {
+                if let EventRequest::Confirm(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Confirm",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker confirm apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description:
+                            "In confirm event, event request must be Confirm"
+                                .to_owned(),
+                    });
+                }
+
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+
                 if let Some(new_owner) = self.subject_metadata.new_owner.take()
                 {
                     self.subject_metadata.owner = new_owner.clone();
@@ -1037,7 +1176,29 @@ impl PersistentActor for Tracker {
                     });
                 }
             }
-            (EventRequest::Reject(..), Protocols::Reject { .. }) => {
+            Protocols::Reject { event_request, .. } => {
+                if let EventRequest::Reject(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "Reject",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker reject apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In reject event, event request must be Reject"
+                            .to_owned(),
+                    });
+                }
+
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+
                 self.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
@@ -1045,7 +1206,29 @@ impl PersistentActor for Tracker {
                     "Applied reject event"
                 );
             }
-            (EventRequest::EOL(..), Protocols::EOL { .. }) => {
+            Protocols::EOL { event_request, .. } => {
+                if let EventRequest::EOL(..) = event_request.content() {
+                } else {
+                    error!(
+                        event_type = "EOL",
+                        subject_id = %self.subject_metadata.subject_id,
+                        actual_request = ?event_request.content(),
+                        "Unexpected event request type for tracker eol apply"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "In EOL event, event request must be EOL"
+                            .to_owned(),
+                    });
+                }
+
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                self.visibility_state.record_event(
+                    event.sn,
+                    stored_visibility,
+                    event_visibility,
+                );
+
                 self.subject_metadata.active = false;
                 debug!(
                     event_type = "EOL",
@@ -1068,7 +1251,7 @@ impl PersistentActor for Tracker {
 
         self.subject_metadata.sn += 1;
         self.subject_metadata.prev_ledger_event_hash =
-            event.content().prev_ledger_event_hash.clone();
+            event.prev_ledger_event_hash.clone();
 
         Ok(())
     }

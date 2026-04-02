@@ -8,9 +8,6 @@ pub enum LedgerError {
 
     #[error("protocols error: {0}")]
     Protocols(#[from] ProtocolsError),
-
-    #[error("opaque tracker fact does not contain an event request")]
-    MissingEventRequest,
 }
 
 #[derive(Debug, Error, Clone)]

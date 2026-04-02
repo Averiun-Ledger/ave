@@ -15,7 +15,7 @@ use crate::{
             get_validation_roles_register,
             node::{SignTypesNode, get_sign},
         },
-        event::{ApprovalData, EvaluationData, EvaluationResponse},
+        event::{ApprovalData, EvaluationData, EvaluationResponse, ValidationMetadata},
     },
     subject::{Metadata, MetadataWithoutProperties, RequestSubjectData},
     validation::{

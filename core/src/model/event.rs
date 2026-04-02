@@ -771,10 +771,10 @@ impl Ledger {
         }
     }
 
-    pub fn get_event_request(&self) -> Result<EventRequest, LedgerError> {
+    pub fn get_event_request(&self) -> Option<EventRequest> {
         match &self.protocols {
             Protocols::TrackerFactOpaque { .. } => {
-                Err(LedgerError::MissingEventRequest)
+                None
             }
             Protocols::Create { event_request, .. }
             | Protocols::TrackerFactFull { event_request, .. }
@@ -784,7 +784,7 @@ impl Ledger {
             | Protocols::GovConfirm { event_request, .. }
             | Protocols::Reject { event_request, .. }
             | Protocols::EOL { event_request, .. } => {
-                Ok(event_request.content().clone())
+                Some(event_request.content().clone())
             }
         }
     }

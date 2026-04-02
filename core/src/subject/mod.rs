@@ -765,6 +765,7 @@ where
         last_data: LastData,
         hash: &HashAlgorithm,
         full_view: bool,
+        is_service: bool
     ) -> Result<bool, SubjectError> {
         if !subject_metadata.active {
             return Err(SubjectError::SubjectInactive);
@@ -882,6 +883,12 @@ where
                 },
                 false,
             ) => {
+                if is_service {
+                    return Err(
+                        SubjectError::ServiceCannotAcceptTrackerOpaque,
+                    );
+                }
+                
                 if data.subject_id != subject_metadata.subject_id {
                     return Err(SubjectError::SubjectIdMismatch {
                         expected: subject_metadata.subject_id.to_string(),

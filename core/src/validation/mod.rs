@@ -798,7 +798,7 @@ pub mod tests {
             description,
             schema_id,
             namespace,
-        } = event.data
+        } = event.event
         else {
             panic!()
         };
@@ -929,7 +929,7 @@ pub mod tests {
         let subject_data = get_subject_state(&db, &subject_id, 1).await;
         let event = get_event_sn(&db, &subject_id, 1).await;
 
-        let RequestEventDB::EOL = event.data else {
+        let RequestEventDB::EOL = event.event else {
             panic!()
         };
 

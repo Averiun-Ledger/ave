@@ -18,10 +18,16 @@ use crate::{
             WitnessesRegisterResponse,
         },
     },
-    model::{common::{check_subject_creation, node::get_subject_data}, event::Ledger},
-    node::{SubjectData, subject_manager::{
-        SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
-    }},
+    model::{
+        common::{check_subject_creation, node::get_subject_data},
+        event::Ledger,
+    },
+    node::{
+        SubjectData,
+        subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
+    },
     subject::Metadata,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
@@ -369,10 +375,10 @@ where
 {
     let mut should_finish = true;
     if ledger.get_event_request_type().is_create_event()
-    && let EventRequest::Create(request) =
-        ledger.get_event_request().map_err(|e| {
-            ActorError::Functional { description: e.to_string() }
-        })?
+        && let EventRequest::Create(request) =
+            ledger.get_event_request().ok_or(ActorError::Functional {
+                description: "Can not obtain create event request".to_string(),
+            })?
     {
         if request.schema_id.is_gov() {
             should_finish = false;
