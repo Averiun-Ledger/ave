@@ -15,6 +15,7 @@ use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, SubjsData, TimeRange,
+    TrackerVisibilityStateDB,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -40,7 +41,6 @@ use crate::model::event::Ledger;
 use crate::node::register::RegisterEvent;
 use crate::request::tracking::RequestTrackingEvent;
 use crate::subject::sinkdata::SinkDataEvent;
-use crate::subject::{Metadata};
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;
@@ -58,7 +58,7 @@ const SQL_GET_SUBJECT_STATE: &str = r#"
     SELECT
         name, description, subject_id, governance_id, genesis_gov_version,
         prev_ledger_event_hash, schema_id, namespace, sn,
-        creator, owner, new_owner, active, properties
+        creator, owner, new_owner, active, tracker_visibility, properties
     FROM subjects
     WHERE subject_id = ?1
 "#;
@@ -252,11 +252,11 @@ const SQL_UPSERT_SUBJECT: &str = r#"
     INSERT INTO subjects (
         name, description, subject_id, governance_id, genesis_gov_version,
         prev_ledger_event_hash, schema_id, namespace, sn,
-        creator, owner, new_owner, active, properties
+        creator, owner, new_owner, active, tracker_visibility, properties
     ) VALUES (
         ?1, ?2, ?3, ?4, ?5,
         ?6, ?7, ?8, ?9,
-        ?10, ?11, ?12, ?13, ?14
+        ?10, ?11, ?12, ?13, ?14, ?15
     )
     ON CONFLICT(subject_id) DO UPDATE SET
         name = excluded.name,
@@ -271,6 +271,7 @@ const SQL_UPSERT_SUBJECT: &str = r#"
         owner = excluded.owner,
         new_owner = excluded.new_owner,
         active = excluded.active,
+        tracker_visibility = excluded.tracker_visibility,
         properties = excluded.properties
 "#;
 
@@ -474,7 +475,7 @@ struct CursorAbortsQuery {
 
 enum WriteCommand {
     Ledger(Box<Ledger>),
-    SubjectState(Metadata),
+    SubjectState(SubjectDB),
     Abort(RequestTrackingEvent),
     Register(RegisterEvent),
     DeleteSubject(String),
@@ -1370,7 +1371,7 @@ impl SqliteWriteStore {
 
     async fn persist_subject_state(
         &self,
-        metadata: Metadata,
+        metadata: SubjectDB,
     ) -> Result<(), DatabaseError> {
         self.enqueue(WriteCommand::SubjectState(metadata)).await
     }
@@ -1574,7 +1575,7 @@ fn persist_write_batch(
     runtime: &SqliteRuntime,
     jobs: &[WriteJob],
 ) -> Result<(), DatabaseError> {
-    let mut touched_subjects = Vec::with_capacity(jobs.len());
+    let mut touched_subjects: Vec<String> = Vec::with_capacity(jobs.len());
     let mut conn = runtime.lock_writer()?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1620,8 +1621,7 @@ fn persist_write_batch(
     for job in jobs {
         match &job.command {
             WriteCommand::Ledger(event) => {
-                touched_subjects
-                    .push(event.content().get_subject_id().to_string());
+                touched_subjects.push(event.get_subject_id().to_string());
                 insert_event_with_stmt(&mut insert_event_stmt, event)?
             }
             WriteCommand::SubjectState(metadata) => {
@@ -2102,11 +2102,26 @@ fn get_subject_state_from_conn(
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     stmt.query_row(params![subject_id], |row| {
-        let props_str: String = row.get(13)?;
+        let tracker_visibility = row
+            .get::<usize, Option<String>>(13)?
+            .map(|tracker_visibility_str| {
+                serde_json::from_str::<TrackerVisibilityStateDB>(
+                    &tracker_visibility_str,
+                )
+                .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            13,
+                            Type::Text,
+                            Box::new(e),
+                        )
+                    })
+            })
+            .transpose()?;
+        let props_str: String = row.get(14)?;
         let props_val: Value =
             serde_json::from_str(&props_str).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    13,
+                    14,
                     Type::Text,
                     Box::new(e),
                 )
@@ -2142,6 +2157,7 @@ fn get_subject_state_from_conn(
             owner: row.get(10)?,
             new_owner: row.get(11)?,
             active: row.get::<usize, i64>(12)? != 0,
+            tracker_visibility,
             properties: props_val,
         })
     })
@@ -3449,32 +3465,15 @@ fn insert_event_with_stmt(
 
 fn upsert_subject_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
-    metadata: &Metadata,
+    s: &SubjectDB,
 ) -> Result<(), DatabaseError> {
-    let prev_ledger_event_hash = if metadata.prev_ledger_event_hash.is_empty() {
-        None
-    } else {
-        Some(metadata.prev_ledger_event_hash.to_string())
-    };
-
-    let s = SubjectDB {
-        name: metadata.name.clone(),
-        description: metadata.description.clone(),
-        subject_id: metadata.subject_id.to_string(),
-        governance_id: metadata.governance_id.to_string(),
-        genesis_gov_version: metadata.genesis_gov_version,
-        prev_ledger_event_hash,
-        schema_id: metadata.schema_id.to_string(),
-        namespace: metadata.namespace.to_string(),
-        sn: metadata.sn,
-        creator: metadata.creator.to_string(),
-        owner: metadata.owner.to_string(),
-        new_owner: metadata.new_owner.clone().map(|x| x.to_string()),
-        active: metadata.active,
-        properties: metadata.properties.0.clone(),
-    };
-
     let properties_json = serde_json::to_string(&s.properties)
+        .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
+    let tracker_visibility_json = s
+        .tracker_visibility
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
         .map_err(|e| DatabaseError::JsonSerialize(e.to_string()))?;
     let active = if s.active { 1 } else { 0 };
     let genesis_gov_version_i64 = i64::try_from(s.genesis_gov_version)
@@ -3505,6 +3504,7 @@ fn upsert_subject_with_stmt(
         s.owner,
         s.new_owner,
         active,
+        tracker_visibility_json,
         properties_json
     ])
     .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -3647,7 +3647,7 @@ impl Subscriber<SinkDataEvent> for SqliteWriteStore {
             return;
         };
 
-        let subject_id = metadata.subject_id.to_string();
+        let subject_id = metadata.subject_id.clone();
         let sn = metadata.sn;
 
         if let Err(e) = self.persist_subject_state(*metadata).await {

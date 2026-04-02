@@ -8,7 +8,6 @@ use ave_actors::{
 use ave_common::{
     Namespace, SchemaType,
     identity::{DigestIdentifier, PublicKey},
-    request::EventRequest,
 };
 use network::ComunicateInfo;
 
@@ -169,8 +168,7 @@ impl DistriWorker {
             }
         } else {
             // No lo conozco - debe ser evento Create
-            if let EventRequest::Create(create) = ledger.event_request.content()
-            {
+            if let Some(create) = ledger.get_create_event() {
                 if !create.schema_id.is_gov() && create.governance_id.is_empty()
                 {
                     return Err(
@@ -626,11 +624,11 @@ impl Handler<Self> for DistriWorker {
                 info,
                 sender,
             } => {
-                let subject_id = ledger.content().get_subject_id();
-                let sn = ledger.content().sn;
+                let subject_id = ledger.get_subject_id();
+                let sn = ledger.sn;
 
                 let (is_gov, ..) = match self
-                    .check_auth(ctx, sender.clone(), ledger.content().clone())
+                    .check_auth(ctx, sender.clone(), *ledger.clone())
                     .await
                 {
                     Ok(is_gov) => is_gov,
@@ -659,12 +657,7 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let lease = if ledger
-                    .content()
-                    .event_request
-                    .content()
-                    .is_create_event()
-                {
+                let lease = if ledger.is_create_event() {
                     if let Err(e) = create_subject(ctx, *ledger.clone()).await {
                         if let ActorError::Functional { .. } = e {
                             warn!(
@@ -734,9 +727,7 @@ impl Handler<Self> for DistriWorker {
                     }
 
                     match update_result {
-                        Ok((last_sn, _, _))
-                            if last_sn < ledger.content().sn =>
-                        {
+                        Ok((last_sn, _, _)) if last_sn < ledger.sn => {
                             debug!(
                                 msg_type = "LastEventDistribution",
                                 subject_id = %subject_id,
@@ -864,16 +855,12 @@ impl Handler<Self> for DistriWorker {
                     return Err(DistributorError::EmptyEvents.into());
                 }
 
-                let subject_id = ledger[0].content().get_subject_id();
+                let subject_id = ledger[0].get_subject_id();
                 let ledger_count = ledger.len();
-                let first_sn = ledger[0].content().sn;
+                let first_sn = ledger[0].sn;
 
                 let (is_gov, is_register) = match self
-                    .check_auth(
-                        ctx,
-                        sender.clone(),
-                        ledger[0].content().clone(),
-                    )
+                    .check_auth(ctx, sender.clone(), ledger[0].clone())
                     .await
                 {
                     Ok(data) => data,
@@ -902,13 +889,7 @@ impl Handler<Self> for DistriWorker {
                     }
                 };
 
-                let lease = if ledger[0]
-                    .content()
-                    .event_request
-                    .content()
-                    .is_create_event()
-                    && !is_register
-                {
+                let lease = if ledger[0].is_create_event() && !is_register {
                     let create_ledger = ledger[0].clone();
                     let requester = Self::requester_id(
                         "ledger_distribution_create",
@@ -941,20 +922,15 @@ impl Handler<Self> for DistriWorker {
                         };
                         None
                     } else {
-                        let EventRequest::Create(request) = create_ledger
-                            .content()
-                            .event_request
-                            .content()
-                            .clone()
-                        else {
-                            return Err(DistributorError::EmptyEvents.into());
-                        };
+                        let request = create_ledger
+                            .get_create_event()
+                            .ok_or(DistributorError::EmptyEvents)?;
 
                         if let Err(e) = check_subject_creation(
                             ctx,
                             &request.governance_id,
-                            create_ledger.signature().signer.clone(),
-                            create_ledger.content().gov_version,
+                            create_ledger.ledger_seal_signature.signer.clone(),
+                            create_ledger.gov_version,
                             request.namespace.to_string(),
                             request.schema_id,
                         )
@@ -1014,13 +990,7 @@ impl Handler<Self> for DistriWorker {
                     let _event = ledger.remove(0);
                     lease
                 } else {
-                    if ledger[0]
-                        .content()
-                        .event_request
-                        .content()
-                        .is_create_event()
-                        && is_register
-                    {
+                    if ledger[0].is_create_event() && is_register {
                         let _event = ledger.remove(0);
                     }
 

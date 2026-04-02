@@ -163,7 +163,7 @@ impl Handler<Self> for Distribution {
         match msg {
             DistributionMessage::Create { ledger, witnesses } => {
                 self.witnesses.clone_from(&witnesses);
-                self.subject_id = ledger.content().get_subject_id();
+                self.subject_id = ledger.get_subject_id();
 
                 debug!(
                     msg_type = "Create",

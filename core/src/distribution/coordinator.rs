@@ -115,8 +115,8 @@ impl Handler<Self> for DistriCoordinator {
                 request_id,
                 ledger,
             } => {
-                let subject_id = ledger.content().get_subject_id();
-                let sn = ledger.content().sn;
+                let subject_id = ledger.get_subject_id();
+                let sn = ledger.sn;
 
                 let receiver_actor =
                     format!("/user/node/distributor_{}", subject_id);

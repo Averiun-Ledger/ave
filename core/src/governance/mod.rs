@@ -72,6 +72,7 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
+    response::SubjectDB,
     schematype::ReservedWords,
 };
 
@@ -504,7 +505,7 @@ impl Subject for Governance {
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             Self::publish_sink(
                 ctx,
-                SinkDataMessage::UpdateState(Box::new(Metadata::from(
+                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
                     self.clone(),
                 ))),
             )

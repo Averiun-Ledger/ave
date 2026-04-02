@@ -17,7 +17,7 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
         TimeStamp, hash_borsh,
     },
-    request::EventRequest,
+    request::{CreateRequest, EventRequest},
     response::{EvalResDB, LedgerDB, RequestEventDB},
 };
 
@@ -722,6 +722,24 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    pub fn get_create_event(&self) -> Option<CreateRequest> {
+        match &self.protocols {
+            Protocols::Create { event_request,  ..} => {
+                if let EventRequest::Create(create_request) = &event_request.content() {
+                    Some(create_request.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None
+        }
+        
+    }
+
+    pub fn is_create_event(&self) -> bool {
+        matches!(&self.protocols, Protocols::Create { .. })
+    }
+
     pub fn get_issuer_event_request_timestamp(&self) -> (String, u64) {
         match &self.protocols {
             Protocols::TrackerFactOpaque { data , .. } => (data.signer.to_string(), data.event_request_timestamp.as_nanos()),

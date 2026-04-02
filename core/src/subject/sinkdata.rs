@@ -5,11 +5,15 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     NotPersistentActor, Response,
 };
-use ave_common::{DataToSink, DataToSinkEvent, identity::TimeStamp};
+use ave_common::{
+    DataToSink, DataToSinkEvent,
+    identity::TimeStamp,
+    response::SubjectDB,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
 
-use crate::{model::common::emit_fail, subject::Metadata};
+use crate::model::common::emit_fail;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SinkData {
@@ -76,7 +80,7 @@ impl SinkDataMessage {
         match self {
             Self::UpdateState(metadata) => (
                 metadata.subject_id.to_string(),
-                metadata.schema_id.to_string(),
+                metadata.schema_id.clone(),
             ),
             Self::Event { event, .. } => event.get_subject_schema()
         }
@@ -85,7 +89,7 @@ impl SinkDataMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SinkDataMessage {
-    UpdateState(Box<Metadata>),
+    UpdateState(Box<SubjectDB>),
     Event {
         event: Box<DataToSinkEvent>,
         event_request_timestamp: u64,
@@ -107,7 +111,7 @@ impl Response for SinkDataResponse {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SinkDataEvent {
     Event(Box<DataToSink>),
-    State(Box<Metadata>),
+    State(Box<SubjectDB>),
 }
 
 impl Event for SinkDataEvent {}
@@ -189,7 +193,7 @@ impl Handler<Self> for SinkData {
             }
             SinkDataEvent::State(metadata) => (
                 metadata.subject_id.to_string(),
-                metadata.schema_id.to_string(),
+                metadata.schema_id.clone(),
             ),
         };
         if let Err(e) = ctx.publish_event(event.clone()).await {

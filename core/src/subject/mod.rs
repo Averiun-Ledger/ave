@@ -38,7 +38,12 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
     request::EventRequest,
-    response::SinkEventsPage,
+    response::{
+        SinkEventsPage, SubjectDB, TrackerEventVisibilityDB,
+        TrackerEventVisibilityRangeDB, TrackerStoredVisibilityDB,
+        TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
+        TrackerVisibilityStateDB,
+    },
 };
 
 use async_trait::async_trait;
@@ -194,6 +199,164 @@ impl From<Tracker> for Metadata {
             new_owner: value.subject_metadata.new_owner,
             active: value.subject_metadata.active,
             properties: value.properties,
+        }
+    }
+}
+
+impl From<Governance> for SubjectDB {
+    fn from(value: Governance) -> Self {
+        Self {
+            name: value.subject_metadata.name,
+            description: value.subject_metadata.description,
+            subject_id: value.subject_metadata.subject_id.to_string(),
+            governance_id: value.subject_metadata.subject_id.to_string(),
+            genesis_gov_version: 0,
+            prev_ledger_event_hash: if value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .is_empty()
+            {
+                None
+            } else {
+                Some(value.subject_metadata.prev_ledger_event_hash.to_string())
+            },
+            schema_id: value.subject_metadata.schema_id.to_string(),
+            namespace: Namespace::new().to_string(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.to_string(),
+            owner: value.subject_metadata.owner.to_string(),
+            new_owner: value
+                .subject_metadata
+                .new_owner
+                .map(|owner| owner.to_string()),
+            active: value.subject_metadata.active,
+            tracker_visibility: None,
+            properties: value.properties.to_value_wrapper().0,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerVisibilityMode>
+    for TrackerVisibilityModeDB
+{
+    fn from(value: crate::model::common::TrackerVisibilityMode) -> Self {
+        match value {
+            crate::model::common::TrackerVisibilityMode::Full => Self::Full,
+            crate::model::common::TrackerVisibilityMode::Opaque => Self::Opaque,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerStoredVisibility>
+    for TrackerStoredVisibilityDB
+{
+    fn from(value: crate::model::common::TrackerStoredVisibility) -> Self {
+        match value {
+            crate::model::common::TrackerStoredVisibility::Full => Self::Full,
+            crate::model::common::TrackerStoredVisibility::Only(
+                viewpoints,
+            ) => Self::Only {
+                viewpoints: viewpoints.into_iter().collect(),
+            },
+            crate::model::common::TrackerStoredVisibility::None => Self::None,
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerStoredVisibilityRange>
+    for TrackerStoredVisibilityRangeDB
+{
+    fn from(
+        value: crate::model::common::TrackerStoredVisibilityRange,
+    ) -> Self {
+        Self {
+            from_sn: value.from_sn,
+            to_sn: value.to_sn,
+            visibility: value.visibility.into(),
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerEventVisibility>
+    for TrackerEventVisibilityDB
+{
+    fn from(value: crate::model::common::TrackerEventVisibility) -> Self {
+        match value {
+            crate::model::common::TrackerEventVisibility::Public => {
+                Self::Public
+            }
+            crate::model::common::TrackerEventVisibility::Private(
+                viewpoints,
+            ) => Self::Private {
+                viewpoints: viewpoints.into_iter().collect(),
+            },
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerEventVisibilityRange>
+    for TrackerEventVisibilityRangeDB
+{
+    fn from(
+        value: crate::model::common::TrackerEventVisibilityRange,
+    ) -> Self {
+        Self {
+            from_sn: value.from_sn,
+            to_sn: value.to_sn,
+            visibility: value.visibility.into(),
+        }
+    }
+}
+
+impl From<crate::model::common::TrackerVisibilityState>
+    for TrackerVisibilityStateDB
+{
+    fn from(value: crate::model::common::TrackerVisibilityState) -> Self {
+        Self {
+            mode: value.mode.into(),
+            stored_ranges: value
+                .stored_ranges
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            event_ranges: value
+                .event_ranges
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<Tracker> for SubjectDB {
+    fn from(value: Tracker) -> Self {
+        Self {
+            name: value.subject_metadata.name,
+            description: value.subject_metadata.description,
+            subject_id: value.subject_metadata.subject_id.to_string(),
+            governance_id: value.governance_id.to_string(),
+            genesis_gov_version: value.genesis_gov_version,
+            prev_ledger_event_hash: if value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .is_empty()
+            {
+                None
+            } else {
+                Some(value.subject_metadata.prev_ledger_event_hash.to_string())
+            },
+            schema_id: value.subject_metadata.schema_id.to_string(),
+            namespace: value.namespace.to_string(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.to_string(),
+            owner: value.subject_metadata.owner.to_string(),
+            new_owner: value
+                .subject_metadata
+                .new_owner
+                .map(|owner| owner.to_string()),
+            active: value.subject_metadata.active,
+            tracker_visibility: Some(value.visibility_state.into()),
+            properties: value.properties.0,
         }
     }
 }

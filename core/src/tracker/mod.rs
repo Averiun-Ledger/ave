@@ -34,6 +34,7 @@ use ave_common::{
     Namespace, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey},
     request::EventRequest,
+    response::SubjectDB,
 };
 
 use async_trait::async_trait;
@@ -366,7 +367,7 @@ impl Subject for Tracker {
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
             Self::publish_sink(
                 ctx,
-                SinkDataMessage::UpdateState(Box::new(Metadata::from(
+                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
                     self.clone(),
                 ))),
             )

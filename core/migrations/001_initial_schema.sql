@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     owner TEXT NOT NULL,
     new_owner TEXT,              -- New owner during ownership transfer
     active INTEGER NOT NULL CHECK (active IN (0, 1)),  -- 0 = false, 1 = true
+    tracker_visibility TEXT,     -- JSON serialized simplified tracker visibility state; NULL for governance subjects
     properties TEXT NOT NULL,    -- JSON serialized subject properties
     PRIMARY KEY (subject_id)
 );
