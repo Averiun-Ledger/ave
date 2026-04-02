@@ -55,30 +55,6 @@ where
     Ok(values.into_iter().collect())
 }
 
-fn deserialize_optional_unique_string_vec<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let values =
-        <Option<Vec<String>> as serde::Deserialize>::deserialize(deserializer)?;
-
-    values
-        .map(|values| {
-            let mut unique = BTreeSet::new();
-            for value in &values {
-                if !unique.insert(value.clone()) {
-                    return Err(serde::de::Error::custom(format!(
-                        "duplicated viewpoint '{value}'"
-                    )));
-                }
-            }
-            Ok(values)
-        })
-        .transpose()
-}
-
 pub type MemberName = String;
 
 /// Governance change set grouped by concern.
@@ -270,7 +246,6 @@ pub struct SchemaAdd {
     pub contract: String,
     pub initial_value: Value,
     #[serde(default)]
-    #[serde(deserialize_with = "deserialize_unique_string_vec")]
     pub viewpoints: Vec<String>,
 }
 
@@ -281,7 +256,7 @@ pub struct SchemaChange {
     pub actual_id: SchemaType,
     pub new_contract: Option<String>,
     pub new_initial_value: Option<Value>,
-    #[serde(deserialize_with = "deserialize_optional_unique_string_vec")]
+    #[serde(default)]
     pub new_viewpoints: Option<Vec<String>>,
 }
 
@@ -555,27 +530,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_schema_add_rejects_duplicated_viewpoints() {
-        let error = serde_json::from_value::<SchemaAdd>(json!({
+    fn test_schema_add_allows_duplicated_viewpoints_deserialization() {
+        let schema = serde_json::from_value::<SchemaAdd>(json!({
             "id": "Example",
             "contract": "contract",
             "initial_value": {},
             "viewpoints": ["agua", "agua"]
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("duplicated viewpoint"));
+        assert_eq!(schema.viewpoints, vec!["agua".to_owned(), "agua".to_owned()]);
     }
 
     #[test]
-    fn test_schema_change_rejects_duplicated_viewpoints() {
-        let error = serde_json::from_value::<SchemaChange>(json!({
+    fn test_schema_change_allows_duplicated_viewpoints_deserialization() {
+        let change = serde_json::from_value::<SchemaChange>(json!({
             "actual_id": "Example",
             "new_viewpoints": ["agua", "agua"]
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("duplicated viewpoint"));
+        assert_eq!(
+            change.new_viewpoints,
+            Some(vec!["agua".to_owned(), "agua".to_owned()])
+        );
     }
 
     #[test]

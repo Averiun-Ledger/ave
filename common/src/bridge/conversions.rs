@@ -287,6 +287,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bridge_fact_request_defaults_missing_viewpoints_to_empty() {
+        let bridge_fact = serde_json::from_value::<BridgeFactRequest>(json!({
+            "subject_id": "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s",
+            "payload": {"test": "value"}
+        }))
+        .unwrap();
+
+        assert!(bridge_fact.viewpoints.is_empty());
+    }
+
+    #[test]
     fn test_create_request_conversion() {
         let bridge_create = BridgeCreateRequest {
             name: Some("Test".to_string()),

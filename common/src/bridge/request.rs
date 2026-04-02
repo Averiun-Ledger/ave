@@ -278,6 +278,7 @@ pub struct BridgeFactRequest {
     /// Changes to be applied to the subject
     pub payload: Value,
     /// Viewpoints targeted by this fact.
+    #[serde(default)]
     pub viewpoints: Vec<String>,
 }
 

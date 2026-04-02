@@ -128,6 +128,7 @@ pub struct FactRequest {
     /// Optional viewpoints targeted by this fact.
     ///
     /// An empty set means the event is not segmented by viewpoints.
+    #[serde(default)]
     #[serde(deserialize_with = "deserialize_unique_viewpoints")]
     pub viewpoints: BTreeSet<String>,
 }
@@ -225,6 +226,19 @@ mod tests {
     use super::FactRequest;
     use ave_identity::DigestIdentifier;
     use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn test_fact_request_defaults_missing_viewpoints_to_empty() {
+        let subject_id = DigestIdentifier::default().to_string();
+        let request = serde_json::from_value::<FactRequest>(json!({
+            "subject_id": subject_id,
+            "payload": { "ModOne": { "data": 1 } }
+        }))
+        .unwrap();
+
+        assert_eq!(request.viewpoints, BTreeSet::new());
+    }
 
     #[test]
     fn test_fact_request_rejects_duplicated_viewpoints() {
