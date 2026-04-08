@@ -244,8 +244,8 @@ pub struct TrackerStoredVisibilityRangeDB {
 #[cfg_attr(feature = "typescript", ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrackerEventVisibilityDB {
-    Public,
-    Private {
+    NonFact,
+    Fact {
         viewpoints: Vec<String>,
     },
 }

@@ -389,6 +389,7 @@ impl TrackerSync {
                     },
                     message: ActorMessage::DistributionLedgerReq {
                         actual_sn,
+                        target_sn: None,
                         subject_id: subject_id.clone(),
                     },
                 },

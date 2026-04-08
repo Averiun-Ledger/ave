@@ -15,6 +15,7 @@ use crate::{
     ActorMessage,
     helpers::network::{NetworkMessage, service::NetworkSender},
     model::{common::emit_fail, network::RetryNetwork},
+    update::UpdateWitnessOffer,
 };
 
 use super::{Update, UpdateMessage};
@@ -23,11 +24,26 @@ use super::{Update, UpdateMessage};
 pub struct Updater {
     network: Arc<NetworkSender>,
     node_key: PublicKey,
+    round: u64,
+    witness_retry_count: usize,
+    witness_retry_interval_secs: u64,
 }
 
 impl Updater {
-    pub const fn new(node_key: PublicKey, network: Arc<NetworkSender>) -> Self {
-        Self { node_key, network }
+    pub const fn new(
+        node_key: PublicKey,
+        round: u64,
+        network: Arc<NetworkSender>,
+        witness_retry_count: usize,
+        witness_retry_interval_secs: u64,
+    ) -> Self {
+        Self {
+            node_key,
+            network,
+            round,
+            witness_retry_count,
+            witness_retry_interval_secs,
+        }
     }
 }
 
@@ -36,10 +52,10 @@ pub enum UpdaterMessage {
     EndRetry,
     NetworkLastSn {
         subject_id: DigestIdentifier,
-        node_key: PublicKey,
+        actual_sn: Option<u64>,
     },
     NetworkResponse {
-        sn: u64,
+        offer: UpdateWitnessOffer,
         sender: PublicKey,
     },
 }
@@ -82,7 +98,8 @@ impl Handler<Self> for Updater {
                         if let Err(e) = update_actor
                             .tell(UpdateMessage::Response {
                                 sender: self.node_key.clone(),
-                                sn: 0,
+                                offer: None,
+                                round: self.round,
                             })
                             .await
                         {
@@ -112,13 +129,13 @@ impl Handler<Self> for Updater {
             }
             UpdaterMessage::NetworkLastSn {
                 subject_id,
-                node_key,
+                actual_sn,
             } => {
                 let message = NetworkMessage {
                     info: ComunicateInfo {
                         request_id: String::default(),
                         version: 0,
-                        receiver: node_key.clone(),
+                        receiver: self.node_key.clone(),
                         receiver_actor: format!(
                             "/user/node/distributor_{}",
                             subject_id
@@ -126,6 +143,7 @@ impl Handler<Self> for Updater {
                     },
                     message: ActorMessage::DistributionGetLastSn {
                         subject_id: subject_id.clone(),
+                        actual_sn,
                         receiver_actor: ctx.path().to_string(),
                     },
                 };
@@ -133,7 +151,12 @@ impl Handler<Self> for Updater {
                 let target = RetryNetwork::new(self.network.clone());
 
                 let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(1, Duration::from_secs(10)),
+                    FixedIntervalStrategy::new(
+                        self.witness_retry_count.max(1),
+                        Duration::from_secs(
+                            self.witness_retry_interval_secs.max(1),
+                        ),
+                    ),
                 );
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
@@ -172,12 +195,15 @@ impl Handler<Self> for Updater {
                     debug!(
                         msg_type = "NetworkLastSn",
                         subject_id = %subject_id,
-                        node_key = %node_key,
+                        node_key = %self.node_key,
                         "Last SN request sent to network with retry"
                     );
                 };
             }
-            UpdaterMessage::NetworkResponse { sn, sender } => {
+            UpdaterMessage::NetworkResponse {
+                offer,
+                sender,
+            } => {
                 if sender != self.node_key {
                     warn!(
                         msg_type = "NetworkResponse",
@@ -193,7 +219,8 @@ impl Handler<Self> for Updater {
                         if let Err(e) = update_actor
                             .tell(UpdateMessage::Response {
                                 sender: self.node_key.clone(),
-                                sn,
+                                offer: Some(offer.clone()),
+                                round: self.round,
                             })
                             .await
                         {
@@ -243,7 +270,7 @@ impl Handler<Self> for Updater {
 
                 debug!(
                     msg_type = "NetworkResponse",
-                    sn = sn,
+                    sn = offer.sn,
                     sender = %sender,
                     "Network response processed successfully"
                 );

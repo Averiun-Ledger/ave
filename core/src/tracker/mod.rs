@@ -5,7 +5,10 @@ use crate::{
     governance::{
         sn_register::{SnRegister, SnRegisterMessage},
         subject_register::{SubjectRegister, SubjectRegisterMessage},
-        witnesses_register::{WitnessesRegister, WitnessesRegisterMessage},
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
     },
     helpers::{db::ExternalDB, sink::AveSink},
     model::{
@@ -44,7 +47,7 @@ use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Tracker {
     #[serde(skip)]
     pub our_key: Arc<PublicKey>,
@@ -59,8 +62,7 @@ pub struct Tracker {
     pub namespace: Namespace,
     /// The version of the governance contract that created the subject.
     pub genesis_gov_version: u64,
-
-    pub visibility_state: TrackerVisibilityState,
+    pub visibility_mode: TrackerVisibilityMode,
     /// The current status of the subject.
     pub properties: ValueWrapper,
 }
@@ -96,7 +98,7 @@ impl BorshSerialize for Tracker {
         BorshSerialize::serialize(&self.governance_id, writer)?;
         BorshSerialize::serialize(&self.namespace, writer)?;
         BorshSerialize::serialize(&self.genesis_gov_version, writer)?;
-        BorshSerialize::serialize(&self.visibility_state, writer)?;
+        BorshSerialize::serialize(&self.visibility_mode, writer)?;
         BorshSerialize::serialize(&self.properties, writer)?;
 
         Ok(())
@@ -112,7 +114,8 @@ impl BorshDeserialize for Tracker {
         let governance_id = DigestIdentifier::deserialize_reader(reader)?;
         let namespace = Namespace::deserialize_reader(reader)?;
         let genesis_gov_version = u64::deserialize_reader(reader)?;
-        let visibility_state = TrackerVisibilityState::deserialize_reader(reader)?;
+        let visibility_mode =
+            TrackerVisibilityMode::deserialize_reader(reader)?;
         let properties = ValueWrapper::deserialize_reader(reader)?;
 
         // Create a default/placeholder KeyPair for 'owner'
@@ -128,7 +131,7 @@ impl BorshDeserialize for Tracker {
             governance_id,
             namespace,
             genesis_gov_version,
-            visibility_state,
+            visibility_mode,
             properties,
         })
     }
@@ -365,11 +368,10 @@ impl Subject for Tracker {
         };
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
+            let subject_db = self.build_subject_db(ctx).await?;
             Self::publish_sink(
                 ctx,
-                SinkDataMessage::UpdateState(Box::new(SubjectDB::from(
-                    self.clone(),
-                ))),
+                SinkDataMessage::UpdateState(Box::new(subject_db)),
             )
             .await?;
 
@@ -385,10 +387,7 @@ impl Tracker {
         TrackerStoredVisibility,
         TrackerEventVisibility,
     ) {
-        (
-            TrackerStoredVisibility::Full,
-            TrackerEventVisibility::Public,
-        )
+        (TrackerStoredVisibility::Full, TrackerEventVisibility::NonFact)
     }
 
     fn fact_visibilities(
@@ -398,11 +397,7 @@ impl Tracker {
         TrackerStoredVisibility,
         TrackerEventVisibility,
     ) {
-        let event_visibility = if viewpoints.is_empty() {
-            TrackerEventVisibility::Public
-        } else {
-            TrackerEventVisibility::Private(viewpoints.clone())
-        };
+        let event_visibility = TrackerEventVisibility::Fact(viewpoints.clone());
 
         let stored_visibility = if opaque {
             TrackerStoredVisibility::None
@@ -413,6 +408,160 @@ impl Tracker {
         };
 
         (stored_visibility, event_visibility)
+    }
+
+    fn is_full(&self) -> bool {
+        matches!(self.visibility_mode, TrackerVisibilityMode::Full)
+    }
+
+    async fn record_visibility_event(
+        &self,
+        ctx: &ActorContext<Self>,
+        event: &Ledger,
+    ) -> Result<(), ActorError> {
+        let (stored_visibility, event_visibility, mode) = match &event.protocols
+        {
+            Protocols::Create { .. } => {
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                (
+                    stored_visibility,
+                    event_visibility,
+                    TrackerVisibilityMode::Full,
+                )
+            }
+            Protocols::TrackerFactFull { event_request, .. } => {
+                let EventRequest::Fact(fact_request) = event_request.content()
+                else {
+                    return Err(ActorError::Functional {
+                        description:
+                            "In fact event, event request must be Fact"
+                                .to_owned(),
+                    });
+                };
+                let (stored_visibility, event_visibility) =
+                    Self::fact_visibilities(&fact_request.viewpoints, false);
+                (stored_visibility, event_visibility, self.visibility_mode)
+            }
+            Protocols::TrackerFactOpaque { evaluation, .. } => {
+                let (stored_visibility, event_visibility) =
+                    Self::fact_visibilities(&evaluation.viewpoints, true);
+                let mode = if evaluation.is_ok() {
+                    TrackerVisibilityMode::Opaque
+                } else {
+                    self.visibility_mode
+                };
+                (stored_visibility, event_visibility, mode)
+            }
+            Protocols::Transfer { .. }
+            | Protocols::TrackerConfirm { .. }
+            | Protocols::Reject { .. }
+            | Protocols::EOL { .. } => {
+                let (stored_visibility, event_visibility) =
+                    Self::public_visibilities();
+                (stored_visibility, event_visibility, self.visibility_mode)
+            }
+            _ => {
+                return Err(ActorError::Functional {
+                    description:
+                        "Invalid protocol data for tracker visibility"
+                            .to_owned(),
+                });
+            }
+        };
+
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+
+        witnesses_register
+            .tell(WitnessesRegisterMessage::UpdateTrackerVisibility {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                sn: event.sn,
+                mode,
+                stored_visibility,
+                event_visibility,
+            })
+            .await
+    }
+
+    async fn get_tracker_visibility_state(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<TrackerVisibilityState, ActorError> {
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+
+        let response = witnesses_register
+            .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+                subject_id: self.subject_metadata.subject_id.clone(),
+            })
+            .await?;
+
+        match response {
+            WitnessesRegisterResponse::TrackerVisibilityState { state } => {
+                Ok(state)
+            }
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected:
+                    "WitnessesRegisterResponse::TrackerVisibilityState"
+                        .to_owned(),
+            }),
+        }
+    }
+
+    async fn build_subject_db(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<SubjectDB, ActorError> {
+        let visibility_state = self.get_tracker_visibility_state(ctx).await?;
+
+        Ok(SubjectDB {
+            name: self.subject_metadata.name.clone(),
+            description: self.subject_metadata.description.clone(),
+            subject_id: self.subject_metadata.subject_id.to_string(),
+            governance_id: self.governance_id.to_string(),
+            genesis_gov_version: self.genesis_gov_version,
+            prev_ledger_event_hash: if self
+                .subject_metadata
+                .prev_ledger_event_hash
+                .is_empty()
+            {
+                None
+            } else {
+                Some(
+                    self.subject_metadata
+                        .prev_ledger_event_hash
+                        .to_string(),
+                )
+            },
+            schema_id: self.subject_metadata.schema_id.to_string(),
+            namespace: self.namespace.to_string(),
+            sn: self.subject_metadata.sn,
+            creator: self.subject_metadata.creator.to_string(),
+            owner: self.subject_metadata.owner.to_string(),
+            new_owner: self
+                .subject_metadata
+                .new_owner
+                .clone()
+                .map(|owner| owner.to_string()),
+            active: self.subject_metadata.active,
+            tracker_visibility: Some(visibility_state.into()),
+            properties: self.properties.0.clone(),
+        })
     }
 
     async fn create(
@@ -530,6 +679,7 @@ impl Tracker {
             self.create(ctx, first.gov_version).await?;
 
             self.on_event(first.clone(), ctx).await;
+            self.record_visibility_event(ctx, &first).await?;
 
             Self::register(
                 ctx,
@@ -603,7 +753,7 @@ impl Tracker {
                 actual_ledger_hash,
                 last_data,
                 hash,
-                self.visibility_state.is_full(),
+                self.is_full(),
                 self.service,
             )
             .await
@@ -673,6 +823,7 @@ impl Tracker {
 
             // Aplicar evento.
             self.on_event(event.clone(), ctx).await;
+            self.record_visibility_event(ctx, &event).await?;
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
@@ -958,7 +1109,7 @@ impl PersistentActor for Tracker {
 
     fn update(&mut self, state: Self) {
         self.properties = state.properties;
-        self.visibility_state = state.visibility_state;
+        self.visibility_mode = state.visibility_mode;
         self.governance_id = state.governance_id;
         self.namespace = state.namespace;
         self.genesis_gov_version = state.genesis_gov_version;
@@ -977,7 +1128,7 @@ impl PersistentActor for Tracker {
             genesis_gov_version: init.genesis_gov_version,
             governance_id: init.governance_id,
             namespace: init.namespace,
-            visibility_state: TrackerVisibilityState::default()
+            visibility_mode: TrackerVisibilityMode::Full,
         }
     }
 
@@ -1004,14 +1155,7 @@ impl PersistentActor for Tracker {
                 {
                     self.subject_metadata = SubjectMetadata::new(metadata);
                     self.properties = metadata.properties.clone();
-                    self.visibility_state = TrackerVisibilityState::default();
-                    let (stored_visibility, event_visibility) =
-                        Self::public_visibilities();
-                    self.visibility_state.record_event(
-                        event.sn,
-                        stored_visibility,
-                        event_visibility,
-                    );
+                    self.visibility_mode = TrackerVisibilityMode::Full;
 
                     debug!(
                         event_type = "Create",
@@ -1030,7 +1174,7 @@ impl PersistentActor for Tracker {
                 return Ok(());
             }
             Protocols::TrackerFactFull { evaluation,event_request,  .. } => {
-                let EventRequest::Fact(fact_request) = event_request.content() else {
+                let EventRequest::Fact(_fact_request) = event_request.content() else {
                     error!(
                         event_type = "Fact",
                         subject_id = %self.subject_metadata.subject_id,
@@ -1043,16 +1187,8 @@ impl PersistentActor for Tracker {
                     });
                 };
 
-                let (stored_visibility, event_visibility) =
-                    Self::fact_visibilities(&fact_request.viewpoints, false);
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
-
                 if let Some(eval_res) = evaluation.evaluator_response_ok() {
-                    if self.visibility_state.is_full() {
+                    if self.is_full() {
                         self.apply_patch(eval_res.patch)?;
                         debug!(
                             event_type = "Fact",
@@ -1070,16 +1206,8 @@ impl PersistentActor for Tracker {
             }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 if evaluation.is_ok() {
-                    self.visibility_state
-                        .set_mode(TrackerVisibilityMode::Opaque);
+                    self.visibility_mode = TrackerVisibilityMode::Opaque;
                 }
-                let (stored_visibility, event_visibility) =
-                    Self::fact_visibilities(&evaluation.viewpoints, true);
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
                 debug!(
                     event_type = "FactOpaque",
                     subject_id = %self.subject_metadata.subject_id,
@@ -1101,21 +1229,13 @@ impl PersistentActor for Tracker {
                     });
                 };
 
-                let (stored_visibility, event_visibility) =
-                    Self::public_visibilities();
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
-
                 if evaluation.evaluator_response_ok().is_some() {
-                    if self.visibility_state.is_full()
+                    if self.is_full()
                         && let Some(eval_res) =
                             evaluation.evaluator_response_ok()
                     {
                         self.apply_patch(eval_res.patch)?;
-                    } else if !self.visibility_state.is_full() {
+                    } else if !self.is_full() {
                         debug!(
                             event_type = "Transfer",
                             subject_id = %self.subject_metadata.subject_id,
@@ -1147,14 +1267,6 @@ impl PersistentActor for Tracker {
                                 .to_owned(),
                     });
                 }
-
-                let (stored_visibility, event_visibility) =
-                    Self::public_visibilities();
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
 
                 if let Some(new_owner) = self.subject_metadata.new_owner.take()
                 {
@@ -1192,14 +1304,6 @@ impl PersistentActor for Tracker {
                     });
                 }
 
-                let (stored_visibility, event_visibility) =
-                    Self::public_visibilities();
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
-
                 self.subject_metadata.new_owner = None;
                 debug!(
                     event_type = "Reject",
@@ -1221,14 +1325,6 @@ impl PersistentActor for Tracker {
                             .to_owned(),
                     });
                 }
-
-                let (stored_visibility, event_visibility) =
-                    Self::public_visibilities();
-                self.visibility_state.record_event(
-                    event.sn,
-                    stored_visibility,
-                    event_visibility,
-                );
 
                 self.subject_metadata.active = false;
                 debug!(

@@ -44,10 +44,21 @@ pub enum ProtocolsError {
 
     #[error("tracker fact full requires a fact event request")]
     InvalidTrackerFactFullEventRequest,
+
+    #[error("only tracker fact events can be projected as opaque")]
+    InvalidTrackerOpaqueProjection,
 }
 
 impl From<ProtocolsError> for ActorError {
     fn from(error: ProtocolsError) -> Self {
+        Self::Functional {
+            description: error.to_string(),
+        }
+    }
+}
+
+impl From<LedgerError> for ActorError {
+    fn from(error: LedgerError) -> Self {
         Self::Functional {
             description: error.to_string(),
         }

@@ -186,6 +186,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     pub fn new(
         keys: &KeyPair,
         config: Config,
+        safe_mode: bool,
         monitor: Option<ActorRef<Monitor>>,
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
@@ -222,8 +223,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let external_addresses = convert_addresses(&config.external_addresses)?;
 
         let node_type = config.node_type.clone();
-        let safe_mode = config.safe_mode;
-
         // Resolve machine sizing from the declared spec, or auto-detect from host.
         let ResolvedSpec { ram_mb, cpu_cores } = resolve_spec(machine_spec);
 
@@ -2009,6 +2008,7 @@ mod tests {
         NetworkWorker::new(
             &keys,
             config,
+            false,
             None,
             graceful_token,
             crash_token,
@@ -2083,11 +2083,12 @@ mod tests {
         let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
             &keys,
             config,
+            false,
             None,
             CancellationToken::new(),
             CancellationToken::new(),
             None,
-            Some(metrics),
+            Some(metrics),   
         )
         .expect("worker");
 
@@ -2155,6 +2156,7 @@ mod tests {
         let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
             &keys,
             config,
+            false,
             None,
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2235,6 +2237,7 @@ mod tests {
         let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
             &keys,
             config,
+            false,
             None,
             CancellationToken::new(),
             CancellationToken::new(),

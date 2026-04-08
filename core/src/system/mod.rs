@@ -2,7 +2,10 @@ pub use error::SystemError;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
-    config::{Config, GovernanceSyncConfig, SinkAuth, TrackerSyncConfig},
+    config::{
+        Config, GovernanceSyncConfig, RebootSyncConfig, SinkAuth,
+        TrackerSyncConfig, UpdateSyncConfig,
+    },
     db::Database,
     external_db::DBManager,
     helpers::{db::ExternalDB, sink::AveSink},
@@ -26,8 +29,11 @@ pub struct ConfigHelper {
     pub always_accept: bool,
     pub safe_mode: bool,
     pub tracking_size: usize,
+    pub ledger_batch_size: usize,
     pub sync_governance: GovernanceSyncConfig,
     pub sync_tracker: TrackerSyncConfig,
+    pub sync_update: UpdateSyncConfig,
+    pub sync_reboot: RebootSyncConfig,
 }
 
 impl From<Config> for ConfigHelper {
@@ -37,8 +43,11 @@ impl From<Config> for ConfigHelper {
             always_accept: value.always_accept,
             safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
+            ledger_batch_size: value.sync.ledger_batch_size,
             sync_governance: value.sync.governance,
             sync_tracker: value.sync.tracker,
+            sync_update: value.sync.update,
+            sync_reboot: value.sync.reboot,
         }
     }
 }
@@ -221,6 +230,9 @@ pub mod tests {
                     update_batch_size: 2,
                     update_timeout_secs: 10,
                 },
+                update: UpdateSyncConfig::default(),
+                reboot: RebootSyncConfig::default(),
+                ledger_batch_size: 100,
             },
             spec: None,
         };

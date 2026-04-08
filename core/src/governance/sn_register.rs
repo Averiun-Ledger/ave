@@ -65,6 +65,11 @@ pub enum SnRegisterMessage {
         subject_id: DigestIdentifier,
         gov_version: u64,
     },
+    GetGovVersionWindow {
+        subject_id: DigestIdentifier,
+        from_sn: u64,
+        to_sn: u64,
+    },
 }
 
 impl Message for SnRegisterMessage {
@@ -89,6 +94,7 @@ pub enum SnLimit {
 pub enum SnRegisterResponse {
     Ok,
     Sn(SnLimit),
+    GovVersionWindow(Vec<SnGovVersionRange>),
 }
 
 impl Response for SnRegisterResponse {}
@@ -108,6 +114,13 @@ pub enum SnRegisterEvent {
 }
 
 impl Event for SnRegisterEvent {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SnGovVersionRange {
+    pub from_sn: u64,
+    pub to_sn: u64,
+    pub gov_version: u64,
+}
 
 #[async_trait]
 impl Actor for SnRegister {
@@ -228,6 +241,40 @@ impl Handler<Self> for SnRegister {
                 );
 
                 Ok(SnRegisterResponse::Ok)
+            }
+            SnRegisterMessage::GetGovVersionWindow {
+                subject_id,
+                from_sn,
+                to_sn,
+            } => {
+                let mut ranges = Vec::new();
+
+                if let Some(register) = self.register.get(&subject_id) {
+                    let mut prev_end_sn: Option<u64> = None;
+
+                    for (gov_version, end_sn) in register.iter() {
+                        let start_sn =
+                            prev_end_sn.map_or(0, |prev| prev.saturating_add(1));
+                        let range_from = start_sn.max(from_sn);
+                        let range_to = (*end_sn).min(to_sn);
+
+                        if range_from <= range_to {
+                            ranges.push(SnGovVersionRange {
+                                from_sn: range_from,
+                                to_sn: range_to,
+                                gov_version: *gov_version,
+                            });
+                        }
+
+                        if *end_sn >= to_sn {
+                            break;
+                        }
+
+                        prev_end_sn = Some(*end_sn);
+                    }
+                }
+
+                Ok(SnRegisterResponse::GovVersionWindow(ranges))
             }
         }
     }

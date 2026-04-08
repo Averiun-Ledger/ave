@@ -14,6 +14,7 @@ use crate::{
     metrics::try_core_metrics,
     model::{common::emit_fail, event::Ledger},
     request::manager::{RequestManager, RequestManagerMessage},
+    request::types::{DistributionPlanEntry, DistributionPlanMode},
 };
 
 pub mod coordinator;
@@ -59,7 +60,19 @@ impl Distribution {
         self.witnesses.remove(&witness)
     }
 
-    async fn create_distributors(
+    fn project_ledger_for_mode(
+        ledger: &Ledger,
+        mode: &DistributionPlanMode,
+    ) -> Result<Ledger, ActorError> {
+        match mode {
+            DistributionPlanMode::Clear => Ok(ledger.clone()),
+            DistributionPlanMode::Opaque => {
+                ledger.to_tracker_opaque().map_err(Into::into)
+            }
+        }
+    }
+
+    async fn create_distributor(
         &self,
         ctx: &mut ActorContext<Self>,
         ledger: Ledger,
@@ -141,7 +154,7 @@ impl Actor for Distribution {
 pub enum DistributionMessage {
     Create {
         ledger: Box<Ledger>,
-        witnesses: HashSet<PublicKey>,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     Response {
         sender: PublicKey,
@@ -161,23 +174,53 @@ impl Handler<Self> for Distribution {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            DistributionMessage::Create { ledger, witnesses } => {
-                self.witnesses.clone_from(&witnesses);
+            DistributionMessage::Create {
+                ledger,
+                distribution_plan,
+            } => {
+                self.witnesses = distribution_plan
+                    .iter()
+                    .map(|entry| entry.node.clone())
+                    .collect();
                 self.subject_id = ledger.get_subject_id();
+                let clear_ledger = (*ledger).clone();
+                let opaque_ledger = if distribution_plan
+                    .iter()
+                    .any(|entry| matches!(entry.mode, DistributionPlanMode::Opaque))
+                {
+                    Some(Self::project_ledger_for_mode(
+                        &clear_ledger,
+                        &DistributionPlanMode::Opaque,
+                    )?)
+                } else {
+                    None
+                };
 
                 debug!(
                     msg_type = "Create",
                     subject_id = %self.subject_id,
-                    witnesses_count = witnesses.len(),
+                    witnesses_count = distribution_plan.len(),
                     distribution_type = ?self.distribution_type,
                     "Starting distribution to witnesses"
                 );
 
-                for witness in witnesses.iter() {
-                    self.create_distributors(
+                for entry in distribution_plan {
+                    let ledger = match entry.mode {
+                        DistributionPlanMode::Clear => clear_ledger.clone(),
+                        DistributionPlanMode::Opaque => opaque_ledger
+                            .clone()
+                            .ok_or_else(|| ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Missing opaque distribution projection for subject {}",
+                                    self.subject_id
+                                ),
+                            })?,
+                    };
+
+                    self.create_distributor(
                         ctx,
-                        *ledger.clone(),
-                        witness.clone(),
+                        ledger,
+                        entry.node,
                     )
                     .await?
                 }

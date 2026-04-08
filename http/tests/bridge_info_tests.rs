@@ -2012,6 +2012,29 @@ async fn test_system_info_deserialization() {
 
     assert_eq!(config.node.tracking_size, 200);
     assert!(config.node.is_service);
+    assert_eq!(config.node.sync.ledger_batch_size, 100);
+    assert_eq!(config.node.sync.governance.interval_secs, 60);
+    assert_eq!(config.node.sync.governance.sample_size, 3);
+    assert_eq!(config.node.sync.governance.response_timeout_secs, 10);
+    assert_eq!(config.node.sync.tracker.interval_secs, 30);
+    assert_eq!(config.node.sync.tracker.page_size, 50);
+    assert_eq!(config.node.sync.tracker.response_timeout_secs, 10);
+    assert_eq!(config.node.sync.tracker.update_batch_size, 2);
+    assert_eq!(config.node.sync.tracker.update_timeout_secs, 10);
+    assert_eq!(config.node.sync.update.round_retry_interval_secs, 8);
+    assert_eq!(config.node.sync.update.max_round_retries, 3);
+    assert_eq!(config.node.sync.update.witness_retry_count, 1);
+    assert_eq!(config.node.sync.update.witness_retry_interval_secs, 5);
+    assert_eq!(config.node.sync.reboot.stability_check_interval_secs, 5);
+    assert_eq!(config.node.sync.reboot.stability_check_max_retries, 3);
+    assert_eq!(
+        config.node.sync.reboot.diff_retry_schedule_secs,
+        vec![10, 20, 30, 60]
+    );
+    assert_eq!(
+        config.node.sync.reboot.timeout_retry_schedule_secs,
+        vec![5, 5, 5, 5]
+    );
 
     assert_eq!(config.node.contracts_path, expected_contracts_path);
     assert!(!config.node.always_accept);

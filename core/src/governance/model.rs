@@ -474,7 +474,12 @@ impl RolesSchema {
     ) -> BTreeSet<String> {
         self.creator
             .get(&RoleCreator::create(name, namespace))
-            .map(|x| x.witnesses.clone())
+            .map(|x| {
+                x.witnesses
+                    .iter()
+                    .map(|witness| witness.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -488,8 +493,7 @@ impl RolesSchema {
                 .into_iter()
                 .filter(|x| x.name != *remove)
                 .map(|mut c| {
-                    c.witnesses.remove(remove);
-                    c.witness_viewpoints.retain(|x| x.name != *remove);
+                    c.witnesses.retain(|x| x.name != *remove);
                     c
                 })
                 .collect();
@@ -554,9 +558,8 @@ impl RolesSchema {
                         RoleCreator {
                             quantity: x.quantity.clone(),
                             name: new_name.clone(),
-                            witnesses: x.witnesses.clone(),
-                            witness_viewpoints: x
-                                .witness_viewpoints
+                            witnesses: x
+                                .witnesses
                                 .iter()
                                 .map(|w| {
                                     if w.name == *old_name {
@@ -573,11 +576,8 @@ impl RolesSchema {
                         }
                     } else {
                         let mut role = x.clone();
-                        if role.witnesses.remove(old_name) {
-                            role.witnesses.insert(new_name.clone());
-                        }
-                        role.witness_viewpoints = role
-                            .witness_viewpoints
+                        role.witnesses = role
+                            .witnesses
                             .iter()
                             .map(|w| {
                                 if w.name == *old_name {
@@ -783,7 +783,6 @@ impl RolesSchema {
                 name: name.to_string(),
                 namespace,
                 witnesses: BTreeSet::default(),
-                witness_viewpoints: BTreeSet::default(),
                 quantity: CreatorQuantity::Infinity,
             })
             .map(|x| x.quantity.clone())

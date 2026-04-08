@@ -18,18 +18,24 @@ pub struct Reboot {
     governance_id: DigestIdentifier,
     actual_sn: u64,
     count: u64,
+    stability_check_interval_secs: u64,
+    stability_check_max_retries: u64,
 }
 
 impl Reboot {
     pub const fn new(
         governance_id: DigestIdentifier,
         request_id: DigestIdentifier,
+        stability_check_interval_secs: u64,
+        stability_check_max_retries: u64,
     ) -> Self {
         Self {
             request_id,
             governance_id,
             actual_sn: 0,
             count: 0,
+            stability_check_interval_secs,
+            stability_check_max_retries,
         }
     }
 
@@ -41,8 +47,9 @@ impl Reboot {
         let request = RebootMessage::Update;
         let request_id = self.request_id.clone();
         let governance_id = self.governance_id.clone();
+        let interval_secs = self.stability_check_interval_secs.max(1);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
             if let Err(e) = actor.tell(request).await {
                 error!(
                     request_id = %request_id,
@@ -170,7 +177,6 @@ impl Handler<Self> for Reboot {
             }
             RebootMessage::Update => {
                 let actual_sn = self.actual_sn;
-
                 match get_gov_sn(ctx, &self.governance_id).await {
                     Ok(sn) => {
                         self.actual_sn = sn;
@@ -217,7 +223,7 @@ impl Handler<Self> for Reboot {
                     );
                 }
 
-                if self.count >= 3 {
+                if self.count >= self.stability_check_max_retries {
                     debug!(
                         msg_type = "Update",
                         request_id = %self.request_id,

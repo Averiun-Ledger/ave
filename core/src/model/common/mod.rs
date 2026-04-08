@@ -33,6 +33,7 @@ use crate::request::tracking::{RequestTracking, RequestTrackingMessage};
 use std::ops::Bound::{Included, Unbounded};
 
 pub mod contract;
+pub mod distribution_plan;
 pub mod node;
 pub mod subject;
 pub mod viewpoints;
@@ -408,8 +409,8 @@ pub struct TrackerStoredVisibilitySpan<'a> {
     BorshSerialize,
 )]
 pub enum TrackerEventVisibility {
-    Public,
-    Private(BTreeSet<String>),
+    NonFact,
+    Fact(BTreeSet<String>),
 }
 
 #[derive(
@@ -748,6 +749,10 @@ where
 
     pub fn insert(&mut self, key: u64, value: T) {
         self.inner.insert(key, value);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&u64, &T)> {
+        self.inner.iter()
     }
 
     pub fn range_with_predecessor(

@@ -639,7 +639,6 @@ impl GovernanceData {
                         return true;
                     }
                 }
-
                 false
             }
         }

@@ -17,6 +17,22 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
+pub enum DistributionPlanMode {
+    Clear,
+    Opaque,
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct DistributionPlanEntry {
+    pub node: PublicKey,
+    pub mode: DistributionPlanMode,
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub enum RequestManagerState {
     Reboot,
     Starting,
@@ -31,12 +47,15 @@ pub enum RequestManagerState {
         init_state: Option<ValueWrapper>,
         current_request_roles: CurrentRequestRoles,
         signers: HashSet<PublicKey>,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     UpdateSubject {
         ledger: Ledger,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     Distribution {
         ledger: Ledger,
+        distribution_plan: Vec<DistributionPlanEntry>,
     },
     End,
 }

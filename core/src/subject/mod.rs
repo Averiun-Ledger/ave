@@ -282,14 +282,14 @@ impl From<crate::model::common::TrackerEventVisibility>
 {
     fn from(value: crate::model::common::TrackerEventVisibility) -> Self {
         match value {
-            crate::model::common::TrackerEventVisibility::Public => {
-                Self::Public
+            crate::model::common::TrackerEventVisibility::NonFact => {
+                Self::NonFact
             }
-            crate::model::common::TrackerEventVisibility::Private(
-                viewpoints,
-            ) => Self::Private {
+            crate::model::common::TrackerEventVisibility::Fact(viewpoints) => {
+                Self::Fact {
                 viewpoints: viewpoints.into_iter().collect(),
-            },
+            }
+            }
         }
     }
 }
@@ -324,39 +324,6 @@ impl From<crate::model::common::TrackerVisibilityState>
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-        }
-    }
-}
-
-impl From<Tracker> for SubjectDB {
-    fn from(value: Tracker) -> Self {
-        Self {
-            name: value.subject_metadata.name,
-            description: value.subject_metadata.description,
-            subject_id: value.subject_metadata.subject_id.to_string(),
-            governance_id: value.governance_id.to_string(),
-            genesis_gov_version: value.genesis_gov_version,
-            prev_ledger_event_hash: if value
-                .subject_metadata
-                .prev_ledger_event_hash
-                .is_empty()
-            {
-                None
-            } else {
-                Some(value.subject_metadata.prev_ledger_event_hash.to_string())
-            },
-            schema_id: value.subject_metadata.schema_id.to_string(),
-            namespace: value.namespace.to_string(),
-            sn: value.subject_metadata.sn,
-            creator: value.subject_metadata.creator.to_string(),
-            owner: value.subject_metadata.owner.to_string(),
-            new_owner: value
-                .subject_metadata
-                .new_owner
-                .map(|owner| owner.to_string()),
-            active: value.subject_metadata.active,
-            tracker_visibility: Some(value.visibility_state.into()),
-            properties: value.properties.0,
         }
     }
 }
@@ -1780,16 +1747,11 @@ where
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
         if let Some(lo_sn) = lo_sn {
             let actual_sn = lo_sn + 1;
-            if (hi_sn - actual_sn) > 99 {
-                Ok((get_n_events(ctx, actual_sn, 99).await?, false))
+            if hi_sn < actual_sn {
+                Ok((Vec::new(), true))
             } else {
-                Ok((
-                    get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
-                    true,
-                ))
+                Ok((get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?, true))
             }
-        } else if hi_sn > 99 {
-            Ok((get_n_events(ctx, 0, 99).await?, false))
         } else {
             Ok((get_n_events(ctx, 0, hi_sn).await?, true))
         }

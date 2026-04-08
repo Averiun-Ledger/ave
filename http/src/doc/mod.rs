@@ -29,8 +29,9 @@ use crate::{
         HttpConfigHttp, LockoutConfigHttp, LoggingHttp, LoggingOutputHttp,
         NetworkConfigHttp, ProxyConfigHttp, RateLimitConfigHttp,
         RoutingConfigHttp, RoutingNodeHttp, SelfSignedCertConfigHttp,
-        SessionConfigHttp, SinkConfigHttp, SinkServerHttp, SyncConfigHttp,
-        TrackerSyncConfigHttp,
+        RebootSyncConfigHttp, SessionConfigHttp, SinkConfigHttp,
+        SinkServerHttp, SyncConfigHttp, TrackerSyncConfigHttp,
+        UpdateSyncConfigHttp,
     },
 };
 use ave_bridge::MonitorNetworkState;
@@ -315,6 +316,8 @@ impl Modify for SecurityAddon {
             SyncConfigHttp,
             GovernanceSyncConfigHttp,
             TrackerSyncConfigHttp,
+            UpdateSyncConfigHttp,
+            RebootSyncConfigHttp,
             NetworkConfigHttp,
             RoutingConfigHttp,
             RoutingNodeHttp,

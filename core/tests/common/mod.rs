@@ -16,8 +16,9 @@ use ave_core::{
     Api,
     config::{
         AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig, SinkAuth,
-        SyncConfig, TrackerSyncConfig,
+        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig,
+        RebootSyncConfig, SinkAuth, SyncConfig, TrackerSyncConfig,
+        UpdateSyncConfig,
     },
 };
 use network::{Config as NetworkConfig, RoutingNode};
@@ -119,6 +120,7 @@ pub async fn create_node(
         always_accept,
         tracking_size: 100,
         sync: SyncConfig {
+            ledger_batch_size: 100,
             governance: GovernanceSyncConfig {
                 interval_secs: 10,
                 sample_size: 3,
@@ -131,6 +133,8 @@ pub async fn create_node(
                 update_batch_size: 2,
                 update_timeout_secs: 5,
             },
+            update: UpdateSyncConfig::default(),
+            reboot: RebootSyncConfig::default(),
         },
         spec: None,
     };
@@ -392,18 +396,36 @@ pub async fn get_subject(
     node: &Api,
     subject_id: DigestIdentifier,
     sn: Option<u64>,
+    timeout: bool
 ) -> Result<SubjectDB, Box<dyn std::error::Error>> {
+    let mut count = 0;
     loop {
         if let Ok(state) = node.get_subject_state(subject_id.clone()).await {
             if let Some(sn) = sn {
                 if sn == state.sn {
                     return Ok(state);
+                } else if count > 100 {
+                    return Err(format!(
+                        "timeout waiting for subject {} at sn {}, actual sn {}",
+                        subject_id, sn, state.sn
+                    )
+                    .into());
                 }
             } else {
                 return Ok(state);
             }
+        } else if count > 100 {
+            return Err(format!(
+                "timeout waiting for subject {} at sn {:?}",
+                subject_id, sn
+            )
+            .into());
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if timeout {
+            count += 1;
+        }
+        
     }
 }
 

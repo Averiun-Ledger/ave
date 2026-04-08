@@ -90,192 +90,15 @@ fn validate_viewpoint_names(
     Ok(unique)
 }
 
-fn validate_creator_witness_viewpoints(
-    creator_name: &str,
-    schema_id: &SchemaType,
-    schema_viewpoints: &BTreeSet<String>,
-    creator_witnesses: &BTreeSet<String>,
-    witness_viewpoints: &BTreeSet<EventCreatorWitness>,
-) -> Result<BTreeSet<CreatorWitness>, RunnerError> {
-    let mut unique_names = HashSet::new();
-    let mut out = BTreeSet::new();
-
-    for witness in witness_viewpoints {
-        if witness.name != witness.name.trim() {
-            return Err(RunnerError::InvalidEvent {
-                location: "SchemaIdRole::check_data",
-                kind: error::InvalidEventKind::InvalidValue {
-                    field: format!(
-                        "creator witness viewpoints name in schema {}",
-                        schema_id
-                    ),
-                    reason: "cannot have leading or trailing whitespace"
-                        .to_owned(),
-                },
-            });
-        }
-
-        if witness.name == creator_name {
-            return Err(RunnerError::InvalidEvent {
-                location: "SchemaIdRole::check_data",
-                kind: error::InvalidEventKind::InvalidValue {
-                    field: format!(
-                        "creator {} witness viewpoints in schema {}",
-                        creator_name, schema_id
-                    ),
-                    reason: "a creator cannot be listed as their own witness"
-                        .to_owned(),
-                },
-            });
-        }
-
-        if witness.name == ReservedWords::Witnesses.to_string() {
-            return Err(RunnerError::InvalidEvent {
-                location: "SchemaIdRole::check_data",
-                kind: error::InvalidEventKind::InvalidValue {
-                    field: format!(
-                        "creator {} witness viewpoints in schema {}",
-                        creator_name, schema_id
-                    ),
-                    reason:
-                        "generic Witnesses cannot carry explicit viewpoints"
-                            .to_owned(),
-                },
-            });
-        }
-
-        if !creator_witnesses.contains(&witness.name) {
-            return Err(RunnerError::InvalidEvent {
-                location: "SchemaIdRole::check_data",
-                kind: error::InvalidEventKind::InvalidValue {
-                    field: format!(
-                        "creator {} witness viewpoints in schema {}",
-                        creator_name, schema_id
-                    ),
-                    reason: format!(
-                        "witness {} must exist in creator witnesses",
-                        witness.name
-                    ),
-                },
-            });
-        }
-
-        if !unique_names.insert(witness.name.clone()) {
-            return Err(RunnerError::InvalidEvent {
-                location: "SchemaIdRole::check_data",
-                kind: error::InvalidEventKind::Duplicate {
-                    what: format!(
-                        "creator {} witness viewpoints in schema {}",
-                        creator_name, schema_id
-                    ),
-                    id: witness.name.clone(),
-                },
-            });
-        }
-
-        if witness.viewpoints.is_empty() {
-            out.insert(CreatorWitness {
-                name: witness.name.clone(),
-                viewpoints: BTreeSet::new(),
-            });
-            continue;
-        }
-
-        if witness
-            .viewpoints
-            .contains(&ReservedWords::AllViewpoints.to_string())
-        {
-            if witness.viewpoints.len() != 1 {
-                return Err(RunnerError::InvalidEvent {
-                    location: "SchemaIdRole::check_data",
-                    kind: error::InvalidEventKind::InvalidValue {
-                        field: format!(
-                            "creator witness {} viewpoints in schema {}",
-                            witness.name, schema_id
-                        ),
-                        reason: "AllViewpoints cannot be combined with other viewpoints"
-                            .to_owned(),
-                    },
-                });
-            }
-
-            out.insert(CreatorWitness {
-                name: witness.name.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
-            });
-            continue;
-        }
-
-        let validated = validate_viewpoint_names(
-            schema_id,
-            &witness.viewpoints,
-            &format!("creator witness {} viewpoints", witness.name),
-        )?;
-
-        for viewpoint in &validated {
-            if !schema_viewpoints.contains(viewpoint) {
-                return Err(RunnerError::InvalidEvent {
-                    location: "SchemaIdRole::check_data",
-                    kind: error::InvalidEventKind::InvalidValue {
-                        field: format!(
-                            "creator witness {} viewpoints in schema {}",
-                            witness.name, schema_id
-                        ),
-                        reason: format!(
-                            "viewpoint {} does not exist in schema",
-                            viewpoint
-                        ),
-                    },
-                });
-            }
-        }
-
-        out.insert(CreatorWitness {
-            name: witness.name.clone(),
-            viewpoints: validated,
-        });
-    }
-
-    Ok(out)
-}
-
-fn normalize_creator_witness_viewpoints(
-    creator_witnesses: &BTreeSet<String>,
-    mut witness_viewpoints: BTreeSet<CreatorWitness>,
-) -> BTreeSet<CreatorWitness> {
-    for witness in creator_witnesses {
-        if !witness_viewpoints.iter().any(|x| x.name == *witness) {
-            witness_viewpoints.insert(CreatorWitness {
-                name: witness.clone(),
-                viewpoints: if witness == &ReservedWords::Witnesses.to_string() {
-                    BTreeSet::from([ReservedWords::AllViewpoints.to_string()])
-                } else {
-                    BTreeSet::new()
-                },
-            });
-        }
-    }
-
-    witness_viewpoints
-}
-
 fn validate_creator_witnesses(
     creator_name: &str,
     schema_id: &SchemaType,
     schema_viewpoints: &BTreeSet<String>,
     members: &HashSet<String>,
     witnesses: &BTreeSet<EventCreatorWitness>,
-) -> Result<(BTreeSet<String>, BTreeSet<CreatorWitness>), RunnerError> {
-    if witnesses.is_empty() {
-        return Ok((
-            BTreeSet::from([ReservedWords::Witnesses.to_string()]),
-            BTreeSet::new(),
-        ));
-    }
-
+) -> Result<BTreeSet<CreatorWitness>, RunnerError> {
     let mut names = BTreeSet::new();
-    let mut explicit = BTreeSet::new();
+    let mut validated_witnesses = BTreeSet::new();
 
     for witness in witnesses {
         if witness.name != witness.name.trim() {
@@ -339,6 +162,11 @@ fn validate_creator_witnesses(
                 });
             }
 
+            validated_witnesses.insert(CreatorWitness {
+                name: witness.name.clone(),
+                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
+                    .to_string()]),
+            });
             continue;
         }
 
@@ -351,19 +179,72 @@ fn validate_creator_witnesses(
             });
         }
 
-        explicit.insert(witness.clone());
+        if witness.viewpoints.is_empty() {
+            validated_witnesses.insert(CreatorWitness {
+                name: witness.name.clone(),
+                viewpoints: BTreeSet::new(),
+            });
+            continue;
+        }
+
+        if witness
+            .viewpoints
+            .contains(&ReservedWords::AllViewpoints.to_string())
+        {
+            if witness.viewpoints.len() != 1 {
+                return Err(RunnerError::InvalidEvent {
+                    location: "SchemaIdRole::check_data",
+                    kind: error::InvalidEventKind::InvalidValue {
+                        field: format!(
+                            "creator witness {} viewpoints in schema {}",
+                            witness.name, schema_id
+                        ),
+                        reason:
+                            "AllViewpoints cannot be combined with other viewpoints"
+                                .to_owned(),
+                    },
+                });
+            }
+
+            validated_witnesses.insert(CreatorWitness {
+                name: witness.name.clone(),
+                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
+                    .to_string()]),
+            });
+            continue;
+        }
+
+        let validated = validate_viewpoint_names(
+            schema_id,
+            &witness.viewpoints,
+            &format!("creator witness {} viewpoints", witness.name),
+        )?;
+
+        for viewpoint in &validated {
+            if !schema_viewpoints.contains(viewpoint) {
+                return Err(RunnerError::InvalidEvent {
+                    location: "SchemaIdRole::check_data",
+                    kind: error::InvalidEventKind::InvalidValue {
+                        field: format!(
+                            "creator witness {} viewpoints in schema {}",
+                            witness.name, schema_id
+                        ),
+                        reason: format!(
+                            "viewpoint {} does not exist in schema",
+                            viewpoint
+                        ),
+                    },
+                });
+            }
+        }
+
+        validated_witnesses.insert(CreatorWitness {
+            name: witness.name.clone(),
+            viewpoints: validated,
+        });
     }
 
-    let validated = validate_creator_witness_viewpoints(
-        creator_name,
-        schema_id,
-        schema_viewpoints,
-        &names,
-        &explicit,
-    )?;
-
-    let normalized = normalize_creator_witness_viewpoints(&names, validated);
-    Ok((names, normalized))
+    Ok(validated_witnesses)
 }
 
 fn tracker_schemas_role_event_to_schema_id_role(
@@ -427,7 +308,7 @@ pub fn governance_event_update_creator_change(
 ) -> CreatorRoleUpdate {
     let mut new_creator: HashMap<
         (SchemaType, String, PublicKey),
-        (EventCreatorQuantity, BTreeSet<String>),
+        (EventCreatorQuantity, BTreeSet<CreatorWitness>),
     > = HashMap::new();
 
     let mut update_creator_quantity: HashSet<(
@@ -441,7 +322,7 @@ pub fn governance_event_update_creator_change(
         SchemaType,
         String,
         PublicKey,
-        BTreeSet<String>,
+        BTreeSet<CreatorWitness>,
     )> = HashSet::new();
 
     let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
@@ -467,17 +348,12 @@ pub fn governance_event_update_creator_change(
                             match (&x.new_witnesses, &x.new_quantity) {
                                 (None, None) => {
                                     if let Some(creator) =
-                                        roles.creator.get(&EventRoleCreator {
-                                            name: x.actual_name.clone(),
-                                            namespace: x
-                                                .actual_namespace
-                                                .clone(),
-                                            witnesses: BTreeSet::new(),
-                                            witness_viewpoints:
-                                                BTreeSet::new(),
-                                            quantity:
-                                                EventCreatorQuantity::Infinity,
-                                        })
+                                        roles.creator.get(
+                                            &EventRoleCreator::create(
+                                                &x.actual_name,
+                                                x.actual_namespace.clone(),
+                                            ),
+                                        )
                                         && let Some(user) =
                                             members.get(&creator.name)
                                     {
@@ -496,17 +372,12 @@ pub fn governance_event_update_creator_change(
                                 }
                                 (None, Some(q)) => {
                                     if let Some(creator) =
-                                        roles.creator.get(&EventRoleCreator {
-                                            name: x.actual_name.clone(),
-                                            namespace: x
-                                                .actual_namespace
-                                                .clone(),
-                                            witnesses: BTreeSet::new(),
-                                            witness_viewpoints:
-                                                BTreeSet::new(),
-                                            quantity:
-                                                EventCreatorQuantity::Infinity,
-                                        })
+                                        roles.creator.get(
+                                            &EventRoleCreator::create(
+                                                &x.actual_name,
+                                                x.actual_namespace.clone(),
+                                            ),
+                                        )
                                         && let Some(user) =
                                             members.get(&creator.name)
                                     {
@@ -525,17 +396,12 @@ pub fn governance_event_update_creator_change(
                                 }
                                 (Some(w), None) => {
                                     if let Some(creator) =
-                                        roles.creator.get(&EventRoleCreator {
-                                            name: x.actual_name.clone(),
-                                            namespace: x
-                                                .actual_namespace
-                                                .clone(),
-                                            witnesses: BTreeSet::new(),
-                                            witness_viewpoints:
-                                                BTreeSet::new(),
-                                            quantity:
-                                                EventCreatorQuantity::Infinity,
-                                        })
+                                        roles.creator.get(
+                                            &EventRoleCreator::create(
+                                                &x.actual_name,
+                                                x.actual_namespace.clone(),
+                                            ),
+                                        )
                                         && let Some(user) =
                                             members.get(&creator.name)
                                     {
@@ -547,9 +413,7 @@ pub fn governance_event_update_creator_change(
                                             ),
                                             (
                                                 creator.quantity.clone(),
-                                                w.iter()
-                                                    .map(|x| x.name.clone())
-                                                    .collect(),
+                                                w.clone(),
                                             ),
                                         );
                                     }
@@ -563,9 +427,7 @@ pub fn governance_event_update_creator_change(
                                         ),
                                         (
                                             q.clone(),
-                                            w.iter()
-                                                .map(|x| x.name.clone())
-                                                .collect(),
+                                            w.clone(),
                                         ),
                                     );
                                 }
@@ -585,9 +447,7 @@ pub fn governance_event_update_creator_change(
                                     schema.schema_id.clone(),
                                     x.actual_namespace.to_string(),
                                     user.clone(),
-                                    w.iter()
-                                        .map(|x| x.name.clone())
-                                        .collect(),
+                                    w.clone(),
                                 ));
                             }
                         }
@@ -915,12 +775,13 @@ pub fn governance_event_roles_update_fact(
                             if let Some(user) = members.get(&x.name) {
                                 let mut witnesses = vec![];
                                 for witness in x.witnesses.iter() {
-                                    if witness
-                                        == &ReservedWords::Witnesses.to_string()
+                                    if witness.name
+                                        == ReservedWords::Witnesses.to_string()
                                     {
                                         witnesses
                                             .push(WitnessesType::Witnesses);
-                                    } else if let Some(w) = members.get(witness)
+                                    } else if let Some(w) =
+                                        members.get(&witness.name)
                                     {
                                         witnesses.push(WitnessesType::User(
                                             w.clone(),
@@ -2354,50 +2215,16 @@ pub fn schema_id_role_check_data(
                         },
                     })?;
 
-                for witness in creator.witnesses.iter() {
-                    if witness != &ReservedWords::Witnesses.to_string() {
-                        if witness != witness.trim() {
-                            return Err(RunnerError::InvalidEvent {
-                                    location: "SchemaIdRole::check_data",
-                                    kind: error::InvalidEventKind::InvalidValue {
-                                        field: format!("creator witness name in schema {}", schema_id),
-                                        reason: "cannot have leading or trailing whitespace".to_owned(),
-                                    },
-                                });
-                        }
-                        if witness == &creator.name {
-                            return Err(RunnerError::InvalidEvent {
-                                    location: "SchemaIdRole::check_data",
-                                    kind: error::InvalidEventKind::InvalidValue {
-                                        field: format!("creator {} witnesses in schema {}", creator.name, schema_id),
-                                        reason: "a creator cannot be listed as their own witness".to_owned(),
-                                    },
-                                });
-                        }
-                        if !members.contains(witness) {
-                            return Err(RunnerError::InvalidEvent {
-                                location: "SchemaIdRole::check_data",
-                                kind: error::InvalidEventKind::NotMember {
-                                    who: witness.clone(),
-                                },
-                            });
-                        }
-                    }
-                }
-
-                let witness_viewpoints = normalize_creator_witness_viewpoints(
-                    &creator.witnesses,
-                    validate_creator_witness_viewpoints(
+                let witnesses = validate_creator_witnesses(
                     &creator.name,
                     schema_id,
                     schema_viewpoints,
+                    &members,
                     &creator.witnesses,
-                    &creator.witness_viewpoints,
-                )?,
-                );
+                )?;
 
                 if !roles_schema.creator.insert(EventRoleCreator {
-                    witness_viewpoints,
+                    witnesses,
                     ..creator.clone()
                 })
                 {
@@ -3294,47 +3121,22 @@ pub fn schema_id_role_check_data(
                         },
                     })?;
 
-                let (new_witnesses, base_witness_viewpoints, witness_names_changed) =
-                    if let Some(witnesses) = creator.new_witnesses.as_ref() {
-                        let (witnesses, witness_viewpoints) =
-                            validate_creator_witnesses(
-                                &creator.actual_name,
-                                schema_id,
-                                schema_viewpoints,
-                                &members,
-                                witnesses,
-                            )?;
-
-                        (
-                            witnesses.clone(),
-                            witness_viewpoints,
-                            witnesses != old_creator.witnesses,
-                        )
-                    } else {
-                        (
-                            old_creator.witnesses.clone(),
-                            normalize_creator_witness_viewpoints(
-                                &old_creator.witnesses,
-                                old_creator.witness_viewpoints.clone(),
-                            ),
-                            false,
-                        )
-                    };
-
-                let effective_old_witness_viewpoints =
-                    normalize_creator_witness_viewpoints(
-                        &new_witnesses,
-                        old_creator
-                            .witness_viewpoints
-                            .iter()
-                            .filter(|x| new_witnesses.contains(&x.name))
-                            .cloned()
-                            .collect(),
-                    );
+                let new_witnesses = if let Some(witnesses) =
+                    creator.new_witnesses.as_ref()
+                {
+                    validate_creator_witnesses(
+                        &creator.actual_name,
+                        schema_id,
+                        schema_viewpoints,
+                        &members,
+                        witnesses,
+                    )?
+                } else {
+                    old_creator.witnesses.clone()
+                };
 
                 if creator.new_witnesses.is_some()
-                    && !witness_names_changed
-                    && base_witness_viewpoints == effective_old_witness_viewpoints
+                    && new_witnesses == old_creator.witnesses
                 {
                     return Err(RunnerError::InvalidEvent {
                         location: "SchemaIdRole::check_data",
@@ -3347,18 +3149,11 @@ pub fn schema_id_role_check_data(
                     });
                 }
 
-                let new_witness_viewpoints = if creator.new_witnesses.is_some() {
-                    base_witness_viewpoints
-                } else {
-                    effective_old_witness_viewpoints
-                };
-
                 if !roles_schema.creator.insert(EventRoleCreator {
                     name: creator.actual_name.clone(),
                     namespace: new_namespace.clone(),
                     quantity: new_quantity,
                     witnesses: new_witnesses,
-                    witness_viewpoints: new_witness_viewpoints,
                 }) {
                     return Err(RunnerError::InvalidEvent {
                         location: "SchemaIdRole::check_data",

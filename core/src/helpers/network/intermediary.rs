@@ -188,6 +188,7 @@ impl Intermediary {
                 match message.message {
                     ActorMessage::DistributionGetLastSn {
                         subject_id,
+                        actual_sn,
                         receiver_actor,
                     } => {
                         let actor = system
@@ -200,6 +201,7 @@ impl Intermediary {
                         actor
                             .tell(DistriWorkerMessage::GetLastSn {
                                 subject_id,
+                                actual_sn,
                                 info: message.info,
                                 sender: sender.clone(),
                                 receiver_actor,
@@ -212,7 +214,7 @@ impl Intermediary {
                                 }
                             })?;
                     }
-                    ActorMessage::AuthLastSn { sn } => {
+                    ActorMessage::UpdateOffer { offer } => {
                         let actor = system
                             .get_actor::<Updater>(&path)
                             .await
@@ -221,7 +223,7 @@ impl Intermediary {
                             })?;
                         actor
                             .tell(UpdaterMessage::NetworkResponse {
-                                sn,
+                                offer,
                                 sender: sender.clone(),
                             })
                             .await
@@ -518,6 +520,7 @@ impl Intermediary {
                     }
                     ActorMessage::DistributionLedgerReq {
                         actual_sn,
+                        target_sn,
                         subject_id,
                     } => {
                         let actor = system
@@ -530,6 +533,7 @@ impl Intermediary {
                         actor
                             .tell(DistriWorkerMessage::SendDistribution {
                                 actual_sn,
+                                target_sn,
                                 subject_id,
                                 info: message.info,
                                 sender: sender.clone(),

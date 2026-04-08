@@ -14,7 +14,7 @@ use crate::{
         Governance, GovernanceMessage, GovernanceResponse,
         data::GovernanceData,
         witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage,
+            TrackerDeliveryRange, WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
         },
     },
@@ -431,7 +431,7 @@ where
     }
 }
 
-pub async fn get_tracker_sn_creator<A>(
+pub async fn get_tracker_sn_owner<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
@@ -448,16 +448,83 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(WitnessesRegisterMessage::GetTrackerSnCreator {
+        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
             subject_id: subject_id.clone(),
         })
         .await?;
 
     match response {
-        WitnessesRegisterResponse::TrackerCreatorSn { data } => Ok(data),
+        WitnessesRegisterResponse::TrackerOwnerSn { data } => Ok(data),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerSn".to_string(),
+        }),
+    }
+}
+
+pub async fn get_local_subject_sn<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<u64>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let Some(subject_data) = get_subject_data(ctx, subject_id).await? else {
+        return Ok(None);
+    };
+
+    match subject_data {
+        SubjectData::Tracker { governance_id, .. } => Ok(
+            get_tracker_sn_owner(ctx, &governance_id, subject_id)
+                .await?
+                .map(|(_, sn)| sn),
+        ),
+        SubjectData::Governance { .. } => {
+            Ok(Some(get_gov_sn(ctx, subject_id).await?))
+        }
+    }
+}
+
+pub async fn get_tracker_window<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: ave_common::SchemaType,
+    actual_sn: Option<u64>,
+) -> Result<(Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<WitnessesRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(WitnessesRegisterMessage::GetTrackerWindow {
+            subject_id: subject_id.clone(),
+            node,
+            namespace,
+            schema_id,
+            actual_sn,
+        })
+        .await?;
+
+    match response {
+        WitnessesRegisterResponse::TrackerWindow {
+            sn,
+            clear_sn,
+            is_all,
+            ranges,
+        } => Ok((sn, clear_sn, is_all, ranges)),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
         }),
     }
 }

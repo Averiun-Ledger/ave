@@ -24,8 +24,9 @@ use crate::{
             governance_event_update_creator_change,
         },
         model::{
-            CreatorQuantity, HashThisRole, ProtocolTypes, Quorum, RoleTypes,
-            Schema, WitnessesData,
+            CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
+            Quorum, RoleCreator,
+            RoleTypes, Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -38,6 +39,7 @@ use crate::{
         tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
+            CreatorWitnessGrant, CreatorWitnessRegistration,
             WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse, WitnessesType,
         },
@@ -151,14 +153,14 @@ pub struct RolesUpdateRemove {
 pub struct CreatorRoleUpdate {
     pub new_creator: HashMap<
         (SchemaType, String, PublicKey),
-        (CreatorQuantity, BTreeSet<String>),
+        (CreatorQuantity, BTreeSet<CreatorWitness>),
     >,
 
     pub update_creator_quantity:
         HashSet<(SchemaType, String, PublicKey, CreatorQuantity)>,
 
     pub update_creator_witnesses:
-        HashSet<(SchemaType, String, PublicKey, BTreeSet<String>)>,
+        HashSet<(SchemaType, String, PublicKey, BTreeSet<CreatorWitness>)>,
 
     pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
 }
@@ -520,6 +522,21 @@ impl Subject for Governance {
 }
 
 impl Governance {
+    async fn ledger_batch_size(
+        ctx: &ActorContext<Self>,
+    ) -> Result<usize, ActorError> {
+        let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_string(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        Ok(config.ledger_batch_size)
+    }
+
     async fn up_approver_only(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1772,20 +1789,86 @@ impl Governance {
         new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
+        let creator_registration = |
+            schema_id: &SchemaType,
+            namespace: &str,
+            creator: &PublicKey,
+            witnesses: Vec<WitnessesType>,
+        | -> CreatorWitnessRegistration {
+            let namespace_value = Namespace::from(namespace.to_owned());
+            let creator_name = self
+                .properties
+                .members
+                .iter()
+                .find(|(_, key)| *key == creator)
+                .map(|(name, _)| name.clone());
+
+            let grants = creator_name
+                .and_then(|creator_name| {
+                    self.properties
+                        .roles_schema
+                        .get(schema_id)
+                        .and_then(|roles_schema| {
+                            roles_schema.creator.get(&RoleCreator::create(
+                                &creator_name,
+                                namespace_value,
+                            ))
+                        })
+                        .map(|creator_role| {
+                            creator_role
+                                .witnesses
+                                .iter()
+                                .filter_map(|witness| {
+                                    let witness_type = if witness.name
+                                        == ReservedWords::Witnesses.to_string()
+                                    {
+                                        Some(WitnessesType::Witnesses)
+                                    } else {
+                                        self.properties
+                                            .members
+                                            .get(&witness.name)
+                                            .cloned()
+                                            .map(WitnessesType::User)
+                                    }?;
+
+                                    let grant = if witness
+                                        .viewpoints
+                                        .contains(
+                                            &ReservedWords::AllViewpoints
+                                                .to_string(),
+                                        )
+                                    {
+                                        CreatorWitnessGrant::Full
+                                    } else if witness.viewpoints.is_empty() {
+                                        CreatorWitnessGrant::Hash
+                                    } else {
+                                        CreatorWitnessGrant::Clear(
+                                            witness.viewpoints.clone(),
+                                        )
+                                    };
+
+                                    Some((witness_type, grant))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+
+            CreatorWitnessRegistration { witnesses, grants }
+        };
+
         let mut data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)> =
             vec![];
 
         let mut new_creator_data: HashMap<
             (SchemaType, String, PublicKey),
-            Vec<WitnessesType>,
+            CreatorWitnessRegistration,
         > = HashMap::new();
 
-        let mut update_creator_witnesses_data: HashSet<(
-            SchemaType,
-            String,
-            PublicKey,
-            Vec<WitnessesType>,
-        )> = HashSet::new();
+        let mut update_creator_witnesses_data: HashMap<
+            (SchemaType, String, PublicKey),
+            CreatorWitnessRegistration,
+        > = HashMap::new();
 
         for ((schema_id, ns, creator), (quantity, witnesses)) in
             new_creator.iter()
@@ -1799,7 +1882,12 @@ impl Governance {
 
             new_creator_data.insert(
                 (schema_id.clone(), ns.clone(), creator.clone()),
-                witnesses.clone(),
+                creator_registration(
+                    schema_id,
+                    ns,
+                    creator,
+                    witnesses.clone(),
+                ),
             );
         }
 
@@ -1824,16 +1912,18 @@ impl Governance {
 
             let mut witnesses = vec![];
             for witness in creator_witnesses.iter() {
-                if witness == &ReservedWords::Witnesses.to_string() {
+                if witness.name == ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) =
+                    self.properties.members.get(&witness.name)
+                {
                     witnesses.push(WitnessesType::User(w.clone()));
                 }
             }
 
             new_creator_data.insert(
                 (schema_id.clone(), ns.clone(), creator.clone()),
-                witnesses,
+                creator_registration(schema_id, ns, creator, witnesses),
             );
         }
 
@@ -1853,9 +1943,11 @@ impl Governance {
         {
             let mut witnesses = vec![];
             for witness in creator_witnesses.iter() {
-                if witness == &ReservedWords::Witnesses.to_string() {
+                if witness.name == ReservedWords::Witnesses.to_string() {
                     witnesses.push(WitnessesType::Witnesses);
-                } else if let Some(w) = self.properties.members.get(witness) {
+                } else if let Some(w) =
+                    self.properties.members.get(&witness.name)
+                {
                     witnesses.push(WitnessesType::User(w.clone()));
                 }
             }
@@ -1864,8 +1956,7 @@ impl Governance {
                 schema_id.clone(),
                 ns.clone(),
                 creator.clone(),
-                witnesses,
-            ));
+            ), creator_registration(schema_id, ns, creator, witnesses));
         }
 
         for (schema_id, ns, creator) in creator_update.remove_creator.iter() {
@@ -2451,7 +2542,10 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             Ok(actor) => Some(actor),
@@ -2752,7 +2846,10 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             Ok(actor) => Some(actor),
@@ -2977,7 +3074,10 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+            .create_child(
+                "witnesses_register",
+                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
+            )
             .await
         {
             error!(

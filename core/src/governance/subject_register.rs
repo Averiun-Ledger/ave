@@ -83,7 +83,6 @@ impl SubjectRegister {
                     }
                     CreatorQuantity::Infinity => {}
                 };
-
                 Ok(())
             } else {
                 Err(ActorError::Functional {

@@ -13,7 +13,7 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{Auth, AuthMessage, AuthResponse},
+    auth::{Auth, AuthInitParams, AuthMessage, AuthResponse},
     db::Storable,
     distribution::worker::DistriWorker,
     governance::{Governance, GovernanceMessage, GovernanceResponse},
@@ -135,6 +135,8 @@ pub struct Node {
     hash: Option<HashAlgorithm>,
     #[serde(skip)]
     is_service: bool,
+    #[serde(skip)]
+    ledger_batch_size: u64,
     /// The node's owned subjects.
     owned_subjects: HashMap<DigestIdentifier, SubjectData>,
     /// The node's known subjects.
@@ -190,6 +192,7 @@ impl BorshDeserialize for Node {
             hash,
             our_key,
             owner,
+            ledger_batch_size: 100,
             owned_subjects,
             known_subjects,
             transfer_subjects,
@@ -361,6 +364,7 @@ impl Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await?;
@@ -379,6 +383,7 @@ impl Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await?;
@@ -449,6 +454,7 @@ impl Node {
     }
 
     async fn collect_tracker_ledger(
+        &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
@@ -460,11 +466,23 @@ impl Node {
         let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
+        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
+            let from_sn =
+                lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let batch_hi_sn = from_sn
+                .saturating_add(ledger_batch_size)
+                .saturating_sub(1)
+                .min(hi_sn);
             let (mut batch, is_all) =
-                Self::get_tracker_ledger_batch(ctx, &tracker, lo_sn, hi_sn)
-                    .await?;
+                Self::get_tracker_ledger_batch(
+                    ctx,
+                    &tracker,
+                    lo_sn,
+                    batch_hi_sn,
+                )
+                .await?;
             if batch.is_empty() {
                 break;
             }
@@ -479,6 +497,7 @@ impl Node {
     }
 
     async fn collect_governance_ledger(
+        &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
@@ -490,13 +509,20 @@ impl Node {
         let governance = ctx.system().get_actor::<Governance>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
+        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
+            let from_sn =
+                lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let batch_hi_sn = from_sn
+                .saturating_add(ledger_batch_size)
+                .saturating_sub(1)
+                .min(hi_sn);
             let (mut batch, is_all) = Self::get_governance_ledger_batch(
                 ctx,
                 &governance,
                 lo_sn,
-                hi_sn,
+                batch_hi_sn,
             )
             .await?;
             if batch.is_empty() {
@@ -572,7 +598,7 @@ impl Node {
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
                 let ledger =
-                    Self::collect_governance_ledger(ctx, &subject_id, hi_sn)
+                    self.collect_governance_ledger(ctx, &subject_id, hi_sn)
                         .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
@@ -617,7 +643,7 @@ impl Node {
                         .map(|to_sn| to_sn.min(metadata.sn))
                         .unwrap_or(metadata.sn);
                     let ledger =
-                        Self::collect_tracker_ledger(ctx, &subject_id, hi_sn)
+                        self.collect_tracker_ledger(ctx, &subject_id, hi_sn)
                             .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
@@ -871,7 +897,20 @@ impl Actor for Node {
         if let Err(e) = ctx
             .create_child(
                 "auth",
-                Auth::initial((network.clone(), self.our_key.clone())),
+                Auth::initial(AuthInitParams {
+                    network: network.clone(),
+                    our_key: self.our_key.clone(),
+                    round_retry_interval_secs: config
+                        .sync_update
+                        .round_retry_interval_secs,
+                    max_round_retries: config.sync_update.max_round_retries,
+                    witness_retry_count: config
+                        .sync_update
+                        .witness_retry_count,
+                    witness_retry_interval_secs: config
+                        .sync_update
+                        .witness_retry_interval_secs,
+                }),
             )
             .await
         {
@@ -889,6 +928,7 @@ impl Actor for Node {
                     DistriWorker {
                         our_key: self.our_key.clone(),
                         network,
+                        ledger_batch_size: self.ledger_batch_size,
                     },
                 )
                 .await
@@ -962,6 +1002,7 @@ impl Handler<Self> for Node {
                         DistriWorker {
                             our_key: self.our_key.clone(),
                             network,
+                            ledger_batch_size: self.ledger_batch_size,
                         },
                     )
                     .await?;
@@ -1311,6 +1352,7 @@ pub struct InitParamsNode {
     pub public_key: Arc<PublicKey>,
     pub hash: HashAlgorithm,
     pub is_service: bool,
+    pub ledger_batch_size: u64,
 }
 
 #[async_trait]
@@ -1331,6 +1373,7 @@ impl PersistentActor for Node {
             owner: params.key_pair,
             our_key: params.public_key,
             is_service: params.is_service,
+            ledger_batch_size: params.ledger_batch_size,
             owned_subjects: HashMap::new(),
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),

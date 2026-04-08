@@ -63,12 +63,87 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
 pub struct SyncConfig {
+    pub ledger_batch_size: usize,
     pub governance: GovernanceSyncConfig,
     pub tracker: TrackerSyncConfig,
+    pub update: UpdateSyncConfig,
+    pub reboot: RebootSyncConfig,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            ledger_batch_size: 100,
+            governance: GovernanceSyncConfig::default(),
+            tracker: TrackerSyncConfig::default(),
+            update: UpdateSyncConfig::default(),
+            reboot: RebootSyncConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct UpdateSyncConfig {
+    /// Seconds between update round retries for tracker updates.
+    pub round_retry_interval_secs: u64,
+    /// Maximum number of tracker round retries without local progress.
+    pub max_round_retries: usize,
+    /// Retry attempts for each witness `GetLastSn` request.
+    pub witness_retry_count: usize,
+    /// Seconds between witness `GetLastSn` retry attempts.
+    pub witness_retry_interval_secs: u64,
+}
+
+impl Default for UpdateSyncConfig {
+    fn default() -> Self {
+        Self {
+            round_retry_interval_secs: 8,
+            max_round_retries: 3,
+            witness_retry_count: 1,
+            witness_retry_interval_secs: 5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct RebootSyncConfig {
+    /// Seconds between governance stability checks while waiting in reboot.
+    pub stability_check_interval_secs: u64,
+    /// Number of unchanged checks before finishing reboot wait.
+    pub stability_check_max_retries: u64,
+    /// Backoff schedule, in seconds, for diff reboot retries.
+    pub diff_retry_schedule_secs: Vec<u64>,
+    /// Backoff schedule, in seconds, for timeout reboot retries.
+    pub timeout_retry_schedule_secs: Vec<u64>,
+}
+
+impl Default for RebootSyncConfig {
+    fn default() -> Self {
+        Self {
+            stability_check_interval_secs: 5,
+            stability_check_max_retries: 3,
+            diff_retry_schedule_secs: vec![10, 20, 30, 60],
+            timeout_retry_schedule_secs: default_reboot_timeout_retry_schedule_secs(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_reboot_timeout_retry_schedule_secs() -> Vec<u64> {
+    vec![5, 5, 5, 5]
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_reboot_timeout_retry_schedule_secs() -> Vec<u64> {
+    vec![30, 60, 120, 300]
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

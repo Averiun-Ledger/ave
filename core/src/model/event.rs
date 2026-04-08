@@ -209,26 +209,23 @@ pub enum Protocols {
 }
 
 impl Protocols {
-    pub fn hash_for_ledger(
-        &self,
-        hash: &HashAlgorithm,
-    ) -> Result<DigestIdentifier, ProtocolsError> {
+    pub fn to_tracker_opaque(&self) -> Result<Self, ProtocolsError> {
         match self {
             Self::TrackerFactFull {
                 event_request,
                 evaluation,
                 validation,
             } => {
-                let fact_request =
-                    match event_request.content() {
-                        EventRequest::Fact(fact_request) => fact_request,
-                        _ => return Err(
+                let fact_request = match event_request.content() {
+                    EventRequest::Fact(fact_request) => fact_request,
+                    _ => {
+                        return Err(
                             ProtocolsError::InvalidTrackerFactFullEventRequest,
-                        ),
-                    };
-                let eval_res_opaque = evaluation.response.build_opaque();
+                        );
+                    }
+                };
 
-                let opaque = Self::TrackerFactOpaque {
+                Ok(Self::TrackerFactOpaque {
                     data: OpaqueData {
                         subject_id: event_request.content().get_subject_id(),
                         event_request_timestamp: event_request
@@ -236,27 +233,41 @@ impl Protocols {
                             .timestamp,
                         signer: event_request.signature().signer.clone(),
                     },
-                    event_request_hash: hash_borsh(
-                        &*hash.hasher(),
-                        event_request,
-                    )
-                    .map_err(|e| {
-                        ProtocolsError::HashingFailed(e.to_string())
-                    })?,
+                    event_request_hash: match &validation.validation_metadata {
+                        ValidationMetadata::ModifiedHash {
+                            event_request_hash,
+                            ..
+                        } => event_request_hash.clone(),
+                        ValidationMetadata::Metadata(..) => {
+                            return Err(
+                                ProtocolsError::InvalidTrackerFactFullEventRequest,
+                            );
+                        }
+                    },
                     evaluation: EvaluationDataOpaque {
-                        eval_req_signature: evaluation
-                            .eval_req_signature
-                            .clone(),
+                        eval_req_signature: evaluation.eval_req_signature.clone(),
                         eval_req_hash: evaluation.eval_req_hash.clone(),
                         evaluators_signatures: evaluation
                             .evaluators_signatures
                             .clone(),
                         viewpoints: fact_request.viewpoints.clone(),
-                        response: eval_res_opaque,
+                        response: evaluation.response.build_opaque(),
                     },
                     validation: validation.clone(),
-                };
+                })
+            }
+            Self::TrackerFactOpaque { .. } => Ok(self.clone()),
+            _ => Err(ProtocolsError::InvalidTrackerOpaqueProjection),
+        }
+    }
 
+    pub fn hash_for_ledger(
+        &self,
+        hash: &HashAlgorithm,
+    ) -> Result<DigestIdentifier, ProtocolsError> {
+        match self {
+            Self::TrackerFactFull { .. } => {
+                let opaque = self.to_tracker_opaque()?;
                 hash_borsh(&*hash.hasher(), &opaque)
                     .map_err(|e| ProtocolsError::HashingFailed(e.to_string()))
             }
@@ -722,6 +733,16 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    pub fn to_tracker_opaque(&self) -> Result<Self, LedgerError> {
+        Ok(Self {
+            gov_version: self.gov_version,
+            sn: self.sn,
+            prev_ledger_event_hash: self.prev_ledger_event_hash.clone(),
+            ledger_seal_signature: self.ledger_seal_signature.clone(),
+            protocols: self.protocols.to_tracker_opaque()?,
+        })
+    }
+
     pub fn get_create_event(&self) -> Option<CreateRequest> {
         match &self.protocols {
             Protocols::Create { event_request,  ..} => {

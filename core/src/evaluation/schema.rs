@@ -19,7 +19,7 @@ use crate::{
     evaluation::worker::{EvalWorker, EvalWorkerMessage},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
-    model::common::{emit_fail, node::try_to_update},
+    model::common::emit_fail,
 };
 
 use super::request::EvaluationReq;
@@ -145,17 +145,17 @@ impl Handler<Self> for EvaluationSchema {
                     return Ok(());
                 }
 
-                if self.gov_version < evaluation_req.content().gov_version
-                    && let Err(e) =
-                        try_to_update(ctx, self.governance_id.clone(), None)
-                            .await
-                {
-                    error!(
+                if self.gov_version < evaluation_req.content().gov_version {
+                    observe("rejected");
+                    warn!(
                         msg_type = "NetworkRequest",
-                        error = %e,
-                        "Failed to update governance"
+                        local_gov_version = self.gov_version,
+                        request_gov_version = evaluation_req.content().gov_version,
+                        governance_id = %self.governance_id,
+                        sender = %sender,
+                        "Ignoring request with newer governance version; service nodes must update governance through resilience protocols"
                     );
-                    return Err(emit_fail(ctx, e).await);
+                    return Ok(());
                 }
 
                 let child = ctx

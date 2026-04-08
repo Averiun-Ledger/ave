@@ -14,7 +14,7 @@ use ave_common::{Namespace, SchemaType, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
 use network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{Span, debug, error, info, info_span, warn};
@@ -32,6 +32,7 @@ use crate::governance::model::{
 use crate::governance::role_register::RoleDataRegister;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
+use crate::model::common::distribution_plan::build_tracker_event_distribution_plan;
 use crate::model::common::node::{SignTypesNode, get_sign, get_subject_data};
 use crate::model::common::subject::{
     acquire_subject, create_subject, get_gov, get_gov_sn,
@@ -46,6 +47,7 @@ use crate::request::error::RequestManagerError;
 use crate::request::tracking::RequestTrackingMessage;
 use crate::request::{RequestHandler, RequestHandlerMessage};
 use crate::subject::Metadata;
+use crate::system::ConfigHelper;
 
 use crate::validation::request::{ActualProtocols, LastData, ValidationReq};
 use crate::validation::worker::CurrentRequestRoles;
@@ -61,7 +63,10 @@ use crate::{
 
 use super::{
     reboot::{Reboot, RebootMessage},
-    types::{ReqManInitMessage, RequestManagerState},
+    types::{
+        DistributionPlanEntry, DistributionPlanMode, ReqManInitMessage,
+        RequestManagerState,
+    },
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,6 +160,12 @@ impl BorshDeserialize for RequestManager {
 }
 
 impl RequestManager {
+    fn retry_seconds_for_attempt(schedule: &[u64], attempt: u64) -> u64 {
+        let default = schedule.last().copied().unwrap_or(1).max(1);
+        let idx = attempt.saturating_sub(1) as usize;
+        schedule.get(idx).copied().unwrap_or(default).max(1)
+    }
+
     fn begin_request_metrics(&mut self) {
         self.request_started_at = Some(Instant::now());
         self.current_phase = None;
@@ -259,6 +270,88 @@ impl RequestManager {
 
     fn requester_id(&self) -> String {
         self.id.to_string()
+    }
+
+    fn build_distribution_plan(
+        &self,
+        validation_req: &ValidationReq,
+        governance_data: Option<&GovernanceData>,
+    ) -> Result<Vec<DistributionPlanEntry>, RequestManagerError> {
+        let mut plan: HashMap<PublicKey, DistributionPlanMode> = HashMap::new();
+
+        match validation_req {
+            ValidationReq::Create {
+                event_request,
+                ..
+            } => {
+                let EventRequest::Create(create) = event_request.content() else {
+                    return Err(RequestManagerError::InvalidEventRequestForEvaluation);
+                };
+
+                if create.schema_id.is_gov() {
+                    return Ok(Vec::new());
+                }
+
+                let Some(governance_data) = governance_data else {
+                    return Err(RequestManagerError::ActorError(
+                        ActorError::FunctionalCritical {
+                            description:
+                                "Missing governance data for distribution plan"
+                                    .to_owned(),
+                        },
+                    ));
+                };
+                let witnesses = governance_data.get_witnesses(
+                    WitnessesData::Schema {
+                        creator: event_request.signature().signer.clone(),
+                        schema_id: create.schema_id.clone(),
+                        namespace: create.namespace.clone(),
+                    },
+                )?;
+
+                for witness in witnesses {
+                    plan.insert(witness, DistributionPlanMode::Clear);
+                }
+            }
+            ValidationReq::Event {
+                actual_protocols,
+                event_request,
+                metadata,
+                ..
+            } => {
+                if metadata.schema_id.is_gov() {
+                    return Ok(Vec::new());
+                }
+
+                let Some(governance_data) = governance_data else {
+                    return Err(RequestManagerError::ActorError(
+                        ActorError::FunctionalCritical {
+                            description:
+                                "Missing governance data for distribution plan"
+                                    .to_owned(),
+                        },
+                    ));
+                };
+                let protocols_success = actual_protocols.is_success();
+
+                return build_tracker_event_distribution_plan(
+                    governance_data,
+                    event_request.content(),
+                    metadata,
+                    protocols_success,
+                )
+                .map_err(|description| {
+                    RequestManagerError::ActorError(
+                        ActorError::FunctionalCritical { description },
+                    )
+                });
+            }
+        }
+
+        Ok(plan
+            .into_iter()
+            .map(|(node, mode)| DistributionPlanEntry { node, mode })
+            .collect())
     }
 
     async fn check_data_eval(
@@ -622,6 +715,7 @@ impl RequestManager {
             init_state,
             current_request_roles,
             schema_id,
+            governance_data,
         ) = self.build_validation_data(ctx, eval, appro_data).await?;
 
         if signers.is_empty() {
@@ -660,6 +754,9 @@ impl RequestManager {
         )
         .await?;
 
+        let distribution_plan =
+            self.build_distribution_plan(&vali_req, governance_data.as_ref())?;
+
         let signed_validation_req: Signed<ValidationReq> =
             Signed::from_parts(vali_req, signature);
 
@@ -671,6 +768,7 @@ impl RequestManager {
                     init_state: init_state.clone(),
                     current_request_roles: current_request_roles.clone(),
                     signers: signers.clone(),
+                    distribution_plan: distribution_plan.clone(),
                 }),
             },
             ctx,
@@ -699,6 +797,7 @@ impl RequestManager {
             Option<ValueWrapper>,
             CurrentRequestRoles,
             SchemaType,
+            Option<GovernanceData>,
         ),
         RequestManagerError,
     > {
@@ -737,6 +836,7 @@ impl RequestManager {
                         },
                     },
                     SchemaType::Governance,
+                    None,
                 ))
             } else {
                 let governance_data =
@@ -772,6 +872,7 @@ impl RequestManager {
                         },
                     },
                     create.schema_id.clone(),
+                    Some(governance_data),
                 ))
             }
         } else {
@@ -826,6 +927,15 @@ impl RequestManager {
             };
 
             let (metadata, last_ledger_event) = last_ledger_event;
+
+            if gov_version != governance_data.version {
+                return Err(RequestManagerError::GovernanceVersionChanged {
+                    governance_id: metadata.governance_id.clone(),
+                    expected: gov_version,
+                    current: governance_data.version,
+                });
+            }
+
             let sn = if let Some(sn) = sn {
                 sn
             } else {
@@ -908,6 +1018,7 @@ impl RequestManager {
                 None,
                 current_request_roles,
                 schema_id,
+                Some(governance_data),
             ))
         }
     }
@@ -968,6 +1079,7 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
         val_req: ValidationReq,
         val_res: ValidationData,
+        distribution_plan: Vec<DistributionPlanEntry>,
     ) -> Result<Ledger, RequestManagerError> {
         let Some((hash, ..)) = self.helpers else {
             return Err(RequestManagerError::HelpersNotInitialized);
@@ -1040,6 +1152,7 @@ impl RequestManager {
             RequestManagerEvent::UpdateState {
                 state: Box::new(RequestManagerState::UpdateSubject {
                     ledger: ledger.clone(),
+                    distribution_plan: distribution_plan.clone(),
                 }),
             },
             ctx,
@@ -1053,6 +1166,7 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
         ledger: Ledger,
+        distribution_plan: Vec<DistributionPlanEntry>,
     ) -> Result<(), RequestManagerError> {
         if ledger.get_event_request_type().is_create_event() {
             if let Err(e) = create_subject(ctx, ledger.clone()).await {
@@ -1079,7 +1193,10 @@ impl RequestManager {
 
         self.on_event(
             RequestManagerEvent::UpdateState {
-                state: Box::new(RequestManagerState::Distribution { ledger }),
+                state: Box::new(RequestManagerState::Distribution {
+                    ledger,
+                    distribution_plan,
+                }),
             },
             ctx,
         )
@@ -1092,21 +1209,34 @@ impl RequestManager {
         &mut self,
         ctx: &mut ActorContext<Self>,
         ledger: Ledger,
+        mut distribution_plan: Vec<DistributionPlanEntry>,
     ) -> Result<bool, RequestManagerError> {
-        let witnesses = self
-            .build_distribution_data(
-                ctx,
-                ledger.ledger_seal_signature.signer.clone(),
-            )
-            .await?;
-
-        let Some(mut witnesses) = witnesses else {
-            return Ok(false);
+        let is_governance = match ledger.get_event_request() {
+            Some(EventRequest::Create(create)) => create.schema_id.is_gov(),
+            Some(_) => self.governance_id.is_none(),
+            None => false,
         };
 
-        witnesses.remove(&self.our_key);
+        if is_governance {
+            let governance_id = ledger.get_subject_id();
+            let governance_data = get_gov(ctx, &governance_id).await?;
+            distribution_plan = governance_data
+                .get_witnesses(WitnessesData::Gov)?
+                .into_iter()
+                .map(|node| DistributionPlanEntry {
+                    node,
+                    mode: DistributionPlanMode::Clear,
+                })
+                .collect();
+        }
 
-        if witnesses.is_empty() {
+        if distribution_plan.is_empty() {
+            return Ok(false);
+        }
+
+        distribution_plan.retain(|entry| entry.node != *self.our_key);
+
+        if distribution_plan.is_empty() {
             warn!(
                 request_id = %self.id,
                 "No witnesses available for distribution"
@@ -1114,72 +1244,15 @@ impl RequestManager {
             return Ok(false);
         }
 
-        self.run_distribution(ctx, witnesses, ledger).await?;
+        self.run_distribution(ctx, distribution_plan, ledger).await?;
 
         Ok(true)
-    }
-
-    async fn build_distribution_data(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        creator: PublicKey,
-    ) -> Result<Option<HashSet<PublicKey>>, RequestManagerError> {
-        let Some(request) = self.request.clone() else {
-            return Err(RequestManagerError::RequestNotSet);
-        };
-
-        let witnesses = if let EventRequest::Create(create) = request.content()
-        {
-            if create.schema_id == SchemaType::Governance {
-                None
-            } else {
-                let governance_data = self.get_governance_data(ctx).await?;
-
-                let witnesses =
-                    governance_data.get_witnesses(WitnessesData::Schema {
-                        creator,
-                        schema_id: create.schema_id.clone(),
-                        namespace: create.namespace.clone(),
-                    })?;
-
-                Some(witnesses)
-            }
-        } else {
-            let data = get_subject_data(ctx, &self.subject_id).await?;
-
-            let Some(data) = data else {
-                return Err(RequestManagerError::SubjectDataNotFound {
-                    subject_id: self.subject_id.to_string(),
-                });
-            };
-
-            let governance_data = self.get_governance_data(ctx).await?;
-
-            let witnesses = match data {
-                SubjectData::Governance { .. } => {
-                    governance_data.get_witnesses(WitnessesData::Gov)?
-                }
-                SubjectData::Tracker {
-                    schema_id,
-                    namespace,
-                    ..
-                } => governance_data.get_witnesses(WitnessesData::Schema {
-                    creator,
-                    schema_id,
-                    namespace: Namespace::from(namespace),
-                })?,
-            };
-
-            Some(witnesses)
-        };
-
-        Ok(witnesses)
     }
 
     async fn run_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        witnesses: HashSet<PublicKey>,
+        distribution_plan: Vec<DistributionPlanEntry>,
         ledger: Ledger,
     ) -> Result<(), RequestManagerError> {
         let Some((.., network)) = self.helpers.clone() else {
@@ -1202,7 +1275,7 @@ impl RequestManager {
         child
             .tell(DistributionMessage::Create {
                 ledger: Box::new(ledger),
-                witnesses,
+                distribution_plan,
             })
             .await?;
 
@@ -1225,10 +1298,25 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
+        let Some(config): Option<ConfigHelper> =
+            ctx.system().get_helper("config").await
+        else {
+            return Err(RequestManagerError::ActorError(
+                ActorError::Helper {
+                    name: "config".to_owned(),
+                    reason: "Not found".to_owned(),
+                },
+            ));
+        };
         let actor = ctx
             .create_child(
                 "reboot",
-                Reboot::new(governance_id.clone(), self.id.clone()),
+                Reboot::new(
+                    governance_id.clone(),
+                    self.id.clone(),
+                    config.sync_reboot.stability_check_interval_secs,
+                    config.sync_reboot.stability_check_max_retries,
+                ),
             )
             .await?;
 
@@ -1306,6 +1394,7 @@ impl RequestManager {
                         info,
                         message: ActorMessage::DistributionLedgerReq {
                             actual_sn: Some(gov_sn),
+                            target_sn: None,
                             subject_id: governance_id.clone(),
                         },
                     },
@@ -1323,6 +1412,11 @@ impl RequestManager {
                 })
                 .await?;
         } else {
+            let Some(config): Option<ConfigHelper> =
+                ctx.system().get_helper("config").await
+            else {
+                return Ok(());
+            };
             let data = UpdateNew {
                 network,
                 subject_id: governance_id.clone(),
@@ -1332,6 +1426,17 @@ impl RequestManager {
                     subject_id: self.subject_id.clone(),
                     id: self.id.clone(),
                 },
+                subject_kind_hint: Some(
+                    crate::update::UpdateSubjectKind::Governance,
+                ),
+                round_retry_interval_secs: config
+                    .sync_update
+                    .round_retry_interval_secs,
+                max_round_retries: config.sync_update.max_round_retries,
+                witness_retry_count: config.sync_update.witness_retry_count,
+                witness_retry_interval_secs: config
+                    .sync_update
+                    .witness_retry_interval_secs,
             };
 
             let updater = Update::new(data);
@@ -1416,6 +1521,10 @@ impl RequestManager {
             | RequestManagerError::NoValidatorsAvailable {
                 governance_id,
                 ..
+            }
+            | RequestManagerError::GovernanceVersionChanged {
+                governance_id,
+                ..
             } => {
                 if let Err(e) = self.send_reboot(ctx, governance_id).await {
                     emit_fail(ctx, e).await;
@@ -1481,6 +1590,15 @@ impl RequestManager {
         reboot_type: RebootType,
         governance_id: DigestIdentifier,
     ) -> Result<(), RequestManagerError> {
+        let Some(config): Option<ConfigHelper> =
+            ctx.system().get_helper("config").await
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            }
+            .into());
+        };
         self.start_phase_metrics("reboot");
         self.on_event(
             RequestManagerEvent::UpdateState {
@@ -1519,12 +1637,10 @@ impl RequestManager {
                 info!("Launching Diff reboot {}", self.id);
                 self.retry_diff += 1;
 
-                let seconds = match self.retry_diff {
-                    1 => 10,
-                    2 => 20,
-                    3 => 30,
-                    _ => 60,
-                };
+                let seconds = Self::retry_seconds_for_attempt(
+                    &config.sync_reboot.diff_retry_schedule_secs,
+                    self.retry_diff,
+                );
 
                 info!(
                     "Launching Diff reboot {}, try: {}, seconds: {}",
@@ -1556,21 +1672,10 @@ impl RequestManager {
             RebootType::TimeOut => {
                 self.retry_timeout += 1;
 
-                #[cfg(not(any(test, feature = "test")))]
-                let seconds = match self.retry_timeout {
-                    1 => 30,
-                    2 => 60,
-                    3 => 120,
-                    _ => 300,
-                };
-
-                #[cfg(any(test, feature = "test"))]
-                let seconds = match self.retry_timeout {
-                    1 => 5,
-                    2 => 5,
-                    3 => 5,
-                    _ => 5,
-                };
+                let seconds = Self::retry_seconds_for_attempt(
+                    &config.sync_reboot.timeout_retry_schedule_secs,
+                    self.retry_timeout,
+                );
 
                 info!(
                     "Launching TimeOut reboot {}, try: {}, seconds: {}",
@@ -2250,6 +2355,7 @@ impl Handler<Self> for RequestManager {
                         init_state,
                         current_request_roles,
                         signers,
+                        distribution_plan: _,
                     } => {
                         if let Err(e) = self
                             .run_validation(
@@ -2273,9 +2379,17 @@ impl Handler<Self> for RequestManager {
                         return Ok(())
                         };
                     }
-                    RequestManagerState::UpdateSubject { ledger } => {
+                    RequestManagerState::UpdateSubject {
+                        ledger,
+                        distribution_plan,
+                    } => {
                         if let Err(e) =
-                            self.update_subject(ctx, ledger.clone()).await
+                            self.update_subject(
+                                ctx,
+                                ledger.clone(),
+                                distribution_plan.clone(),
+                            )
+                            .await
                         {
                             error!(
                                 msg_type = "Run",
@@ -2288,7 +2402,10 @@ impl Handler<Self> for RequestManager {
                         return Ok(())
                         };
 
-                        match self.build_distribution(ctx, ledger).await {
+                        match self
+                            .build_distribution(ctx, ledger, distribution_plan)
+                            .await
+                        {
                             Ok(in_distribution) => {
                                 if !in_distribution
                                     && let Err(e) =
@@ -2318,8 +2435,14 @@ impl Handler<Self> for RequestManager {
                             }
                         };
                     }
-                    RequestManagerState::Distribution { ledger } => {
-                        match self.build_distribution(ctx, ledger).await {
+                    RequestManagerState::Distribution {
+                        ledger,
+                        distribution_plan,
+                    } => {
+                        match self
+                            .build_distribution(ctx, ledger, distribution_plan)
+                            .await
+                        {
                             Ok(in_distribution) => {
                                 if !in_distribution
                                     && let Err(e) =
@@ -2587,8 +2710,40 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
+                    let distribution_plan = match &self.state {
+                        RequestManagerState::Validation {
+                            distribution_plan,
+                            ..
+                        } => distribution_plan.clone(),
+                        _ => {
+                            error!(
+                                msg_type = "ValidationRes",
+                                request_id = %self.id,
+                                state = ?self.state,
+                                "Invalid state for validation response"
+                            );
+                            self.match_error(
+                                ctx,
+                                RequestManagerError::InvalidRequestState {
+                                    expected: "Validation",
+                                    got: "Other",
+                                },
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                    };
+
                     let signed_ledger =
-                        match self.build_ledger(ctx, *val_req, val_res).await {
+                        match self
+                            .build_ledger(
+                                ctx,
+                                *val_req,
+                                val_res,
+                                distribution_plan.clone(),
+                            )
+                            .await
+                        {
                             Ok(signed_ledger) => signed_ledger,
                             Err(e) => {
                                 error!(
@@ -2603,7 +2758,13 @@ impl Handler<Self> for RequestManager {
                         };
 
                     if let Err(e) =
-                        self.update_subject(ctx, signed_ledger.clone()).await
+                        self
+                            .update_subject(
+                                ctx,
+                                signed_ledger.clone(),
+                                distribution_plan.clone(),
+                            )
+                            .await
                     {
                         error!(
                             msg_type = "ValidationRes",
@@ -2615,7 +2776,14 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    match self.build_distribution(ctx, signed_ledger).await {
+                    match self
+                        .build_distribution(
+                            ctx,
+                            signed_ledger,
+                            distribution_plan,
+                        )
+                        .await
+                    {
                         Ok(in_distribution) => {
                             if !in_distribution
                                 && let Err(e) = self.finish_request(ctx).await

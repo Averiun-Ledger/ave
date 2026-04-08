@@ -188,6 +188,15 @@ pub enum RequestManagerError {
         governance_id: DigestIdentifier,
     },
 
+    #[error(
+        "governance version changed for '{governance_id}': expected {expected}, got {current}"
+    )]
+    GovernanceVersionChanged {
+        governance_id: DigestIdentifier,
+        expected: u64,
+        current: u64,
+    },
+
     // Governance errors
     #[error("governance error: {0}")]
     Governance(#[from] GovernanceError),

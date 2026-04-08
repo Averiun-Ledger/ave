@@ -305,8 +305,6 @@ impl Api {
             e
         })?;
 
-        config.network.safe_mode = config.safe_mode;
-
         let newtork_monitor = Monitor::default();
         let newtork_monitor_actor = system
             .create_root_actor("network_monitor", newtork_monitor)
@@ -326,6 +324,7 @@ impl Api {
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,
             config.network.clone(),
+            config.safe_mode,
             Some(newtork_monitor_actor.clone()),
             graceful_token.clone(),
             crash_token.clone(),
@@ -363,6 +362,7 @@ impl Api {
                     key_pair: keys.clone(),
                     hash: config.hash_algorithm,
                     is_service: config.is_service,
+                    ledger_batch_size: config.sync.ledger_batch_size as u64,
                     public_key: public_key.clone(),
                 }),
             )

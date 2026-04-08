@@ -167,6 +167,7 @@ pub async fn update_ledger_network(
     let subject_string = data.subject_id.to_string();
     let request = ActorMessage::DistributionLedgerReq {
         actual_sn: Some(data.sn),
+        target_sn: None,
         subject_id: data.subject_id,
     };
 

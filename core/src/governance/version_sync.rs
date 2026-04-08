@@ -154,6 +154,7 @@ impl GovernanceVersionSync {
                     info,
                     message: ActorMessage::DistributionLedgerReq {
                         actual_sn: Some(self.local_version),
+                        target_sn: None,
                         subject_id: self.governance_id.clone(),
                     },
                 },
