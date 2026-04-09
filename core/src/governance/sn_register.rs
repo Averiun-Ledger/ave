@@ -253,8 +253,8 @@ impl Handler<Self> for SnRegister {
                     let mut prev_end_sn: Option<u64> = None;
 
                     for (gov_version, end_sn) in register.iter() {
-                        let start_sn =
-                            prev_end_sn.map_or(0, |prev| prev.saturating_add(1));
+                        let start_sn = prev_end_sn
+                            .map_or(0, |prev| prev.saturating_add(1));
                         let range_from = start_sn.max(from_sn);
                         let range_to = (*end_sn).min(to_sn);
 

@@ -280,12 +280,12 @@ impl RequestManager {
         let mut plan: HashMap<PublicKey, DistributionPlanMode> = HashMap::new();
 
         match validation_req {
-            ValidationReq::Create {
-                event_request,
-                ..
-            } => {
-                let EventRequest::Create(create) = event_request.content() else {
-                    return Err(RequestManagerError::InvalidEventRequestForEvaluation);
+            ValidationReq::Create { event_request, .. } => {
+                let EventRequest::Create(create) = event_request.content()
+                else {
+                    return Err(
+                        RequestManagerError::InvalidEventRequestForEvaluation,
+                    );
                 };
 
                 if create.schema_id.is_gov() {
@@ -301,13 +301,12 @@ impl RequestManager {
                         },
                     ));
                 };
-                let witnesses = governance_data.get_witnesses(
-                    WitnessesData::Schema {
+                let witnesses =
+                    governance_data.get_witnesses(WitnessesData::Schema {
                         creator: event_request.signature().signer.clone(),
                         schema_id: create.schema_id.clone(),
                         namespace: create.namespace.clone(),
-                    },
-                )?;
+                    })?;
 
                 for witness in witnesses {
                     plan.insert(witness, DistributionPlanMode::Clear);
@@ -506,7 +505,9 @@ impl RequestManager {
                     request_type = ?request_type,
                     "Invalid event request type for evaluation state"
                 );
-                return Err(RequestManagerError::InvalidEventRequestForEvaluation);
+                return Err(
+                    RequestManagerError::InvalidEventRequestForEvaluation,
+                );
             }
         };
 
@@ -528,9 +529,11 @@ impl RequestManager {
             governance_id: metadata.governance_id.clone(),
         };
 
-        let signature =
-            get_sign(ctx, SignTypesNode::EvaluationReq(Box::new(eval_req.clone())))
-                .await?;
+        let signature = get_sign(
+            ctx,
+            SignTypesNode::EvaluationReq(Box::new(eval_req.clone())),
+        )
+        .await?;
 
         let signed_evaluation_req: Signed<EvaluationReq> =
             Signed::from_parts(eval_req, signature);
@@ -1244,7 +1247,8 @@ impl RequestManager {
             return Ok(false);
         }
 
-        self.run_distribution(ctx, distribution_plan, ledger).await?;
+        self.run_distribution(ctx, distribution_plan, ledger)
+            .await?;
 
         Ok(true)
     }
@@ -1301,12 +1305,10 @@ impl RequestManager {
         let Some(config): Option<ConfigHelper> =
             ctx.system().get_helper("config").await
         else {
-            return Err(RequestManagerError::ActorError(
-                ActorError::Helper {
-                    name: "config".to_owned(),
-                    reason: "Not found".to_owned(),
-                },
-            ));
+            return Err(RequestManagerError::ActorError(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            }));
         };
         let actor = ctx
             .create_child(
@@ -2291,7 +2293,7 @@ impl Handler<Self> for RequestManager {
                                 "Failed to execute command"
                             );
                             self.match_error(ctx, e).await;
-                        return Ok(())
+                            return Ok(());
                         };
                     }
                     RequestManagerState::Evaluation => {
@@ -2304,14 +2306,11 @@ impl Handler<Self> for RequestManager {
                                 "Failed to build evaluation"
                             );
                             self.match_error(ctx, e).await;
-                        return Ok(())
+                            return Ok(());
                         }
                     }
 
-                    RequestManagerState::Approval {
-                        eval_req,
-                        eval_res,
-                    } => {
+                    RequestManagerState::Approval { eval_req, eval_res } => {
                         let Some(evaluator_res) =
                             eval_res.evaluator_response_ok()
                         else {
@@ -2335,19 +2334,19 @@ impl Handler<Self> for RequestManager {
                         };
 
                         if let Err(e) = self
-                                .build_approval(ctx, eval_req, evaluator_res)
-                                .await
-                            {
-                                error!(
-                                    msg_type = "Run",
-                                    request_id = %self.id,
-                                    state = "Approval",
-                                    error = %e,
-                                    "Failed to build approval"
-                                );
-                                self.match_error(ctx, e).await;
-                        return Ok(())
-                            }
+                            .build_approval(ctx, eval_req, evaluator_res)
+                            .await
+                        {
+                            error!(
+                                msg_type = "Run",
+                                request_id = %self.id,
+                                state = "Approval",
+                                error = %e,
+                                "Failed to build approval"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        }
                     }
                     RequestManagerState::Validation {
                         request,
@@ -2376,15 +2375,15 @@ impl Handler<Self> for RequestManager {
                                 "Failed to run validation"
                             );
                             self.match_error(ctx, e).await;
-                        return Ok(())
+                            return Ok(());
                         };
                     }
                     RequestManagerState::UpdateSubject {
                         ledger,
                         distribution_plan,
                     } => {
-                        if let Err(e) =
-                            self.update_subject(
+                        if let Err(e) = self
+                            .update_subject(
                                 ctx,
                                 ledger.clone(),
                                 distribution_plan.clone(),
@@ -2399,7 +2398,7 @@ impl Handler<Self> for RequestManager {
                                 "Failed to update subject"
                             );
                             self.match_error(ctx, e).await;
-                        return Ok(())
+                            return Ok(());
                         };
 
                         match self
@@ -2410,16 +2409,16 @@ impl Handler<Self> for RequestManager {
                                 if !in_distribution
                                     && let Err(e) =
                                         self.finish_request(ctx).await
-                                    {
-                                        error!(
-                                            msg_type = "Run",
-                                            request_id = %self.id,
-                                            state = "UpdateSubject",
-                                            error = %e,
-                                            "Failed to finish request after build distribution"
-                                        );
-                                        self.match_error(ctx, e).await;
-                        return Ok(())
+                                {
+                                    error!(
+                                        msg_type = "Run",
+                                        request_id = %self.id,
+                                        state = "UpdateSubject",
+                                        error = %e,
+                                        "Failed to finish request after build distribution"
+                                    );
+                                    self.match_error(ctx, e).await;
+                                    return Ok(());
                                 }
                             }
                             Err(e) => {
@@ -2431,7 +2430,7 @@ impl Handler<Self> for RequestManager {
                                     "Failed to build distribution"
                                 );
                                 self.match_error(ctx, e).await;
-                        return Ok(())
+                                return Ok(());
                             }
                         };
                     }
@@ -2447,17 +2446,17 @@ impl Handler<Self> for RequestManager {
                                 if !in_distribution
                                     && let Err(e) =
                                         self.finish_request(ctx).await
-                                    {
-                                        error!(
-                                            msg_type = "Run",
-                                            request_id = %self.id,
-                                            state = "Distribution",
-                                            error = %e,
-                                            "Failed to finish request after build distribution"
-                                        );
-                                        self.match_error(ctx, e).await;
-                        return Ok(())
-                                    }
+                                {
+                                    error!(
+                                        msg_type = "Run",
+                                        request_id = %self.id,
+                                        state = "Distribution",
+                                        error = %e,
+                                        "Failed to finish request after build distribution"
+                                    );
+                                    self.match_error(ctx, e).await;
+                                    return Ok(());
+                                }
                             }
                             Err(e) => {
                                 error!(
@@ -2468,7 +2467,7 @@ impl Handler<Self> for RequestManager {
                                     "Failed to build distribution"
                                 );
                                 self.match_error(ctx, e).await;
-                        return Ok(())
+                                return Ok(());
                             }
                         };
                     }
@@ -2482,7 +2481,7 @@ impl Handler<Self> for RequestManager {
                                 "Failed to end request"
                             );
                             self.match_error(ctx, e).await;
-                            return Ok(())
+                            return Ok(());
                         }
                     }
                 };
@@ -2734,37 +2733,35 @@ impl Handler<Self> for RequestManager {
                         }
                     };
 
-                    let signed_ledger =
-                        match self
-                            .build_ledger(
-                                ctx,
-                                *val_req,
-                                val_res,
-                                distribution_plan.clone(),
-                            )
-                            .await
-                        {
-                            Ok(signed_ledger) => signed_ledger,
-                            Err(e) => {
-                                error!(
-                                    msg_type = "ValidationRes",
-                                    request_id = %self.id,
-                                    error = %e,
-                                    "Failed to build ledger"
-                                );
-                                self.match_error(ctx, e).await;
-                                return Ok(());
-                            }
-                        };
+                    let signed_ledger = match self
+                        .build_ledger(
+                            ctx,
+                            *val_req,
+                            val_res,
+                            distribution_plan.clone(),
+                        )
+                        .await
+                    {
+                        Ok(signed_ledger) => signed_ledger,
+                        Err(e) => {
+                            error!(
+                                msg_type = "ValidationRes",
+                                request_id = %self.id,
+                                error = %e,
+                                "Failed to build ledger"
+                            );
+                            self.match_error(ctx, e).await;
+                            return Ok(());
+                        }
+                    };
 
-                    if let Err(e) =
-                        self
-                            .update_subject(
-                                ctx,
-                                signed_ledger.clone(),
-                                distribution_plan.clone(),
-                            )
-                            .await
+                    if let Err(e) = self
+                        .update_subject(
+                            ctx,
+                            signed_ledger.clone(),
+                            distribution_plan.clone(),
+                        )
+                        .await
                     {
                         error!(
                             msg_type = "ValidationRes",

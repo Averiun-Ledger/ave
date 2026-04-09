@@ -139,9 +139,8 @@ fn deserialize_unique_viewpoints<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let viewpoints = <Vec<String> as serde::Deserialize>::deserialize(
-        deserializer,
-    )?;
+    let viewpoints =
+        <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
     let mut unique: BTreeSet<String> = BTreeSet::new();
 
     for viewpoint in viewpoints {

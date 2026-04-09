@@ -184,10 +184,9 @@ impl Handler<Self> for Distribution {
                     .collect();
                 self.subject_id = ledger.get_subject_id();
                 let clear_ledger = (*ledger).clone();
-                let opaque_ledger = if distribution_plan
-                    .iter()
-                    .any(|entry| matches!(entry.mode, DistributionPlanMode::Opaque))
-                {
+                let opaque_ledger = if distribution_plan.iter().any(|entry| {
+                    matches!(entry.mode, DistributionPlanMode::Opaque)
+                }) {
                     Some(Self::project_ledger_for_mode(
                         &clear_ledger,
                         &DistributionPlanMode::Opaque,
@@ -217,12 +216,7 @@ impl Handler<Self> for Distribution {
                             })?,
                     };
 
-                    self.create_distributor(
-                        ctx,
-                        ledger,
-                        entry.node,
-                    )
-                    .await?
+                    self.create_distributor(ctx, ledger, entry.node).await?
                 }
 
                 debug!(

@@ -239,7 +239,9 @@ impl Protocols {
                         }
                     },
                     evaluation: EvaluationDataOpaque {
-                        eval_req_signature: evaluation.eval_req_signature.clone(),
+                        eval_req_signature: evaluation
+                            .eval_req_signature
+                            .clone(),
                         eval_req_hash: evaluation.eval_req_hash.clone(),
                         evaluators_signatures: evaluation
                             .evaluators_signatures
@@ -270,9 +272,7 @@ impl Protocols {
         }
     }
 
-    pub fn buidl_event_db(
-        &self,
-    ) -> (RequestEventDB, DigestIdentifier, u64) {
+    pub fn buidl_event_db(&self) -> (RequestEventDB, DigestIdentifier, u64) {
         match self {
             Self::Create {
                 validation,
@@ -340,9 +340,7 @@ impl Protocols {
                 )
             }
             Self::TrackerFactOpaque {
-                evaluation,
-                data,
-                ..
+                evaluation, data, ..
             } => (
                 RequestEventDB::TrackerFactOpaque {
                     viewpoints: evaluation.viewpoints.iter().cloned().collect(),
@@ -392,7 +390,7 @@ impl Protocols {
                         approval_success,
                     },
                     event_request.content().get_subject_id(),
-                    event_request.signature().timestamp.as_nanos()
+                    event_request.signature().timestamp.as_nanos(),
                 )
             }
             Self::Transfer {
@@ -421,13 +419,13 @@ impl Protocols {
                         evaluation_error,
                     },
                     event_request.content().get_subject_id(),
-                    event_request.signature().timestamp.as_nanos()
+                    event_request.signature().timestamp.as_nanos(),
                 )
             }
             Self::TrackerConfirm { event_request, .. } => (
                 RequestEventDB::TrackerConfirm,
                 event_request.content().get_subject_id(),
-                event_request.signature().timestamp.as_nanos()
+                event_request.signature().timestamp.as_nanos(),
             ),
             Self::GovConfirm {
                 evaluation,
@@ -456,18 +454,18 @@ impl Protocols {
                         evaluation_response,
                     },
                     event_request.content().get_subject_id(),
-                    event_request.signature().timestamp.as_nanos()
+                    event_request.signature().timestamp.as_nanos(),
                 )
             }
             Self::Reject { event_request, .. } => (
                 RequestEventDB::Reject,
                 event_request.content().get_subject_id(),
-                event_request.signature().timestamp.as_nanos()
+                event_request.signature().timestamp.as_nanos(),
             ),
             Self::EOL { event_request, .. } => (
                 RequestEventDB::EOL,
                 event_request.content().get_subject_id(),
-                event_request.signature().timestamp.as_nanos()
+                event_request.signature().timestamp.as_nanos(),
             ),
         }
     }
@@ -739,16 +737,17 @@ impl Ledger {
 
     pub fn get_create_event(&self) -> Option<CreateRequest> {
         match &self.protocols {
-            Protocols::Create { event_request,  ..} => {
-                if let EventRequest::Create(create_request) = &event_request.content() {
+            Protocols::Create { event_request, .. } => {
+                if let EventRequest::Create(create_request) =
+                    &event_request.content()
+                {
                     Some(create_request.clone())
                 } else {
                     None
                 }
             }
-            _ => None
+            _ => None,
         }
-        
     }
 
     pub const fn is_create_event(&self) -> bool {
@@ -757,7 +756,10 @@ impl Ledger {
 
     pub fn get_issuer_event_request_timestamp(&self) -> (String, u64) {
         match &self.protocols {
-            Protocols::TrackerFactOpaque { data , .. } => (data.signer.to_string(), data.event_request_timestamp.as_nanos()),
+            Protocols::TrackerFactOpaque { data, .. } => (
+                data.signer.to_string(),
+                data.event_request_timestamp.as_nanos(),
+            ),
             Protocols::Create { event_request, .. }
             | Protocols::TrackerFactFull { event_request, .. }
             | Protocols::GovFact { event_request, .. }
@@ -806,9 +808,7 @@ impl Ledger {
 
     pub fn get_event_request(&self) -> Option<EventRequest> {
         match &self.protocols {
-            Protocols::TrackerFactOpaque { .. } => {
-                None
-            }
+            Protocols::TrackerFactOpaque { .. } => None,
             Protocols::Create { event_request, .. }
             | Protocols::TrackerFactFull { event_request, .. }
             | Protocols::GovFact { event_request, .. }

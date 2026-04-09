@@ -6,9 +6,7 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::{
-    DataToSink, DataToSinkEvent,
-    identity::TimeStamp,
-    response::SubjectDB,
+    DataToSink, DataToSinkEvent, identity::TimeStamp, response::SubjectDB,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -78,11 +76,10 @@ impl From<String> for SinkTypes {
 impl SinkDataMessage {
     pub fn get_subject_schema(&self) -> (String, String) {
         match self {
-            Self::UpdateState(metadata) => (
-                metadata.subject_id.to_string(),
-                metadata.schema_id.clone(),
-            ),
-            Self::Event { event, .. } => event.get_subject_schema()
+            Self::UpdateState(metadata) => {
+                (metadata.subject_id.to_string(), metadata.schema_id.clone())
+            }
+            Self::Event { event, .. } => event.get_subject_schema(),
         }
     }
 }
@@ -191,10 +188,9 @@ impl Handler<Self> for SinkData {
             SinkDataEvent::Event(data_to_sink) => {
                 data_to_sink.payload.get_subject_schema()
             }
-            SinkDataEvent::State(metadata) => (
-                metadata.subject_id.to_string(),
-                metadata.schema_id.clone(),
-            ),
+            SinkDataEvent::State(metadata) => {
+                (metadata.subject_id.to_string(), metadata.schema_id.clone())
+            }
         };
         if let Err(e) = ctx.publish_event(event.clone()).await {
             error!(

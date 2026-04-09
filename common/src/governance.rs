@@ -534,10 +534,8 @@ impl<'de> Deserialize<'de> for RoleCreator {
             quantity,
         } = RoleCreatorDef::deserialize(deserializer)?;
 
-        let witnesses =
-            witnesses.map_or_else(default_creator_witnesses, |values| {
-                values.into()
-            });
+        let witnesses = witnesses
+            .map_or_else(default_creator_witnesses, |values| values.into());
 
         Ok(Self {
             name,
@@ -643,7 +641,10 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(schema.viewpoints, vec!["agua".to_owned(), "agua".to_owned()]);
+        assert_eq!(
+            schema.viewpoints,
+            vec!["agua".to_owned(), "agua".to_owned()]
+        );
     }
 
     #[test]

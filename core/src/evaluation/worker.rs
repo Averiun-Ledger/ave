@@ -5,7 +5,8 @@ use crate::{
         compiler::{CompilerResponse, error::CompilerError},
         request::EvaluateData,
         response::{
-            EvalRunnerError, EvaluationResult, EvaluatorError, EvaluatorResponse as EvalRes
+            EvalRunnerError, EvaluationResult, EvaluatorError,
+            EvaluatorResponse as EvalRes,
         },
         runner::types::EvaluateInfo,
     },
@@ -401,7 +402,8 @@ impl EvalWorker {
         } else {
             match self.evaluate(ctx, evaluation_req.content()).await {
                 Ok(evaluation) => {
-                    self.build_response(ctx, evaluation, evaluation_req.clone()).await?
+                    self.build_response(ctx, evaluation, evaluation_req.clone())
+                        .await?
                 }
                 Err(error) => {
                     if let EvaluatorError::InternalError(..) = &error {
@@ -411,7 +413,8 @@ impl EvalWorker {
                             ctx,
                             error,
                             evaluation_req.clone(),
-                        ).await?
+                        )
+                        .await?
                     }
                 }
             }
@@ -605,7 +608,12 @@ impl Handler<Self> for EvalWorker {
                     self.check_data(&evaluation_req)
                 {
                     match self
-                        .build_response_error(ctx, error, evaluation_req.clone()).await
+                        .build_response_error(
+                            ctx,
+                            error,
+                            evaluation_req.clone(),
+                        )
+                        .await
                     {
                         Ok(eval) => eval,
                         Err(e) => {

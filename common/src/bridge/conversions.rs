@@ -1,7 +1,7 @@
 //! Conversions between bridge models and internal domain models.
 
-use std::str::FromStr;
 use std::collections::BTreeSet;
+use std::str::FromStr;
 
 use ave_identity::{DigestIdentifier, PublicKey, Signed};
 

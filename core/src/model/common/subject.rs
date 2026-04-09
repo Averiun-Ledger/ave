@@ -375,8 +375,9 @@ where
 {
     let mut should_finish = true;
     if ledger.get_event_request_type().is_create_event()
-        && let EventRequest::Create(request) =
-            ledger.get_event_request().ok_or_else(|| ActorError::Functional {
+        && let EventRequest::Create(request) = ledger
+            .get_event_request()
+            .ok_or_else(|| ActorError::Functional {
                 description: "Can not obtain create event request".to_string(),
             })?
     {
@@ -474,11 +475,11 @@ where
     };
 
     match subject_data {
-        SubjectData::Tracker { governance_id, .. } => Ok(
-            get_tracker_sn_owner(ctx, &governance_id, subject_id)
+        SubjectData::Tracker { governance_id, .. } => {
+            Ok(get_tracker_sn_owner(ctx, &governance_id, subject_id)
                 .await?
-                .map(|(_, sn)| sn),
-        ),
+                .map(|(_, sn)| sn))
+        }
         SubjectData::Governance { .. } => {
             Ok(Some(get_gov_sn(ctx, subject_id).await?))
         }
@@ -493,7 +494,10 @@ pub async fn get_tracker_window<A>(
     namespace: String,
     schema_id: ave_common::SchemaType,
     actual_sn: Option<u64>,
-) -> Result<(Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>), ActorError>
+) -> Result<
+    (Option<u64>, Option<u64>, bool, Vec<TrackerDeliveryRange>),
+    ActorError,
+>
 where
     A: Actor + Handler<A>,
 {

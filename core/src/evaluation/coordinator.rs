@@ -104,9 +104,8 @@ impl EvalCoordinator {
             );
 
             return Err(ActorError::Functional {
-                description:
-                    "Evaluation result hash signature signer mismatch"
-                        .to_string(),
+                description: "Evaluation result hash signature signer mismatch"
+                    .to_string(),
             });
         }
 
@@ -289,13 +288,13 @@ impl Handler<Self> for EvalCoordinator {
                 sender,
             } => {
                 if request_id == self.request_id && version == self.version {
-                        if self.node_key != sender {
-                            error!(
-                                msg_type = "NetworkResponse",
-                                expected_node = %self.node_key,
-                                network_sender = %sender,
-                                "Evaluation response sender mismatch"
-                            );
+                    if self.node_key != sender {
+                        error!(
+                            msg_type = "NetworkResponse",
+                            expected_node = %self.node_key,
+                            network_sender = %sender,
+                            "Evaluation response sender mismatch"
+                        );
                         return Err(ActorError::Functional {
                             description:
                                 "We received an evaluation response from an unexpected sender"

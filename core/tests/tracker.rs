@@ -284,9 +284,10 @@ async fn test_issuer_any() {
         })
     );
 
-    let state = get_subject(owner_governance, subject_id_1.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, subject_id_1.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -304,7 +305,6 @@ async fn test_issuer_any() {
             "one": 100, "three": 0, "two": 0
         })
     );
-
 }
 
 #[test(tokio::test)]
@@ -782,9 +782,10 @@ async fn test_namespace_in_role_1() {
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, subject_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -1041,9 +1042,10 @@ async fn test_namespace_in_role_2() {
         .await
         .unwrap();
 
-    let state = get_subject(owner_governance, subject_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -1577,7 +1579,6 @@ async fn test_subject_transfer_event_2() {
         .await
         .unwrap();
 
-
     let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
     assert!(transfer_data.is_empty());
 
@@ -2034,9 +2035,10 @@ async fn test_subject_transfer_event_3() {
         })
     );
 
-    let state = get_subject(owner_governance, subject_id_1.clone(), Some(4), true)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(4), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, subject_id_1.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -2073,7 +2075,6 @@ async fn test_subject_transfer_event_3() {
             "one": 100, "three": 0, "two": 0
         })
     );
-
 }
 
 #[test(tokio::test)]
@@ -2589,7 +2590,6 @@ async fn test_dynamic_witnesses_2() {
         })
     );
 
-    
     let json = json!({
         "roles": {
             "schema": [
@@ -2623,16 +2623,10 @@ async fn test_dynamic_witnesses_2() {
         .await
         .unwrap();
 
-    let state = creator
-        .get_subject_state(subject_id.clone())
-        .await
-        .unwrap();
+    let state = creator.get_subject_state(subject_id.clone()).await.unwrap();
     assert_eq!(state.sn, 2);
 
-    let state = witness
-        .get_subject_state(subject_id.clone())
-        .await
-        .unwrap();
+    let state = witness.get_subject_state(subject_id.clone()).await.unwrap();
     assert_eq!(state.sn, 1);
 
     let state = new_witness
@@ -3523,9 +3517,10 @@ async fn test_500_events() {
         let _response = owner_governance.own_request(request).await.unwrap();
     }
 
-    let state = get_subject(owner_governance, subject_id_1.clone(), Some(500), false)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(500), false)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, subject_id_1.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
     assert_eq!(state.genesis_gov_version, 1);
@@ -3680,9 +3675,10 @@ async fn test_subj_no_all_validators() {
     });
     let _response = owner_governance.own_request(request).await.unwrap();
 
-    let state = get_subject(owner_governance, subject_id_1.clone(), Some(1), false)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(1), false)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, subject_id_1.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -3992,9 +3988,10 @@ async fn test_subj_no_all_evaluators() {
     });
     let _response = owner_governance.own_request(request).await.unwrap();
 
-    let state = get_subject(owner_governance, subject_id_1.clone(), Some(1), false)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(1), false)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, subject_id_1.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -4156,25 +4153,30 @@ async fn test_infinty_creations() {
         .await
         .unwrap();
 
-    let _state = get_subject(owner_governance, subject_id_1.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(owner_governance, subject_id_1.clone(), Some(0), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(owner_governance, subject_id_2.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(owner_governance, subject_id_2.clone(), Some(0), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(owner_governance, subject_id_3.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(owner_governance, subject_id_3.clone(), Some(0), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(owner_governance, subject_id_4.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(owner_governance, subject_id_4.clone(), Some(0), true)
+            .await
+            .unwrap();
 
-    let _state = get_subject(owner_governance, subject_id_5.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(owner_governance, subject_id_5.clone(), Some(0), true)
+            .await
+            .unwrap();
 }
 
 #[test(tokio::test)]
@@ -4451,7 +4453,9 @@ async fn test_tracker_fact_viewpoints_accept_valid_values() {
         viewpoints: BTreeSet::new(),
     });
     let response = owner_governance.own_request(request).await.unwrap();
-    wait_request(owner_governance, response.request_id).await.unwrap();
+    wait_request(owner_governance, response.request_id)
+        .await
+        .unwrap();
 
     let request = EventRequest::Fact(FactRequest {
         subject_id: subject_id.clone(),
@@ -4463,7 +4467,9 @@ async fn test_tracker_fact_viewpoints_accept_valid_values() {
         viewpoints: BTreeSet::from(["agua".to_owned()]),
     });
     let response = owner_governance.own_request(request).await.unwrap();
-    wait_request(owner_governance, response.request_id).await.unwrap();
+    wait_request(owner_governance, response.request_id)
+        .await
+        .unwrap();
 
     let request = EventRequest::Fact(FactRequest {
         subject_id: subject_id.clone(),
@@ -4472,17 +4478,17 @@ async fn test_tracker_fact_viewpoints_accept_valid_values() {
                 "data": 3
             }
         })),
-        viewpoints: BTreeSet::from([
-            "agua".to_owned(),
-            "basura".to_owned(),
-        ]),
+        viewpoints: BTreeSet::from(["agua".to_owned(), "basura".to_owned()]),
     });
     let response = owner_governance.own_request(request).await.unwrap();
-    wait_request(owner_governance, response.request_id).await.unwrap();
-
-    let state = get_subject(owner_governance, subject_id.clone(), Some(3), true)
+    wait_request(owner_governance, response.request_id)
         .await
         .unwrap();
+
+    let state =
+        get_subject(owner_governance, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert_eq!(state.subject_id, subject_id.to_string());
     assert_eq!(state.governance_id, governance_id.to_string());
@@ -4682,16 +4688,21 @@ async fn test_tracker_fact_viewpoints_reject_invalid_values() {
     });
     assert!(owner_governance.own_request(request).await.is_err());
 
-    let state =
-        get_subject(owner_governance, example_subject_id.clone(), Some(0), true)
-            .await
-            .unwrap();
+    let state = get_subject(
+        owner_governance,
+        example_subject_id.clone(),
+        Some(0),
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(state.subject_id, example_subject_id.to_string());
     assert_eq!(state.sn, 0);
 
-    let state = get_subject(owner_governance, plain_subject_id.clone(), Some(0), true)
-        .await
-        .unwrap();
+    let state =
+        get_subject(owner_governance, plain_subject_id.clone(), Some(0), true)
+            .await
+            .unwrap();
     assert_eq!(state.subject_id, plain_subject_id.to_string());
     assert_eq!(state.sn, 0);
 }

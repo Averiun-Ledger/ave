@@ -136,9 +136,7 @@ impl Update {
             .find(|range| range.from_sn <= next_sn && next_sn <= range.to_sn)
     }
 
-    const fn tracker_range_rank(
-        mode: &TrackerDeliveryMode,
-    ) -> u8 {
+    const fn tracker_range_rank(mode: &TrackerDeliveryMode) -> u8 {
         match mode {
             TrackerDeliveryMode::Clear => 1,
             TrackerDeliveryMode::Opaque => 0,
@@ -174,7 +172,11 @@ impl Update {
                     sender.clone(),
                     offer.clone(),
                     target_sn,
-                    (Self::tracker_range_rank(&range.mode), target_sn, offer.sn),
+                    (
+                        Self::tracker_range_rank(&range.mode),
+                        target_sn,
+                        offer.sn,
+                    ),
                 ))
             })
             .max_by_key(|(.., rank)| *rank)
@@ -214,7 +216,8 @@ impl Update {
     ) -> Result<(), ActorError> {
         let children = ctx.system().children(ctx.path()).await;
         for child_path in children {
-            let Ok(child) = ctx.system().get_actor::<Updater>(&child_path).await
+            let Ok(child) =
+                ctx.system().get_actor::<Updater>(&child_path).await
             else {
                 continue;
             };
@@ -635,9 +638,7 @@ impl Handler<Self> for Update {
                             "All witnesses responded, update complete"
                         );
 
-                        if !self.should_retry_auth_rounds()
-                            || !keep_running
-                        {
+                        if !self.should_retry_auth_rounds() || !keep_running {
                             ctx.stop(None).await;
                         }
                     }

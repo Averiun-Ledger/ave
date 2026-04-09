@@ -14,8 +14,7 @@ use ave_common::SchemaType;
 use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
-    RequestEventDB, SubjectDB, SubjsData, TimeRange,
-    TrackerVisibilityStateDB,
+    RequestEventDB, SubjectDB, SubjsData, TimeRange, TrackerVisibilityStateDB,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -1365,8 +1364,7 @@ impl SqliteWriteStore {
         &self,
         event: Ledger,
     ) -> Result<(), DatabaseError> {
-        self.enqueue(WriteCommand::Ledger(Box::new(event)))
-            .await
+        self.enqueue(WriteCommand::Ledger(Box::new(event))).await
     }
 
     async fn persist_subject_state(
@@ -2109,12 +2107,12 @@ fn get_subject_state_from_conn(
                     &tracker_visibility_str,
                 )
                 .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            13,
-                            Type::Text,
-                            Box::new(e),
-                        )
-                    })
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        Type::Text,
+                        Box::new(e),
+                    )
+                })
             })
             .transpose()?;
         let props_str: String = row.get(14)?;
@@ -3414,8 +3412,8 @@ fn insert_event_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
     event: &Ledger,
 ) -> Result<(), DatabaseError> {
-    let event_db = event
-        .build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos());
+    let event_db =
+        event.build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos());
 
     let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
         DatabaseError::IntegerConversion(format!(

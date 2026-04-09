@@ -183,9 +183,9 @@ impl RequestEventDB {
     pub const fn get_event_type(&self) -> EventRequestType {
         match self {
             Self::Create { .. } => EventRequestType::Create,
-            Self::TrackerFactFull { .. } | Self::GovernanceFact { .. } | Self::TrackerFactOpaque { .. }=> {
-                EventRequestType::Fact
-            }
+            Self::TrackerFactFull { .. }
+            | Self::GovernanceFact { .. }
+            | Self::TrackerFactOpaque { .. } => EventRequestType::Fact,
             Self::Transfer { .. } => EventRequestType::Transfer,
             Self::TrackerConfirm | Self::GovernanceConfirm { .. } => {
                 EventRequestType::Confirm
@@ -222,9 +222,7 @@ pub enum TrackerVisibilityModeDB {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrackerStoredVisibilityDB {
     Full,
-    Only {
-        viewpoints: Vec<String>,
-    },
+    Only { viewpoints: Vec<String> },
     None,
 }
 
@@ -245,9 +243,7 @@ pub struct TrackerStoredVisibilityRangeDB {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrackerEventVisibilityDB {
     NonFact,
-    Fact {
-        viewpoints: Vec<String>,
-    },
+    Fact { viewpoints: Vec<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

@@ -6,8 +6,7 @@ use std::{
 use test_log::test;
 
 use ave_bridge::ave_common::{
-    DataToSinkEvent,
-    SchemaType,
+    DataToSinkEvent, SchemaType,
     bridge::request::ApprovalState,
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
@@ -1852,7 +1851,8 @@ async fn test_sink_events_deserialization_includes_failed_governance_events() {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let sink_page = sink_page.expect("sink page did not include failed governance events");
+    let sink_page =
+        sink_page.expect("sink page did not include failed governance events");
 
     assert!(sink_page.events.len() >= 5);
 }
@@ -1868,12 +1868,12 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let governance_id = request_data.subject_id.clone();
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
-    let tracker_member_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-        .public_key()
-        .to_string();
+    let tracker_member_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
     let body = add_example_schema_to_governance(
         &client,
         &server,
@@ -1883,8 +1883,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
     )
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let body = create_subject(
         &client,
@@ -1897,8 +1896,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
     .await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let tracker_id = request_data.subject_id.clone();
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let (status, body) = make_request(
         &client,
@@ -1923,8 +1921,7 @@ async fn test_sink_events_deserialization_includes_failed_tracker_fact() {
     .await;
     assert!(status.is_success(), "{body}");
     let request_data: RequestData = serde_json::from_value(body).unwrap();
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     let (status, body) = make_request(
         &client,

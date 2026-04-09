@@ -28,7 +28,9 @@ pub fn validate_fact_viewpoints(
 
     for viewpoint in fact_viewpoints {
         if viewpoint.trim().len() != viewpoint.len() {
-            return Err("viewpoints cannot have surrounding whitespace".to_owned());
+            return Err(
+                "viewpoints cannot have surrounding whitespace".to_owned()
+            );
         }
 
         if viewpoint.is_empty() {

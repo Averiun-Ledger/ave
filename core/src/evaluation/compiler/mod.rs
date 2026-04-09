@@ -1,3 +1,7 @@
+#[cfg(feature = "test")]
+use std::env;
+#[cfg(feature = "test")]
+use std::io::ErrorKind;
 use std::{
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash as StdHash, Hasher},
@@ -6,10 +10,6 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-#[cfg(feature = "test")]
-use std::env;
-#[cfg(feature = "test")]
-use std::io::ErrorKind;
 
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Response};
 use ave_common::{
@@ -20,9 +20,9 @@ use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{fs, process::Command, sync::RwLock};
 #[cfg(feature = "test")]
 use tokio::time::{Duration, sleep};
+use tokio::{fs, process::Command, sync::RwLock};
 use tracing::debug;
 use wasmtime::{ExternType, Module, Store};
 
@@ -422,12 +422,15 @@ impl CompilerSupport {
             })?;
 
         let metadata_path = Self::global_cache_metadata_path(cache_dir);
-        fs::write(&metadata_path, to_vec(metadata).map_err(|e| {
-            CompilerError::SerializationError {
-                context: "global cache metadata",
-                details: e.to_string(),
-            }
-        })?)
+        fs::write(
+            &metadata_path,
+            to_vec(metadata).map_err(|e| {
+                CompilerError::SerializationError {
+                    context: "global cache metadata",
+                    details: e.to_string(),
+                }
+            })?,
+        )
         .await
         .map_err(|e| CompilerError::FileWriteFailed {
             path: metadata_path.to_string_lossy().to_string(),
@@ -519,13 +522,12 @@ impl CompilerSupport {
         cache_dir: &Path,
     ) -> Result<ContractArtifactRecord, CompilerError> {
         let metadata_path = Self::global_cache_metadata_path(cache_dir);
-        let metadata_bytes =
-            fs::read(&metadata_path).await.map_err(|e| {
-                CompilerError::FileReadFailed {
-                    path: metadata_path.to_string_lossy().to_string(),
-                    details: e.to_string(),
-                }
-            })?;
+        let metadata_bytes = fs::read(&metadata_path).await.map_err(|e| {
+            CompilerError::FileReadFailed {
+                path: metadata_path.to_string_lossy().to_string(),
+                details: e.to_string(),
+            }
+        })?;
 
         ContractArtifactRecord::try_from_slice(&metadata_bytes).map_err(|e| {
             CompilerError::SerializationError {
@@ -886,7 +888,8 @@ impl CompilerSupport {
             toolchain_fingerprint,
         );
 
-        let persisted = match Self::load_global_cache_metadata(&cache_dir).await {
+        let persisted = match Self::load_global_cache_metadata(&cache_dir).await
+        {
             Ok(metadata) => metadata,
             Err(error) => {
                 debug!(
@@ -966,13 +969,9 @@ impl CompilerSupport {
 
         if let Ok((precompiled_bytes, module)) =
             Self::precompile_module(&wasm_runtime, &wasm_bytes)
-            && Self::validate_module(
-                ctx,
-                &module,
-                ValueWrapper(initial_value),
-            )
-            .await
-            .is_ok()
+            && Self::validate_module(ctx, &module, ValueWrapper(initial_value))
+                .await
+                .is_ok()
         {
             let refreshed_record = Self::build_contract_record(
                 hash,

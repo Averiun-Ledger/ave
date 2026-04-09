@@ -383,20 +383,18 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
-    const fn public_visibilities() -> (
-        TrackerStoredVisibility,
-        TrackerEventVisibility,
-    ) {
-        (TrackerStoredVisibility::Full, TrackerEventVisibility::NonFact)
+    const fn public_visibilities()
+    -> (TrackerStoredVisibility, TrackerEventVisibility) {
+        (
+            TrackerStoredVisibility::Full,
+            TrackerEventVisibility::NonFact,
+        )
     }
 
     fn fact_visibilities(
         viewpoints: &BTreeSet<String>,
         opaque: bool,
-    ) -> (
-        TrackerStoredVisibility,
-        TrackerEventVisibility,
-    ) {
+    ) -> (TrackerStoredVisibility, TrackerEventVisibility) {
         let event_visibility = TrackerEventVisibility::Fact(viewpoints.clone());
 
         let stored_visibility = if opaque {
@@ -463,9 +461,8 @@ impl Tracker {
             }
             _ => {
                 return Err(ActorError::Functional {
-                    description:
-                        "Invalid protocol data for tracker visibility"
-                            .to_owned(),
+                    description: "Invalid protocol data for tracker visibility"
+                        .to_owned(),
                 });
             }
         };
@@ -516,9 +513,8 @@ impl Tracker {
                     "/user/node/subject_manager/{}/witnesses_register",
                     self.governance_id
                 )),
-                expected:
-                    "WitnessesRegisterResponse::TrackerVisibilityState"
-                        .to_owned(),
+                expected: "WitnessesRegisterResponse::TrackerVisibilityState"
+                    .to_owned(),
             }),
         }
     }
@@ -542,11 +538,7 @@ impl Tracker {
             {
                 None
             } else {
-                Some(
-                    self.subject_metadata
-                        .prev_ledger_event_hash
-                        .to_string(),
-                )
+                Some(self.subject_metadata.prev_ledger_event_hash.to_string())
             },
             schema_id: self.subject_metadata.schema_id.to_string(),
             namespace: self.namespace.to_string(),
@@ -1135,9 +1127,11 @@ impl PersistentActor for Tracker {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        match &event.protocols
-         {
-            Protocols::Create { validation, event_request } => {
+        match &event.protocols {
+            Protocols::Create {
+                validation,
+                event_request,
+            } => {
                 if let EventRequest::Create(..) = event_request.content() {
                 } else {
                     error!(
@@ -1147,8 +1141,9 @@ impl PersistentActor for Tracker {
                         "Unexpected event request type for tracker create apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In create event, event request must be Create"
-                            .to_owned(),
+                        description:
+                            "In create event, event request must be Create"
+                                .to_owned(),
                     });
                 }
 
@@ -1175,8 +1170,13 @@ impl PersistentActor for Tracker {
 
                 return Ok(());
             }
-            Protocols::TrackerFactFull { evaluation,event_request,  .. } => {
-                let EventRequest::Fact(_fact_request) = event_request.content() else {
+            Protocols::TrackerFactFull {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Fact(_fact_request) = event_request.content()
+                else {
                     error!(
                         event_type = "Fact",
                         subject_id = %self.subject_metadata.subject_id,
@@ -1184,8 +1184,9 @@ impl PersistentActor for Tracker {
                         "Unexpected event request type for tracker fact apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In fact event, event request must be Fact"
-                            .to_owned(),
+                        description:
+                            "In fact event, event request must be Fact"
+                                .to_owned(),
                     });
                 };
 
@@ -1216,8 +1217,14 @@ impl PersistentActor for Tracker {
                     "Applied tracker opaque fact event"
                 );
             }
-            Protocols::Transfer { evaluation, event_request, .. }=> {
-                let EventRequest::Transfer(transfer_request) = event_request.content() else {
+            Protocols::Transfer {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
                     error!(
                         event_type = "Transfer",
                         subject_id = %self.subject_metadata.subject_id,
@@ -1301,8 +1308,9 @@ impl PersistentActor for Tracker {
                         "Unexpected event request type for tracker reject apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In reject event, event request must be Reject"
-                            .to_owned(),
+                        description:
+                            "In reject event, event request must be Reject"
+                                .to_owned(),
                     });
                 }
 

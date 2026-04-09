@@ -469,20 +469,18 @@ impl Node {
         let ledger_batch_size = self.ledger_batch_size;
 
         loop {
-            let from_sn =
-                lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
             let batch_hi_sn = from_sn
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, is_all) =
-                Self::get_tracker_ledger_batch(
-                    ctx,
-                    &tracker,
-                    lo_sn,
-                    batch_hi_sn,
-                )
-                .await?;
+            let (mut batch, is_all) = Self::get_tracker_ledger_batch(
+                ctx,
+                &tracker,
+                lo_sn,
+                batch_hi_sn,
+            )
+            .await?;
             if batch.is_empty() {
                 break;
             }
@@ -512,8 +510,7 @@ impl Node {
         let ledger_batch_size = self.ledger_batch_size;
 
         loop {
-            let from_sn =
-                lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
+            let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
             let batch_hi_sn = from_sn
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
@@ -597,9 +594,9 @@ impl Node {
                 let hi_sn = to_sn
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
-                let ledger =
-                    self.collect_governance_ledger(ctx, &subject_id, hi_sn)
-                        .await?;
+                let ledger = self
+                    .collect_governance_ledger(ctx, &subject_id, hi_sn)
+                    .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
                     &public_key,
@@ -642,9 +639,9 @@ impl Node {
                     let hi_sn = to_sn
                         .map(|to_sn| to_sn.min(metadata.sn))
                         .unwrap_or(metadata.sn);
-                    let ledger =
-                        self.collect_tracker_ledger(ctx, &subject_id, hi_sn)
-                            .await?;
+                    let ledger = self
+                        .collect_tracker_ledger(ctx, &subject_id, hi_sn)
+                        .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
                         &public_key,
@@ -904,9 +901,7 @@ impl Actor for Node {
                         .sync_update
                         .round_retry_interval_secs,
                     max_round_retries: config.sync_update.max_round_retries,
-                    witness_retry_count: config
-                        .sync_update
-                        .witness_retry_count,
+                    witness_retry_count: config.sync_update.witness_retry_count,
                     witness_retry_interval_secs: config
                         .sync_update
                         .witness_retry_interval_secs,

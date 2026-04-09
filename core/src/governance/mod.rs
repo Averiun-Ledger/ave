@@ -25,8 +25,7 @@ use crate::{
         },
         model::{
             CreatorQuantity, CreatorWitness, HashThisRole, ProtocolTypes,
-            Quorum, RoleCreator,
-            RoleTypes, Schema, WitnessesData,
+            Quorum, RoleCreator, RoleTypes, Schema, WitnessesData,
         },
         role_register::{
             CurrentValidationRoles, RoleRegister, RoleRegisterMessage,
@@ -39,9 +38,8 @@ use crate::{
         tracker_sync::{TrackerSync, TrackerSyncConfig},
         version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
         witnesses_register::{
-            CreatorWitnessGrant, CreatorWitnessRegistration,
-            WitnessesRegister, WitnessesRegisterMessage,
-            WitnessesRegisterResponse, WitnessesType,
+            CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
+            WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
         },
     },
     helpers::{db::ExternalDB, network::service::NetworkSender, sink::AveSink},
@@ -1789,12 +1787,11 @@ impl Governance {
         new_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     ) -> (SubjectRegisterMessage, WitnessesRegisterMessage) {
-        let creator_registration = |
-            schema_id: &SchemaType,
-            namespace: &str,
-            creator: &PublicKey,
-            witnesses: Vec<WitnessesType>,
-        | -> CreatorWitnessRegistration {
+        let creator_registration = |schema_id: &SchemaType,
+                                    namespace: &str,
+                                    creator: &PublicKey,
+                                    witnesses: Vec<WitnessesType>|
+         -> CreatorWitnessRegistration {
             let namespace_value = Namespace::from(namespace.to_owned());
             let creator_name = self
                 .properties
@@ -1831,13 +1828,10 @@ impl Governance {
                                             .map(WitnessesType::User)
                                     }?;
 
-                                    let grant = if witness
-                                        .viewpoints
-                                        .contains(
-                                            &ReservedWords::AllViewpoints
-                                                .to_string(),
-                                        )
-                                    {
+                                    let grant = if witness.viewpoints.contains(
+                                        &ReservedWords::AllViewpoints
+                                            .to_string(),
+                                    ) {
                                         CreatorWitnessGrant::Full
                                     } else if witness.viewpoints.is_empty() {
                                         CreatorWitnessGrant::Hash
@@ -1882,12 +1876,7 @@ impl Governance {
 
             new_creator_data.insert(
                 (schema_id.clone(), ns.clone(), creator.clone()),
-                creator_registration(
-                    schema_id,
-                    ns,
-                    creator,
-                    witnesses.clone(),
-                ),
+                creator_registration(schema_id, ns, creator, witnesses.clone()),
             );
         }
 
@@ -1952,11 +1941,10 @@ impl Governance {
                 }
             }
 
-            update_creator_witnesses_data.insert((
-                schema_id.clone(),
-                ns.clone(),
-                creator.clone(),
-            ), creator_registration(schema_id, ns, creator, witnesses));
+            update_creator_witnesses_data.insert(
+                (schema_id.clone(), ns.clone(), creator.clone()),
+                creator_registration(schema_id, ns, creator, witnesses),
+            );
         }
 
         for (schema_id, ns, creator) in creator_update.remove_creator.iter() {
@@ -3387,7 +3375,10 @@ impl PersistentActor for Governance {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         match &event.protocols {
-            Protocols::Create { validation, event_request } => {
+            Protocols::Create {
+                validation,
+                event_request,
+            } => {
                 if let EventRequest::Create(..) = event_request.content() {
                 } else {
                     error!(
@@ -3397,8 +3388,9 @@ impl PersistentActor for Governance {
                         "Unexpected event request type for governance create apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In create event, event request must be Create"
-                            .to_owned(),
+                        description:
+                            "In create event, event request must be Create"
+                                .to_owned(),
                     });
                 };
 
@@ -3435,13 +3427,12 @@ impl PersistentActor for Governance {
 
                 return Ok(());
             }
-                Protocols::GovFact {
-                    evaluation,
-                    approval,
-                    event_request,
-                    ..
-                }
-             => {
+            Protocols::GovFact {
+                evaluation,
+                approval,
+                event_request,
+                ..
+            } => {
                 if let EventRequest::Fact(..) = event_request.content() {
                 } else {
                     error!(
@@ -3451,8 +3442,9 @@ impl PersistentActor for Governance {
                         "Unexpected event request type for governance fact apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In fact event, event request must be Fact"
-                            .to_owned(),
+                        description:
+                            "In fact event, event request must be Fact"
+                                .to_owned(),
                     });
                 };
 
@@ -3484,10 +3476,15 @@ impl PersistentActor for Governance {
                     }
                 }
             }
-            
-                Protocols::Transfer { evaluation, event_request, .. }
-             => {
-                let EventRequest::Transfer(transfer_request) = event_request.content() else {
+
+            Protocols::Transfer {
+                evaluation,
+                event_request,
+                ..
+            } => {
+                let EventRequest::Transfer(transfer_request) =
+                    event_request.content()
+                else {
                     error!(
                         event_type = "Transfer",
                         subject_id = %self.subject_metadata.subject_id,
@@ -3512,9 +3509,12 @@ impl PersistentActor for Governance {
                     );
                 }
             }
-            
-                Protocols::GovConfirm { evaluation, event_request, .. }
-             => {
+
+            Protocols::GovConfirm {
+                evaluation,
+                event_request,
+                ..
+            } => {
                 if let EventRequest::Confirm(..) = event_request.content() {
                 } else {
                     error!(
@@ -3565,8 +3565,9 @@ impl PersistentActor for Governance {
                         "Unexpected event request type for governance reject apply"
                     );
                     return Err(ActorError::Functional {
-                        description: "In reject event, event request must be Reject"
-                            .to_owned(),
+                        description:
+                            "In reject event, event request must be Reject"
+                                .to_owned(),
                     });
                 };
 

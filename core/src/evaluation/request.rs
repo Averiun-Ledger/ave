@@ -194,7 +194,10 @@ pub struct SubjectContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ave_common::identity::{Signed, keys::{Ed25519Signer, KeyPair}};
+    use ave_common::identity::{
+        Signed,
+        keys::{Ed25519Signer, KeyPair},
+    };
     use serde_json::json;
 
     #[test]
@@ -224,10 +227,7 @@ mod tests {
         };
 
         let error = req.build_evaluate_info(&None).unwrap_err();
-        assert!(matches!(
-            error,
-            EvaluatorError::InvalidEventRequest(_)
-        ));
+        assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
     #[test]
@@ -264,10 +264,7 @@ mod tests {
         let error = req
             .build_evaluate_info(&Some(ValueWrapper(json!({}))))
             .unwrap_err();
-        assert!(matches!(
-            error,
-            EvaluatorError::InvalidEventRequest(_)
-        ));
+        assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
     #[test]
@@ -304,10 +301,7 @@ mod tests {
         let error = req
             .build_evaluate_info(&Some(ValueWrapper(json!({}))))
             .unwrap_err();
-        assert!(matches!(
-            error,
-            EvaluatorError::InvalidEventRequest(_)
-        ));
+        assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
     #[test]
@@ -344,9 +338,6 @@ mod tests {
         let error = req
             .build_evaluate_info(&Some(ValueWrapper(json!({}))))
             .unwrap_err();
-        assert!(matches!(
-            error,
-            EvaluatorError::InvalidEventRequest(_)
-        ));
+        assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 }

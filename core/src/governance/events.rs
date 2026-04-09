@@ -8,14 +8,12 @@ use crate::{
     evaluation::runner::error::{self, RunnerError},
     governance::{
         CreatorRoleUpdate, RolesUpdate, RolesUpdateRemove,
-        data::GovernanceData,
-        witnesses_register::WitnessesType,
+        data::GovernanceData, witnesses_register::WitnessesType,
     },
 };
 
 use super::model::{
-    CreatorWitness,
-    RolesGov, RolesSchema, RolesTrackerSchemas,
+    CreatorWitness, RolesGov, RolesSchema, RolesTrackerSchemas,
 };
 
 pub use ave_common::governance::{
@@ -164,8 +162,9 @@ fn validate_creator_witnesses(
 
             validated_witnesses.insert(CreatorWitness {
                 name: witness.name.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
+                viewpoints: BTreeSet::from([
+                    ReservedWords::AllViewpoints.to_string()
+                ]),
             });
             continue;
         }
@@ -208,8 +207,9 @@ fn validate_creator_witnesses(
 
             validated_witnesses.insert(CreatorWitness {
                 name: witness.name.clone(),
-                viewpoints: BTreeSet::from([ReservedWords::AllViewpoints
-                    .to_string()]),
+                viewpoints: BTreeSet::from([
+                    ReservedWords::AllViewpoints.to_string()
+                ]),
             });
             continue;
         }
@@ -347,15 +347,13 @@ pub fn governance_event_update_creator_change(
 
                             match (&x.new_witnesses, &x.new_quantity) {
                                 (None, None) => {
-                                    if let Some(creator) =
-                                        roles.creator.get(
-                                            &EventRoleCreator::create(
-                                                &x.actual_name,
-                                                x.actual_namespace.clone(),
-                                            ),
-                                        )
-                                        && let Some(user) =
-                                            members.get(&creator.name)
+                                    if let Some(creator) = roles.creator.get(
+                                        &EventRoleCreator::create(
+                                            &x.actual_name,
+                                            x.actual_namespace.clone(),
+                                        ),
+                                    ) && let Some(user) =
+                                        members.get(&creator.name)
                                     {
                                         new_creator.insert(
                                             (
@@ -371,15 +369,13 @@ pub fn governance_event_update_creator_change(
                                     }
                                 }
                                 (None, Some(q)) => {
-                                    if let Some(creator) =
-                                        roles.creator.get(
-                                            &EventRoleCreator::create(
-                                                &x.actual_name,
-                                                x.actual_namespace.clone(),
-                                            ),
-                                        )
-                                        && let Some(user) =
-                                            members.get(&creator.name)
+                                    if let Some(creator) = roles.creator.get(
+                                        &EventRoleCreator::create(
+                                            &x.actual_name,
+                                            x.actual_namespace.clone(),
+                                        ),
+                                    ) && let Some(user) =
+                                        members.get(&creator.name)
                                     {
                                         new_creator.insert(
                                             (
@@ -395,15 +391,13 @@ pub fn governance_event_update_creator_change(
                                     }
                                 }
                                 (Some(w), None) => {
-                                    if let Some(creator) =
-                                        roles.creator.get(
-                                            &EventRoleCreator::create(
-                                                &x.actual_name,
-                                                x.actual_namespace.clone(),
-                                            ),
-                                        )
-                                        && let Some(user) =
-                                            members.get(&creator.name)
+                                    if let Some(creator) = roles.creator.get(
+                                        &EventRoleCreator::create(
+                                            &x.actual_name,
+                                            x.actual_namespace.clone(),
+                                        ),
+                                    ) && let Some(user) =
+                                        members.get(&creator.name)
                                     {
                                         new_creator.insert(
                                             (
@@ -425,10 +419,7 @@ pub fn governance_event_update_creator_change(
                                             new_namespace.to_string(),
                                             user.clone(),
                                         ),
-                                        (
-                                            q.clone(),
-                                            w.clone(),
-                                        ),
+                                        (q.clone(), w.clone()),
                                     );
                                 }
                             }
@@ -795,10 +786,7 @@ pub fn governance_event_roles_update_fact(
                                         x.namespace.to_string(),
                                         user.clone(),
                                     ),
-                                    (
-                                        x.quantity.clone(),
-                                        witnesses,
-                                    ),
+                                    (x.quantity.clone(), witnesses),
                                 );
                             }
                         });
@@ -948,12 +936,10 @@ pub fn governance_event_roles_update_fact(
             appr_quorum = governance.change.approve.clone();
 
             if let Some(quorum) = &governance.change.evaluate {
-                eval_quorum
-                    .insert(SchemaType::Governance, quorum.clone());
+                eval_quorum.insert(SchemaType::Governance, quorum.clone());
             }
             if let Some(quorum) = &governance.change.validate {
-                vali_quorum
-                    .insert(SchemaType::Governance, quorum.clone());
+                vali_quorum.insert(SchemaType::Governance, quorum.clone());
             }
         }
 
@@ -961,16 +947,12 @@ pub fn governance_event_roles_update_fact(
         if let Some(schemas) = &policies.schema {
             for schema in schemas {
                 if let Some(quorum) = &schema.change.evaluate {
-                    eval_quorum.insert(
-                        schema.schema_id.clone(),
-                        quorum.clone(),
-                    );
+                    eval_quorum
+                        .insert(schema.schema_id.clone(), quorum.clone());
                 }
                 if let Some(quorum) = &schema.change.validate {
-                    vali_quorum.insert(
-                        schema.schema_id.clone(),
-                        quorum.clone(),
-                    );
+                    vali_quorum
+                        .insert(schema.schema_id.clone(), quorum.clone());
                 }
             }
         }
@@ -2226,8 +2208,7 @@ pub fn schema_id_role_check_data(
                 if !roles_schema.creator.insert(EventRoleCreator {
                     witnesses,
                     ..creator.clone()
-                })
-                {
+                }) {
                     return Err(RunnerError::InvalidEvent {
                         location: "SchemaIdRole::check_data",
                         kind: error::InvalidEventKind::AlreadyExists {
@@ -2314,11 +2295,7 @@ pub fn schema_id_role_check_data(
                         });
                     }
 
-                    if !roles_schema
-                        .issuer
-                        .signers
-                        .insert(issuer.clone())
-                    {
+                    if !roles_schema.issuer.signers.insert(issuer.clone()) {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::AlreadyExists {
@@ -2621,11 +2598,7 @@ pub fn schema_id_role_check_data(
                             },
                         });
                     }
-                    if !roles_schema
-                        .issuer
-                        .signers
-                        .remove(&issuer)
-                    {
+                    if !roles_schema.issuer.signers.remove(&issuer) {
                         return Err(RunnerError::InvalidEvent {
                             location: "SchemaIdRole::check_data",
                             kind: error::InvalidEventKind::CannotRemove {
@@ -3121,19 +3094,18 @@ pub fn schema_id_role_check_data(
                         },
                     })?;
 
-                let new_witnesses = if let Some(witnesses) =
-                    creator.new_witnesses.as_ref()
-                {
-                    validate_creator_witnesses(
-                        &creator.actual_name,
-                        schema_id,
-                        schema_viewpoints,
-                        &members,
-                        witnesses,
-                    )?
-                } else {
-                    old_creator.witnesses.clone()
-                };
+                let new_witnesses =
+                    if let Some(witnesses) = creator.new_witnesses.as_ref() {
+                        validate_creator_witnesses(
+                            &creator.actual_name,
+                            schema_id,
+                            schema_viewpoints,
+                            &members,
+                            witnesses,
+                        )?
+                    } else {
+                        old_creator.witnesses.clone()
+                    };
 
                 if creator.new_witnesses.is_some()
                     && new_witnesses == old_creator.witnesses

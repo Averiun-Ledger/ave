@@ -15,7 +15,10 @@ use crate::{
             get_validation_roles_register,
             node::{SignTypesNode, get_sign},
         },
-        event::{ApprovalData, EvaluationData, EvaluationResponse, ValidationMetadata},
+        event::{
+            ApprovalData, EvaluationData, EvaluationResponse,
+            ValidationMetadata,
+        },
     },
     subject::{Metadata, MetadataWithoutProperties, RequestSubjectData},
     validation::{
@@ -765,7 +768,8 @@ impl ValiWorker {
                 });
             };
 
-            let meta_wo_props = MetadataWithoutProperties::from(metadata.clone());
+            let meta_wo_props =
+                MetadataWithoutProperties::from(metadata.clone());
             let meta_wo_props_hash =
                 hash_borsh(&*self.hash.hasher(), &meta_wo_props).map_err(
                     |e| ValidatorError::InternalError {
@@ -773,12 +777,11 @@ impl ValiWorker {
                     },
                 )?;
 
-            let propierties_hash  =
-                hash_borsh(&*self.hash.hasher(), &metadata.properties).map_err(
-                    |e| ValidatorError::InternalError {
+            let propierties_hash =
+                hash_borsh(&*self.hash.hasher(), &metadata.properties)
+                    .map_err(|e| ValidatorError::InternalError {
                         problem: e.to_string(),
-                    },
-                )?;
+                    })?;
 
             ValidationRes::Response {
                 vali_req_hash,
@@ -1032,20 +1035,24 @@ impl ValiWorker {
                                 problem: e.to_string(),
                             })?;
 
-                    let meta_wo_props = MetadataWithoutProperties::from(modified_metadata.clone());
+                    let meta_wo_props = MetadataWithoutProperties::from(
+                        modified_metadata.clone(),
+                    );
                     let meta_wo_props_hash =
-                        hash_borsh(&*self.hash.hasher(), &meta_wo_props).map_err(
-                            |e| ValidatorError::InternalError {
+                        hash_borsh(&*self.hash.hasher(), &meta_wo_props)
+                            .map_err(|e| ValidatorError::InternalError {
                                 problem: e.to_string(),
-                            },
-                        )?;
+                            })?;
 
-                    let propierties_hash  =
-                        hash_borsh(&*self.hash.hasher(), &modified_metadata.properties).map_err(
-                            |e| ValidatorError::InternalError {
-                                problem: e.to_string(),
-                            },
-                        )?;
+                    let propierties_hash = hash_borsh(
+                        &*self.hash.hasher(),
+                        &modified_metadata.properties,
+                    )
+                    .map_err(|e| {
+                        ValidatorError::InternalError {
+                            problem: e.to_string(),
+                        }
+                    })?;
 
                     let event_request_hash =
                         self.event_request_hash(event_request)?;
@@ -1054,7 +1061,8 @@ impl ValiWorker {
 
                     Ok(ValidationRes::Response {
                         vali_req_hash,
-                        modified_metadata_without_propierties_hash: meta_wo_props_hash,
+                        modified_metadata_without_propierties_hash:
+                            meta_wo_props_hash,
                         propierties_hash,
                         event_request_hash,
                         viewpoints_hash,

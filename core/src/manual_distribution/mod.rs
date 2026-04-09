@@ -77,8 +77,8 @@ impl ManualDistribution {
             &validation.validation_metadata
         else {
             return Err(ActorError::FunctionalCritical {
-                description:
-                    "Missing validation metadata in tracker ledger".to_owned(),
+                description: "Missing validation metadata in tracker ledger"
+                    .to_owned(),
             });
         };
 
@@ -201,9 +201,8 @@ impl Handler<Self> for ManualDistribution {
 
                 let is_gov = schema_id.is_gov();
                 let recipients = if is_gov {
-                    let mut witnesses = gov
-                        .get_witnesses(WitnessesData::Gov)
-                        .map_err(|e| {
+                    let mut witnesses =
+                        gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
                             error!(
                                 msg_type = "Update",
                                 subject_id = %subject_id,
@@ -225,13 +224,14 @@ impl Handler<Self> for ManualDistribution {
                         .collect::<Vec<_>>()
                 } else {
                     let metadata = Self::tracker_metadata_from_ledger(&ledger)?;
-                    let event_request = ledger.get_event_request().ok_or_else(|| {
-                        ActorError::FunctionalCritical {
-                            description:
-                                "Missing event request in tracker ledger"
-                                    .to_owned(),
-                        }
-                    })?;
+                    let event_request =
+                        ledger.get_event_request().ok_or_else(|| {
+                            ActorError::FunctionalCritical {
+                                description:
+                                    "Missing event request in tracker ledger"
+                                        .to_owned(),
+                            }
+                        })?;
                     let candidates = build_tracker_event_distribution_plan(
                         &gov,
                         &event_request,

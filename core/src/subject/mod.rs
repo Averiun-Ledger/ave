@@ -263,11 +263,11 @@ impl From<crate::model::common::TrackerStoredVisibility>
     fn from(value: crate::model::common::TrackerStoredVisibility) -> Self {
         match value {
             crate::model::common::TrackerStoredVisibility::Full => Self::Full,
-            crate::model::common::TrackerStoredVisibility::Only(
-                viewpoints,
-            ) => Self::Only {
-                viewpoints: viewpoints.into_iter().collect(),
-            },
+            crate::model::common::TrackerStoredVisibility::Only(viewpoints) => {
+                Self::Only {
+                    viewpoints: viewpoints.into_iter().collect(),
+                }
+            }
             crate::model::common::TrackerStoredVisibility::None => Self::None,
         }
     }
@@ -276,9 +276,7 @@ impl From<crate::model::common::TrackerStoredVisibility>
 impl From<crate::model::common::TrackerStoredVisibilityRange>
     for TrackerStoredVisibilityRangeDB
 {
-    fn from(
-        value: crate::model::common::TrackerStoredVisibilityRange,
-    ) -> Self {
+    fn from(value: crate::model::common::TrackerStoredVisibilityRange) -> Self {
         Self {
             from_sn: value.from_sn,
             to_sn: value.to_sn,
@@ -297,8 +295,8 @@ impl From<crate::model::common::TrackerEventVisibility>
             }
             crate::model::common::TrackerEventVisibility::Fact(viewpoints) => {
                 Self::Fact {
-                viewpoints: viewpoints.into_iter().collect(),
-            }
+                    viewpoints: viewpoints.into_iter().collect(),
+                }
             }
         }
     }
@@ -307,9 +305,7 @@ impl From<crate::model::common::TrackerEventVisibility>
 impl From<crate::model::common::TrackerEventVisibilityRange>
     for TrackerEventVisibilityRangeDB
 {
-    fn from(
-        value: crate::model::common::TrackerEventVisibilityRange,
-    ) -> Self {
+    fn from(value: crate::model::common::TrackerEventVisibilityRange) -> Self {
         Self {
             from_sn: value.from_sn,
             to_sn: value.to_sn,
@@ -384,8 +380,8 @@ impl SinkReplayState {
         event: &Ledger,
         event_data_ledger: EventLedgerDataForSink,
     ) -> DataForSink {
-        let (issuer, event_request_timestamp) = event
-            .get_issuer_event_request_timestamp();
+        let (issuer, event_request_timestamp) =
+            event.get_issuer_event_request_timestamp();
 
         DataForSink {
             gov_id: self.governance_id.clone(),
@@ -412,8 +408,7 @@ impl SinkReplayState {
         sink_timestamp: u64,
     ) -> Result<DataToSink, ActorError> {
         let replay_parts = SinkReplayEventParts::from_ledger(ledger)?;
-        let data =
-            self.data_for_sink(ledger, replay_parts.event_data_ledger);
+        let data = self.data_for_sink(ledger, replay_parts.event_data_ledger);
 
         Ok(build_data_to_sink(
             data,
@@ -423,7 +418,10 @@ impl SinkReplayState {
         ))
     }
 
-    fn apply_success(&mut self, protocols: &Protocols) -> Result<(), ActorError> {
+    fn apply_success(
+        &mut self,
+        protocols: &Protocols,
+    ) -> Result<(), ActorError> {
         match protocols {
             Protocols::Create { .. }
             | Protocols::TrackerFactFull { .. }
@@ -519,7 +517,9 @@ impl SinkReplayEventParts {
 
 #[derive(Clone)]
 pub enum EventLedgerDataForSink {
-    Create { state: Value },
+    Create {
+        state: Value,
+    },
     FactFull {
         patch: Option<Value>,
         success: bool,
@@ -666,18 +666,16 @@ fn data_to_sink_event(
                 viewpoints,
                 success,
             },
-        ) => {
-            DataToSinkEvent::FactOpaque {
-                governance_id: data.gov_id,
-                subject_id: data.subject_id,
-                viewpoints,
-                owner: data.owner,
-                schema_id: data.schema_id,
-                sn: data.sn,
-                gov_version: data.gov_version,
-                success,
-            }
-        }
+        ) => DataToSinkEvent::FactOpaque {
+            governance_id: data.gov_id,
+            subject_id: data.subject_id,
+            viewpoints,
+            owner: data.owner,
+            schema_id: data.schema_id,
+            sn: data.sn,
+            gov_version: data.gov_version,
+            success,
+        },
         (
             Some(EventRequest::Transfer(transfer_request)),
             EventLedgerDataForSink::Transfer { success, error },
@@ -772,12 +770,11 @@ pub fn replay_sink_events(
 
     for ledger in ledgers {
         if replay_state.is_none() {
-            let metadata =
-                ledger.get_create_metadata().map_err(|e| {
-                    ActorError::Functional {
-                        description: e.to_string(),
-                    }
-                })?;
+            let metadata = ledger.get_create_metadata().map_err(|e| {
+                ActorError::Functional {
+                    description: e.to_string(),
+                }
+            })?;
             replay_state = Some(SinkReplayState::from_metadata(&metadata));
         }
 
@@ -1061,11 +1058,9 @@ where
                 false,
             ) => {
                 if is_service {
-                    return Err(
-                        SubjectError::ServiceCannotAcceptTrackerOpaque,
-                    );
+                    return Err(SubjectError::ServiceCannotAcceptTrackerOpaque);
                 }
-                
+
                 if data.subject_id != subject_metadata.subject_id {
                     return Err(SubjectError::SubjectIdMismatch {
                         expected: subject_metadata.subject_id.to_string(),
@@ -1784,7 +1779,10 @@ where
             if hi_sn < actual_sn {
                 Ok((Vec::new(), true))
             } else {
-                Ok((get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?, true))
+                Ok((
+                    get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
+                    true,
+                ))
             }
         } else {
             Ok((get_n_events(ctx, 0, hi_sn).await?, true))

@@ -150,14 +150,13 @@ impl Handler<Self> for Updater {
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                let strategy = Strategy::FixedInterval(
-                    FixedIntervalStrategy::new(
+                let strategy =
+                    Strategy::FixedInterval(FixedIntervalStrategy::new(
                         self.witness_retry_count.max(1),
                         Duration::from_secs(
                             self.witness_retry_interval_secs.max(1),
                         ),
-                    ),
-                );
+                    ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
                     target,
@@ -200,10 +199,7 @@ impl Handler<Self> for Updater {
                     );
                 };
             }
-            UpdaterMessage::NetworkResponse {
-                offer,
-                sender,
-            } => {
+            UpdaterMessage::NetworkResponse { offer, sender } => {
                 if sender != self.node_key {
                     warn!(
                         msg_type = "NetworkResponse",

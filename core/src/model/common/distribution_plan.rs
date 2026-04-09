@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use ave_common::{
-    identity::PublicKey,
-    request::EventRequest,
-    schematype::ReservedWords,
+    identity::PublicKey, request::EventRequest, schematype::ReservedWords,
 };
 
 use crate::{
@@ -72,29 +70,33 @@ fn tracker_fact_mode_for_witness(
         return DistributionPlanMode::Opaque;
     };
 
-    let Some(roles_schema) = governance_data.roles_schema.get(&metadata.schema_id) else {
-        return DistributionPlanMode::Opaque;
-    };
-
-    let Some(role_creator) = roles_schema
-        .creator
-        .get(&ave_common::governance::RoleCreator::create(
-            &owner_name,
-            metadata.namespace.clone(),
-        ))
+    let Some(roles_schema) =
+        governance_data.roles_schema.get(&metadata.schema_id)
     else {
         return DistributionPlanMode::Opaque;
     };
 
-    let is_generic_witness = roles_schema.hash_this_rol(
-        RoleTypes::Witness,
-        metadata.namespace.clone(),
-        &witness_name,
-    ) || governance_data.roles_tracker_schemas.hash_this_rol(
-        RoleTypes::Witness,
-        metadata.namespace.clone(),
-        &witness_name,
-    );
+    let Some(role_creator) =
+        roles_schema
+            .creator
+            .get(&ave_common::governance::RoleCreator::create(
+                &owner_name,
+                metadata.namespace.clone(),
+            ))
+    else {
+        return DistributionPlanMode::Opaque;
+    };
+
+    let is_generic_witness =
+        roles_schema.hash_this_rol(
+            RoleTypes::Witness,
+            metadata.namespace.clone(),
+            &witness_name,
+        ) || governance_data.roles_tracker_schemas.hash_this_rol(
+            RoleTypes::Witness,
+            metadata.namespace.clone(),
+            &witness_name,
+        );
 
     let allows_clear = role_creator.witnesses.iter().any(|creator_witness| {
         let applies = creator_witness.name == witness_name
@@ -175,12 +177,9 @@ pub fn build_tracker_event_distribution_plan(
             }
         }
         EventRequest::Confirm(..) | EventRequest::Reject(..) => {
-            let new_owner = metadata
-                .new_owner
-                .clone()
-                .ok_or_else(|| {
-                    "Tracker confirm/reject without new_owner".to_owned()
-                })?;
+            let new_owner = metadata.new_owner.clone().ok_or_else(|| {
+                "Tracker confirm/reject without new_owner".to_owned()
+            })?;
 
             let witnesses = governance_data
                 .get_witnesses(WitnessesData::Schema {

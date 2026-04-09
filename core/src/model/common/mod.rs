@@ -436,12 +436,7 @@ pub struct TrackerEventVisibilitySpan<'a> {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshDeserialize,
-    BorshSerialize,
+    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
 pub struct TrackerVisibilityState {
     pub mode: TrackerVisibilityMode,
@@ -500,11 +495,7 @@ impl TrackerVisibilityState {
         self.push_event(sn, event_visibility);
     }
 
-    fn push_stored(
-        &mut self,
-        sn: u64,
-        visibility: TrackerStoredVisibility,
-    ) {
+    fn push_stored(&mut self, sn: u64, visibility: TrackerStoredVisibility) {
         if let Some(last) = self.stored_ranges.last_mut() {
             if last.visibility == visibility {
                 return;
@@ -522,11 +513,7 @@ impl TrackerVisibilityState {
         });
     }
 
-    fn push_event(
-        &mut self,
-        sn: u64,
-        visibility: TrackerEventVisibility,
-    ) {
+    fn push_event(&mut self, sn: u64, visibility: TrackerEventVisibility) {
         if let Some(last) = self.event_ranges.last_mut() {
             if last.visibility == visibility {
                 return;

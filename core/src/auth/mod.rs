@@ -107,16 +107,13 @@ impl Auth {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<
-        (
-            HashSet<PublicKey>,
-            Option<u64>,
-            Option<UpdateSubjectKind>,
-        ),
+        (HashSet<PublicKey>, Option<u64>, Option<UpdateSubjectKind>),
         ActorError,
     > {
         let data = get_subject_data(ctx, subject_id).await?;
 
-        let (witnesses, actual_sn, subject_kind_hint) = if let Some(data) = &data
+        let (witnesses, actual_sn, subject_kind_hint) = if let Some(data) =
+            &data
         {
             match data {
                 SubjectData::Tracker {
@@ -179,11 +176,7 @@ impl Auth {
 
                     let sn = get_gov_sn(ctx, subject_id).await?;
 
-                    (
-                        witnesses,
-                        Some(sn),
-                        Some(UpdateSubjectKind::Governance),
-                    )
+                    (witnesses, Some(sn), Some(UpdateSubjectKind::Governance))
                 }
             }
         } else {

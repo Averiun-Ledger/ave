@@ -131,7 +131,8 @@ impl Default for RebootSyncConfig {
             stability_check_interval_secs: 5,
             stability_check_max_retries: 3,
             diff_retry_schedule_secs: vec![10, 20, 30, 60],
-            timeout_retry_schedule_secs: default_reboot_timeout_retry_schedule_secs(),
+            timeout_retry_schedule_secs:
+                default_reboot_timeout_retry_schedule_secs(),
         }
     }
 }

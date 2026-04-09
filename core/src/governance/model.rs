@@ -2,8 +2,7 @@
 //!
 
 use ave_common::{
-    Namespace, SchemaType, ValueWrapper,
-    identity::PublicKey,
+    Namespace, SchemaType, ValueWrapper, identity::PublicKey,
     schematype::ReservedWords,
 };
 use borsh::{BorshDeserialize, BorshSerialize};

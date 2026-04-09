@@ -16,9 +16,7 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{HashThisRole, RoleTypes},
-        witnesses_register::{
-            TrackerDeliveryMode, TrackerDeliveryRange,
-        },
+        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
     },
     helpers::network::service::NetworkSender,
     model::{
@@ -155,11 +153,16 @@ impl DistriWorker {
             return Err(DistributorError::SubjectNotFound.into());
         };
 
-        let governance_path =
-            ActorPath::from(format!("/user/node/subject_manager/{}", subject_id));
-        let governance_actor =
-            ctx.system().get_actor::<Governance>(&governance_path).await?;
-        let response = governance_actor.ask(GovernanceMessage::GetVersion).await?;
+        let governance_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            subject_id
+        ));
+        let governance_actor = ctx
+            .system()
+            .get_actor::<Governance>(&governance_path)
+            .await?;
+        let response =
+            governance_actor.ask(GovernanceMessage::GetVersion).await?;
         let GovernanceResponse::Version(version) = response else {
             return Err(ActorError::UnexpectedResponse {
                 path: governance_path,
@@ -289,12 +292,13 @@ impl DistriWorker {
                     std::cmp::Ordering::Greater => {}
                 };
 
-                let has_this_role = gov.has_this_role(HashThisRole::SchemaWitness {
-                    who: (*self.our_key).clone(),
-                    creator: sender.clone(),
-                    schema_id: schema_id.clone(),
-                    namespace: namespace.clone(),
-                });
+                let has_this_role =
+                    gov.has_this_role(HashThisRole::SchemaWitness {
+                        who: (*self.our_key).clone(),
+                        creator: sender.clone(),
+                        schema_id: schema_id.clone(),
+                        namespace: namespace.clone(),
+                    });
 
                 if !has_this_role {
                     return Err(DistributorError::NotWitness.into());
@@ -360,7 +364,8 @@ impl DistriWorker {
         let mut projected = Vec::with_capacity(ledger.len());
 
         for event in ledger {
-            let Some(mode) = Self::tracker_delivery_mode(ranges, event.sn) else {
+            let Some(mode) = Self::tracker_delivery_mode(ranges, event.sn)
+            else {
                 return Err(ActorError::FunctionalCritical {
                     description: format!(
                         "Missing tracker delivery range for sn {}",
@@ -371,9 +376,8 @@ impl DistriWorker {
 
             match mode {
                 TrackerDeliveryMode::Clear => projected.push(event),
-                TrackerDeliveryMode::Opaque => {
-                    projected.push(event.to_tracker_opaque().map_err(ActorError::from)?)
-                }
+                TrackerDeliveryMode::Opaque => projected
+                    .push(event.to_tracker_opaque().map_err(ActorError::from)?),
             }
         }
 
@@ -492,7 +496,9 @@ impl DistriWorker {
                     .get_tracker_window(ctx, subject_id, sender, actual_sn)
                     .await?;
 
-                if let Some(actual_sn) = actual_sn && actual_sn >= window_sn {
+                if let Some(actual_sn) = actual_sn
+                    && actual_sn >= window_sn
+                {
                     return Err(DistributorError::ActualSnBiggerThanWitness {
                         actual_sn,
                         witness_sn: window_sn,
@@ -507,8 +513,9 @@ impl DistriWorker {
                     .unwrap_or(window_sn);
                 let hi_sn = target_sn.unwrap_or(hi_sn).min(window_sn);
 
-                let (ledger, raw_is_all) =
-                    self.get_ledger(ctx, subject_id, hi_sn, actual_sn, false).await?;
+                let (ledger, raw_is_all) = self
+                    .get_ledger(ctx, subject_id, hi_sn, actual_sn, false)
+                    .await?;
 
                 let ledger = Self::project_tracker_ledger(ledger, &ranges)?;
                 let is_all = raw_is_all && window_is_all && hi_sn == window_sn;
@@ -865,35 +872,33 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger.get_subject_id();
                 let sn = ledger.sn;
 
-                let (is_gov, ..) = match self
-                    .check_auth(ctx, sender.clone(), &ledger)
-                    .await
-                {
-                    Ok(is_gov) => is_gov,
-                    Err(e) => {
-                        if let ActorError::Functional { .. } = e {
-                            warn!(
-                                msg_type = "LastEventDistribution",
-                                subject_id = %subject_id,
-                                sn = sn,
-                                sender = %sender,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(e);
-                        } else {
-                            error!(
-                                msg_type = "LastEventDistribution",
-                                subject_id = %subject_id,
-                                sn = sn,
-                                sender = %sender,
-                                error = %e,
-                                "Authorization check failed"
-                            );
-                            return Err(emit_fail(ctx, e).await);
+                let (is_gov, ..) =
+                    match self.check_auth(ctx, sender.clone(), &ledger).await {
+                        Ok(is_gov) => is_gov,
+                        Err(e) => {
+                            if let ActorError::Functional { .. } = e {
+                                warn!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    sender = %sender,
+                                    error = %e,
+                                    "Authorization check failed"
+                                );
+                                return Err(e);
+                            } else {
+                                error!(
+                                    msg_type = "LastEventDistribution",
+                                    subject_id = %subject_id,
+                                    sn = sn,
+                                    sender = %sender,
+                                    error = %e,
+                                    "Authorization check failed"
+                                );
+                                return Err(emit_fail(ctx, e).await);
+                            }
                         }
-                    }
-                };
+                    };
 
                 let lease = if ledger.is_create_event() {
                     if let Err(e) = create_subject(ctx, *ledger.clone()).await {
@@ -1027,7 +1032,11 @@ impl Handler<Self> for DistriWorker {
                 let new_info = self.build_response_info(
                     sender.clone(),
                     &info,
-                    format!("/user/{}/{}", info.request_id, info.receiver.clone()),
+                    format!(
+                        "/user/{}/{}",
+                        info.request_id,
+                        info.receiver.clone()
+                    ),
                 );
 
                 if let Err(e) = self
