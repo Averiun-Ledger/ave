@@ -315,7 +315,6 @@ async fn test_approve_invalid_gov_version() {
         Some(nodes[1].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_node2 = node_new_node2.api.clone();

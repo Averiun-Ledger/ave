@@ -113,7 +113,6 @@ async fn test_up_down_compiler() {
         Some(nodes[0].keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let new_owner = node_new_node2.api.clone();
@@ -724,7 +723,6 @@ async fn test_namespace_in_role_1() {
             "schema": [
                 {
                     "schema_id": "Example",
-
                         "change": {
                             "evaluate": {
                                 "fixed": 10

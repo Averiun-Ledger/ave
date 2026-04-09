@@ -56,9 +56,8 @@ async fn gov_life() {
         false,
         false,
         Some(nodes[1].keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -114,9 +113,8 @@ async fn gov_life() {
         false,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -182,9 +180,8 @@ async fn gov_life() {
         false,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -221,9 +218,8 @@ async fn gov_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -263,9 +259,8 @@ async fn gov_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -290,7 +285,6 @@ async fn gov_life() {
         Some(nodes[0].keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -340,9 +334,8 @@ async fn gov_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -367,7 +360,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -413,9 +405,8 @@ async fn gov_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -440,7 +431,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -485,7 +475,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -529,7 +518,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -572,7 +560,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -609,7 +596,6 @@ async fn gov_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -779,9 +765,8 @@ async fn tracker_life() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -822,9 +807,8 @@ async fn tracker_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -864,9 +848,8 @@ async fn tracker_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -891,7 +874,6 @@ async fn tracker_life() {
         Some(nodes[0].keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -929,9 +911,8 @@ async fn tracker_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -956,7 +937,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1002,9 +982,8 @@ async fn tracker_life() {
         true,
         false,
         Some(node_new_owner.keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();
@@ -1029,7 +1008,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1069,7 +1047,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1104,7 +1081,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1137,7 +1113,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1174,7 +1149,6 @@ async fn tracker_life() {
         Some(node_bootstrap.keys.clone()),
         Some(dirs[0].path().to_path_buf()),
         Some(dirs[1].path().to_path_buf()),
-        Some(dirs[2].path().to_path_buf()),
     )
     .await;
     let bootstrap = node_bootstrap.api.clone();
@@ -1194,7 +1168,6 @@ async fn tracker_life() {
 }
 
 #[test(tokio::test)]
-// todos los eventos de un tracker
 async fn not_node_role() {
     let (mut nodes, dirs) = create_nodes_and_connections(
         vec![vec![]],
@@ -1357,9 +1330,8 @@ async fn not_node_role() {
         true,
         false,
         Some(nodes[1].keys.clone()),
+        Some(dirs[2].path().to_path_buf()),
         Some(dirs[3].path().to_path_buf()),
-        Some(dirs[4].path().to_path_buf()),
-        Some(dirs[5].path().to_path_buf()),
     )
     .await;
     let owner = node_new_owner.api.clone();

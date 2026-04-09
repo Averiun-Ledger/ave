@@ -548,7 +548,6 @@ async fn test_basic_access() {
         Some(nodes[1].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -1168,7 +1167,6 @@ async fn test_basic_transfers() {
         Some(nodes[2].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_bob = node_new_bob.api;
@@ -1245,7 +1243,6 @@ async fn test_basic_transfers() {
         Some(nodes[1].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -1268,7 +1265,6 @@ async fn test_basic_transfers() {
         true,
         false,
         Some(nodes[3].keys.clone()),
-        None,
         None,
         None,
     )
@@ -1629,7 +1625,6 @@ async fn test_basic_explicit_witness() {
         true,
         false,
         Some(nodes[2].keys.clone()),
-        None,
         None,
         None,
     )
@@ -2031,7 +2026,6 @@ async fn test_basic_implicit_witness() {
         true,
         false,
         Some(nodes[2].keys.clone()),
-        None,
         None,
         None,
     )
@@ -2521,7 +2515,6 @@ async fn test_explicit_witness() {
         Some(nodes[1].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -2724,7 +2717,6 @@ async fn test_explicit_witness() {
         true,
         false,
         Some(node_new_alice.keys.clone()),
-        None,
         None,
         None,
     )
@@ -3276,14 +3268,13 @@ async fn test_explicit_witness_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_charlie, _dirs) = create_node(
+    let (node_new_charlie, _dirs) = create_node(
         NodeType::Addressable,
         &listen_address,
         peers,
         true,
         false,
         Some(nodes[3].keys.clone()),
-        None,
         None,
         None,
     )
@@ -3335,6 +3326,134 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     let _state = get_subject(&new_charlie, subject_id_3.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_explicit_witness_2_1() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test1"],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Charlie", "viewpoints": ["AllViewpoints"]}, {"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Alice",
+                                    "namespace": ["Test2"],
+                                    "quantity": "infinity",
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -3422,13 +3541,13 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_4.clone())
             .await
             .is_err()
     );
 
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_4.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -3436,7 +3555,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_4.clone())
         .await
         .unwrap();
@@ -3444,7 +3563,7 @@ async fn test_explicit_witness_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_4.clone())
             .await
             .is_err()
@@ -3582,13 +3701,13 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_5.clone())
             .await
             .is_err()
     );
 
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_5.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -3596,7 +3715,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_5.clone())
         .await
         .unwrap();
@@ -3604,7 +3723,7 @@ async fn test_explicit_witness_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_5.clone())
             .await
             .is_err()
@@ -3712,12 +3831,12 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie, subject_id_6.clone(), Some(2), true)
+    let _state = get_subject(&witness_charlie, subject_id_6.clone(), Some(2), true)
         .await
         .unwrap();
 
-    node_new_charlie.token.cancel();
-    join_all(node_new_charlie.handler.iter_mut()).await;
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let listen_address = format!("/memory/{}", port);
@@ -3732,8 +3851,7 @@ async fn test_explicit_witness_2() {
         peers,
         true,
         false,
-        Some(node_new_charlie.keys.clone()),
-        None,
+        Some(nodes[3].keys.clone()),
         None,
         None,
     )
@@ -3761,7 +3879,7 @@ async fn test_explicit_witness_2() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_charlie_2, governance_id.clone(), Some(6), true)
+    let _state = get_subject(&new_charlie_2, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -4100,7 +4218,6 @@ async fn test_range() {
         true,
         false,
         Some(nodes[2].keys.clone()),
-        None,
         None,
         None,
     )
@@ -4796,7 +4913,6 @@ async fn test_multi_source() {
         Some(nodes[1].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_alice = node_new_alice.api;
@@ -4982,7 +5098,6 @@ async fn test_multi_source() {
         Some(nodes[3].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_charlie = node_new_charlie.api;
@@ -5116,7 +5231,6 @@ async fn test_multi_source() {
         true,
         false,
         Some(node_new_charlie.keys.clone()),
-        None,
         None,
         None,
     )
@@ -5454,7 +5568,6 @@ async fn test_more_cases() {
         Some(nodes[4].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_dali = node_new_dali.api;
@@ -5626,8 +5739,7 @@ async fn test_more_cases() {
         false,
         Some(node_new_dali.keys.clone()),
         None,
-        None,
-        None,
+        None
     )
     .await;
     let new_dali = node_new_dali.api;
@@ -5676,8 +5788,147 @@ async fn test_more_cases() {
     let _state = get_subject(&new_dali, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
+}
 
-    // T49: N es old_owner + testigo activo de A(actual) + testigo de B(old owner)
+#[test(tokio::test)]
+async fn test_more_cases_1_1() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+    let witness_dali = nodes[4].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![
+            &witness_alice,
+            &witness_bob,
+            &witness_charlie,
+            &witness_dali,
+        ],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+                {
+                    "name": "Dali",
+                    "key": witness_dali.public_key()
+                },
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie", "Dali"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Dali", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Charlie",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Charlie",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+        // T49: N es old_owner + testigo activo de A(actual) + testigo de B(old owner)
     //      → data.sn (testigo activo de A cortocircuita, es el máximo posible)
     //
     // Secuencia:
@@ -5693,31 +5944,6 @@ async fn test_more_cases() {
     //   N.auth_subject → recibe hasta data.sn
     //   (check_current_owner para A devuelve ActualSearch::End inmediatamente,
     //    sin evaluar el rol de old_owner ni el testigo de B)
-
-    let json = json!({
-        "roles": {
-            "schema":
-                [
-                {
-                    "schema_id": "Example",
-                        "change": {
-                            "creator": [
-                                {
-                                    "actual_name": "Charlie",
-                                    "actual_namespace": [],
-                                    "new_witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Alice", "viewpoints": ["AllViewpoints"]}]
-                                }
-                            ]
-                        },
-
-                }
-            ]
-        }
-    });
-
-    emit_fact(&owner, governance_id.clone(), json, true)
-        .await
-        .unwrap();
 
     let (subject_id_3, ..) = create_subject(
         &witness_alice,
@@ -5777,15 +6003,6 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    emit_transfer(
-        &witness_bob,
-        subject_id_3.clone(),
-        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
-        true,
-    )
-    .await
-    .unwrap();
-
     witness_charlie
         .auth_subject(
             subject_id_3.clone(),
@@ -5794,10 +6011,14 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    witness_charlie
-        .update_subject(subject_id_3.clone())
-        .await
-        .unwrap();
+    emit_transfer(
+        &witness_bob,
+        subject_id_3.clone(),
+        PublicKey::from_str(&witness_charlie.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
 
     let _state = get_subject(&witness_charlie, subject_id_3.clone(), Some(5), true)
         .await
@@ -5823,7 +6044,7 @@ async fn test_more_cases() {
     let _state = get_subject(&witness_bob, subject_id_3.clone(), Some(6), true)
         .await
         .unwrap();
-    let _state = get_subject(&new_dali, subject_id_3.clone(), Some(5), true)
+    let _state = get_subject(&witness_dali, subject_id_3.clone(), Some(5), true)
         .await
         .unwrap();
     let _state = get_subject(&owner, subject_id_3.clone(), Some(7), true)
@@ -5847,7 +6068,6 @@ async fn test_more_cases() {
         true,
         false,
         Some(nodes[1].keys.clone()),
-        None,
         None,
         None,
     )
@@ -5875,7 +6095,7 @@ async fn test_more_cases() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, governance_id.clone(), Some(2), true)
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -5901,6 +6121,7 @@ async fn test_more_cases() {
     let _state = get_subject(&new_alice, subject_id_3.clone(), Some(7), true)
         .await
         .unwrap();
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6166,7 +6387,6 @@ async fn test_more_cases_2() {
         Some(nodes[3].keys.clone()),
         None,
         None,
-        None,
     )
     .await;
     let new_charlie = node_new_charlie.api.clone();
@@ -6216,6 +6436,125 @@ async fn test_more_cases_2() {
         .unwrap();
 
     let _state = get_subject(&new_charlie, subject_id_1.clone(), Some(2), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_more_cases_2_1() {
+        let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let witness_alice = nodes[1].api.clone();
+    let witness_bob = nodes[2].api.clone();
+    let witness_charlie = nodes[3].api.clone();
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&witness_alice, &witness_bob, &witness_charlie],
+    )
+    .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": witness_alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": witness_bob.public_key()
+                },
+                {
+                    "name": "Charlie",
+                    "key": witness_charlie.public_key()
+                },
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Charlie"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}],
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -6389,7 +6728,7 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .auth_subject(
             subject_id_2.clone(),
             AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
@@ -6397,7 +6736,7 @@ async fn test_more_cases_2() {
         .await
         .unwrap();
 
-    new_charlie
+    witness_charlie
         .update_subject(subject_id_2.clone())
         .await
         .unwrap();
@@ -6405,7 +6744,7 @@ async fn test_more_cases_2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
-        new_charlie
+        witness_charlie
             .get_subject_state(subject_id_2.clone())
             .await
             .is_err()

@@ -150,6 +150,11 @@ pub async fn system(
 #[cfg(test)]
 pub mod tests {
 
+    use std::{
+        env, process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
     use network::Config as NetworkConfig;
     use tempfile::TempDir;
@@ -161,6 +166,19 @@ pub mod tests {
     };
 
     use super::*;
+
+    static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn create_contracts_temp_dir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!(
+                "ave-test-contracts-{}-{}-",
+                process::id(),
+                CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ))
+            .tempdir_in(env::temp_dir())
+            .expect("Can not create temporal directory")
+    }
 
     #[derive(Debug, Clone)]
     pub struct Dummy;
@@ -189,8 +207,7 @@ pub mod tests {
         let ext_path = dir_ext_db.path().to_path_buf();
         vec_dirs.push(dir_ext_db);
 
-        let dir_contracts =
-            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_contracts = create_contracts_temp_dir();
         let contracts_path = dir_contracts.path().to_path_buf();
         vec_dirs.push(dir_contracts);
 

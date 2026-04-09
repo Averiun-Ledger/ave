@@ -24,9 +24,11 @@ use ave_core::{
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
+    env, fs,
     path::PathBuf,
+    process,
     str::FromStr,
-    sync::atomic::{AtomicU16, Ordering},
+    sync::atomic::{AtomicU16, AtomicU64, Ordering},
     time::Duration,
 };
 use tempfile::TempDir;
@@ -34,6 +36,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
+pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct NodeData {
     pub api: Api,
@@ -56,7 +59,6 @@ pub async fn create_node(
     keys: Option<KeyPair>,
     local_db: Option<PathBuf>,
     ext_db: Option<PathBuf>,
-    contracts_path: Option<PathBuf>,
 ) -> (NodeData, Vec<TempDir>) {
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
@@ -91,16 +93,13 @@ pub async fn create_node(
         peers,
     );
 
-    let contracts_path = if let Some(contracts_path) = contracts_path {
-        contracts_path
-    } else {
-        let contract_dir =
-            tempfile::tempdir().expect("Can not create temporal directory");
-        let contracts_path = contract_dir.path().to_path_buf();
-        vec_dirs.push(contract_dir);
-
-        contracts_path
-    };
+    let contracts_path = env::temp_dir().join(format!(
+        "ave-test-contracts-{}-{}",
+        process::id(),
+        CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::create_dir_all(&contracts_path)
+        .expect("Can not create contracts directory");
 
     let config = Config {
         is_service,
@@ -203,7 +202,6 @@ pub async fn create_nodes_and_connections(
             None,
             None,
             None,
-            None,
         )
         .await;
         dirs.append(&mut vec_dirs);
@@ -233,7 +231,6 @@ pub async fn create_nodes_and_connections(
             None,
             None,
             None,
-            None,
         )
         .await;
         dirs.append(&mut vec_dirs);
@@ -260,7 +257,6 @@ pub async fn create_nodes_and_connections(
             peers,
             always_accept,
             is_service,
-            None,
             None,
             None,
             None,
@@ -394,7 +390,7 @@ pub async fn get_subject(
     node: &Api,
     subject_id: DigestIdentifier,
     sn: Option<u64>,
-    timeout: bool
+    timeout: bool,
 ) -> Result<SubjectDB, Box<dyn std::error::Error>> {
     let mut count = 0;
     loop {
@@ -423,7 +419,6 @@ pub async fn get_subject(
         if timeout {
             count += 1;
         }
-        
     }
 }
 
@@ -449,7 +444,7 @@ pub async fn get_abort_request(
         {
             return Ok(state);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
 
@@ -491,14 +486,14 @@ pub async fn wait_request_state(
                         return Ok(state.state);
                     }
                     _ => {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
                     }
                 }
             } else {
                 return Ok(state.state);
             }
         } else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
 }
@@ -528,7 +523,7 @@ pub async fn wait_request(
                 _ => {}
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     // Segundo para que la información se escriba en el sumidero
@@ -545,7 +540,7 @@ pub async fn node_running(
                 break;
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
     Ok(())
 }
@@ -598,7 +593,7 @@ pub async fn emit_approve(
                 _ => {}
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     Ok(())

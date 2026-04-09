@@ -3,12 +3,14 @@
 // Shared utilities and helpers for all auth tests
 
 use std::collections::BTreeSet;
+use std::env;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process;
 use std::sync::{
     Arc,
-    atomic::{AtomicU16, Ordering},
+    atomic::{AtomicU16, AtomicU64, Ordering},
 };
 
 use ave_bridge::{
@@ -35,6 +37,19 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn create_contracts_temp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!(
+            "ave-test-contracts-{}-{}-",
+            process::id(),
+            CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ))
+        .tempdir_in(env::temp_dir())
+        .expect("contracts temp dir")
+}
 
 pub trait TestDbExt {
     fn create_user(
@@ -805,8 +820,7 @@ async fn build_test_router_with_options(
         let ave_db_temp_dir = tempfile::tempdir().expect("ave_db temp dir");
         let external_db_temp_dir =
             tempfile::tempdir().expect("external_db temp dir");
-        let contracts_temp_dir =
-            tempfile::tempdir().expect("contracts temp dir");
+        let contracts_temp_dir = create_contracts_temp_dir();
         let keys_dir = tempfile::tempdir().expect("keys temp dir");
         let auth_dir = tempfile::tempdir().expect("auth temp dir");
 
