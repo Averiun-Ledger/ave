@@ -110,7 +110,7 @@ impl Update {
         }
     }
 
-    fn should_retry_auth_rounds(&self) -> bool {
+    const fn should_retry_auth_rounds(&self) -> bool {
         matches!(self.update_type, UpdateType::Auth)
             && !matches!(
                 self.subject_kind_hint,
@@ -136,7 +136,7 @@ impl Update {
             .find(|range| range.from_sn <= next_sn && next_sn <= range.to_sn)
     }
 
-    fn tracker_range_rank(
+    const fn tracker_range_rank(
         mode: &TrackerDeliveryMode,
     ) -> u8 {
         match mode {
@@ -210,7 +210,7 @@ impl Update {
 
     async fn stop_active_updaters(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let children = ctx.system().children(ctx.path()).await;
         for child_path in children {
@@ -311,7 +311,7 @@ impl Update {
 
     async fn schedule_retry(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         expected_target_sn: u64,
         attempt: usize,
     ) -> Result<(), ActorError> {
@@ -635,14 +635,9 @@ impl Handler<Self> for Update {
                             "All witnesses responded, update complete"
                         );
 
-                        if self.should_retry_auth_rounds() {
-                            if !keep_running {
-                                ctx.stop(None).await;
-                            }
-                        } else if matches!(self.update_type, UpdateType::Auth)
+                        if !self.should_retry_auth_rounds()
+                            || !keep_running
                         {
-                            ctx.stop(None).await;
-                        } else {
                             ctx.stop(None).await;
                         }
                     }

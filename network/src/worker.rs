@@ -181,17 +181,27 @@ where
     metrics: Option<Arc<NetworkMetrics>>,
 }
 
+/// Runtime dependencies and optional integrations for `NetworkWorker`.
+pub struct NetworkWorkerRuntime {
+    /// Monitor actor that receives network events.
+    pub monitor: Option<ActorRef<Monitor>>,
+    /// Graceful shutdown token shared with the rest of the node.
+    pub graceful_token: CancellationToken,
+    /// Crash token used to force-stop the node on unrecoverable failures.
+    pub crash_token: CancellationToken,
+    /// Optional machine spec used to derive sizing limits.
+    pub machine_spec: Option<MachineSpec>,
+    /// Optional metrics handle for network instrumentation.
+    pub metrics: Option<Arc<NetworkMetrics>>,
+}
+
 impl<T: Debug + Serialize> NetworkWorker<T> {
     /// Create a new `NetworkWorker`.
     pub fn new(
         keys: &KeyPair,
         config: Config,
         safe_mode: bool,
-        monitor: Option<ActorRef<Monitor>>,
-        graceful_token: CancellationToken,
-        crash_token: CancellationToken,
-        machine_spec: Option<MachineSpec>,
-        metrics: Option<Arc<NetworkMetrics>>,
+        runtime: NetworkWorkerRuntime,
     ) -> Result<Self, Error> {
         // Create channels to communicate commands
         info!(target: TARGET, "network initialising");
@@ -224,7 +234,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
         let node_type = config.node_type.clone();
         // Resolve machine sizing from the declared spec, or auto-detect from host.
-        let ResolvedSpec { ram_mb, cpu_cores } = resolve_spec(machine_spec);
+        let ResolvedSpec { ram_mb, cpu_cores } =
+            resolve_spec(runtime.machine_spec);
 
         let limits = LimitsConfig::build(ram_mb, cpu_cores);
         let max_app_message_bytes = config.max_app_message_bytes;
@@ -243,10 +254,10 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let behaviour = Behaviour::new(
             &key.public(),
             config,
-            graceful_token.clone(),
-            crash_token.clone(),
+            runtime.graceful_token.clone(),
+            runtime.crash_token.clone(),
             limits,
-            metrics.clone(),
+            runtime.metrics.clone(),
         );
 
         // Create the swarm.
@@ -304,9 +315,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             state: NetworkState::Start,
             command_receiver,
             helper_sender: None,
-            monitor,
-            graceful_token,
-            crash_token,
+            monitor: runtime.monitor,
+            graceful_token: runtime.graceful_token,
+            crash_token: runtime.crash_token,
             node_type,
             safe_mode,
             boot_nodes,
@@ -325,7 +336,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             max_pending_inbound_bytes_per_peer,
             max_pending_outbound_bytes_total,
             max_pending_inbound_bytes_total,
-            metrics,
+            metrics: runtime.metrics,
         };
 
         if let Some(metrics) = worker.metric_handle() {
@@ -913,9 +924,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     /// Send event
-    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn send_event(&mut self, event: NetworkEvent) {
-        if let Some(monitor) = self.monitor.clone()
+        if let Some(monitor) = self.monitor.as_mut()
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
         {
             error!(target: TARGET, error = %e, "failed to forward event to monitor");
@@ -1470,7 +1480,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         }
     }
 
-    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn message_to_helper(
         &mut self,
         message: MessagesHelper,
@@ -1485,7 +1494,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         };
 
         'Send: {
-            if let Some(helper_sender) = self.helper_sender.as_ref() {
+            if let Some(helper_sender) = self.helper_sender.as_mut() {
                 match message {
                     MessagesHelper::Single(items) => {
                         if helper_sender
@@ -2009,11 +2018,13 @@ mod tests {
             &keys,
             config,
             false,
-            None,
-            graceful_token,
-            crash_token,
-            None,
-            None,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token,
+                crash_token,
+                machine_spec: None,
+                metrics: None,
+            },
         )
         .unwrap()
     }
@@ -2084,11 +2095,13 @@ mod tests {
             &keys,
             config,
             false,
-            None,
-            CancellationToken::new(),
-            CancellationToken::new(),
-            None,
-            Some(metrics),   
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
         )
         .expect("worker");
 
@@ -2157,11 +2170,13 @@ mod tests {
             &keys,
             config,
             false,
-            None,
-            CancellationToken::new(),
-            CancellationToken::new(),
-            None,
-            Some(metrics),
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
         )
         .expect("worker");
 
@@ -2238,11 +2253,13 @@ mod tests {
             &keys,
             config,
             false,
-            None,
-            CancellationToken::new(),
-            CancellationToken::new(),
-            None,
-            Some(metrics),
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
         )
         .expect("worker");
 

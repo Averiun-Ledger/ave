@@ -43,10 +43,10 @@ pub enum EvaluationResponse {
 impl EvaluationResponse {
     pub fn build_opaque(&self) -> EvaluationResponseOpaque {
         match self.clone() {
-            EvaluationResponse::Ok { result_hash, .. } => {
+            Self::Ok { result_hash, .. } => {
                 EvaluationResponseOpaque::Ok { result_hash }
             }
-            EvaluationResponse::Error { result_hash, .. } => {
+            Self::Error { result_hash, .. } => {
                 EvaluationResponseOpaque::Error { result_hash }
             }
         }
@@ -73,11 +73,8 @@ pub struct EvaluationDataOpaque {
 }
 
 impl EvaluationDataOpaque {
-    pub fn is_ok(&self) -> bool {
-        match &self.response {
-            EvaluationResponseOpaque::Ok { .. } => true,
-            _ => false,
-        }
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.response, EvaluationResponseOpaque::Ok { .. })
     }
 }
 
@@ -92,11 +89,8 @@ pub struct EvaluationData {
 }
 
 impl EvaluationData {
-    pub fn is_ok(&self) -> bool {
-        match &self.response {
-            EvaluationResponse::Ok { .. } => true,
-            _ => false,
-        }
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.response, EvaluationResponse::Ok { .. })
     }
 
     pub fn evaluator_response_ok(&self) -> Option<EvaluatorResponse> {
@@ -757,7 +751,7 @@ impl Ledger {
         
     }
 
-    pub fn is_create_event(&self) -> bool {
+    pub const fn is_create_event(&self) -> bool {
         matches!(&self.protocols, Protocols::Create { .. })
     }
 
@@ -795,7 +789,7 @@ impl Ledger {
             .map_err(|e| LedgerError::HashingFailed(e.to_string()))
     }
 
-    pub fn get_event_request_type(&self) -> EventRequestType {
+    pub const fn get_event_request_type(&self) -> EventRequestType {
         match &self.protocols {
             Protocols::Create { .. } => EventRequestType::Create,
             Protocols::TrackerFactFull { .. }

@@ -383,7 +383,7 @@ impl Subject for Tracker {
 }
 
 impl Tracker {
-    fn public_visibilities() -> (
+    const fn public_visibilities() -> (
         TrackerStoredVisibility,
         TrackerEventVisibility,
     ) {
@@ -410,7 +410,7 @@ impl Tracker {
         (stored_visibility, event_visibility)
     }
 
-    fn is_full(&self) -> bool {
+    const fn is_full(&self) -> bool {
         matches!(self.visibility_mode, TrackerVisibilityMode::Full)
     }
 
@@ -748,13 +748,15 @@ impl Tracker {
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
-                &event,
-                Metadata::from(self.clone()),
-                actual_ledger_hash,
-                last_data,
-                hash,
-                self.is_full(),
-                self.service,
+                Self::verify_new_ledger_event_args(
+                    &event,
+                    Metadata::from(self.clone()),
+                    actual_ledger_hash,
+                    last_data,
+                    hash,
+                    self.is_full(),
+                    self.service,
+                ),
             )
             .await
             {

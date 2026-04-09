@@ -143,7 +143,6 @@ impl DistriWorker {
                 message: NetworkMessage { info, message },
             })
             .await
-            .map_err(ActorError::from)
     }
 
     async fn get_governance_version(
@@ -242,7 +241,7 @@ impl DistriWorker {
                     Some(create.governance_id.clone())
                 };
 
-                (create.schema_id.clone(), create.namespace.clone(), gov_id)
+                (create.schema_id.clone(), create.namespace, gov_id)
             } else {
                 // No es el primer evento, necesito el primero
                 try_to_update(ctx, subject_id, Some(sender)).await?;

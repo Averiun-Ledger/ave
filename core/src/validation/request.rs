@@ -145,7 +145,7 @@ pub enum ActualProtocols {
 }
 
 impl ActualProtocols {
-    pub fn is_success(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         match &self {
             Self::None => true,
             Self::Eval { eval_data } => eval_data.is_ok(),
@@ -153,7 +153,7 @@ impl ActualProtocols {
         }
     }
 
-    pub fn check_protocols(
+    pub const fn check_protocols(
         &self,
         is_gov: bool,
         event_request_type: &EventRequestType,

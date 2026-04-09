@@ -212,8 +212,6 @@ pub async fn create_nodes_and_connections(
         nodes.push(node);
     }
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     for connections in addressable.iter() {
         let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let listen_address = format!("/memory/{}", port);

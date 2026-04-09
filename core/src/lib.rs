@@ -46,6 +46,7 @@ use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 use network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
+    NetworkWorkerRuntime,
 };
 
 use node::{Node, NodeMessage, NodeResponse, TransferSubject};
@@ -283,7 +284,7 @@ impl Api {
     /// Creates a new `Api`.
     pub async fn build(
         keys: KeyPair,
-        mut config: AveBaseConfig,
+        config: AveBaseConfig,
         sink_auth: SinkAuth,
         registry: &mut Registry,
         password: &str,
@@ -325,11 +326,13 @@ impl Api {
             &keys,
             config.network.clone(),
             config.safe_mode,
-            Some(newtork_monitor_actor.clone()),
-            graceful_token.clone(),
-            crash_token.clone(),
-            spec,
-            Some(network_metrics),
+            NetworkWorkerRuntime {
+                monitor: Some(newtork_monitor_actor.clone()),
+                graceful_token: graceful_token.clone(),
+                crash_token: crash_token.clone(),
+                machine_spec: spec,
+                metrics: Some(network_metrics),
+            },
         )
         .map_err(|e| {
             error!(error = %e, "Can not create networt");

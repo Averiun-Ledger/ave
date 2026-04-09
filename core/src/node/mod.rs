@@ -1190,7 +1190,7 @@ impl Handler<Self> for Node {
                         self.sign(&validation_res)
                     }
                     SignTypesNode::EvaluationReq(evaluation_req) => {
-                        self.sign(&evaluation_req)
+                        self.sign(&*evaluation_req)
                     }
                     SignTypesNode::EvaluationSignature(evaluation_res) => {
                         self.sign(&evaluation_res)

@@ -28,7 +28,7 @@ pub enum SignTypesNode {
     ApprovalReq(ApprovalReq),
     ApprovalRes(Box<ApprovalRes>),
 
-    EvaluationReq(EvaluationReq),
+    EvaluationReq(Box<EvaluationReq>),
     EvaluationSignature(DigestIdentifier),
 
     ValidationReq(Box<ValidationReq>),

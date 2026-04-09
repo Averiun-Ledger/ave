@@ -482,11 +482,11 @@ impl Default for TrackerVisibilityState {
 }
 
 impl TrackerVisibilityState {
-    pub fn is_full(&self) -> bool {
+    pub const fn is_full(&self) -> bool {
         matches!(self.mode, TrackerVisibilityMode::Full)
     }
 
-    pub fn set_mode(&mut self, mode: TrackerVisibilityMode) {
+    pub const fn set_mode(&mut self, mode: TrackerVisibilityMode) {
         self.mode = mode;
     }
 
@@ -683,13 +683,13 @@ impl<'a> Iterator for TrackerEventVisibilityIter<'a> {
 
 impl TrackerStoredVisibilityRange {
     fn contains(&self, sn: u64) -> bool {
-        self.from_sn <= sn && self.to_sn.map_or(true, |to_sn| sn <= to_sn)
+        self.from_sn <= sn && self.to_sn.is_none_or(|to_sn| sn <= to_sn)
     }
 }
 
 impl TrackerEventVisibilityRange {
     fn contains(&self, sn: u64) -> bool {
-        self.from_sn <= sn && self.to_sn.map_or(true, |to_sn| sn <= to_sn)
+        self.from_sn <= sn && self.to_sn.is_none_or(|to_sn| sn <= to_sn)
     }
 }
 

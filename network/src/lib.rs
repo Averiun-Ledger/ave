@@ -30,7 +30,7 @@ pub use monitor::*;
 pub use routing::{Config as RoutingConfig, RoutingNode};
 pub use service::NetworkService;
 pub use utils::NetworkState;
-pub use worker::NetworkWorker;
+pub use worker::{NetworkWorker, NetworkWorkerRuntime};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};

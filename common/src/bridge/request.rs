@@ -118,12 +118,8 @@ pub enum EventRequestType {
 }
 
 impl EventRequestType {
-    pub fn is_create_event(&self) -> bool {
-        if let EventRequestType::Create = self {
-            true
-        } else {
-            false
-        }
+    pub const fn is_create_event(&self) -> bool {
+        matches!(self, Self::Create)
     }
 }
 

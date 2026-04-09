@@ -534,10 +534,10 @@ impl<'de> Deserialize<'de> for RoleCreator {
             quantity,
         } = RoleCreatorDef::deserialize(deserializer)?;
 
-        let witnesses = match witnesses {
-            Some(values) => values.into(),
-            None => default_creator_witnesses(),
-        };
+        let witnesses =
+            witnesses.map_or_else(default_creator_witnesses, |values| {
+                values.into()
+            });
 
         Ok(Self {
             name,

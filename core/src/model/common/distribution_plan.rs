@@ -15,7 +15,7 @@ use crate::{
     subject::Metadata,
 };
 
-fn merge_distribution_mode(
+const fn merge_distribution_mode(
     current: DistributionPlanMode,
     next: DistributionPlanMode,
 ) -> DistributionPlanMode {
@@ -35,12 +35,11 @@ fn upsert_distribution_plan(
     node: PublicKey,
     mode: DistributionPlanMode,
 ) {
-    plan.entry(node)
-        .and_modify(|current| {
-            *current =
-                merge_distribution_mode(current.clone(), mode.clone());
-        })
-        .or_insert(mode);
+    if let Some(current) = plan.get_mut(&node) {
+        *current = merge_distribution_mode(current.clone(), mode);
+    } else {
+        plan.insert(node, mode);
+    }
 }
 
 fn tracker_fact_mode_for_witness(
@@ -185,7 +184,7 @@ pub fn build_tracker_event_distribution_plan(
 
             let witnesses = governance_data
                 .get_witnesses(WitnessesData::Schema {
-                    creator: new_owner.clone(),
+                    creator: new_owner,
                     schema_id: metadata.schema_id.clone(),
                     namespace: metadata.namespace.clone(),
                 })

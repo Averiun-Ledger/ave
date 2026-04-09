@@ -2260,13 +2260,15 @@ impl Governance {
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
                 ctx,
-                &event,
-                Metadata::from(self.clone()),
-                actual_ledger_hash,
-                last_data,
-                hash,
-                true,
-                false
+                Self::verify_new_ledger_event_args(
+                    &event,
+                    Metadata::from(self.clone()),
+                    actual_ledger_hash,
+                    last_data,
+                    hash,
+                    true,
+                    false,
+                ),
             )
             .await
             {

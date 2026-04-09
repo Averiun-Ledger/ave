@@ -72,6 +72,16 @@ pub struct RequestSubjectData {
     pub signer: PublicKey,
 }
 
+pub struct VerifyNewLedgerEvent<'a> {
+    pub new_ledger_event: &'a Ledger,
+    pub subject_metadata: Metadata,
+    pub actual_ledger_event_hash: DigestIdentifier,
+    pub last_data: LastData,
+    pub hash: &'a HashAlgorithm,
+    pub full_view: bool,
+    pub is_service: bool,
+}
+
 /// Subject metadata.
 #[derive(
     Debug,
@@ -642,7 +652,7 @@ fn data_to_sink_event(
             issuer: data.issuer.to_string(),
             viewpoints: fact_request.viewpoints.iter().cloned().collect(),
             owner: data.owner,
-            payload: success.then_some(fact_request.payload.0.clone()),
+            payload: success.then_some(fact_request.payload.0),
             schema_id: data.schema_id,
             sn: data.sn,
             gov_version: data.gov_version,
@@ -698,7 +708,7 @@ fn data_to_sink_event(
             patch,
             success,
             error,
-            name_old_owner: confirm_request.name_old_owner.clone(),
+            name_old_owner: confirm_request.name_old_owner,
         },
         (Some(EventRequest::Reject(..)), EventLedgerDataForSink::Reject) => {
             DataToSinkEvent::Reject {
@@ -864,6 +874,26 @@ where
     <Self as Actor>::Event: BorshSerialize + BorshDeserialize,
     Self: PersistentActor,
 {
+    fn verify_new_ledger_event_args<'a>(
+        new_ledger_event: &'a Ledger,
+        subject_metadata: Metadata,
+        actual_ledger_event_hash: DigestIdentifier,
+        last_data: LastData,
+        hash: &'a HashAlgorithm,
+        full_view: bool,
+        is_service: bool,
+    ) -> VerifyNewLedgerEvent<'a> {
+        VerifyNewLedgerEvent {
+            new_ledger_event,
+            subject_metadata,
+            actual_ledger_event_hash,
+            last_data,
+            hash,
+            full_view,
+            is_service,
+        }
+    }
+
     fn hash_viewpoints(
         hash: &HashAlgorithm,
         viewpoints: &BTreeSet<String>,
@@ -902,14 +932,18 @@ where
 
     async fn verify_new_ledger_event(
         ctx: &mut ActorContext<Self>,
-        new_ledger_event: &Ledger,
-        subject_metadata: Metadata,
-        actual_ledger_event_hash: DigestIdentifier,
-        last_data: LastData,
-        hash: &HashAlgorithm,
-        full_view: bool,
-        is_service: bool
+        args: VerifyNewLedgerEvent<'_>,
     ) -> Result<bool, SubjectError> {
+        let VerifyNewLedgerEvent {
+            new_ledger_event,
+            subject_metadata,
+            actual_ledger_event_hash,
+            last_data,
+            hash,
+            full_view,
+            is_service,
+        } = args;
+
         if !subject_metadata.active {
             return Err(SubjectError::SubjectInactive);
         }

@@ -798,10 +798,8 @@ impl WitnessesRegister {
                         .is_some_and(|(new_owner, _)| new_owner == node)
                 {
                     Some(data.sn)
-                } else if let Some(old_owner) = data.old_owners.get(node) {
-                    Some(old_owner.sn)
                 } else {
-                    None
+                    data.old_owners.get(node).map(|old_owner| old_owner.sn)
                 }
             }
         };
@@ -861,13 +859,13 @@ impl WitnessesRegister {
                 }),
             }
 
-            if clear_sn.is_none()
-                && matches!(ranges.first().map(|x| &x.mode), Some(TrackerDeliveryMode::Clear))
-                && matches!(mode, TrackerDeliveryMode::Clear)
-            {
-                clear_sn = Some(sn);
-            } else if clear_sn == Some(sn.saturating_sub(1))
-                && matches!(mode, TrackerDeliveryMode::Clear)
+            if matches!(mode, TrackerDeliveryMode::Clear)
+                && ((clear_sn.is_none()
+                    && matches!(
+                        ranges.first().map(|x| &x.mode),
+                        Some(TrackerDeliveryMode::Clear)
+                    ))
+                    || clear_sn == Some(sn.saturating_sub(1)))
             {
                 clear_sn = Some(sn);
             }
@@ -1778,7 +1776,7 @@ impl Handler<Self> for WitnessesRegister {
                     WitnessesRegisterEvent::UpdateTrackerVisibility {
                         subject_id: subject_id.clone(),
                         sn,
-                        mode: mode.clone(),
+                        mode,
                         stored_visibility: stored_visibility.clone(),
                         event_visibility: event_visibility.clone(),
                     },
@@ -2161,7 +2159,7 @@ impl PersistentActor for WitnessesRegister {
                 event_visibility,
             } => {
                 if let Some(data) = self.subjects.get_mut(subject_id) {
-                    data.visibility_state.set_mode(mode.clone());
+                    data.visibility_state.set_mode(*mode);
                     data.visibility_state.record_event(
                         *sn,
                         stored_visibility.clone(),

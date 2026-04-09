@@ -529,7 +529,7 @@ impl RequestManager {
         };
 
         let signature =
-            get_sign(ctx, SignTypesNode::EvaluationReq(eval_req.clone()))
+            get_sign(ctx, SignTypesNode::EvaluationReq(Box::new(eval_req.clone())))
                 .await?;
 
         let signed_evaluation_req: Signed<EvaluationReq> =
@@ -930,7 +930,7 @@ impl RequestManager {
 
             if gov_version != governance_data.version {
                 return Err(RequestManagerError::GovernanceVersionChanged {
-                    governance_id: metadata.governance_id.clone(),
+                    governance_id: metadata.governance_id,
                     expected: gov_version,
                     current: governance_data.version,
                 });

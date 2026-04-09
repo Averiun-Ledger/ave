@@ -376,7 +376,7 @@ where
     let mut should_finish = true;
     if ledger.get_event_request_type().is_create_event()
         && let EventRequest::Create(request) =
-            ledger.get_event_request().ok_or(ActorError::Functional {
+            ledger.get_event_request().ok_or_else(|| ActorError::Functional {
                 description: "Can not obtain create event request".to_string(),
             })?
     {
