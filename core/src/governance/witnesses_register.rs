@@ -252,6 +252,13 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
+    CreateAccess {
+        owner: PublicKey,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        gov_version: u64,
+    },
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
@@ -351,6 +358,9 @@ impl Event for WitnessesRegisterEvent {}
 pub enum WitnessesRegisterResponse {
     Access {
         sn: Option<u64>,
+    },
+    CreateAccess {
+        allowed: bool,
     },
     GovSn {
         sn: u64,
@@ -1432,6 +1442,89 @@ impl WitnessesRegister {
                 .is_some_and(has_match)
     }
 
+    fn interval_active_at(
+        interval: &IntervalSet,
+        current_from: Option<u64>,
+        gov_version: u64,
+    ) -> bool {
+        current_from.is_some_and(|from| from <= gov_version)
+            || interval
+                .iter()
+                .any(|range| range.lo <= gov_version && gov_version <= range.hi)
+    }
+
+    fn has_schema_witness_at(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &Namespace,
+        gov_version: u64,
+    ) -> bool {
+        let has_match = |witness_data: &HashMap<Namespace, IntervalData>| {
+            witness_data.iter().any(
+                |(current_namespace, (interval, current_from))| {
+                    current_namespace.is_ancestor_or_equal_of(namespace)
+                        && Self::interval_active_at(
+                            interval,
+                            *current_from,
+                            gov_version,
+                        )
+                },
+            )
+        };
+
+        self.witnesses
+            .get(&(node.clone(), schema_id.clone()))
+            .is_some_and(has_match)
+            || self
+                .witnesses
+                .get(&(node.clone(), SchemaType::TrackerSchemas))
+                .is_some_and(has_match)
+    }
+
+    fn has_create_access(
+        &self,
+        owner: &PublicKey,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+        gov_version: u64,
+    ) -> bool {
+        if owner == node {
+            return true;
+        }
+
+        let namespace = Namespace::from(namespace.to_owned());
+        let Some(witnesses_creator) = self.witnesses_creator.get(&(
+            owner.clone(),
+            namespace.to_string(),
+            schema_id.clone(),
+        )) else {
+            return false;
+        };
+
+        if witnesses_creator
+            .get(&WitnessesType::User(node.clone()))
+            .is_some_and(|(interval, current_from)| {
+                Self::interval_active_at(interval, *current_from, gov_version)
+            })
+        {
+            return true;
+        }
+
+        witnesses_creator
+            .get(&WitnessesType::Witnesses)
+            .is_some_and(|(interval, current_from)| {
+                Self::interval_active_at(interval, *current_from, gov_version)
+                    && self.has_schema_witness_at(
+                        node,
+                        schema_id,
+                        &namespace,
+                        gov_version,
+                    )
+            })
+    }
+
     fn is_current_witness_for_entry(
         &self,
         node: &PublicKey,
@@ -1907,6 +2000,25 @@ impl Handler<Self> for WitnessesRegister {
                 );
 
                 return Ok(WitnessesRegisterResponse::Access { sn });
+            }
+            WitnessesRegisterMessage::CreateAccess {
+                owner,
+                node,
+                namespace,
+                schema_id,
+                gov_version,
+            } => {
+                let allowed = self.has_create_access(
+                    &owner,
+                    &node,
+                    &namespace,
+                    &schema_id,
+                    gov_version,
+                );
+
+                return Ok(WitnessesRegisterResponse::CreateAccess {
+                    allowed,
+                });
             }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
                 subject_id,
