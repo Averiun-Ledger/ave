@@ -74,36 +74,17 @@ impl DistriWorker {
             .unwrap_or(ledger.len())
     }
 
-    async fn tracker_access_limit(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-    ) -> Result<Option<u64>, ActorError> {
-        check_witness_access(
-            ctx,
-            governance_id,
-            subject_id,
-            node,
-            namespace,
-            schema_id,
-        )
-        .await
-    }
-
-    async fn create_participant_allowed(
+    async fn check_create_copy_auth(
         &self,
         ctx: &ActorContext<Self>,
         governance_id: &DigestIdentifier,
         owner: &PublicKey,
-        node: &PublicKey,
+        sender: &PublicKey,
+        receiver: &PublicKey,
         namespace: &Namespace,
         schema_id: &SchemaType,
         gov_version: u64,
-    ) -> Result<bool, ActorError> {
+    ) -> Result<(bool, bool), ActorError> {
         let actor_path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/witnesses_register",
             governance_id
@@ -111,9 +92,10 @@ impl DistriWorker {
         let actor: ActorRef<WitnessesRegister> =
             ctx.system().get_actor(&actor_path).await?;
         let response = actor
-            .ask(WitnessesRegisterMessage::CreateAccess {
+            .ask(WitnessesRegisterMessage::CheckCreateCopyAuth {
                 owner: owner.clone(),
-                node: node.clone(),
+                sender: sender.clone(),
+                receiver: receiver.clone(),
                 namespace: namespace.to_string(),
                 schema_id: schema_id.clone(),
                 gov_version,
@@ -121,12 +103,16 @@ impl DistriWorker {
             .await?;
 
         match response {
-            WitnessesRegisterResponse::CreateAccess { allowed } => {
-                Ok(allowed)
+            WitnessesRegisterResponse::CheckCreateCopyAuth {
+                sender_allowed,
+                receiver_allowed,
+            } => {
+                Ok((sender_allowed, receiver_allowed))
             }
             _ => Err(ActorError::UnexpectedResponse {
                 path: actor_path,
-                expected: "WitnessesRegisterResponse::CreateAccess".to_owned(),
+                expected: "WitnessesRegisterResponse::CheckCreateCopyAuth"
+                    .to_owned(),
             }),
         }
     }
@@ -199,6 +185,46 @@ impl DistriWorker {
                     path,
                 }),
             }
+        }
+    }
+
+    async fn check_known_tracker_copy_auth(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        sender: &PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        target_sn: u64,
+    ) -> Result<(bool, bool), ActorError> {
+        let actor_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}/witnesses_register",
+            governance_id
+        ));
+        let actor: ActorRef<WitnessesRegister> =
+            ctx.system().get_actor(&actor_path).await?;
+        let response = actor
+            .ask(WitnessesRegisterMessage::CheckCopyAuth {
+                subject_id: subject_id.clone(),
+                sender: sender.clone(),
+                receiver: (*self.our_key).clone(),
+                namespace,
+                schema_id,
+                target_sn,
+            })
+            .await?;
+
+        match response {
+            WitnessesRegisterResponse::CheckCopyAuth {
+                sender_allowed,
+                receiver_allowed,
+            } => Ok((sender_allowed, receiver_allowed)),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: actor_path,
+                expected: "WitnessesRegisterResponse::CheckCopyAuth"
+                    .to_owned(),
+            }),
         }
     }
 
@@ -327,12 +353,13 @@ impl DistriWorker {
             }
 
             if !auth {
-                let sender_allowed = self
-                    .create_participant_allowed(
+                let (sender_allowed, receiver_allowed) = self
+                    .check_create_copy_auth(
                         ctx,
                         &create.governance_id,
                         &create_owner,
                         &sender,
+                        self.our_key.as_ref(),
                         &create.namespace,
                         &create.schema_id,
                         first_ledger.gov_version,
@@ -342,17 +369,6 @@ impl DistriWorker {
                     return Err(DistributorError::SenderNoAccess.into());
                 }
 
-                let receiver_allowed = self
-                    .create_participant_allowed(
-                        ctx,
-                        &create.governance_id,
-                        &create_owner,
-                        self.our_key.as_ref(),
-                        &create.namespace,
-                        &create.schema_id,
-                        first_ledger.gov_version,
-                    )
-                    .await?;
                 if !receiver_allowed {
                     return Err(DistributorError::NotWitness.into());
                 }
@@ -395,32 +411,23 @@ impl DistriWorker {
                     .map(|entry| entry.sn)
                     .unwrap_or(first_ledger.sn);
 
-                let sender_limit = self
-                    .tracker_access_limit(
+                let (sender_allowed, receiver_allowed) = self
+                    .check_known_tracker_copy_auth(
                         ctx,
                         &governance_id,
                         &subject_id,
-                        sender,
-                        namespace.clone(),
-                        schema_id.clone(),
-                    )
-                    .await?;
-                let receiver_limit = self
-                    .tracker_access_limit(
-                        ctx,
-                        &governance_id,
-                        &subject_id,
-                        (*self.our_key).clone(),
+                        &sender,
                         namespace,
                         schema_id,
+                        target_sn,
                     )
                     .await?;
 
-                if sender_limit.is_none_or(|sn| sn < target_sn) {
+                if !sender_allowed {
                     return Err(DistributorError::SenderNoAccess.into());
                 }
 
-                if receiver_limit.is_none_or(|sn| sn < target_sn) {
+                if !receiver_allowed {
                     return Err(DistributorError::NotWitness.into());
                 }
 

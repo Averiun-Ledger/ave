@@ -252,9 +252,18 @@ pub enum WitnessesRegisterMessage {
         namespace: String,
         schema_id: SchemaType,
     },
-    CreateAccess {
+    CheckCopyAuth {
+        subject_id: DigestIdentifier,
+        sender: PublicKey,
+        receiver: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        target_sn: u64,
+    },
+    CheckCreateCopyAuth {
         owner: PublicKey,
-        node: PublicKey,
+        sender: PublicKey,
+        receiver: PublicKey,
         namespace: String,
         schema_id: SchemaType,
         gov_version: u64,
@@ -359,8 +368,13 @@ pub enum WitnessesRegisterResponse {
     Access {
         sn: Option<u64>,
     },
-    CreateAccess {
-        allowed: bool,
+    CheckCopyAuth {
+        sender_allowed: bool,
+        receiver_allowed: bool,
+    },
+    CheckCreateCopyAuth {
+        sender_allowed: bool,
+        receiver_allowed: bool,
     },
     GovSn {
         sn: u64,
@@ -890,11 +904,11 @@ impl WitnessesRegister {
         };
 
         let sn = if data.actual_owner == *node {
-            Some(data.sn)
+            Some(u64::MAX)
         } else if let Some((new_owner, ..)) = &data.actual_new_owner_data
             && new_owner == node
         {
-            Some(data.sn)
+            Some(u64::MAX)
         } else if let Some(old_data) = data.old_owners.get(node) {
             let sn_limit = self
                 .search_witnesses(
@@ -909,9 +923,7 @@ impl WitnessesRegister {
 
             let sn = match sn_limit {
                 SnLimit::Sn(sn) => sn.max(old_data.sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
+                SnLimit::LastSn => u64::MAX,
                 SnLimit::NotSn => old_data.sn,
             };
 
@@ -930,9 +942,7 @@ impl WitnessesRegister {
 
             match sn_limit {
                 SnLimit::Sn(sn) => Some(sn),
-                SnLimit::LastSn => unreachable!(
-                    "search_witnesses can not return SnLimit::LastSn"
-                ),
+                SnLimit::LastSn => Some(u64::MAX),
                 SnLimit::NotSn => None,
             }
         };
@@ -1101,14 +1111,14 @@ impl WitnessesRegister {
         witness_data: &HashMap<Namespace, (IntervalSet, Option<u64>)>,
         parse_namespace: &Namespace,
         gov_version: u64,
-        sn: u64,
+        _sn: u64,
         mut better_gov_version: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
                 // Actualmente soy testigo del owner
                 if actual_lo.is_some() {
-                    return ActualSearch::End(SnLimit::Sn(sn));
+                    return ActualSearch::End(SnLimit::LastSn);
                 }
 
                 if let Some(range) = interval.iter().last()
@@ -1237,7 +1247,7 @@ impl WitnessesRegister {
         {
             // Actualmente soy testigo del owner
             if actual_lo.is_some() {
-                return ActualSearch::End(SnLimit::Sn(sn));
+                return ActualSearch::End(SnLimit::LastSn);
             }
             // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
             // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
@@ -2001,23 +2011,66 @@ impl Handler<Self> for WitnessesRegister {
 
                 return Ok(WitnessesRegisterResponse::Access { sn });
             }
-            WitnessesRegisterMessage::CreateAccess {
+            WitnessesRegisterMessage::CheckCopyAuth {
+                subject_id,
+                sender,
+                receiver,
+                namespace,
+                schema_id,
+                target_sn,
+            } => {
+                let sender_sn = self
+                    .access_limit_for_node(
+                        ctx,
+                        &subject_id,
+                        &sender,
+                        &namespace,
+                        &schema_id,
+                    )
+                    .await?;
+                let receiver_sn = self
+                    .access_limit_for_node(
+                        ctx,
+                        &subject_id,
+                        &receiver,
+                        &namespace,
+                        &schema_id,
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::CheckCopyAuth {
+                    sender_allowed: sender_sn
+                        .is_some_and(|sn| sn >= target_sn),
+                    receiver_allowed: receiver_sn
+                        .is_some_and(|sn| sn >= target_sn),
+                });
+            }
+            WitnessesRegisterMessage::CheckCreateCopyAuth {
                 owner,
-                node,
+                sender,
+                receiver,
                 namespace,
                 schema_id,
                 gov_version,
             } => {
-                let allowed = self.has_create_access(
+                let sender_allowed = self.has_create_access(
                     &owner,
-                    &node,
+                    &sender,
+                    &namespace,
+                    &schema_id,
+                    gov_version,
+                );
+                let receiver_allowed = self.has_create_access(
+                    &owner,
+                    &receiver,
                     &namespace,
                     &schema_id,
                     gov_version,
                 );
 
-                return Ok(WitnessesRegisterResponse::CreateAccess {
-                    allowed,
+                return Ok(WitnessesRegisterResponse::CheckCreateCopyAuth {
+                    sender_allowed,
+                    receiver_allowed,
                 });
             }
             WitnessesRegisterMessage::GetTrackerVisibilityState {
