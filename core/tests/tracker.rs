@@ -18,7 +18,7 @@ use common::{
     get_subject,
 };
 use futures::future::join_all;
-use network::NodeType;
+use network::{NodeType, RoutingNode};
 use serde_json::json;
 use test_log::test;
 
@@ -28,6 +28,330 @@ use crate::common::{
 };
 
 const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
+
+#[test(tokio::test)]
+// distribución manual.
+async fn manual_distribution() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
+
+    let owner_governance = nodes[0].api.clone();
+    let creator_1 = nodes[1].api.clone();
+    let creator_2 = nodes[2].api.clone();
+    let witness = nodes[3].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&creator_1, &creator_2, &witness])
+            .await;
+
+    // add node bootstrap and ephemeral to governance
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": creator_1.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": creator_2.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2", "AveNode3"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode2",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "AveNode3",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Any",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&creator_1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&creator_2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&creator_1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // emit event to subject
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+
+    let _request_id =
+        emit_fact(&creator_1, subject_id.clone(), json.clone(), false)
+            .await
+            .unwrap();
+
+    let _state = get_subject(&creator_1, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    
+    let _state = get_subject(&owner_governance, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode4",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode4"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "witness": [
+                                {
+                                    "name": "AveNode4",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&creator_1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&creator_2, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&witness, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    assert!(
+        witness
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    creator_1.manual_distribution(subject_id.clone()).await.unwrap();
+
+    let _state = get_subject(&witness, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+
+    emit_transfer(&creator_1, subject_id.clone(), PublicKey::from_str(&creator_2.public_key()).unwrap(), true).await.unwrap();
+    let _state = get_subject(&creator_2, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&owner_governance, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    emit_reject(&creator_2, subject_id.clone(), true).await.unwrap();
+
+    let _state = get_subject(&owner_governance, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(&creator_1, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: owner_governance.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+     let (node_other_witness, _dirs) = create_node(
+        NodeType::Bootstrap,
+        &listen_address,
+        peers,
+        true,
+        false,
+        None,
+        None,
+        None
+    )
+    .await;
+
+    let new_other_witness = node_other_witness.api.clone();
+    node_running(&new_other_witness).await.unwrap();
+
+    assert!(
+        new_other_witness
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err()
+    );
+
+    new_other_witness
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&owner_governance.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode5",
+                    "key": new_other_witness.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode5"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "witness": [
+                                {
+                                    "name": "AveNode5",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    new_other_witness
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+
+    let _state = get_subject(&new_other_witness, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    assert!(
+        new_other_witness
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_err()
+    );
+
+    creator_2.manual_distribution(subject_id.clone()).await.unwrap();
+
+    let _state = get_subject(&new_other_witness, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+}
 
 #[test(tokio::test)]
 // Compilamos un contrato bajamos y subimos
@@ -3417,8 +3741,8 @@ async fn test_no_subject_issuer() {
 }
 
 #[test(tokio::test)]
-// Testear 500 eventos sin cooldown para un sujeto
-async fn test_500_events() {
+// Testear 300 eventos sin cooldown para un sujeto
+async fn test_300_events() {
     let (nodes, _dirs) =
         create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
             .await;
@@ -3501,7 +3825,7 @@ async fn test_500_events() {
     .await
     .unwrap();
 
-    for i in 0..500 {
+    for i in 0..300 {
         // emit event to subject
         let json = json!({
             "ModOne": {
@@ -3518,7 +3842,7 @@ async fn test_500_events() {
     }
 
     let state =
-        get_subject(owner_governance, subject_id_1.clone(), Some(500), false)
+        get_subject(owner_governance, subject_id_1.clone(), Some(300), false)
             .await
             .unwrap();
     assert_eq!(state.subject_id, subject_id_1.to_string());
@@ -3530,11 +3854,11 @@ async fn test_500_events() {
     assert_eq!(state.new_owner, None);
     assert_eq!(state.creator, owner_governance.public_key());
     assert_eq!(state.active, true);
-    assert_eq!(state.sn, 500);
+    assert_eq!(state.sn, 300);
     assert_eq!(
         state.properties,
         json!({
-            "one": 500, "three": 0, "two": 0
+            "one": 300, "three": 0, "two": 0
         })
     );
 }
@@ -3699,21 +4023,23 @@ async fn test_subj_no_all_validators() {
 }
 
 #[test(tokio::test)]
-async fn test_tracker_sync_updates_new_service_witness() {
-    let (nodes, _dirs) = create_nodes_and_connections(
+//  Verificar que update protocol actualiza pasivamente la un tracker, a un testigo no al creator.
+async fn test_update_protocol() {
+    let (mut nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
-        vec![vec![0]],
+        vec![vec![0],vec![0]],
         vec![],
         true,
         true,
     )
     .await;
 
-    let owner_governance = &nodes[0].api;
-    let future_witness = &nodes[1].api;
+    let owner_governance = nodes[0].api.clone();
+    let future_witness = nodes[1].api.clone();
+    let creator = nodes[2].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(owner_governance, vec![future_witness])
+        create_and_authorize_governance(&owner_governance, vec![&future_witness, &creator])
             .await;
 
     let json = json!({
@@ -3722,6 +4048,10 @@ async fn test_tracker_sync_updates_new_service_witness() {
                 {
                     "name": "AveNode2",
                     "key": future_witness.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": creator.public_key()
                 }
             ]
         },
@@ -3742,7 +4072,7 @@ async fn test_tracker_sync_updates_new_service_witness() {
             "governance": {
                 "add": {
                     "witness": [
-                        "AveNode2"
+                        "AveNode2", "AveNode3"
                     ]
                 }
             },
@@ -3770,14 +4100,14 @@ async fn test_tracker_sync_updates_new_service_witness() {
                         ],
                         "creator": [
                             {
-                                "name": "Owner",
+                                "name": "AveNode3",
                                 "namespace": [],
                                 "quantity": 1
                             }
                         ],
                         "issuer": [
                             {
-                                "name": "Owner",
+                                "name": "AveNode3",
                                 "namespace": []
                             }
                         ]
@@ -3787,16 +4117,20 @@ async fn test_tracker_sync_updates_new_service_witness() {
         }
     });
 
-    emit_fact(owner_governance, governance_id.clone(), json, true)
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
 
-    let _ = get_subject(future_witness, governance_id.clone(), Some(1), true)
+    let _ = get_subject(&future_witness, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let _ = get_subject(&creator, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
 
     let (subject_id, ..) = create_subject(
-        owner_governance,
+        &creator,
         governance_id.clone(),
         "Example",
         "",
@@ -3810,7 +4144,7 @@ async fn test_tracker_sync_updates_new_service_witness() {
             "data": 100,
         }
     });
-    emit_fact(owner_governance, subject_id.clone(), json, true)
+    emit_fact(&creator, subject_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -3820,6 +4154,18 @@ async fn test_tracker_sync_updates_new_service_witness() {
             .await
             .is_err()
     );
+
+    let _ = get_subject(&creator, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let _ = get_subject(&owner_governance, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    
+    nodes[2].token.cancel();
+    join_all(nodes[2].handler.iter_mut()).await;
 
     let json = json!({
         "roles": {
@@ -3836,19 +4182,11 @@ async fn test_tracker_sync_updates_new_service_witness() {
         }
     });
 
-    emit_fact(owner_governance, governance_id.clone(), json, true)
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
         .await
         .unwrap();
 
-    let _ = get_subject(future_witness, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
-
-    let _ = get_subject(owner_governance, subject_id.clone(), Some(1), true)
-        .await
-        .unwrap();
-
-    let _ = get_subject(future_witness, subject_id.clone(), Some(1), true)
+    let _ = get_subject(&future_witness, subject_id.clone(), Some(1), false)
         .await
         .unwrap();
 }

@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
     NotPersistentActor,
 };
 use ave_common::{
-    Namespace, SchemaType,
-    bridge::request::EventRequestType,
+    SchemaType,
     identity::{DigestIdentifier, PublicKey},
 };
 use network::ComunicateInfo;
@@ -17,16 +16,13 @@ use crate::{
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{HashThisRole, RoleTypes},
-        witnesses_register::{
-            TrackerDeliveryMode, TrackerDeliveryRange, WitnessesRegister,
-            WitnessesRegisterMessage, WitnessesRegisterResponse,
-        },
+        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
     },
     helpers::network::service::NetworkSender,
     model::{
         common::{
             check_subject_creation, check_witness_access, emit_fail,
-            node::{get_subject_data, try_to_update},
+            node::get_subject_data,
             subject::{
                 acquire_subject, create_subject, get_gov, get_gov_sn,
                 get_tracker_window as resolve_tracker_window, update_ledger,
@@ -50,73 +46,6 @@ pub struct DistriWorker {
 }
 
 impl DistriWorker {
-    fn is_owner_boundary_event(ledger: &Ledger) -> bool {
-        matches!(
-            ledger.get_event_request_type(),
-            EventRequestType::Transfer
-                | EventRequestType::Confirm
-                | EventRequestType::Reject
-        )
-    }
-
-    fn safe_unknown_prefix_len(ledger: &[Ledger], auth: bool) -> usize {
-        if auth {
-            return ledger.len();
-        }
-
-        ledger
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find_map(|(idx, entry)| {
-                Self::is_owner_boundary_event(entry).then_some(idx)
-            })
-            .unwrap_or(ledger.len())
-    }
-
-    async fn check_create_copy_auth(
-        &self,
-        ctx: &ActorContext<Self>,
-        governance_id: &DigestIdentifier,
-        owner: &PublicKey,
-        sender: &PublicKey,
-        receiver: &PublicKey,
-        namespace: &Namespace,
-        schema_id: &SchemaType,
-        gov_version: u64,
-    ) -> Result<(bool, bool), ActorError> {
-        let actor_path = ActorPath::from(format!(
-            "/user/node/subject_manager/{}/witnesses_register",
-            governance_id
-        ));
-        let actor: ActorRef<WitnessesRegister> =
-            ctx.system().get_actor(&actor_path).await?;
-        let response = actor
-            .ask(WitnessesRegisterMessage::CheckCreateCopyAuth {
-                owner: owner.clone(),
-                sender: sender.clone(),
-                receiver: receiver.clone(),
-                namespace: namespace.to_string(),
-                schema_id: schema_id.clone(),
-                gov_version,
-            })
-            .await?;
-
-        match response {
-            WitnessesRegisterResponse::CheckCreateCopyAuth {
-                sender_allowed,
-                receiver_allowed,
-            } => {
-                Ok((sender_allowed, receiver_allowed))
-            }
-            _ => Err(ActorError::UnexpectedResponse {
-                path: actor_path,
-                expected: "WitnessesRegisterResponse::CheckCreateCopyAuth"
-                    .to_owned(),
-            }),
-        }
-    }
-
     fn requester_id(
         kind: &str,
         subject_id: &DigestIdentifier,
@@ -185,46 +114,6 @@ impl DistriWorker {
                     path,
                 }),
             }
-        }
-    }
-
-    async fn check_known_tracker_copy_auth(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        sender: &PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        target_sn: u64,
-    ) -> Result<(bool, bool), ActorError> {
-        let actor_path = ActorPath::from(format!(
-            "/user/node/subject_manager/{}/witnesses_register",
-            governance_id
-        ));
-        let actor: ActorRef<WitnessesRegister> =
-            ctx.system().get_actor(&actor_path).await?;
-        let response = actor
-            .ask(WitnessesRegisterMessage::CheckCopyAuth {
-                subject_id: subject_id.clone(),
-                sender: sender.clone(),
-                receiver: (*self.our_key).clone(),
-                namespace,
-                schema_id,
-                target_sn,
-            })
-            .await?;
-
-        match response {
-            WitnessesRegisterResponse::CheckCopyAuth {
-                sender_allowed,
-                receiver_allowed,
-            } => Ok((sender_allowed, receiver_allowed)),
-            _ => Err(ActorError::UnexpectedResponse {
-                path: actor_path,
-                expected: "WitnessesRegisterResponse::CheckCopyAuth"
-                    .to_owned(),
-            }),
         }
     }
 
@@ -310,130 +199,100 @@ impl DistriWorker {
         &self,
         ctx: &mut ActorContext<Self>,
         sender: PublicKey,
-        ledger: &[Ledger],
-    ) -> Result<(bool, bool, usize), ActorError> {
-        let first_ledger = ledger
-            .first()
-            .ok_or(DistributorError::EmptyEvents)
-            .map_err(ActorError::from)?;
-        let subject_id = first_ledger.get_subject_id();
+        info: &ComunicateInfo,
+        ledger: &Ledger,
+    ) -> Result<(bool, bool), ActorError> {
+        let subject_id = ledger.get_subject_id();
+        // Si está auth o si soy el dueño del sujeto.
         let (auth, subject_data) =
             self.authorized_subj(ctx, &subject_id).await?;
 
-        if first_ledger.is_create_event() {
-            let create =
-                first_ledger
-                    .get_create_event()
-                    .ok_or_else(|| {
-                        DistributorError::MissingCreateEventInCreateLedger {
+        // Extraer schema_id y governance_id según si conocemos el sujeto o no
+        let (schema_id, governance_id) = if let Some(ref data) = subject_data {
+            // Lo conozco
+            match data {
+                SubjectData::Tracker {
+                    governance_id,
+                    schema_id,
+                    ..
+                } => (schema_id.clone(), Some(governance_id.clone())),
+                SubjectData::Governance { .. } => {
+                    (SchemaType::Governance, None)
+                }
+            }
+        } else {
+            // No lo conozco - debe ser evento Create
+            if let Some(create) = ledger.get_create_event() {
+                if !create.schema_id.is_gov() && create.governance_id.is_empty()
+                {
+                    return Err(
+                        DistributorError::MissingGovernanceIdInCreate {
                             subject_id: subject_id.clone(),
                         }
-                    })?;
-            let create_owner = first_ledger.ledger_seal_signature.signer.clone();
-
-            if create.schema_id.is_gov() {
-                if !auth {
-                    return Err(
-                        DistributorError::GovernanceNotAuthorized.into()
+                        .into(),
                     );
                 }
 
-                return Ok((
-                    true,
-                    subject_data.is_some(),
-                    Self::safe_unknown_prefix_len(ledger, auth),
-                ));
-            }
+                let gov_id = if create.schema_id.is_gov() {
+                    None
+                } else {
+                    Some(create.governance_id.clone())
+                };
 
-            if create.governance_id.is_empty() {
-                return Err(DistributorError::MissingGovernanceIdInCreate {
+                (create.schema_id, gov_id)
+            } else {
+                // No es el primer evento: pedir el histórico directamente
+                // al sender que nos acaba de escribir.
+                self.request_ledger_from_sender(
+                    &subject_id,
+                    sender.clone(),
+                    info,
+                    None,
+                )
+                .await?;
+                return Err(DistributorError::UpdatingSubject.into());
+            }
+        };
+
+        let is_gov = schema_id.is_gov();
+        // Verificar autorización
+        if is_gov {
+            // Es una gobernanza
+            if !auth {
+                return Err(DistributorError::GovernanceNotAuthorized.into());
+            }
+        } else {
+            // Es un Tracker - verificar rol de witness si no está autorizado
+            let Some(governance_id) = governance_id else {
+                error!(
+                    subject_id = %subject_id,
+                    "Tracker subject is missing governance_id during authorization check"
+                );
+                return Err(DistributorError::MissingGovernanceId {
                     subject_id: subject_id.clone(),
                 }
                 .into());
-            }
-
-            if !auth {
-                let (sender_allowed, receiver_allowed) = self
-                    .check_create_copy_auth(
-                        ctx,
-                        &create.governance_id,
-                        &create_owner,
-                        &sender,
-                        self.our_key.as_ref(),
-                        &create.namespace,
-                        &create.schema_id,
-                        first_ledger.gov_version,
-                    )
-                    .await?;
-                if !sender_allowed {
-                    return Err(DistributorError::SenderNoAccess.into());
+            };
+            let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+                DistributorError::GetGovernanceFailed {
+                    details: e.to_string(),
                 }
+            })?;
 
-                if !receiver_allowed {
-                    return Err(DistributorError::NotWitness.into());
+            match gov.version.cmp(&ledger.gov_version) {
+                std::cmp::Ordering::Less => {
+                    return Err(DistributorError::GovernanceVersionMismatch {
+                        our_version: gov.version,
+                        their_version: ledger.gov_version,
+                    }
+                    .into());
                 }
-            }
-
-            return Ok((
-                false,
-                subject_data.is_some(),
-                Self::safe_unknown_prefix_len(ledger, auth),
-            ));
-        }
-
-        let Some(data) = subject_data else {
-            try_to_update(ctx, subject_id, Some(sender)).await?;
-            return Err(DistributorError::UpdatingSubject.into());
-        };
-
-        match data {
-            SubjectData::Governance { .. } => {
-                if !auth {
-                    return Err(
-                        DistributorError::GovernanceNotAuthorized.into()
-                    );
-                }
-
-                Ok((true, true, ledger.len()))
-            }
-            SubjectData::Tracker {
-                governance_id,
-                schema_id,
-                namespace,
-                ..
-            } => {
-                if auth {
-                    return Ok((false, true, ledger.len()));
-                }
-
-                let target_sn = ledger
-                    .last()
-                    .map(|entry| entry.sn)
-                    .unwrap_or(first_ledger.sn);
-
-                let (sender_allowed, receiver_allowed) = self
-                    .check_known_tracker_copy_auth(
-                        ctx,
-                        &governance_id,
-                        &subject_id,
-                        &sender,
-                        namespace,
-                        schema_id,
-                        target_sn,
-                    )
-                    .await?;
-
-                if !sender_allowed {
-                    return Err(DistributorError::SenderNoAccess.into());
-                }
-
-                if !receiver_allowed {
-                    return Err(DistributorError::NotWitness.into());
-                }
-
-                Ok((false, true, ledger.len()))
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater => {}
             }
         }
+
+        Ok((is_gov, subject_data.is_some()))
     }
 
     async fn get_tracker_window(
@@ -685,7 +544,7 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
         sender: PublicKey,
         info: &ComunicateInfo,
-        actual_sn: u64,
+        actual_sn: Option<u64>,
     ) -> Result<(), ActorError> {
         let new_info = self.build_response_info(
             sender,
@@ -696,7 +555,7 @@ impl DistriWorker {
         self.send_network_message(
             new_info,
             ActorMessage::DistributionLedgerReq {
-                actual_sn: Some(actual_sn),
+                actual_sn,
                 target_sn: None,
                 subject_id: subject_id.clone(),
             },
@@ -999,11 +858,11 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger.get_subject_id();
                 let sn = ledger.sn;
 
-                let single_ledger = [(*ledger).clone()];
-                let (is_gov, ..) = match self
-                    .check_auth(ctx, sender.clone(), &single_ledger)
-                    .await
-                {
+                let (is_gov, ..) =
+                    match self
+                        .check_auth(ctx, sender.clone(), &info, &ledger)
+                        .await
+                    {
                         Ok(is_gov) => is_gov,
                         Err(e) => {
                             if let ActorError::Functional { .. } = e {
@@ -1114,7 +973,7 @@ impl Handler<Self> for DistriWorker {
                                     &subject_id,
                                     sender.clone(),
                                     &info,
-                                    last_sn,
+                                    Some(last_sn),
                                 )
                                 .await
                             {
@@ -1217,8 +1076,8 @@ impl Handler<Self> for DistriWorker {
                 let subject_id = ledger[0].get_subject_id();
                 let ledger_count = ledger.len();
                 let first_sn = ledger[0].sn;
-                let (is_gov, is_register, safe_prefix_len) = match self
-                    .check_auth(ctx, sender.clone(), &ledger)
+                let (is_gov, is_register) = match self
+                    .check_auth(ctx, sender.clone(), &info, &ledger[0])
                     .await
                 {
                     Ok(data) => data,
@@ -1246,13 +1105,6 @@ impl Handler<Self> for DistriWorker {
                         }
                     }
                 };
-
-                let original_len = ledger.len();
-                let mut is_all = is_all;
-                if safe_prefix_len < ledger.len() {
-                    ledger.truncate(safe_prefix_len);
-                    is_all = false;
-                }
 
                 let lease = if ledger[0].is_create_event() && !is_register {
                     let create_ledger = ledger[0].clone();
@@ -1428,7 +1280,7 @@ impl Handler<Self> for DistriWorker {
                                         &subject_id,
                                         sender.clone(),
                                         &info,
-                                        last_sn,
+                                        Some(last_sn),
                                     )
                                     .await
                                 {
@@ -1481,7 +1333,7 @@ impl Handler<Self> for DistriWorker {
                     msg_type = "LedgerDistribution",
                     subject_id = %subject_id,
                     sender = %sender,
-                    ledger_count = original_len,
+                    ledger_count = ledger_count,
                     is_all = is_all,
                     is_gov = is_gov,
                     "Ledger distribution processed successfully"

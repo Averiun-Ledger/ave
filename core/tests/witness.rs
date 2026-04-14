@@ -902,7 +902,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_3.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -1062,7 +1062,7 @@ async fn test_basic_transfers() {
         .await
         .unwrap();
     let _state =
-        get_subject(&witness_alice, subject_id_1.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -2689,7 +2689,7 @@ async fn test_explicit_witness() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(2), true)
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -3001,7 +3001,7 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_1.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -3107,7 +3107,7 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_2.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_2.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -3271,7 +3271,7 @@ async fn test_explicit_witness_2() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_3.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_3.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -3560,7 +3560,7 @@ async fn test_explicit_witness_2_1() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_4.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_4.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -3698,7 +3698,7 @@ async fn test_explicit_witness_2_1() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_5.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_5.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -3853,7 +3853,7 @@ async fn test_explicit_witness_2_1() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_6.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_6.clone(), Some(3), true)
             .await
             .unwrap();
 
@@ -5105,7 +5105,7 @@ async fn test_multi_source() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(2), true)
+    let _state = get_subject(&new_alice, subject_id_2.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -5575,7 +5575,7 @@ async fn test_more_cases() {
         .unwrap();
 
     let _state =
-        get_subject(&witness_alice, subject_id_1.clone(), Some(2), true)
+        get_subject(&witness_alice, subject_id_1.clone(), Some(3), true)
             .await
             .unwrap();
     let _state = get_subject(&witness_bob, subject_id_1.clone(), Some(6), true)

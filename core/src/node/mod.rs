@@ -231,7 +231,7 @@ impl Node {
 
     pub fn delete_transfer(&mut self, subject_id: &DigestIdentifier) {
         if let Some(data) = self.transfer_subjects.remove(subject_id)
-            && data.actual_owner == *self.our_key
+            && data.new_owner == *self.our_key
         {
             self.reject_subjects.insert(subject_id.clone());
         }

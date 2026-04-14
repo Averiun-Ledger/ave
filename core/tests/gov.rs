@@ -51,34 +51,48 @@ fn governance_properties(actual: Value) -> GovernanceData {
 }
 
 #[test(tokio::test)]
-//  Verificar que update protocol actualiza pasivamente la gobernanza.
+//  Verificar que update protocol actualiza pasivamente la gobernanza, a un testigo.
 async fn test_update_protocol() {
-    let (nodes, _dirs) = create_nodes_and_connections(
+    let (mut nodes, _dirs) = create_nodes_and_connections(
         vec![vec![]],
-        vec![vec![0]],
+        vec![vec![0], vec![0]],
         vec![],
         true,
         true,
     )
     .await;
-    let node1 = &nodes[0].api;
-    let node2 = &nodes[1].api;
+    let node1 = nodes[0].api.clone();
+    let node2 = nodes[1].api.clone();
+    let node3 = nodes[2].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(node1, vec![node2]).await;
+        create_and_authorize_governance(&node1, vec![&node2]).await;
 
     let json = json!({
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode3"
+                    ]
+                }
+            },
+        },
         "members": {
             "add": [
                 {
                     "name": "AveNode2",
                     "key": node2.public_key()
+                },
+                {
+                    "name": "AveNode3",
+                    "key": node3.public_key()
                 }
             ]
         }
     });
 
-    let _request_id = emit_fact(node1, governance_id.clone(), json, true)
+    let _request_id = emit_fact(&node1, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -96,6 +110,23 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 
+    node3
+        .auth_subject(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(&node1.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    node3.update_subject(governance_id.clone()).await.unwrap();
+
+    let _state = get_subject(&node3, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
@@ -111,7 +142,7 @@ async fn test_update_protocol() {
         ]
     }});
 
-    emit_fact(node1, governance_id.clone(), json, true)
+    emit_fact(&node1, governance_id.clone(), json, true)
         .await
         .unwrap();
 
@@ -119,36 +150,38 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 
-    let _state = get_subject(&node2, governance_id.clone(), Some(2), true)
+    let _state = get_subject(&node3, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
-        .public_key()
-        .to_string();
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
 
-    // add new fake member to governance
-    let json = json!({
-    "members": {
-        "add": [
-            {
-                "name": "Fake2",
-                "key": fake_node
-            }
-        ]
-    }});
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: node3.peer_id().to_string(),
+        address: vec![nodes[2].listen_address.clone()],
+    }];
 
-    emit_fact(node1, governance_id.clone(), json, true)
+    let (node_new_node2, _dirs) = create_node(
+        NodeType::Addressable,
+        &listen_address,
+        peers,
+        true,
+        true,
+        Some(nodes[1].keys.clone()),
+        Some(_dirs[2].path().to_path_buf()),
+        Some(_dirs[3].path().to_path_buf()),
+    )
+    .await;
+    let new_node2 = node_new_node2.api.clone();
+    node_running(&new_node2).await.unwrap();
+
+    let _state = get_subject(&new_node2, governance_id.clone(), Some(2), false)
         .await
         .unwrap();
 
-    let _state = get_subject(&node1, governance_id.clone(), Some(3), true)
-        .await
-        .unwrap();
-
-    let _state = get_subject(&node2, governance_id.clone(), Some(3), true)
-        .await
-        .unwrap();
 }
 
 #[test(tokio::test)]

@@ -1533,7 +1533,9 @@ impl RequestManager {
                 }
             }
             RequestManagerError::CheckLimit
-            | RequestManagerError::Governance(..) => {
+            | RequestManagerError::Governance(..)
+            | RequestManagerError::NotIssuer
+            | RequestManagerError::NotCreator => {
                 if let Err(e) = self
                     .abort_request(
                         ctx,
@@ -1738,7 +1740,7 @@ impl RequestManager {
         }
     }
 
-    async fn check_signature(
+    async fn check_request_roles_after_reboot(
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
@@ -1746,13 +1748,47 @@ impl RequestManager {
             return Err(RequestManagerError::RequestNotSet);
         };
 
+        let gov = self.get_governance_data(ctx).await?;
+        let subject_data = match request.content() {
+            EventRequest::Create(..) => None,
+            _ => get_subject_data(ctx, &self.subject_id).await?,
+        };
+
+        let creator_scope = match request.content() {
+            EventRequest::Create(create) if !create.schema_id.is_gov() => {
+                Some((create.schema_id.clone(), create.namespace.clone()))
+            }
+            _ => subject_data.as_ref().and_then(|subject_data| {
+                match subject_data {
+                    SubjectData::Tracker {
+                        schema_id,
+                        namespace,
+                        ..
+                    } => Some((
+                        schema_id.clone(),
+                        Namespace::from(namespace.clone()),
+                    )),
+                    _ => None,
+                }
+            }),
+        };
+
+        if let Some((schema_id, namespace)) = creator_scope
+            && !gov.has_this_role(HashThisRole::Schema {
+                who: (*self.our_key).clone(),
+                role: RoleTypes::Creator,
+                schema_id,
+                namespace,
+            })
+        {
+            return Err(RequestManagerError::NotCreator);
+        }
+
         if let EventRequest::Fact { .. } = request.content() {
-            let subject_data = get_subject_data(ctx, &self.subject_id).await?;
             let Some(subject_data) = subject_data else {
                 return Err(RequestManagerError::SubjecData);
             };
 
-            let gov = self.get_governance_data(ctx).await?;
             match subject_data {
                 SubjectData::Tracker {
                     schema_id,
@@ -2140,7 +2176,9 @@ impl Handler<Self> for RequestManager {
                         return Err(emit_fail(ctx, e).await);
                     }
 
-                    if let Err(e) = self.check_signature(ctx).await {
+                    if let Err(e) =
+                        self.check_request_roles_after_reboot(ctx).await
+                    {
                         error!(
                             msg_type = "FinishReboot",
                             request_id = %self.id,

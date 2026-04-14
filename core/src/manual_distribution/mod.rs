@@ -5,26 +5,29 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
     NotPersistentActor,
 };
-use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::{
+    identity::{DigestIdentifier, PublicKey},
+    request::EventRequest,
+    schematype::ReservedWords,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    governance::model::WitnessesData,
+    governance::{
+        data::GovernanceData,
+        model::{RoleTypes, WitnessesData},
+    },
     helpers::network::service::NetworkSender,
     model::common::{
-        distribution_plan::build_tracker_event_distribution_plan,
         emit_fail,
         node::i_can_send_last_ledger,
         subject::{
             acquire_subject, get_gov, get_last_ledger_event,
-            get_tracker_window as resolve_tracker_window,
         },
     },
-    model::event::{Ledger, Protocols, ValidationMetadata},
     request::types::{DistributionPlanEntry, DistributionPlanMode},
-    subject::Metadata,
 };
 
 pub struct ManualDistribution {
@@ -36,53 +39,122 @@ impl ManualDistribution {
         Self { our_key }
     }
 
-    fn tracker_delivery_mode(
-        sn: u64,
-        ranges: &[crate::governance::witnesses_register::TrackerDeliveryRange],
-    ) -> Option<DistributionPlanMode> {
-        ranges
+    fn tracker_fact_mode_for_creator(
+        governance_data: &GovernanceData,
+        schema_id: &ave_common::SchemaType,
+        namespace: &ave_common::Namespace,
+        creator: &PublicKey,
+        witness: &PublicKey,
+        viewpoints: &std::collections::BTreeSet<String>,
+    ) -> DistributionPlanMode {
+        let Some(witness_name) = governance_data
+            .members
             .iter()
-            .find(|range| range.from_sn <= sn && sn <= range.to_sn)
-            .map(|range| match range.mode {
-                crate::governance::witnesses_register::TrackerDeliveryMode::Clear => {
-                    DistributionPlanMode::Clear
+            .find(|(_, key)| *key == witness)
+            .map(|(name, _)| name.clone())
+        else {
+            return DistributionPlanMode::Opaque;
+        };
+
+        let Some(creator_name) = governance_data
+            .members
+            .iter()
+            .find(|(_, key)| *key == creator)
+            .map(|(name, _)| name.clone())
+        else {
+            return DistributionPlanMode::Opaque;
+        };
+
+        let Some(roles_schema) = governance_data.roles_schema.get(schema_id)
+        else {
+            return DistributionPlanMode::Opaque;
+        };
+
+        let Some(role_creator) =
+            roles_schema
+                .creator
+                .get(&ave_common::governance::RoleCreator::create(
+                    &creator_name,
+                    namespace.clone(),
+                ))
+        else {
+            return DistributionPlanMode::Opaque;
+        };
+
+        let is_generic_witness =
+            roles_schema.hash_this_rol(
+                RoleTypes::Witness,
+                namespace.clone(),
+                &witness_name,
+            ) || governance_data.roles_tracker_schemas.hash_this_rol(
+                RoleTypes::Witness,
+                namespace.clone(),
+                &witness_name,
+            );
+
+        let allows_clear =
+            role_creator.witnesses.iter().any(|creator_witness| {
+                let applies = creator_witness.name == witness_name
+                    || (creator_witness.name
+                        == ReservedWords::Witnesses.to_string()
+                        && is_generic_witness);
+
+                if !applies {
+                    return false;
                 }
-                crate::governance::witnesses_register::TrackerDeliveryMode::Opaque => {
-                    DistributionPlanMode::Opaque
-                }
-            })
+
+                creator_witness.viewpoints.is_empty()
+                    || creator_witness
+                        .viewpoints
+                        .contains(&ReservedWords::AllViewpoints.to_string())
+                    || viewpoints.is_empty()
+                    || viewpoints.is_subset(&creator_witness.viewpoints)
+            });
+
+        if allows_clear {
+            DistributionPlanMode::Clear
+        } else {
+            DistributionPlanMode::Opaque
+        }
     }
 
-    fn tracker_metadata_from_ledger(
-        ledger: &Ledger,
-    ) -> Result<Metadata, ActorError> {
-        let validation = match &ledger.protocols {
-            Protocols::Create { validation, .. }
-            | Protocols::TrackerFactFull { validation, .. }
-            | Protocols::Transfer { validation, .. }
-            | Protocols::TrackerConfirm { validation, .. }
-            | Protocols::Reject { validation, .. }
-            | Protocols::EOL { validation, .. } => validation,
-            _ => {
-                return Err(ActorError::FunctionalCritical {
-                    description: format!(
-                        "Unsupported tracker ledger protocols for manual distribution: {:?}",
-                        ledger.get_event_request_type()
-                    ),
-                });
-            }
-        };
+    fn build_tracker_manual_plan(
+        governance_data: &GovernanceData,
+        schema_id: ave_common::SchemaType,
+        namespace: ave_common::Namespace,
+        event_request: &EventRequest,
+        signer: &PublicKey,
+    ) -> Result<Vec<DistributionPlanEntry>, ActorError> {
+        let witnesses = governance_data
+            .get_witnesses(WitnessesData::Schema {
+                creator: signer.clone(),
+                schema_id: schema_id.clone(),
+                namespace: namespace.clone(),
+            })
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
 
-        let ValidationMetadata::Metadata(metadata) =
-            &validation.validation_metadata
-        else {
-            return Err(ActorError::FunctionalCritical {
-                description: "Missing validation metadata in tracker ledger"
-                    .to_owned(),
-            });
-        };
+        Ok(witnesses
+            .into_iter()
+            .map(|node| {
+                let mode = match event_request {
+                    EventRequest::Fact(fact_request) => {
+                        Self::tracker_fact_mode_for_creator(
+                            governance_data,
+                            &schema_id,
+                            &namespace,
+                            signer,
+                            &node,
+                            &fact_request.viewpoints,
+                        )
+                    }
+                    _ => DistributionPlanMode::Clear,
+                };
 
-        Ok((**metadata).clone())
+                DistributionPlanEntry { node, mode }
+            })
+            .collect())
     }
 }
 
@@ -142,8 +214,11 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
-                let is_tracker = data.get_governance_id().is_some();
-                let ledger = if is_tracker {
+                let is_gov = data.get_schema_id().is_gov();
+
+                let ledger = if is_gov {
+                    get_last_ledger_event(ctx, &subject_id).await
+                } else {
                     let lease = acquire_subject(
                         ctx,
                         &subject_id,
@@ -152,13 +227,13 @@ impl Handler<Self> for ManualDistribution {
                         true,
                     )
                     .await?;
+
                     let ledger = get_last_ledger_event(ctx, &subject_id).await;
                     lease.finish(ctx).await?;
                     ledger
-                } else {
-                    get_last_ledger_event(ctx, &subject_id).await
-                }
-                .map_err(|e| {
+                };
+
+                let ledger = ledger.map_err(|e| {
                     error!(
                         msg_type = "Update",
                         subject_id = %subject_id,
@@ -186,21 +261,19 @@ impl Handler<Self> for ManualDistribution {
                         |governance_id| governance_id.clone(),
                     );
 
-                let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
-                    error!(
-                        msg_type = "Update",
-                        subject_id = %subject_id,
-                        governance_id = %governance_id,
-                        error = %e,
-                        "Failed to get governance"
-                    );
-                    e
-                })?;
-
                 let schema_id = data.get_schema_id();
-
-                let is_gov = schema_id.is_gov();
                 let recipients = if is_gov {
+                    let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to get governance"
+                        );
+                        e
+                    })?;
+
                     let mut witnesses =
                         gov.get_witnesses(WitnessesData::Gov).map_err(|e| {
                             error!(
@@ -223,79 +296,33 @@ impl Handler<Self> for ManualDistribution {
                         })
                         .collect::<Vec<_>>()
                 } else {
-                    let metadata = Self::tracker_metadata_from_ledger(&ledger)?;
-                    let event_request =
-                        ledger.get_event_request().ok_or_else(|| {
-                            ActorError::FunctionalCritical {
-                                description:
-                                    "Missing event request in tracker ledger"
-                                        .to_owned(),
-                            }
-                        })?;
-                    let candidates = build_tracker_event_distribution_plan(
-                        &gov,
-                        &event_request,
-                        &metadata,
-                        true,
-                    )
-                    .map_err(|description| ActorError::FunctionalCritical {
-                        description,
+                    let gov = get_gov(ctx, &governance_id).await.map_err(|e| {
+                        error!(
+                            msg_type = "Update",
+                            subject_id = %subject_id,
+                            governance_id = %governance_id,
+                            error = %e,
+                            "Failed to get governance"
+                        );
+                        e
                     })?;
 
-                    let mut distribution_plan = Vec::new();
-
-                    for candidate in candidates {
-                        let witness = candidate.node;
-                        if witness == *self.our_key {
-                            continue;
-                        }
-
-                        let window = resolve_tracker_window(
-                            ctx,
-                            &governance_id,
-                            &subject_id,
-                            witness.clone(),
-                            data.get_namespace(),
-                            schema_id.clone(),
-                            ledger.sn.checked_sub(1),
-                        )
-                        .await;
-
-                        let (sn, _, _, ranges) = match window {
-                            Ok(window) => window,
-                            Err(e) => {
-                                warn!(
-                                    msg_type = "Update",
-                                    subject_id = %subject_id,
-                                    witness = %witness,
-                                    error = %e,
-                                    "Skipping witness because tracker window could not be resolved"
-                                );
-                                continue;
-                            }
-                        };
-
-                        let Some(sn) = sn else {
-                            continue;
-                        };
-
-                        if sn < ledger.sn {
-                            continue;
-                        }
-
-                        let Some(mode) =
-                            Self::tracker_delivery_mode(ledger.sn, &ranges)
-                        else {
-                            continue;
-                        };
-
-                        distribution_plan.push(DistributionPlanEntry {
-                            node: witness,
-                            mode,
+                    let Some(event_request) = ledger.get_event_request() else {
+                        return Err(ActorError::Functional {
+                            description: "Missing event request in tracker ledger".to_owned(),
                         });
-                    }
+                    };
 
-                    distribution_plan
+                    Self::build_tracker_manual_plan(
+                        &gov,
+                        schema_id.clone(),
+                        ave_common::Namespace::from(data.get_namespace()),
+                        &event_request,
+                        &ledger.ledger_seal_signature.signer,
+                    )?
+                    .into_iter()
+                    .filter(|entry| entry.node != *self.our_key)
+                    .collect::<Vec<_>>()
                 };
 
                 if recipients.is_empty() {

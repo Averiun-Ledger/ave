@@ -227,6 +227,9 @@ pub enum RequestManagerError {
 
     #[error("In fact events, the signer has to be an issuer")]
     NotIssuer,
+
+    #[error("In create tracker events, the signer has to be a creator")]
+    NotCreator,
 }
 
 /*
