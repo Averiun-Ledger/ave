@@ -10,7 +10,7 @@ use ave_common::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
         RejectRequest, TransferRequest,
     },
-    response::{MonitorNetworkState, PaginatorAborts, RequestState, SubjectDB},
+    response::{MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB},
 };
 use ave_core::{
     Api,
@@ -24,12 +24,7 @@ use ave_core::{
 use network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
-    env, fs,
-    path::PathBuf,
-    process,
-    str::FromStr,
-    sync::atomic::{AtomicU16, AtomicU64, Ordering},
-    time::Duration,
+    collections::BTreeSet, env, fs, path::PathBuf, process, str::FromStr, sync::atomic::{AtomicU16, AtomicU64, Ordering}, time::Duration
 };
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -357,6 +352,58 @@ pub async fn emit_fact(
 }
 
 #[allow(dead_code)]
+pub async fn emit_fact_viewpoints(
+    node: &Api,
+    subject_id: DigestIdentifier,
+    payload_json: serde_json::Value,
+    viewpoints: BTreeSet<String>,
+    wait_request_state: bool,
+) -> Result<DigestIdentifier, Box<dyn std::error::Error>> {
+    let request = EventRequest::Fact(FactRequest {
+        subject_id,
+        payload: ValueWrapper(payload_json),
+        viewpoints,
+    });
+
+    let response = node.own_request(request).await?;
+    // state of request
+    let request_id = response.request_id;
+
+    if !wait_request_state {
+        return Ok(request_id);
+    }
+
+    wait_request(node, request_id.clone()).await.unwrap();
+
+    Ok(request_id)
+}
+
+#[allow(dead_code)]
+pub fn assert_tracker_fact_full(
+    event: &RequestEventDB,
+    expected_payload: serde_json::Value,
+    expected_viewpoints: &[&str],
+) {
+    match event {
+        RequestEventDB::TrackerFactFull {
+            payload,
+            viewpoints,
+            ..
+        } => {
+            assert_eq!(payload, &expected_payload);
+            assert_eq!(
+                viewpoints,
+                &expected_viewpoints
+                    .iter()
+                    .map(|viewpoint| viewpoint.to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+        event => panic!("unexpected fact event: {event:?}"),
+    }
+}
+
+#[allow(dead_code)]
 pub async fn emit_fact_signed(
     node: &Api,
     keys: &KeyPair,
@@ -545,6 +592,7 @@ pub async fn node_running(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn emit_transfer(
     node: &Api,
     subject_id: DigestIdentifier,
@@ -599,6 +647,7 @@ pub async fn emit_approve(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn emit_confirm(
     node: &Api,
     subject_id: DigestIdentifier,

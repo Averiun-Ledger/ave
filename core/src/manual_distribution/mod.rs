@@ -103,10 +103,9 @@ impl ManualDistribution {
                     return false;
                 }
 
-                creator_witness.viewpoints.is_empty()
-                    || creator_witness
-                        .viewpoints
-                        .contains(&ReservedWords::AllViewpoints.to_string())
+                creator_witness
+                    .viewpoints
+                    .contains(&ReservedWords::AllViewpoints.to_string())
                     || viewpoints.is_empty()
                     || viewpoints.is_subset(&creator_witness.viewpoints)
             });
