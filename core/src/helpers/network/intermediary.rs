@@ -234,6 +234,25 @@ impl Intermediary {
                                 }
                             })?;
                     }
+                    ActorMessage::UpdateNoOffer => {
+                        let actor = system
+                            .get_actor::<Updater>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(UpdaterMessage::NetworkNoOffer {
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
                     ActorMessage::GovernanceVersionReq {
                         subject_id,
                         receiver_actor,

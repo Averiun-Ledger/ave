@@ -54,6 +54,7 @@ pub enum ActorMessage {
         actual_sn: Option<u64>,
         receiver_actor: String,
     },
+    UpdateNoOffer,
     UpdateOffer {
         offer: UpdateWitnessOffer,
     },

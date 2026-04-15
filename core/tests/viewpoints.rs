@@ -4,20 +4,19 @@ use std::{collections::BTreeSet, str::FromStr};
 
 use ave_common::{
     bridge::{
-        request::EventsQuery,
         response::{
-            LedgerDB, RequestEventDB, SubjectDB, TrackerEventVisibilityDB,
+            RequestEventDB, SubjectDB, TrackerEventVisibilityDB,
             TrackerEventVisibilityRangeDB, TrackerStoredVisibilityDB,
             TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
         },
     },
-    identity::{DigestIdentifier, PublicKey},
+    identity::PublicKey,
 };
-use ave_core::{Api, auth::AuthWitness};
+use ave_core::auth::AuthWitness;
 use common::{
     assert_tracker_fact_full, create_and_authorize_governance,
     create_nodes_and_connections, create_subject, emit_fact,
-    emit_fact_viewpoints, get_subject,
+    emit_fact_viewpoints, get_events, get_subject,
 };
 use serde_json::json;
 use test_log::test;
@@ -27,40 +26,23 @@ const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07
 fn assert_tracker_fact_opaque(
     event: &RequestEventDB,
     expected_viewpoints: &[&str],
-) {
+) -> Result<(), String> {
     match event {
         RequestEventDB::TrackerFactOpaque { viewpoints, .. } => {
-            assert_eq!(
-                viewpoints,
-                &expected_viewpoints
-                    .iter()
-                    .map(|viewpoint| viewpoint.to_string())
-                    .collect::<Vec<_>>()
-            );
+            let expected = expected_viewpoints
+                .iter()
+                .map(|viewpoint| viewpoint.to_string())
+                .collect::<Vec<_>>();
+            if viewpoints != &expected {
+                return Err(format!(
+                    "unexpected opaque viewpoints: got {:?}, expected {:?}",
+                    viewpoints, expected
+                ));
+            }
+            Ok(())
         }
-        event => panic!("unexpected opaque fact event: {event:?}"),
+        event => Err(format!("unexpected opaque fact event: {event:?}")),
     }
-}
-
-async fn get_all_events(
-    node: &Api,
-    subject_id: DigestIdentifier,
-) -> Vec<LedgerDB> {
-    node.get_events(
-        subject_id,
-        EventsQuery {
-            quantity: Some(1000),
-            page: Some(0),
-            reverse: Some(false),
-            event_request_ts: None,
-            event_ledger_ts: None,
-            sink_ts: None,
-            event_type: None,
-        },
-    )
-    .await
-    .unwrap()
-    .events
 }
 
 fn assert_tracker_visibility(
@@ -68,15 +50,33 @@ fn assert_tracker_visibility(
     expected_mode: TrackerVisibilityModeDB,
     expected_stored: Vec<TrackerStoredVisibilityRangeDB>,
     expected_events: Vec<TrackerEventVisibilityRangeDB>,
-) {
-    let visibility = state
-        .tracker_visibility
-        .as_ref()
-        .expect("tracker subjects must expose tracker_visibility");
+) -> Result<(), String> {
+    let visibility = state.tracker_visibility.as_ref().ok_or_else(|| {
+        "tracker subjects must expose tracker_visibility".to_owned()
+    })?;
 
-    assert_eq!(visibility.mode, expected_mode);
-    assert_eq!(visibility.stored_ranges, expected_stored);
-    assert_eq!(visibility.event_ranges, expected_events);
+    if visibility.mode != expected_mode {
+        return Err(format!(
+            "unexpected tracker visibility mode: got {:?}, expected {:?}",
+            visibility.mode, expected_mode
+        ));
+    }
+
+    if visibility.stored_ranges != expected_stored {
+        return Err(format!(
+            "unexpected stored visibility ranges: got {:?}, expected {:?}",
+            visibility.stored_ranges, expected_stored
+        ));
+    }
+
+    if visibility.event_ranges != expected_events {
+        return Err(format!(
+            "unexpected event visibility ranges: got {:?}, expected {:?}",
+            visibility.event_ranges, expected_events
+        ));
+    }
+
+    Ok(())
 }
 
 #[test(tokio::test)]
@@ -293,7 +293,8 @@ async fn test_viewpoints_architecture_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &witness_state,
         TrackerVisibilityModeDB::Full,
@@ -325,44 +326,18 @@ async fn test_viewpoints_architecture_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
 
-    let owner_events = owner
-        .get_events(
-            subject_id.clone(),
-            EventsQuery {
-                quantity: Some(10),
-                page: Some(0),
-                reverse: Some(false),
-                event_request_ts: None,
-                event_ledger_ts: None,
-                sink_ts: None,
-                event_type: None,
-            },
-        )
+    let owner_events = get_events(owner, subject_id.clone(), 2, true)
         .await
         .unwrap();
-    let witness_events = witness
-        .get_events(
-            subject_id.clone(),
-            EventsQuery {
-                quantity: Some(10),
-                page: Some(0),
-                reverse: Some(false),
-                event_request_ts: None,
-                event_ledger_ts: None,
-                sink_ts: None,
-                event_type: None,
-            },
-        )
+    let witness_events = get_events(witness, subject_id.clone(), 2, true)
         .await
         .unwrap();
-
-    assert_eq!(owner_events.events.len(), 2);
-    assert_eq!(witness_events.events.len(), 2);
 
     assert_tracker_fact_full(
-        &owner_events.events[1].event,
+        &owner_events[1].event,
         json!({
             "ModOne": {
                 "data": 1
@@ -371,7 +346,7 @@ async fn test_viewpoints_architecture_battery() {
         &["agua"],
     );
     assert_tracker_fact_full(
-        &witness_events.events[1].event,
+        &witness_events[1].event,
         json!({
             "ModOne": {
                 "data": 1
@@ -459,7 +434,8 @@ async fn test_viewpoints_architecture_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &witness_state,
         TrackerVisibilityModeDB::Full,
@@ -503,44 +479,18 @@ async fn test_viewpoints_architecture_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
 
-    let owner_events = owner
-        .get_events(
-            subject_id.clone(),
-            EventsQuery {
-                quantity: Some(10),
-                page: Some(0),
-                reverse: Some(false),
-                event_request_ts: None,
-                event_ledger_ts: None,
-                sink_ts: None,
-                event_type: None,
-            },
-        )
+    let owner_events = get_events(owner, subject_id.clone(), 3, true)
         .await
         .unwrap();
-    let witness_events = witness
-        .get_events(
-            subject_id.clone(),
-            EventsQuery {
-                quantity: Some(10),
-                page: Some(0),
-                reverse: Some(false),
-                event_request_ts: None,
-                event_ledger_ts: None,
-                sink_ts: None,
-                event_type: None,
-            },
-        )
+    let witness_events = get_events(witness, subject_id.clone(), 3, true)
         .await
         .unwrap();
-
-    assert_eq!(owner_events.events.len(), 3);
-    assert_eq!(witness_events.events.len(), 3);
 
     assert_tracker_fact_full(
-        &owner_events.events[2].event,
+        &owner_events[2].event,
         json!({
             "ModTwo": {
                 "data": 2
@@ -549,7 +499,7 @@ async fn test_viewpoints_architecture_battery() {
         &[],
     );
     assert_tracker_fact_full(
-        &witness_events.events[2].event,
+        &witness_events[2].event,
         json!({
             "ModTwo": {
                 "data": 2
@@ -711,15 +661,18 @@ async fn test_viewpoints_grant_precedence_battery() {
         .await
         .unwrap();
 
-    let _state = get_subject(witness_mixed, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
-    let _state = get_subject(witness_agua, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
-    let _state = get_subject(witness_hash, governance_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(witness_mixed, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(witness_agua, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state =
+        get_subject(witness_hash, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
     let _state =
         get_subject(witness_vidrio, governance_id.clone(), Some(1), true)
             .await
@@ -778,12 +731,14 @@ async fn test_viewpoints_grant_precedence_battery() {
         get_subject(witness_mixed, subject_id.clone(), Some(3), true)
             .await
             .unwrap();
-    let agua_state = get_subject(witness_agua, subject_id.clone(), Some(3), true)
-        .await
-        .unwrap();
-    let hash_state = get_subject(witness_hash, subject_id.clone(), Some(3), true)
-        .await
-        .unwrap();
+    let agua_state =
+        get_subject(witness_agua, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+    let hash_state =
+        get_subject(witness_hash, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
     let vidrio_state =
         get_subject(witness_vidrio, subject_id.clone(), Some(3), true)
             .await
@@ -886,7 +841,8 @@ async fn test_viewpoints_grant_precedence_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &agua_state,
         TrackerVisibilityModeDB::Opaque,
@@ -942,7 +898,8 @@ async fn test_viewpoints_grant_precedence_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &hash_state,
         TrackerVisibilityModeDB::Opaque,
@@ -991,7 +948,8 @@ async fn test_viewpoints_grant_precedence_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &vidrio_state,
         TrackerVisibilityModeDB::Opaque,
@@ -1040,12 +998,21 @@ async fn test_viewpoints_grant_precedence_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
 
-    let mixed_events = get_all_events(witness_mixed, subject_id.clone()).await;
-    let agua_events = get_all_events(witness_agua, subject_id.clone()).await;
-    let hash_events = get_all_events(witness_hash, subject_id.clone()).await;
-    let vidrio_events = get_all_events(witness_vidrio, subject_id.clone()).await;
+    let mixed_events = get_events(witness_mixed, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+    let agua_events = get_events(witness_agua, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+    let hash_events = get_events(witness_hash, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+    let vidrio_events = get_events(witness_vidrio, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
 
     assert_eq!(mixed_events.len(), 4);
     assert_eq!(agua_events.len(), 4);
@@ -1089,7 +1056,7 @@ async fn test_viewpoints_grant_precedence_battery() {
         }),
         &["agua"],
     );
-    assert_tracker_fact_opaque(&agua_events[2].event, &["basura"]);
+    assert_tracker_fact_opaque(&agua_events[2].event, &["basura"]).unwrap();
     assert_tracker_fact_full(
         &agua_events[3].event,
         json!({
@@ -1100,8 +1067,8 @@ async fn test_viewpoints_grant_precedence_battery() {
         &[],
     );
 
-    assert_tracker_fact_opaque(&hash_events[1].event, &["agua"]);
-    assert_tracker_fact_opaque(&hash_events[2].event, &["basura"]);
+    assert_tracker_fact_opaque(&hash_events[1].event, &["agua"]).unwrap();
+    assert_tracker_fact_opaque(&hash_events[2].event, &["basura"]).unwrap();
     assert_tracker_fact_full(
         &hash_events[3].event,
         json!({
@@ -1112,8 +1079,8 @@ async fn test_viewpoints_grant_precedence_battery() {
         &[],
     );
 
-    assert_tracker_fact_opaque(&vidrio_events[1].event, &["agua"]);
-    assert_tracker_fact_opaque(&vidrio_events[2].event, &["basura"]);
+    assert_tracker_fact_opaque(&vidrio_events[1].event, &["agua"]).unwrap();
+    assert_tracker_fact_opaque(&vidrio_events[2].event, &["basura"]).unwrap();
     assert_tracker_fact_full(
         &vidrio_events[3].event,
         json!({
@@ -1347,7 +1314,6 @@ async fn test_viewpoints_historical_gaps_battery() {
     .await
     .unwrap();
 
-
     let owner_state = get_subject(owner, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
@@ -1417,7 +1383,8 @@ async fn test_viewpoints_historical_gaps_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
     assert_tracker_visibility(
         &witness_state,
         TrackerVisibilityModeDB::Opaque,
@@ -1468,10 +1435,15 @@ async fn test_viewpoints_historical_gaps_battery() {
                 },
             },
         ],
-    );
+    )
+    .unwrap();
 
-    let owner_events = get_all_events(owner, subject_id.clone()).await;
-    let witness_events = get_all_events(witness, subject_id.clone()).await;
+    let owner_events = get_events(owner, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+    let witness_events = get_events(witness, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
 
     assert_eq!(owner_events.len(), 4);
     assert_eq!(witness_events.len(), 4);
@@ -1513,7 +1485,7 @@ async fn test_viewpoints_historical_gaps_battery() {
         }),
         &["agua"],
     );
-    assert_tracker_fact_opaque(&witness_events[2].event, &["agua"]);
+    assert_tracker_fact_opaque(&witness_events[2].event, &["agua"]).unwrap();
     assert_tracker_fact_full(
         &witness_events[3].event,
         json!({
@@ -1526,21 +1498,444 @@ async fn test_viewpoints_historical_gaps_battery() {
 }
 
 #[test(tokio::test)]
-#[ignore = "test plan placeholder"]
 // B04: ventana de búsqueda por batch
 //
 // Setup:
-//   usar el mismo subject con `actual_sn = None`, `5` y `100`;
+//   crear tres testigos explícitos por tramos:
+//   uno hasta `5`, otro hasta `100` y otro hasta `110`;
+//   el receptor entra como testigo al final;
 //   fijar `ledger_batch_size = 100`.
 //
 // Acción:
-//   lanzar update.
+//   lanzar un update sobre el receptor nuevo.
 //
 // Comprobar:
-//   la ventana es `0..49`, `6..105` o `101..200` según el caso;
-//   governance no usa esta ventana, trackers sí.
-//   si `actual_sn` ya está por encima del límite accesible, no hay ventana útil.
-async fn test_viewpoints_batch_window_battery() {}
+//   el update llega al `sn` más alto en un único intento;
+//   el primer tramo público se aplica;
+//   el segundo tramo público también se aplica;
+//   el prefijo público se aplica;
+//   el tramo con viewpoints privados llega opaco y congela `properties`.
+async fn test_viewpoints_batch_window_battery() {
+    let (nodes, _dirs) = create_nodes_and_connections(
+        vec![vec![]],
+        vec![vec![0], vec![0], vec![0], vec![0]],
+        vec![],
+        true,
+        false,
+    )
+    .await;
+
+    let owner = &nodes[0].api;
+    let node_five = &nodes[1].api;
+    let node_hundred = &nodes[2].api;
+    let node_opaque = &nodes[3].api;
+    let node_new = &nodes[4].api;
+
+    let governance_id = create_and_authorize_governance(
+        owner,
+        vec![node_five, node_hundred, node_opaque, node_new],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "NodeFive",
+                    "key": node_five.public_key()
+                },
+                {
+                    "name": "NodeHundred",
+                    "key": node_hundred.public_key()
+                },
+                {
+                    "name": "NodeOpaque",
+                    "key": node_opaque.public_key()
+                },
+                {
+                    "name": "NodeNew",
+                    "key": node_new.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "NodeFive",
+                        "NodeHundred",
+                        "NodeOpaque",
+                        "NodeNew"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "NodeFive",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(node_five, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state =
+        get_subject(node_hundred, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+    let _state = get_subject(node_opaque, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let _state = get_subject(node_new, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for data in 1..=5 {
+        emit_fact(
+            owner,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "NodeHundred",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(node_five, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let _state =
+        get_subject(node_hundred, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+    let _state = get_subject(node_opaque, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let _state = get_subject(node_new, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    for data in 6..=100 {
+        emit_fact(
+            owner,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "NodeOpaque",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(node_five, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let _state =
+        get_subject(node_hundred, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+    let _state = get_subject(node_opaque, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let _state = get_subject(node_new, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    for data in 101..=110 {
+        emit_fact_viewpoints(
+            owner,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            BTreeSet::from(["agua".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "NodeOpaque",
+                                        "viewpoints": []
+                                    },
+                                    {
+                                        "name": "NodeNew",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(node_new, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    let node_five_state =
+        get_subject(node_five, subject_id.clone(), Some(5), true)
+            .await
+            .unwrap();
+    let node_hundred_state =
+        get_subject(node_hundred, subject_id.clone(), Some(100), true)
+            .await
+            .unwrap();
+    let node_opaque_state =
+        get_subject(node_opaque, subject_id.clone(), Some(110), true)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        node_five_state.properties,
+        json!({
+            "one": 5,
+            "two": 0,
+            "three": 0
+        })
+    );
+    assert_eq!(
+        node_hundred_state.properties,
+        json!({
+            "one": 100,
+            "two": 0,
+            "three": 0
+        })
+    );
+    assert_eq!(
+        node_opaque_state.properties,
+        json!({
+            "one": 0,
+            "two": 0,
+            "three": 0
+        })
+    );
+
+    node_new
+        .auth_subject(
+            subject_id.clone(),
+            AuthWitness::Many(vec![
+                PublicKey::from_str(&node_five.public_key()).unwrap(),
+                PublicKey::from_str(&node_hundred.public_key()).unwrap(),
+                PublicKey::from_str(&node_opaque.public_key()).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+
+    node_new.update_subject(subject_id.clone()).await.unwrap();
+
+    let new_state = get_subject(node_new, subject_id.clone(), Some(110), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        new_state.properties,
+        json!({
+            "one": 100,
+            "two": 0,
+            "three": 0
+        })
+    );
+    assert_tracker_visibility(
+        &new_state,
+        TrackerVisibilityModeDB::Opaque,
+        vec![
+            TrackerStoredVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(100),
+                visibility: TrackerStoredVisibilityDB::Full,
+            },
+            TrackerStoredVisibilityRangeDB {
+                from_sn: 101,
+                to_sn: None,
+                visibility: TrackerStoredVisibilityDB::None,
+            },
+        ],
+        vec![
+            TrackerEventVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: Some(100),
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 101,
+                to_sn: None,
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec!["agua".to_owned()],
+                },
+            },
+        ],
+    )
+    .unwrap();
+
+    let new_events = get_events(node_new, subject_id.clone(), 111, true)
+        .await
+        .unwrap();
+
+    for data in 1..=100 {
+        assert_tracker_fact_full(
+            &new_events[data as usize].event,
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            &[],
+        );
+    }
+
+    for data in 101..=110 {
+        assert_tracker_fact_opaque(&new_events[data as usize].event, &["agua"])
+            .unwrap();
+    }
+}
 
 #[test(tokio::test)]
 #[ignore = "test plan placeholder"]

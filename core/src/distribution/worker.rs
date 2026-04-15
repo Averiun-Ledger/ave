@@ -143,6 +143,17 @@ impl DistriWorker {
             .await
     }
 
+    async fn send_no_offer_response(
+        &self,
+        info: &ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    ) -> Result<(), ActorError> {
+        let new_info = self.build_response_info(sender, info, receiver_actor);
+        self.send_network_message(new_info, ActorMessage::UpdateNoOffer)
+            .await
+    }
+
     async fn get_governance_version(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -319,15 +330,36 @@ impl DistriWorker {
             ctx,
             &governance_id,
             subject_id,
-            sender,
-            namespace,
-            schema_id,
+            sender.clone(),
+            namespace.clone(),
+            schema_id.clone(),
             actual_sn,
         )
         .await?;
 
         let Some(sn) = sn else {
-            return Err(DistributorError::SenderNoAccess.into());
+            let witness_sn = check_witness_access(
+                ctx,
+                &governance_id,
+                subject_id,
+                sender,
+                namespace,
+                schema_id,
+            )
+            .await?;
+
+            return match (actual_sn, witness_sn) {
+                (Some(actual_sn), Some(witness_sn))
+                    if actual_sn >= witness_sn =>
+                {
+                    Err(DistributorError::ActualSnBiggerThanWitness {
+                        actual_sn,
+                        witness_sn,
+                    }
+                    .into())
+                }
+                _ => Err(DistributorError::SenderNoAccess.into()),
+            };
         };
 
         Ok((sn, clear_sn, is_all, ranges))
@@ -441,7 +473,12 @@ impl DistriWorker {
         match data {
             SubjectData::Tracker { .. } => {
                 let (sn, clear_sn, _, ranges) = self
-                    .get_tracker_window(ctx, subject_id, sender, actual_sn)
+                    .get_tracker_window(
+                        ctx,
+                        subject_id,
+                        sender.clone(),
+                        actual_sn,
+                    )
                     .await?;
                 Ok(UpdateWitnessOffer {
                     kind: UpdateSubjectKind::Tracker,
@@ -452,7 +489,7 @@ impl DistriWorker {
             }
             SubjectData::Governance { .. } => {
                 let (sn, ..) =
-                    self.check_witness(ctx, subject_id, sender).await?;
+                    self.check_witness(ctx, subject_id, sender.clone()).await?;
                 Ok(UpdateWitnessOffer {
                     kind: UpdateSubjectKind::Governance,
                     sn,
@@ -478,7 +515,7 @@ impl DistriWorker {
 
         match data {
             SubjectData::Tracker { .. } => {
-                let (window_sn, clear_sn, window_is_all, ranges) = self
+                let (window_sn, clear_sn, _, ranges) = self
                     .get_tracker_window(ctx, subject_id, sender, actual_sn)
                     .await?;
 
@@ -492,19 +529,27 @@ impl DistriWorker {
                     .into());
                 }
 
-                let hi_sn = clear_sn
+                let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
+                let batch_hi_sn = from_sn
+                    .saturating_add(self.ledger_batch_size)
+                    .saturating_sub(1)
+                    .min(window_sn);
+                let preferred_hi_sn = clear_sn
                     .filter(|clear_sn| {
                         actual_sn.is_none_or(|actual_sn| *clear_sn > actual_sn)
                     })
                     .unwrap_or(window_sn);
-                let hi_sn = target_sn.unwrap_or(hi_sn).min(window_sn);
+                let hi_sn = target_sn
+                    .unwrap_or(preferred_hi_sn)
+                    .min(preferred_hi_sn)
+                    .min(batch_hi_sn);
 
                 let (ledger, raw_is_all) = self
                     .get_ledger(ctx, subject_id, hi_sn, actual_sn, false)
                     .await?;
 
                 let ledger = Self::project_tracker_ledger(ledger, &ranges)?;
-                let is_all = raw_is_all && window_is_all && hi_sn == window_sn;
+                let is_all = raw_is_all && hi_sn == window_sn;
                 Ok((ledger, is_all, hi_sn))
             }
             SubjectData::Governance { .. } => {
@@ -743,9 +788,9 @@ impl Handler<Self> for DistriWorker {
                     ctx,
                     subject_id.clone(),
                     actual_sn,
-                    info,
+                    info.clone(),
                     sender.clone(),
-                    receiver_actor,
+                    receiver_actor.clone(),
                 )
                 .await
             {
@@ -759,7 +804,13 @@ impl Handler<Self> for DistriWorker {
                             error = %e,
                             "Witness check failed"
                         );
-                        return Err(e);
+                        self.send_no_offer_response(
+                            &info,
+                            sender.clone(),
+                            receiver_actor,
+                        )
+                        .await?;
+                        return Ok(());
                     } else {
                         error!(
                             msg_type = "GetLastSn",

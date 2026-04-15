@@ -529,6 +529,16 @@ impl Handler<Self> for Update {
                         if let Some((better_node, offer, target_sn)) =
                             selected_request.clone()
                         {
+                            let expected_target_sn = self
+                                .offers
+                                .values()
+                                .filter(|offer| {
+                                    offer.kind == UpdateSubjectKind::Tracker
+                                })
+                                .map(|offer| offer.sn)
+                                .max()
+                                .unwrap_or(target_sn);
+
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),
@@ -563,7 +573,7 @@ impl Handler<Self> for Update {
                                 if let Err(e) = self
                                     .schedule_retry(
                                         ctx,
-                                        target_sn,
+                                        expected_target_sn,
                                         self.retry_attempt,
                                     )
                                     .await
@@ -571,7 +581,7 @@ impl Handler<Self> for Update {
                                     error!(
                                         msg_type = "Response",
                                         subject_id = %self.subject_id,
-                                        expected_target_sn = target_sn,
+                                        expected_target_sn = expected_target_sn,
                                         error = %e,
                                         "Failed to schedule update retry"
                                     );

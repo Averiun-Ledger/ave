@@ -1,6 +1,6 @@
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    bridge::request::{AbortsQuery, ApprovalStateRes},
+    bridge::request::{AbortsQuery, ApprovalStateRes, EventsQuery},
     identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         Signature, Signed,
@@ -10,7 +10,7 @@ use ave_common::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
         RejectRequest, TransferRequest,
     },
-    response::{MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB},
+    response::{LedgerDB, MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB},
 };
 use ave_core::{
     Api,
@@ -462,6 +462,56 @@ pub async fn get_subject(
             )
             .into());
         }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if timeout {
+            count += 1;
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub async fn get_events(
+    node: &Api,
+    subject_id: DigestIdentifier,
+    expected_len: usize,
+    timeout: bool,
+) -> Result<Vec<LedgerDB>, Box<dyn std::error::Error>> {
+    let mut count = 0;
+    loop {
+        if let Ok(state) = node
+            .get_events(
+                subject_id.clone(),
+                EventsQuery {
+                    quantity: Some(expected_len.max(1000) as u64),
+                    page: Some(0),
+                    reverse: Some(false),
+                    event_request_ts: None,
+                    event_ledger_ts: None,
+                    sink_ts: None,
+                    event_type: None,
+                },
+            )
+            .await
+        {
+            if state.events.len() == expected_len {
+                return Ok(state.events);
+            } else if count > 100 {
+                return Err(format!(
+                    "timeout waiting for events {} at len {}, actual len {}",
+                    subject_id,
+                    expected_len,
+                    state.events.len()
+                )
+                .into());
+            }
+        } else if count > 100 {
+            return Err(format!(
+                "timeout waiting for events {} at len {}",
+                subject_id, expected_len
+            )
+            .into());
+        }
+
         tokio::time::sleep(Duration::from_millis(300)).await;
         if timeout {
             count += 1;

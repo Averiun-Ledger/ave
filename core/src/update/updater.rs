@@ -54,6 +54,9 @@ pub enum UpdaterMessage {
         subject_id: DigestIdentifier,
         actual_sn: Option<u64>,
     },
+    NetworkNoOffer {
+        sender: PublicKey,
+    },
     NetworkResponse {
         offer: UpdateWitnessOffer,
         sender: PublicKey,
@@ -269,6 +272,77 @@ impl Handler<Self> for Updater {
                     sn = offer.sn,
                     sender = %sender,
                     "Network response processed successfully"
+                );
+
+                ctx.stop(None).await;
+            }
+            UpdaterMessage::NetworkNoOffer { sender } => {
+                if sender != self.node_key {
+                    warn!(
+                        msg_type = "NetworkNoOffer",
+                        expected_node = %self.node_key,
+                        sender = %sender,
+                        "Ignoring empty update response from unexpected sender"
+                    );
+                    return Ok(());
+                }
+
+                match ctx.get_parent::<Update>().await {
+                    Ok(update_actor) => {
+                        if let Err(e) = update_actor
+                            .tell(UpdateMessage::Response {
+                                sender: self.node_key.clone(),
+                                offer: None,
+                                round: self.round,
+                            })
+                            .await
+                        {
+                            error!(
+                                msg_type = "NetworkNoOffer",
+                                error = %e,
+                                "Failed to send empty response to update actor"
+                            );
+                            return Err(emit_fail(ctx, e).await);
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "NetworkNoOffer",
+                            error = %e,
+                            path = %ctx.path().parent(),
+                            "Update actor not found"
+                        );
+                        return Err(emit_fail(ctx, e).await);
+                    }
+                };
+
+                'retry: {
+                    let Ok(retry) = ctx
+                        .get_child::<RetryActor<RetryNetwork>>("retry")
+                        .await
+                    else {
+                        debug!(
+                            msg_type = "NetworkNoOffer",
+                            sender = %sender,
+                            "Retry actor not found while closing updater"
+                        );
+                        break 'retry;
+                    };
+
+                    if let Err(e) = retry.tell(RetryMessage::End).await {
+                        warn!(
+                            msg_type = "NetworkNoOffer",
+                            error = %e,
+                            "Failed to end retry actor"
+                        );
+                        break 'retry;
+                    };
+                }
+
+                debug!(
+                    msg_type = "NetworkNoOffer",
+                    sender = %sender,
+                    "Empty network response processed successfully"
                 );
 
                 ctx.stop(None).await;

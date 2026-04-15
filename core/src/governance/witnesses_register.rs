@@ -808,20 +808,15 @@ impl WitnessesRegister {
             return Ok((None, None, true, Vec::new()));
         }
 
-        let batch_end = from_sn
-            .saturating_add(self.ledger_batch_size as u64)
-            .saturating_sub(1);
-        let to_sn = access_limit.min(batch_end);
-        let is_all = to_sn >= access_limit;
         let namespace = Namespace::from(namespace);
         let gov_versions = self
-            .get_gov_version_window(ctx, subject_id, from_sn, to_sn)
+            .get_gov_version_window(ctx, subject_id, from_sn, access_limit)
             .await?;
 
         let mut ranges: Vec<TrackerDeliveryRange> = Vec::new();
         let mut clear_sn = None;
 
-        for sn in from_sn..=to_sn {
+        for sn in from_sn..=access_limit {
             let Some(gov_version) = Self::gov_version_for_sn(&gov_versions, sn)
                 .or_else(|| (sn == 0).then_some(data.gov_version))
             else {
@@ -864,7 +859,7 @@ impl WitnessesRegister {
             }
         }
 
-        Ok((Some(to_sn), clear_sn, is_all, ranges))
+        Ok((Some(access_limit), clear_sn, true, ranges))
     }
 
     async fn access_limit_for_node(
