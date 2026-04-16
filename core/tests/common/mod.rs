@@ -45,16 +45,44 @@ pub struct NodeData {
     pub listen_address: String,
 }
 
+#[derive(Default)]
+pub struct CreateNodesAndConnectionsConfig {
+    pub bootstrap: Vec<Vec<usize>>,
+    pub addressable: Vec<Vec<usize>>,
+    pub ephemeral: Vec<Vec<usize>>,
+    pub always_accept: bool,
+    pub is_service: bool,
+    pub ledger_batch_size: Option<usize>,
+}
+
+#[derive(Default)]
+pub struct CreateNodeConfig {
+    pub node_type: network::NodeType,
+    pub listen_address: String,
+    pub peers: Vec<RoutingNode>,
+    pub always_accept: bool,
+    pub is_service: bool,
+    pub keys: Option<KeyPair>,
+    pub local_db: Option<PathBuf>,
+    pub ext_db: Option<PathBuf>,
+    pub ledger_batch_size: Option<usize>,
+}
+
 pub async fn create_node(
-    node_type: network::NodeType,
-    listen_address: &str,
-    peers: Vec<RoutingNode>,
-    always_accept: bool,
-    is_service: bool,
-    keys: Option<KeyPair>,
-    local_db: Option<PathBuf>,
-    ext_db: Option<PathBuf>,
+    config: CreateNodeConfig,
 ) -> (NodeData, Vec<TempDir>) {
+    let CreateNodeConfig {
+        node_type,
+        listen_address,
+        peers,
+        always_accept,
+        is_service,
+        keys,
+        local_db,
+        ext_db,
+        ledger_batch_size,
+    } = config;
+
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
@@ -83,7 +111,7 @@ pub async fn create_node(
 
     let network_config = NetworkConfig::new(
         node_type,
-        vec![listen_address.to_owned()],
+        vec![listen_address.clone()],
         vec![],
         peers,
     );
@@ -114,7 +142,7 @@ pub async fn create_node(
         always_accept,
         tracking_size: 100,
         sync: SyncConfig {
-            ledger_batch_size: 100,
+            ledger_batch_size: ledger_batch_size.unwrap_or(100),
             governance: GovernanceSyncConfig {
                 interval_secs: 10,
                 sample_size: 3,
@@ -155,19 +183,24 @@ pub async fn create_node(
             handler: runners,
             token: graceful_token,
             keys,
-            listen_address: listen_address.to_owned(),
+            listen_address,
         },
         vec_dirs,
     )
 }
 
 pub async fn create_nodes_and_connections(
-    bootstrap: Vec<Vec<usize>>,
-    addressable: Vec<Vec<usize>>,
-    ephemeral: Vec<Vec<usize>>,
-    always_accept: bool,
-    is_service: bool,
+    config: CreateNodesAndConnectionsConfig,
 ) -> (Vec<NodeData>, Vec<TempDir>) {
+    let CreateNodesAndConnectionsConfig {
+        bootstrap,
+        addressable,
+        ephemeral,
+        always_accept,
+        is_service,
+        ledger_batch_size,
+    } = config;
+
     let mut nodes: Vec<NodeData> = Vec::new();
     let mut dirs = vec![];
 
@@ -188,16 +221,15 @@ pub async fn create_nodes_and_connections(
             })
             .collect();
 
-        let (node, .., mut vec_dirs) = create_node(
-            network::NodeType::Bootstrap,
-            &listen_address,
+        let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
+            node_type: network::NodeType::Bootstrap,
+            listen_address: listen_address.clone(),
             peers,
             always_accept,
             is_service,
-            None,
-            None,
-            None,
-        )
+            ledger_batch_size,
+            ..Default::default()
+        })
         .await;
         dirs.append(&mut vec_dirs);
 
@@ -217,16 +249,15 @@ pub async fn create_nodes_and_connections(
             })
             .collect();
 
-        let (node, .., mut vec_dirs) = create_node(
-            network::NodeType::Addressable,
-            &listen_address,
+        let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
+            node_type: network::NodeType::Addressable,
+            listen_address: listen_address.clone(),
             peers,
             always_accept,
             is_service,
-            None,
-            None,
-            None,
-        )
+            ledger_batch_size,
+            ..Default::default()
+        })
         .await;
         dirs.append(&mut vec_dirs);
 
@@ -246,16 +277,15 @@ pub async fn create_nodes_and_connections(
             })
             .collect();
 
-        let (node, .., mut vec_dirs) = create_node(
-            network::NodeType::Ephemeral,
-            &listen_address,
+        let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
+            node_type: network::NodeType::Ephemeral,
+            listen_address: listen_address.clone(),
             peers,
             always_accept,
             is_service,
-            None,
-            None,
-            None,
-        )
+            ledger_batch_size,
+            ..Default::default()
+        })
         .await;
         dirs.append(&mut vec_dirs);
 

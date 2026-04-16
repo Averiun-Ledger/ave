@@ -23,6 +23,7 @@ use ave_core::governance::model::{
 };
 
 use common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig,
     create_and_authorize_governance, create_nodes_and_connections,
     create_subject, emit_approve, emit_confirm, emit_fact, emit_transfer,
     get_subject,
@@ -41,11 +42,13 @@ const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07
 const INVALID_EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXp";
 const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
 
+#[track_caller]
 fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
     let actual: GovernanceData = from_value(actual).unwrap();
     assert_eq!(actual, expected);
 }
 
+#[track_caller]
 fn governance_properties(actual: Value) -> GovernanceData {
     from_value(actual).unwrap()
 }
@@ -53,14 +56,15 @@ fn governance_properties(actual: Value) -> GovernanceData {
 #[test(tokio::test)]
 //  Verificar que update protocol actualiza pasivamente la gobernanza, a un testigo.
 async fn test_update_protocol() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        true,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            is_service: true,
+            ..Default::default()
+        })
+        .await;
     let node1 = nodes[0].api.clone();
     let node2 = nodes[1].api.clone();
     let node3 = nodes[2].api.clone();
@@ -164,16 +168,17 @@ async fn test_update_protocol() {
         address: vec![nodes[2].listen_address.clone()],
     }];
 
-    let (node_new_node2, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_node2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address,
         peers,
-        true,
-        true,
-        Some(nodes[1].keys.clone()),
-        Some(_dirs[2].path().to_path_buf()),
-        Some(_dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        is_service: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(_dirs[2].path().to_path_buf()),
+        ext_db: Some(_dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let new_node2 = node_new_node2.api.clone();
     node_running(&new_node2).await.unwrap();
@@ -181,21 +186,19 @@ async fn test_update_protocol() {
     let _state = get_subject(&new_node2, governance_id.clone(), Some(2), false)
         .await
         .unwrap();
-
 }
 
 #[test(tokio::test)]
 //  El owner perdió el ledger, se lo pidió a un testigo que no tenía la última versión
 // la siguiente request se aborta.
 async fn test_approve_invalid_gov_version() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let node1 = nodes[0].api.clone();
     let node2 = nodes[1].api.clone();
     let node3 = nodes[2].api.clone();
@@ -339,16 +342,14 @@ async fn test_approve_invalid_gov_version() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_node2, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_node2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_node2 = node_new_node2.api.clone();
     node_running(&new_node2).await.unwrap();
@@ -486,8 +487,12 @@ async fn test_approve_invalid_gov_version() {
 async fn test_invalid_init_state() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -562,8 +567,12 @@ async fn test_invalid_init_state() {
 async fn test_invalid_contract() {
     //  Ephemeral -> Bootstrap ≤- Addressable
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node, vec![]).await;
@@ -638,14 +647,13 @@ async fn test_invalid_contract() {
 //  Verificar que se puede crear una gobernanza, sujeto y emitir un evento además de recibir la copia
 async fn test_governance_and_subject_copy_with_approve() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
     let node2 = &nodes[1].api;
 
@@ -834,14 +842,15 @@ async fn test_governance_and_subject_copy_with_approve() {
 // 1 addressable(owner de la gobernanza)
 async fn test_basic_use_case_1b_1e_1a() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![vec![0]],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ephemeral: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let bootstrap = &nodes[0].api;
     let addressable = &nodes[1].api;
     let ephimeral = &nodes[2].api;
@@ -975,8 +984,12 @@ async fn test_basic_use_case_1b_1e_1a() {
 #[test(tokio::test)]
 async fn test_many_schema_in_one_governance() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner_governance = &nodes[0].api;
 
     let governance_id =
@@ -1132,14 +1145,14 @@ async fn test_many_schema_in_one_governance() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza
 async fn test_transfer_event_governance_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -1302,14 +1315,14 @@ async fn test_transfer_event_governance_1() {
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro
 async fn test_transfer_event_governance_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -1485,14 +1498,12 @@ async fn test_transfer_event_governance_2() {
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -1581,14 +1592,13 @@ async fn test_governance_fail_approve() {
 // Varios approvers y todos dicen que sí, se cumple el quorum.
 async fn test_governance_manual_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -1789,14 +1799,14 @@ async fn test_governance_manual_many_approvers() {
 // Varios approvers y todos dicen que sí, se cumple el quorum. de forma automática.
 async fn test_governance_auto_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -1967,14 +1977,13 @@ async fn test_governance_auto_many_approvers() {
 // Varios approvers pero uno dice que no y el quorum no se cumple.
 async fn test_governance_not_quorum_many_approvers() {
     // Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let approver_1 = &nodes[1].api;
     let approver_2 = &nodes[2].api;
@@ -2170,14 +2179,14 @@ async fn test_governance_not_quorum_many_approvers() {
 #[test(tokio::test)]
 // Se añade un evaluador, se evalua, se le elimina y se vuelve a evaluar.
 async fn test_change_roles_gov() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let eval_node = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -2482,8 +2491,12 @@ async fn test_change_roles_gov() {
 #[test(tokio::test)]
 async fn test_delete_schema() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -2633,8 +2646,12 @@ async fn test_delete_schema() {
 #[test(tokio::test)]
 async fn test_change_schema() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let node1 = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(node1, vec![]).await;
@@ -2789,8 +2806,12 @@ async fn test_change_schema() {
 // uno que esté o que no
 async fn test_gov_no_all_validators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -2920,8 +2941,12 @@ async fn test_gov_no_all_validators() {
 // uno que esté o que no.
 async fn test_gov_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3052,8 +3077,12 @@ async fn test_gov_no_all_evaluators() {
 // Algunos eventos fallan, por lo que la versión de la governanza no aumenta
 async fn test_gov_fail_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3191,8 +3220,12 @@ async fn test_gov_fail_no_all_evaluators() {
 #[test(tokio::test)]
 async fn test_governance_schema_and_creator_viewpoints_state() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(owner, vec![]).await;
@@ -3423,8 +3456,12 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
 #[test(tokio::test)]
 async fn test_governance_invalid_viewpoints_validation() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
 
     let governance_id = create_and_authorize_governance(owner, vec![]).await;

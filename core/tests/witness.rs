@@ -16,7 +16,10 @@ use std::time::Duration;
 use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;
 
-use crate::common::{PORT_COUNTER, create_node, node_running};
+use crate::common::{
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
+    create_node, node_running,
+};
 
 // TODO(witness coverage):
 // - Cubrir el caso histórico de old_owner + Witnesses:
@@ -37,14 +40,14 @@ use crate::common::{PORT_COUNTER, create_node, node_running};
 #[test(tokio::test)]
 // Recibe la copia de un sujeto sin tener la gobernanza
 async fn test_witeness_not_gov() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -174,14 +177,14 @@ async fn test_witeness_not_gov() {
 
 #[test(tokio::test)]
 async fn test_not_access() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = &nodes[0].api;
     let witness_alice = &nodes[1].api;
     let witness_bob = &nodes[2].api;
@@ -370,14 +373,14 @@ async fn test_not_access() {
 
 #[test(tokio::test)]
 async fn test_basic_access() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -539,16 +542,14 @@ async fn test_basic_access() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -668,14 +669,14 @@ async fn test_basic_access() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_transfers() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = &nodes[1].api;
     let witness_bob = nodes[2].api.clone();
@@ -1166,16 +1167,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -1242,16 +1241,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -1266,16 +1263,14 @@ async fn test_basic_transfers() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -1394,14 +1389,14 @@ async fn test_basic_transfers() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_explicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -1628,16 +1623,14 @@ async fn test_basic_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -1756,14 +1749,14 @@ async fn test_basic_explicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_basic_implicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -2032,16 +2025,14 @@ async fn test_basic_implicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -2170,14 +2161,14 @@ async fn test_basic_implicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_explicit_witness() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -2522,16 +2513,14 @@ async fn test_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -2726,16 +2715,14 @@ async fn test_explicit_witness() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_alice.keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_alice.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -2793,14 +2780,14 @@ async fn test_explicit_witness() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_explicit_witness_2() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -3290,16 +3277,14 @@ async fn test_explicit_witness_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api.clone();
     node_running(&new_charlie).await.unwrap();
@@ -3355,14 +3340,14 @@ async fn test_explicit_witness_2() {
 
 #[test(tokio::test)]
 async fn test_explicit_witness_2_1() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -3872,16 +3857,14 @@ async fn test_explicit_witness_2_1() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie_2, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie_2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie_2 = node_new_charlie_2.api;
     node_running(&new_charlie_2).await.unwrap();
@@ -3941,14 +3924,14 @@ async fn test_explicit_witness_2_1() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_range() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -4240,16 +4223,14 @@ async fn test_range() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_bob, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[2].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_bob = node_new_bob.api;
     node_running(&new_bob).await.unwrap();
@@ -4335,14 +4316,14 @@ async fn test_range() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_ns_schema() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -4703,14 +4684,14 @@ async fn test_ns_schema() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_multi_source() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -4938,16 +4919,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -5124,16 +5103,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -5260,16 +5237,14 @@ async fn test_multi_source() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_charlie.keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_charlie.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api;
     node_running(&new_charlie).await.unwrap();
@@ -5328,14 +5303,14 @@ async fn test_multi_source() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -5599,16 +5574,14 @@ async fn test_more_cases() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_dali, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (mut node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[4].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[4].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_dali = node_new_dali.api;
     node_running(&new_dali).await.unwrap();
@@ -5773,16 +5746,14 @@ async fn test_more_cases() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_dali, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_dali, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_dali.keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(node_new_dali.keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_dali = node_new_dali.api;
     node_running(&new_dali).await.unwrap();
@@ -5834,14 +5805,14 @@ async fn test_more_cases() {
 
 #[test(tokio::test)]
 async fn test_more_cases_1_1() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -6106,16 +6077,14 @@ async fn test_more_cases_1_1() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_alice, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_alice = node_new_alice.api;
     node_running(&new_alice).await.unwrap();
@@ -6173,14 +6142,14 @@ async fn test_more_cases_1_1() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases_2() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -6424,16 +6393,14 @@ async fn test_more_cases_2() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_charlie, _dirs) = create_node(
-        NodeType::Addressable,
-        &listen_address,
+    let (node_new_charlie, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[3].keys.clone()),
-        None,
-        None,
-    )
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
     .await;
     let new_charlie = node_new_charlie.api.clone();
     node_running(&new_charlie).await.unwrap();
@@ -6489,14 +6456,14 @@ async fn test_more_cases_2() {
 
 #[test(tokio::test)]
 async fn test_more_cases_2_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();
@@ -6805,14 +6772,14 @@ async fn test_more_cases_2_1() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test(tokio::test)]
 async fn test_more_cases_3() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let witness_alice = nodes[1].api.clone();
     let witness_bob = nodes[2].api.clone();

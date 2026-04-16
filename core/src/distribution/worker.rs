@@ -539,6 +539,14 @@ impl DistriWorker {
                         actual_sn.is_none_or(|actual_sn| *clear_sn > actual_sn)
                     })
                     .unwrap_or(window_sn);
+                let preferred_hi_sn = if from_sn == 0
+                    && preferred_hi_sn == 0
+                    && window_sn > 0
+                {
+                    window_sn
+                } else {
+                    preferred_hi_sn
+                };
                 let hi_sn = target_sn
                     .unwrap_or(preferred_hi_sn)
                     .min(preferred_hi_sn)

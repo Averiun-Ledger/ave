@@ -665,6 +665,10 @@ impl WitnessesRegister {
         match event_span.visibility {
             TrackerEventVisibility::NonFact => TrackerDeliveryMode::Clear,
             TrackerEventVisibility::Fact(viewpoints) => {
+                if viewpoints.is_empty() {
+                    return TrackerDeliveryMode::Clear;
+                }
+
                 if data.actual_owner == *node
                     || data
                         .actual_new_owner_data

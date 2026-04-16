@@ -18,21 +18,20 @@ use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, emit_approve, emit_eol, node_running,
-    wait_request_state,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
+    create_node, emit_approve, emit_eol, node_running, wait_request_state,
 };
 
 #[test(tokio::test)]
 // todos los eventos de una gobernanza
 async fn gov_life() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        false,
-        false,
-    )
-    .await;
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            ..Default::default()
+        })
+        .await;
     let bootstrap = nodes[0].api.clone();
     let owner = &nodes[1].api.clone();
 
@@ -49,16 +48,15 @@ async fn gov_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        false,
-        false,
-        Some(nodes[1].keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -106,16 +104,15 @@ async fn gov_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        false,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -173,16 +170,15 @@ async fn gov_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        false,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -211,16 +207,16 @@ async fn gov_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -252,16 +248,16 @@ async fn gov_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -276,16 +272,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[0].keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -327,16 +323,16 @@ async fn gov_life() {
         address: vec![node_bootstrap.listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -351,16 +347,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -398,16 +394,16 @@ async fn gov_life() {
         address: vec![node_bootstrap.listen_address.clone()],
     }];
 
-    let (node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -422,16 +418,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -466,16 +462,15 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        false,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -509,16 +504,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -551,16 +546,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -587,16 +582,16 @@ async fn gov_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -626,14 +621,14 @@ async fn gov_life() {
 #[test(tokio::test)]
 // todos los eventos de un tracker
 async fn tracker_life() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let bootstrap = nodes[0].api.clone();
     let owner = &nodes[1].api.clone();
 
@@ -758,16 +753,16 @@ async fn tracker_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -800,16 +795,16 @@ async fn tracker_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -841,16 +836,16 @@ async fn tracker_life() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -865,16 +860,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[0].keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -904,16 +899,16 @@ async fn tracker_life() {
         address: vec![node_bootstrap.listen_address.clone()],
     }];
 
-    let (mut node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -928,16 +923,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -975,16 +970,16 @@ async fn tracker_life() {
         address: vec![node_bootstrap.listen_address.clone()],
     }];
 
-    let (node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_new_owner.keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_new_owner.keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();
@@ -999,16 +994,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -1038,16 +1033,15 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        false,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -1072,16 +1066,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -1104,16 +1098,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (mut node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (mut node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -1140,16 +1134,16 @@ async fn tracker_life() {
         address: vec![node_new_owner.listen_address.clone()],
     }];
 
-    let (node_bootstrap, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_bootstrap, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(node_bootstrap.keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(node_bootstrap.keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
@@ -1169,14 +1163,14 @@ async fn tracker_life() {
 
 #[test(tokio::test)]
 async fn not_node_role() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let bootstrap = nodes[0].api.clone();
     let owner = &nodes[1].api.clone();
 
@@ -1323,16 +1317,16 @@ async fn not_node_role() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-    let (node_new_owner, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_new_owner, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[1].keys.clone()),
-        Some(dirs[2].path().to_path_buf()),
-        Some(dirs[3].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let owner = node_new_owner.api.clone();
     node_running(&owner).await.unwrap();

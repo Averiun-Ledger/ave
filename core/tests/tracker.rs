@@ -23,8 +23,9 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, emit_fact_signed, get_abort_request,
-    node_running, wait_request, wait_request_state,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
+    create_node, emit_fact_signed, get_abort_request, node_running,
+    wait_request, wait_request_state,
 };
 
 const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
@@ -32,23 +33,25 @@ const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07
 #[test(tokio::test)]
 // distribución manual.
 async fn manual_distribution() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = nodes[0].api.clone();
     let creator_1 = nodes[1].api.clone();
     let creator_2 = nodes[2].api.clone();
     let witness = nodes[3].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner_governance, vec![&creator_1, &creator_2, &witness])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &owner_governance,
+        vec![&creator_1, &creator_2, &witness],
+    )
+    .await;
 
     // add node bootstrap and ephemeral to governance
     let json = json!({
@@ -165,10 +168,10 @@ async fn manual_distribution() {
         .await
         .unwrap();
 
-    
-    let _state = get_subject(&owner_governance, subject_id.clone(), Some(1), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&owner_governance, subject_id.clone(), Some(1), true)
+            .await
+            .unwrap();
 
     let json = json!({
         "members": {
@@ -220,14 +223,12 @@ async fn manual_distribution() {
         .await
         .unwrap();
 
-    assert!(
-        witness
-            .get_subject_state(subject_id.clone())
-            .await
-            .is_err()
-    );
+    assert!(witness.get_subject_state(subject_id.clone()).await.is_err());
 
-    creator_1.manual_distribution(subject_id.clone()).await.unwrap();
+    creator_1
+        .manual_distribution(subject_id.clone())
+        .await
+        .unwrap();
 
     let _state = get_subject(&witness, subject_id.clone(), Some(1), true)
         .await
@@ -236,20 +237,31 @@ async fn manual_distribution() {
     nodes[3].token.cancel();
     join_all(nodes[3].handler.iter_mut()).await;
 
-    emit_transfer(&creator_1, subject_id.clone(), PublicKey::from_str(&creator_2.public_key()).unwrap(), true).await.unwrap();
+    emit_transfer(
+        &creator_1,
+        subject_id.clone(),
+        PublicKey::from_str(&creator_2.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
     let _state = get_subject(&creator_2, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
 
-    let _state = get_subject(&owner_governance, subject_id.clone(), Some(2), true)
+    let _state =
+        get_subject(&owner_governance, subject_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+    emit_reject(&creator_2, subject_id.clone(), true)
         .await
         .unwrap();
 
-    emit_reject(&creator_2, subject_id.clone(), true).await.unwrap();
-
-    let _state = get_subject(&owner_governance, subject_id.clone(), Some(3), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&owner_governance, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     let _state = get_subject(&creator_1, subject_id.clone(), Some(3), true)
         .await
@@ -262,16 +274,12 @@ async fn manual_distribution() {
         address: vec![nodes[0].listen_address.clone()],
     }];
 
-     let (node_other_witness, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_other_witness, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        None,
-        None,
-        None
-    )
+        ..Default::default()
+    })
     .await;
 
     let new_other_witness = node_other_witness.api.clone();
@@ -287,12 +295,14 @@ async fn manual_distribution() {
     new_other_witness
         .auth_subject(
             governance_id.clone(),
-            AuthWitness::One(PublicKey::from_str(&owner_governance.public_key()).unwrap()),
+            AuthWitness::One(
+                PublicKey::from_str(&owner_governance.public_key()).unwrap(),
+            ),
         )
         .await
         .unwrap();
 
-        let json = json!({
+    let json = json!({
         "members": {
             "add": [
                 {
@@ -335,9 +345,10 @@ async fn manual_distribution() {
         .await
         .unwrap();
 
-    let _state = get_subject(&new_other_witness, governance_id.clone(), Some(3), true)
-        .await
-        .unwrap();
+    let _state =
+        get_subject(&new_other_witness, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 
     assert!(
         new_other_witness
@@ -346,19 +357,27 @@ async fn manual_distribution() {
             .is_err()
     );
 
-    creator_2.manual_distribution(subject_id.clone()).await.unwrap();
-
-    let _state = get_subject(&new_other_witness, subject_id.clone(), Some(3), true)
+    creator_2
+        .manual_distribution(subject_id.clone())
         .await
         .unwrap();
+
+    let _state =
+        get_subject(&new_other_witness, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
 }
 
 #[test(tokio::test)]
 // Compilamos un contrato bajamos y subimos
 async fn test_up_down_compiler() {
     let (mut nodes, dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = nodes[0].api.clone();
 
@@ -428,16 +447,16 @@ async fn test_up_down_compiler() {
     let listen_address = format!("/memory/{}", port);
     let peers = vec![];
 
-    let (node_new_node2, _dirs) = create_node(
-        NodeType::Bootstrap,
-        &listen_address,
+    let (node_new_node2, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
         peers,
-        true,
-        false,
-        Some(nodes[0].keys.clone()),
-        Some(dirs[0].path().to_path_buf()),
-        Some(dirs[1].path().to_path_buf()),
-    )
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
     .await;
     let new_owner = node_new_node2.api.clone();
     node_running(&new_owner).await.unwrap();
@@ -469,14 +488,14 @@ async fn test_up_down_compiler() {
 // El issuer es any
 async fn test_issuer_any() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let emit_events = &nodes[1].api;
@@ -635,14 +654,14 @@ async fn test_issuer_any() {
 // Testear limitaciones en la creación de sujetos INFINITY - QUANTITY
 async fn test_limits_in_subjects() {
     //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let emit_events = &nodes[1].api;
@@ -919,14 +938,14 @@ async fn test_limits_in_subjects() {
 #[test(tokio::test)]
 // Testear los esppacios de nombre
 async fn test_namespace_in_role_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let evaluator = &nodes[0].api;
     let owner_governance = &nodes[1].api;
     let emit_events = &nodes[2].api;
@@ -1178,14 +1197,14 @@ async fn test_namespace_in_role_1() {
 #[test(tokio::test)]
 // Testear los esppacios de nombre
 async fn test_namespace_in_role_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let evaluator = &nodes[0].api;
     let owner_governance = &nodes[1].api;
     let emit_events = &nodes[2].api;
@@ -1438,14 +1457,14 @@ async fn test_namespace_in_role_2() {
 #[test(tokio::test)]
 // Testear la transferencia de sujeto
 async fn test_subject_transfer_event_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let future_owner = &nodes[0].api;
     let owner_governance = &nodes[1].api;
 
@@ -1687,14 +1706,14 @@ async fn test_subject_transfer_event_1() {
 #[test(tokio::test)]
 // Testear la transferencia de sujeto, entre dos nodos que no son el owner de la gobernanza
 async fn test_subject_transfer_event_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let future_owner = &nodes[1].api;
@@ -2025,14 +2044,14 @@ async fn test_subject_transfer_event_2() {
 // Testear la transferencia de sujeto, entre dos nodos que no son el owner de la gobernanza
 // Pero el nuevo owner ya tiene el límite y tiene que hacer reject y el otro recupera el sujeto.
 async fn test_subject_transfer_event_3() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let future_owner = &nodes[1].api;
@@ -2404,14 +2423,14 @@ async fn test_subject_transfer_event_3() {
 #[test(tokio::test)]
 // Un testigo nuevo reciba las copias de un sujeto que ya va por un sn != 0.
 async fn test_dynamic_witnesses_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let creator = &nodes[1].api;
@@ -2639,14 +2658,14 @@ async fn test_dynamic_witnesses_1() {
 #[test(tokio::test)]
 // Un testigo nuevo le pide la copia a otro testigo viejo.
 async fn test_dynamic_witnesses_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let creator = &nodes[1].api;
@@ -2964,14 +2983,14 @@ async fn test_dynamic_witnesses_2() {
 // EL Owner_governance es testigo pero Witnesses no es testigo explicito, no recibe copia.
 // Un testigo nuevo reciba las copias de un sujeto que ya va por un sn != 0.
 async fn test_dynamic_witnesses_explicit_1() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let creator = &nodes[1].api;
@@ -3156,14 +3175,14 @@ async fn test_dynamic_witnesses_explicit_1() {
 // el otro tiene un testigo explicito pero no es el owner
 // witness recibe la copia del testigo 1 y owner del 2.
 async fn test_dynamic_witnesses_explicit_2() {
-    let (nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0], vec![0]],
-        vec![],
-        true,
-        false,
-    )
-    .await;
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
     let creator = &nodes[1].api;
@@ -3396,8 +3415,12 @@ async fn test_dynamic_witnesses_explicit_2() {
 // Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_validator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3498,8 +3521,12 @@ async fn test_no_subject_validator() {
 // Vemos que se reinicia la request y la abortamos manualmente.
 async fn test_no_subject_evaluator() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3644,8 +3671,12 @@ async fn test_no_subject_evaluator() {
 // No es issuer
 async fn test_no_subject_issuer() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3744,8 +3775,12 @@ async fn test_no_subject_issuer() {
 // Testear 300 eventos sin cooldown para un sujeto
 async fn test_300_events() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -3869,8 +3904,12 @@ async fn test_300_events() {
 // uno que esté o que no
 async fn test_subj_no_all_validators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -4025,22 +4064,25 @@ async fn test_subj_no_all_validators() {
 #[test(tokio::test)]
 //  Verificar que update protocol actualiza pasivamente la un tracker, a un testigo no al creator.
 async fn test_update_protocol() {
-    let (mut nodes, _dirs) = create_nodes_and_connections(
-        vec![vec![]],
-        vec![vec![0],vec![0]],
-        vec![],
-        true,
-        true,
-    )
-    .await;
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            is_service: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = nodes[0].api.clone();
     let future_witness = nodes[1].api.clone();
     let creator = nodes[2].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner_governance, vec![&future_witness, &creator])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &owner_governance,
+        vec![&future_witness, &creator],
+    )
+    .await;
 
     let json = json!({
         "members": {
@@ -4129,15 +4171,10 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 
-    let (subject_id, ..) = create_subject(
-        &creator,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&creator, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     let json = json!({
         "ModOne": {
@@ -4163,7 +4200,6 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 
-    
     nodes[2].token.cancel();
     join_all(nodes[2].handler.iter_mut()).await;
 
@@ -4197,8 +4233,12 @@ async fn test_update_protocol() {
 // uno que esté o que no
 async fn test_subj_no_all_evaluators() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -4353,8 +4393,12 @@ async fn test_subj_no_all_evaluators() {
 // Creator infinity, falla porque no hay validadores, luego se completan todas las creaciones.
 async fn test_infinty_creations() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -4521,8 +4565,12 @@ async fn test_infinty_creations() {
 // Creator Quantity 2, falla porque no hay validadores, luego se completa 2 creaciones.
 async fn test_quantity_creations() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -4708,8 +4756,12 @@ async fn test_quantity_creations() {
 #[test(tokio::test)]
 async fn test_tracker_fact_viewpoints_accept_valid_values() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
@@ -4844,8 +4896,12 @@ async fn test_tracker_fact_viewpoints_accept_valid_values() {
 #[test(tokio::test)]
 async fn test_tracker_fact_viewpoints_reject_invalid_values() {
     let (nodes, _dirs) =
-        create_nodes_and_connections(vec![vec![]], vec![], vec![], true, false)
-            .await;
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
 
     let owner_governance = &nodes[0].api;
 
