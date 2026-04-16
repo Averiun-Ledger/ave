@@ -10,7 +10,7 @@ use ave_common::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
         RejectRequest, TransferRequest,
     },
-    response::{LedgerDB, MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB},
+    response::{LedgerDB, MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB, TrackerEventVisibilityRangeDB, TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB},
 };
 use ave_core::{
     Api,
@@ -189,6 +189,7 @@ pub async fn create_node(
     )
 }
 
+#[allow(dead_code)]
 pub async fn create_nodes_and_connections(
     config: CreateNodesAndConnectionsConfig,
 ) -> (Vec<NodeData>, Vec<TempDir>) {
@@ -299,6 +300,7 @@ pub async fn create_nodes_and_connections(
 /// Crea una governance en `owner_node` y lo autoriza en `other_nodes`.
 /// Retorna el `governance_id` generado.
 /// Correcto
+#[allow(dead_code)]
 pub async fn create_and_authorize_governance(
     owner_node: &Api,
     other_nodes: Vec<&Api>,
@@ -356,6 +358,7 @@ pub async fn create_subject(
     Ok((subject_id, request_id))
 }
 
+#[allow(dead_code)]
 pub async fn emit_fact(
     node: &Api,
     subject_id: DigestIdentifier,
@@ -463,6 +466,7 @@ pub async fn emit_fact_signed(
     Ok(request_id)
 }
 
+#[allow(dead_code)]
 pub async fn get_subject(
     node: &Api,
     subject_id: DigestIdentifier,
@@ -658,6 +662,7 @@ pub async fn wait_request(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn node_running(
     node: &Api,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -784,6 +789,64 @@ pub async fn emit_eol(
 
     let request_id = response.request_id;
     wait_request(node, request_id.clone()).await.unwrap();
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn assert_tracker_fact_opaque(
+    event: &RequestEventDB,
+    expected_viewpoints: &[&str],
+) -> Result<(), String> {
+    match event {
+        RequestEventDB::TrackerFactOpaque { viewpoints, .. } => {
+            let expected = expected_viewpoints
+                .iter()
+                .map(|viewpoint| viewpoint.to_string())
+                .collect::<Vec<_>>();
+            if viewpoints != &expected {
+                return Err(format!(
+                    "unexpected opaque viewpoints: got {:?}, expected {:?}",
+                    viewpoints, expected
+                ));
+            }
+            Ok(())
+        }
+        event => Err(format!("unexpected opaque fact event: {event:?}")),
+    }
+}
+
+#[allow(dead_code)]
+pub fn assert_tracker_visibility(
+    state: &SubjectDB,
+    expected_mode: TrackerVisibilityModeDB,
+    expected_stored: Vec<TrackerStoredVisibilityRangeDB>,
+    expected_events: Vec<TrackerEventVisibilityRangeDB>,
+) -> Result<(), String> {
+    let visibility = state.tracker_visibility.as_ref().ok_or_else(|| {
+        "tracker subjects must expose tracker_visibility".to_owned()
+    })?;
+
+    if visibility.mode != expected_mode {
+        return Err(format!(
+            "unexpected tracker visibility mode: got {:?}, expected {:?}",
+            visibility.mode, expected_mode
+        ));
+    }
+
+    if visibility.stored_ranges != expected_stored {
+        return Err(format!(
+            "unexpected stored visibility ranges: got {:?}, expected {:?}",
+            visibility.stored_ranges, expected_stored
+        ));
+    }
+
+    if visibility.event_ranges != expected_events {
+        return Err(format!(
+            "unexpected event visibility ranges: got {:?}, expected {:?}",
+            visibility.event_ranges, expected_events
+        ));
+    }
 
     Ok(())
 }
