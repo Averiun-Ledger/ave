@@ -31,7 +31,7 @@ use ave_common::{
 };
 
 use json_patch::diff;
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction, Handler, Message,
@@ -668,7 +668,7 @@ impl Handler<Self> for EvalWorker {
 
                 if let Err(e) = self
                     .network
-                    .send_command(network::CommandHelper::SendMessage {
+                    .send_command(ave_network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info,
                             message: ActorMessage::EvaluationRes {

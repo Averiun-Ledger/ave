@@ -31,9 +31,9 @@ use super::{NetworkMessage, service::NetworkSender};
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use bytes::Bytes;
-use network::Command as NetworkCommand;
-use network::CommandHelper as Command;
-use network::{PeerId, PublicKeyEd25519};
+use ave_network::Command as NetworkCommand;
+use ave_network::CommandHelper as Command;
+use ave_network::{PeerId, PublicKeyEd25519};
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::{io::Cursor, sync::Arc};
@@ -717,7 +717,7 @@ impl Intermediary {
                             }
                         })?;
 
-                let pk = network::PublicKeyLibP2P::from(pk_ed);
+                let pk = ave_network::PublicKeyLibP2P::from(pk_ed);
                 Ok(pk.to_peer_id())
             }
         }

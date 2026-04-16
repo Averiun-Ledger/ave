@@ -41,7 +41,7 @@ use ave_common::{
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use json_patch::{Patch, patch};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use std::collections::BTreeSet;
 
 use ave_actors::{
@@ -1297,7 +1297,7 @@ impl Handler<Self> for ValiWorker {
                     Signed::from_parts(validation, signature);
                 if let Err(e) = self
                     .network
-                    .send_command(network::CommandHelper::SendMessage {
+                    .send_command(ave_network::CommandHelper::SendMessage {
                         message: NetworkMessage {
                             info: new_info.clone(),
                             message: ActorMessage::ValidationRes {

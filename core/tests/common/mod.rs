@@ -21,7 +21,7 @@ use ave_core::{
         UpdateSyncConfig,
     },
 };
-use network::{Config as NetworkConfig, RoutingNode};
+use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
     collections::BTreeSet, env, fs, path::PathBuf, process, str::FromStr, sync::atomic::{AtomicU16, AtomicU64, Ordering}, time::Duration
@@ -57,7 +57,7 @@ pub struct CreateNodesAndConnectionsConfig {
 
 #[derive(Default)]
 pub struct CreateNodeConfig {
-    pub node_type: network::NodeType,
+    pub node_type: ave_network::NodeType,
     pub listen_address: String,
     pub peers: Vec<RoutingNode>,
     pub always_accept: bool,
@@ -222,7 +222,7 @@ pub async fn create_nodes_and_connections(
             .collect();
 
         let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
-            node_type: network::NodeType::Bootstrap,
+            node_type: ave_network::NodeType::Bootstrap,
             listen_address: listen_address.clone(),
             peers,
             always_accept,
@@ -250,7 +250,7 @@ pub async fn create_nodes_and_connections(
             .collect();
 
         let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
-            node_type: network::NodeType::Addressable,
+            node_type: ave_network::NodeType::Addressable,
             listen_address: listen_address.clone(),
             peers,
             always_accept,
@@ -278,7 +278,7 @@ pub async fn create_nodes_and_connections(
             .collect();
 
         let (node, .., mut vec_dirs) = create_node(CreateNodeConfig {
-            node_type: network::NodeType::Ephemeral,
+            node_type: ave_network::NodeType::Ephemeral,
             listen_address: listen_address.clone(),
             peers,
             always_accept,

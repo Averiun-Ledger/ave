@@ -156,7 +156,7 @@ pub mod tests {
     };
 
     use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-    use network::Config as NetworkConfig;
+    use ave_network::Config as NetworkConfig;
     use tempfile::TempDir;
     use test_log::test;
 
@@ -212,7 +212,7 @@ pub mod tests {
         vec_dirs.push(dir_contracts);
 
         let newtork_config = NetworkConfig::new(
-            network::NodeType::Bootstrap,
+            ave_network::NodeType::Bootstrap,
             vec![],
             vec![],
             vec![],

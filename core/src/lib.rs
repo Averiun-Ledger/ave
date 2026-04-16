@@ -44,7 +44,7 @@ use error::Error;
 use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
-use network::{
+use ave_network::{
     MachineSpec, Monitor, MonitorMessage, MonitorResponse, NetworkWorker,
     NetworkWorkerRuntime,
 };
@@ -319,7 +319,7 @@ impl Api {
             })?;
 
         let spec = config.spec.map(MachineSpec::from);
-        let network_metrics = network::metrics::register(registry);
+        let network_metrics = ave_network::metrics::register(registry);
         crate::metrics::register(registry);
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(

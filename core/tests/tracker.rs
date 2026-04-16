@@ -18,7 +18,7 @@ use common::{
     get_subject,
 };
 use futures::future::join_all;
-use network::{NodeType, RoutingNode};
+use ave_network::{NodeType, RoutingNode};
 use serde_json::json;
 use test_log::test;
 

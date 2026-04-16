@@ -10,7 +10,7 @@ use ave_actors::{
 
 use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 use updater::{Updater, UpdaterMessage};
@@ -251,7 +251,7 @@ impl Update {
         };
 
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info,
                     message: ActorMessage::DistributionLedgerReq {

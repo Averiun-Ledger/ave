@@ -269,7 +269,7 @@ mod tests {
         },
         subject::sinkdata::SinkTypes,
     };
-    use network::{MemoryLimitsConfig, NodeType, RoutingNode};
+    use ave_network::{MemoryLimitsConfig, NodeType, RoutingNode};
     use tempfile::TempPath;
 
     use crate::{

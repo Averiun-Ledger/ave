@@ -2,7 +2,7 @@
 //!
 
 use ave_actors::ActorError;
-use network::CommandHelper as Command;
+use ave_network::CommandHelper as Command;
 use tokio::sync::mpsc::Sender;
 use tracing::error;
 

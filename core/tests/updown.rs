@@ -12,7 +12,7 @@ use common::{
 };
 
 use futures::future::join_all;
-use network::{NodeType, RoutingNode};
+use ave_network::{NodeType, RoutingNode};
 use serde_json::json;
 use std::{str::FromStr, sync::atomic::Ordering};
 use test_log::test;

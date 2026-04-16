@@ -18,7 +18,7 @@ use ave_actors::{
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use super::{

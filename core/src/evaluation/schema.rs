@@ -12,7 +12,7 @@ use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed},
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{

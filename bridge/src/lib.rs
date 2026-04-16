@@ -30,7 +30,7 @@ pub use ave_core::{
 };
 use ave_core::{config::SinkAuth, helpers::sink::obtain_token};
 use config::Config;
-pub use network::{
+pub use ave_network::{
     Config as NetworkConfig, ControlListConfig, MemoryLimitsConfig,
     RoutingConfig, RoutingNode,
 };

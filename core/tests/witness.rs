@@ -10,7 +10,7 @@ use common::{
 };
 
 use futures::future::join_all;
-use network::{NodeType, RoutingNode};
+use ave_network::{NodeType, RoutingNode};
 use serde_json::json;
 use std::time::Duration;
 use std::{str::FromStr, sync::atomic::Ordering};

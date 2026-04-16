@@ -7,7 +7,7 @@ use ave_actors::{
     RetryMessage, Strategy,
 };
 use ave_common::identity::PublicKey;
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage,

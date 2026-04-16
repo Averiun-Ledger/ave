@@ -15,7 +15,7 @@ use crate::auth::{Auth, AuthMessage, AuthResponse};
 use crate::helpers::network::{
     ActorMessage, NetworkMessage, service::NetworkSender,
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct UpdateTarget {
@@ -149,7 +149,7 @@ impl GovernanceVersionSync {
         };
 
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info,
                     message: ActorMessage::DistributionLedgerReq {
@@ -259,7 +259,7 @@ impl GovernanceVersionSync {
 
             if let Err(error) = self
                 .network
-                .send_command(network::CommandHelper::SendMessage { message })
+                .send_command(ave_network::CommandHelper::SendMessage { message })
                 .await
             {
                 warn!(

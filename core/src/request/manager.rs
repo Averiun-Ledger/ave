@@ -12,7 +12,7 @@ use ave_common::request::EventRequest;
 use ave_common::response::RequestState;
 use ave_common::{Namespace, SchemaType, ValueWrapper};
 use borsh::{BorshDeserialize, BorshSerialize};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1391,7 +1391,7 @@ impl RequestManager {
             };
 
             network
-                .send_command(network::CommandHelper::SendMessage {
+                .send_command(ave_network::CommandHelper::SendMessage {
                     message: NetworkMessage {
                         info,
                         message: ActorMessage::DistributionLedgerReq {

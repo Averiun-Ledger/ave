@@ -1,6 +1,6 @@
 [package]
 name = "ave-core"
-version = "0.9.0"
+version = "0.10.0"
 edition.workspace = true
 authors.workspace = true
 description = "Averiun Ledger core runtime and node API"
@@ -23,9 +23,9 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "fs", "process"] }
 tracing = { workspace = true }
-network = { package = "ave-network", path = "../network", version = "0.9.0" }
+ave-network = { workspace = true }
 rmp-serde = { workspace = true }
-wasmtime = {version = "42.0.1"}
+wasmtime = {version = "43.0.1"}
 base64 = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
@@ -38,7 +38,7 @@ prometheus-client = { workspace = true }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
-network = { package = "ave-network", path = "../network", version = "0.9.0", features = ["test"] }
+ave-network = { workspace = true, features = ["test"] }
 futures = { workspace = true }
 axum = { workspace = true }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ave_actors::{Actor, ActorContext, ActorError, ActorPath, Handler};
 
 use ave_common::identity::{DigestIdentifier, PublicKey, Signature};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
@@ -179,7 +179,7 @@ pub async fn update_ledger_network(
     };
 
     network
-        .send_command(network::CommandHelper::SendMessage {
+        .send_command(ave_network::CommandHelper::SendMessage {
             message: NetworkMessage {
                 info,
                 message: request,

@@ -1,6 +1,6 @@
 {
   "name": "ave-types",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "TypeScript types for the Averiun Ledger API",
   "types": "src/index.ts",
   "exports": {

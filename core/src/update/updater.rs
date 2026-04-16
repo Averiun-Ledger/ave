@@ -8,7 +8,7 @@ use ave_actors::{
 
 use async_trait::async_trait;
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{

@@ -7,7 +7,7 @@ use std::{
 };
 
 use ave_common::identity::{HashAlgorithm, KeyPairAlgorithm};
-use network::Config as NetworkConfig;
+use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{helpers::sink::TokenResponse, subject::sinkdata::SinkTypes};
@@ -350,7 +350,7 @@ pub(crate) fn detect_cpu_cores() -> usize {
 
 // ── Conversions to peer-crate MachineSpec types ───────────────────────────────
 
-impl From<MachineProfile> for network::MachineProfile {
+impl From<MachineProfile> for ave_network::MachineProfile {
     fn from(p: MachineProfile) -> Self {
         match p {
             MachineProfile::Nano => Self::Nano,
@@ -364,7 +364,7 @@ impl From<MachineProfile> for network::MachineProfile {
     }
 }
 
-impl From<MachineSpec> for network::MachineSpec {
+impl From<MachineSpec> for ave_network::MachineSpec {
     fn from(spec: MachineSpec) -> Self {
         match spec {
             MachineSpec::Profile(p) => Self::Profile(p.into()),

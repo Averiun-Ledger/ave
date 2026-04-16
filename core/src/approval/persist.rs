@@ -28,7 +28,7 @@ use ave_common::{
     },
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
@@ -215,7 +215,7 @@ impl ApprPersist {
             };
 
             if let Err(e) = network
-                .send_command(network::CommandHelper::SendMessage {
+                .send_command(ave_network::CommandHelper::SendMessage {
                     message: NetworkMessage {
                         info: new_info,
                         message: ActorMessage::ApprovalRes {

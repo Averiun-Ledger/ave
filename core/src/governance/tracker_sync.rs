@@ -10,7 +10,7 @@ use ave_actors::{
     NotPersistentActor, Response,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
@@ -304,7 +304,7 @@ impl TrackerSync {
         let request_nonce = self.allocate_nonce();
 
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: peer.clone(),
@@ -376,7 +376,7 @@ impl TrackerSync {
         actual_sn: Option<u64>,
     ) -> Result<(), ActorError> {
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: peer.clone(),
@@ -591,7 +591,7 @@ impl TrackerSync {
         };
 
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage {
                     info: ComunicateInfo {
                         receiver: request.sender,

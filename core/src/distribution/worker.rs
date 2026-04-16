@@ -9,7 +9,7 @@ use ave_common::{
     SchemaType,
     identity::{DigestIdentifier, PublicKey},
 };
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
@@ -137,7 +137,7 @@ impl DistriWorker {
         message: ActorMessage,
     ) -> Result<(), ActorError> {
         self.network
-            .send_command(network::CommandHelper::SendMessage {
+            .send_command(ave_network::CommandHelper::SendMessage {
                 message: NetworkMessage { info, message },
             })
             .await

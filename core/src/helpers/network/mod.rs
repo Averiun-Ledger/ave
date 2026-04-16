@@ -1,6 +1,6 @@
 use ave_actors::Message;
 use ave_common::identity::{DigestIdentifier, Signed};
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::{

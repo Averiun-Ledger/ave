@@ -10,7 +10,7 @@ use crate::helpers::network::ActorMessage;
 use async_trait::async_trait;
 use ave_common::identity::{HashAlgorithm, PublicKey, Signed, hash_borsh};
 
-use network::ComunicateInfo;
+use ave_network::ComunicateInfo;
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ChildAction,
