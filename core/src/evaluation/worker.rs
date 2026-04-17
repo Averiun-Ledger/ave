@@ -581,7 +581,6 @@ impl Handler<Self> for EvalWorker {
                     return Ok(());
                 }
 
-                // TODO MUCHO CUIDADO COn esto
                 let reboot = match self
                     .check_governance(evaluation_req.content().gov_version)
                     .await

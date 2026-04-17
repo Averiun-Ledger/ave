@@ -1207,7 +1207,6 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 }
 
-                // TODO MUCHO CUIDADO COn esto
                 let reboot = match self
                     .check_governance(
                         validation_req.content().get_gov_version(),
