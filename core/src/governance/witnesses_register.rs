@@ -582,6 +582,35 @@ impl WitnessesRegister {
         out
     }
 
+    fn creator_grant_for_event_or_current_owner(
+        &self,
+        node: &PublicKey,
+        creator: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &Namespace,
+        event_gov_version: u64,
+        owner_from_gov_version: u64,
+    ) -> Option<CreatorWitnessGrant> {
+        self.creator_grant_for_owner_interval(
+            node,
+            creator,
+            schema_id,
+            namespace,
+            event_gov_version,
+            event_gov_version,
+        )
+        .or_else(|| {
+            self.creator_grant_for_owner_interval(
+                node,
+                creator,
+                schema_id,
+                namespace,
+                owner_from_gov_version,
+                u64::MAX,
+            )
+        })
+    }
+
     fn grant_allows_clear(
         grant: Option<CreatorWitnessGrant>,
         viewpoints: &BTreeSet<String>,
@@ -697,13 +726,13 @@ impl WitnessesRegister {
                     grant = Some(Self::merge_grant(
                         grant,
                         &self
-                            .creator_grant_for_owner_interval(
+                            .creator_grant_for_event_or_current_owner(
                                 node,
                                 &data.actual_owner,
                                 schema_id,
                                 namespace,
+                                gov_version,
                                 data.gov_version,
-                                u64::MAX,
                             )
                             .unwrap_or(CreatorWitnessGrant::Hash),
                     ));
@@ -716,13 +745,13 @@ impl WitnessesRegister {
                     grant = Some(Self::merge_grant(
                         grant,
                         &self
-                            .creator_grant_for_owner_interval(
+                            .creator_grant_for_event_or_current_owner(
                                 node,
                                 new_owner,
                                 schema_id,
                                 namespace,
+                                gov_version,
                                 *new_owner_gov_version,
-                                u64::MAX,
                             )
                             .unwrap_or(CreatorWitnessGrant::Hash),
                     ));
@@ -742,8 +771,12 @@ impl WitnessesRegister {
                             grant,
                             &self
                                 .creator_grant_for_owner_interval(
-                                    node, creator, schema_id, namespace,
-                                    range.lo, range.hi,
+                                    node,
+                                    creator,
+                                    schema_id,
+                                    namespace,
+                                    gov_version,
+                                    gov_version,
                                 )
                                 .unwrap_or(CreatorWitnessGrant::Hash),
                         ));

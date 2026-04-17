@@ -37,7 +37,7 @@ use crate::{
             tracker_schemas_role_event_check_data,
             tracker_schemas_role_event_is_empty,
         },
-        model::{HashThisRole, RoleTypes, Schema},
+        model::{CreatorWitness, HashThisRole, RoleCreator, RoleTypes, Schema},
     },
     metrics::try_core_metrics,
     model::common::contract::{
@@ -58,6 +58,48 @@ pub mod types;
 pub struct Runner;
 
 impl Runner {
+    fn adapt_creator_witnesses_to_schema_viewpoints(
+        governance: &mut GovernanceData,
+        schema_id: &SchemaType,
+        schema_viewpoints: &BTreeSet<String>,
+    ) {
+        let Some(roles_schema) = governance.roles_schema.get_mut(schema_id)
+        else {
+            return;
+        };
+
+        roles_schema.creator = roles_schema
+            .creator
+            .iter()
+            .map(|creator| {
+                let mut creator = creator.clone();
+                creator.witnesses = creator
+                    .witnesses
+                    .iter()
+                    .map(|witness| {
+                        if witness.viewpoints.is_empty()
+                            || witness.viewpoints.contains(
+                                &ReservedWords::AllViewpoints.to_string(),
+                            )
+                        {
+                            witness.clone()
+                        } else {
+                            CreatorWitness {
+                                name: witness.name.clone(),
+                                viewpoints: witness
+                                    .viewpoints
+                                    .intersection(schema_viewpoints)
+                                    .cloned()
+                                    .collect(),
+                            }
+                        }
+                    })
+                    .collect();
+                creator
+            })
+            .collect::<BTreeSet<RoleCreator>>();
+    }
+
     async fn execute_contract(
         ctx: &ActorContext<Self>,
         data: &EvaluateInfo,
@@ -1234,6 +1276,11 @@ impl Runner {
                     }
 
                     schema_data.viewpoints = new_viewpoints;
+                    Self::adapt_creator_witnesses_to_schema_viewpoints(
+                        governance,
+                        &change_schema.actual_id,
+                        &schema_data.viewpoints,
+                    );
                 }
 
                 change_schemas.insert(change_schema.actual_id);

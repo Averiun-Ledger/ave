@@ -4,9 +4,9 @@ use std::{collections::BTreeSet, str::FromStr, sync::atomic::Ordering};
 
 use ave_common::{
     bridge::response::{
-        TrackerEventVisibilityDB,
-        TrackerEventVisibilityRangeDB, TrackerStoredVisibilityDB,
-        TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
+        TrackerEventVisibilityDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityDB, TrackerStoredVisibilityRangeDB,
+        TrackerVisibilityModeDB,
     },
     identity::PublicKey,
 };
@@ -15,8 +15,8 @@ use ave_network::{NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, assert_tracker_fact_full, assert_tracker_visibility,
     create_and_authorize_governance, create_node, create_nodes_and_connections,
-    create_subject, emit_confirm,  emit_fact, emit_fact_viewpoints,
-    emit_reject, emit_transfer, get_events, get_subject, node_running,
+    create_subject, emit_confirm, emit_fact, emit_fact_viewpoints, emit_reject,
+    emit_transfer, get_events, get_subject, node_running,
 };
 use futures::future::join_all;
 use serde_json::json;

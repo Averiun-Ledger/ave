@@ -247,6 +247,33 @@ fn validate_creator_witnesses(
     Ok(validated_witnesses)
 }
 
+fn adapt_creator_witnesses_to_viewpoints(
+    witnesses: &BTreeSet<CreatorWitness>,
+    schema_viewpoints: &BTreeSet<String>,
+) -> BTreeSet<CreatorWitness> {
+    witnesses
+        .iter()
+        .map(|witness| {
+            if witness.viewpoints.is_empty()
+                || witness
+                    .viewpoints
+                    .contains(&ReservedWords::AllViewpoints.to_string())
+            {
+                witness.clone()
+            } else {
+                CreatorWitness {
+                    name: witness.name.clone(),
+                    viewpoints: witness
+                        .viewpoints
+                        .intersection(schema_viewpoints)
+                        .cloned()
+                        .collect(),
+                }
+            }
+        })
+        .collect()
+}
+
 fn tracker_schemas_role_event_to_schema_id_role(
     event: &TrackerSchemasRoleEvent,
 ) -> SchemaIdRole {
@@ -326,6 +353,8 @@ pub fn governance_event_update_creator_change(
     )> = HashSet::new();
 
     let mut remove_creator: HashSet<(SchemaType, String, PublicKey)> =
+        HashSet::new();
+    let mut explicit_witness_updates: HashSet<(SchemaType, String, PublicKey)> =
         HashSet::new();
 
     if let Some(roles) = &event.roles
@@ -434,6 +463,11 @@ pub fn governance_event_update_creator_change(
                             }
 
                             if let Some(w) = &x.new_witnesses {
+                                explicit_witness_updates.insert((
+                                    schema.schema_id.clone(),
+                                    x.actual_namespace.to_string(),
+                                    user.clone(),
+                                ));
                                 update_creator_witnesses.insert((
                                     schema.schema_id.clone(),
                                     x.actual_namespace.to_string(),
@@ -444,6 +478,48 @@ pub fn governance_event_update_creator_change(
                         }
                     }
                 });
+            }
+        }
+    }
+
+    if let Some(schemas) = &event.schemas
+        && let Some(changes) = &schemas.change
+    {
+        for schema_change in changes {
+            let Some(new_viewpoints) = &schema_change.new_viewpoints else {
+                continue;
+            };
+            let Some(roles) = roles_schema.get(&schema_change.actual_id) else {
+                continue;
+            };
+            let schema_viewpoints =
+                new_viewpoints.iter().cloned().collect::<BTreeSet<_>>();
+
+            for creator in &roles.creator {
+                let Some(user) = members.get(&creator.name) else {
+                    continue;
+                };
+                let key = (
+                    schema_change.actual_id.clone(),
+                    creator.namespace.to_string(),
+                    user.clone(),
+                );
+
+                if remove_creator.contains(&key)
+                    || explicit_witness_updates.contains(&key)
+                {
+                    continue;
+                }
+
+                let adapted = adapt_creator_witnesses_to_viewpoints(
+                    &creator.witnesses,
+                    &schema_viewpoints,
+                );
+
+                if adapted != creator.witnesses {
+                    update_creator_witnesses
+                        .insert((key.0, key.1, key.2, adapted));
+                }
             }
         }
     }

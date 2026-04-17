@@ -10,7 +10,11 @@ use ave_common::{
         ConfirmRequest, CreateRequest, EOLRequest, EventRequest, FactRequest,
         RejectRequest, TransferRequest,
     },
-    response::{LedgerDB, MonitorNetworkState, PaginatorAborts, RequestEventDB, RequestState, SubjectDB, TrackerEventVisibilityRangeDB, TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB},
+    response::{
+        LedgerDB, MonitorNetworkState, PaginatorAborts, RequestEventDB,
+        RequestState, SubjectDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
+    },
 };
 use ave_core::{
     Api,
@@ -24,7 +28,13 @@ use ave_core::{
 use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
 use std::{
-    collections::BTreeSet, env, fs, path::PathBuf, process, str::FromStr, sync::atomic::{AtomicU16, AtomicU64, Ordering}, time::Duration
+    collections::BTreeSet,
+    env, fs,
+    path::PathBuf,
+    process,
+    str::FromStr,
+    sync::atomic::{AtomicU16, AtomicU64, Ordering},
+    time::Duration,
 };
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -68,9 +78,7 @@ pub struct CreateNodeConfig {
     pub ledger_batch_size: Option<usize>,
 }
 
-pub async fn create_node(
-    config: CreateNodeConfig,
-) -> (NodeData, Vec<TempDir>) {
+pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
     let CreateNodeConfig {
         node_type,
         listen_address,

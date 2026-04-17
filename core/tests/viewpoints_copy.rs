@@ -1,8 +1,6 @@
 mod common;
 
-use std::{
-    collections::BTreeSet, str::FromStr
-};
+use std::{collections::BTreeSet, str::FromStr};
 
 use ave_common::{
     bridge::response::{
@@ -14,15 +12,17 @@ use ave_common::{
 };
 use ave_core::auth::AuthWitness;
 use common::{
-    assert_tracker_fact_full,
-    create_and_authorize_governance, create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
-    emit_eol, emit_fact_viewpoints, emit_reject, emit_transfer, get_events,
-    get_subject, assert_tracker_visibility
+    assert_tracker_fact_full, assert_tracker_visibility,
+    create_and_authorize_governance, create_nodes_and_connections,
+    create_subject, emit_confirm, emit_eol, emit_fact, emit_fact_viewpoints,
+    emit_reject, emit_transfer, get_events, get_subject,
 };
 use serde_json::json;
 use test_log::test;
 
-use crate::common::{CreateNodesAndConnectionsConfig, assert_tracker_fact_opaque};
+use crate::common::{
+    CreateNodesAndConnectionsConfig, assert_tracker_fact_opaque,
+};
 
 const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
@@ -62,7 +62,13 @@ async fn test_viewpoints_projection_battery() {
 
     let governance_id = create_and_authorize_governance(
         &owner,
-        vec![&witness_full, &sender_agua, &new_owner, &nodes[4].api, &nodes[5].api],
+        vec![
+            &witness_full,
+            &sender_agua,
+            &new_owner,
+            &nodes[4].api,
+            &nodes[5].api,
+        ],
     )
     .await;
 
@@ -383,7 +389,10 @@ async fn test_viewpoints_projection_battery() {
         )
         .await
         .unwrap();
-    requester_basura.update_subject(subject_id.clone()).await.unwrap();
+    requester_basura
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
 
     let basura_state =
         get_subject(&requester_basura, subject_id.clone(), Some(8), true)
@@ -453,9 +462,10 @@ async fn test_viewpoints_projection_battery() {
     )
     .unwrap();
 
-    let basura_events = get_events(&requester_basura, subject_id.clone(), 9, true)
-        .await
-        .unwrap();
+    let basura_events =
+        get_events(&requester_basura, subject_id.clone(), 9, true)
+            .await
+            .unwrap();
     assert_tracker_fact_opaque(&basura_events[1].event, &["agua"]).unwrap();
     assert_tracker_fact_opaque(&basura_events[2].event, &["basura"]).unwrap();
     assert_tracker_fact_full(
@@ -467,10 +477,19 @@ async fn test_viewpoints_projection_battery() {
         }),
         &[],
     );
-    assert!(matches!(basura_events[4].event, RequestEventDB::Transfer { .. }));
+    assert!(matches!(
+        basura_events[4].event,
+        RequestEventDB::Transfer { .. }
+    ));
     assert!(matches!(basura_events[5].event, RequestEventDB::Reject));
-    assert!(matches!(basura_events[6].event, RequestEventDB::Transfer { .. }));
-    assert!(matches!(basura_events[7].event, RequestEventDB::TrackerConfirm));
+    assert!(matches!(
+        basura_events[6].event,
+        RequestEventDB::Transfer { .. }
+    ));
+    assert!(matches!(
+        basura_events[7].event,
+        RequestEventDB::TrackerConfirm
+    ));
     assert!(matches!(basura_events[8].event, RequestEventDB::EOL));
 
     requester_hash
@@ -482,7 +501,10 @@ async fn test_viewpoints_projection_battery() {
         )
         .await
         .unwrap();
-    requester_hash.update_subject(subject_id.clone()).await.unwrap();
+    requester_hash
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
 
     let hash_state =
         get_subject(&requester_hash, subject_id.clone(), Some(8), true)
@@ -566,10 +588,19 @@ async fn test_viewpoints_projection_battery() {
         }),
         &[],
     );
-    assert!(matches!(hash_events[4].event, RequestEventDB::Transfer { .. }));
+    assert!(matches!(
+        hash_events[4].event,
+        RequestEventDB::Transfer { .. }
+    ));
     assert!(matches!(hash_events[5].event, RequestEventDB::Reject));
-    assert!(matches!(hash_events[6].event, RequestEventDB::Transfer { .. }));
-    assert!(matches!(hash_events[7].event, RequestEventDB::TrackerConfirm));
+    assert!(matches!(
+        hash_events[6].event,
+        RequestEventDB::Transfer { .. }
+    ));
+    assert!(matches!(
+        hash_events[7].event,
+        RequestEventDB::TrackerConfirm
+    ));
     assert!(matches!(hash_events[8].event, RequestEventDB::EOL));
 }
 
@@ -904,9 +935,7 @@ async fn test_viewpoints_copy_paths_battery() {
     requester_auth
         .auth_subject(
             subject_auth.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -918,9 +947,7 @@ async fn test_viewpoints_copy_paths_battery() {
     invalid_auth
         .auth_subject(
             subject_auth.clone(),
-            AuthWitness::One(
-                PublicKey::from_str(&owner.public_key()).unwrap(),
-            ),
+            AuthWitness::One(PublicKey::from_str(&owner.public_key()).unwrap()),
         )
         .await
         .unwrap();
@@ -1214,12 +1241,14 @@ async fn test_viewpoints_copy_paths_battery() {
         get_events(&requester_manual, subject_manual.clone(), 4, true)
             .await
             .unwrap();
-    let auth_events = get_events(&requester_auth, subject_auth.clone(), 4, true)
-        .await
-        .unwrap();
-    let auto_events = get_events(&requester_auto, subject_auto.clone(), 5, true)
-        .await
-        .unwrap();
+    let auth_events =
+        get_events(&requester_auth, subject_auth.clone(), 4, true)
+            .await
+            .unwrap();
+    let auto_events =
+        get_events(&requester_auto, subject_auto.clone(), 5, true)
+            .await
+            .unwrap();
     let invalid_manual_events =
         get_events(&invalid_manual, subject_manual.clone(), 4, true)
             .await
@@ -1269,8 +1298,10 @@ async fn test_viewpoints_copy_paths_battery() {
         );
     }
 
-    assert_tracker_fact_opaque(&invalid_auto_events[1].event, &["agua"]).unwrap();
-    assert_tracker_fact_opaque(&invalid_auto_events[2].event, &["basura"]).unwrap();
+    assert_tracker_fact_opaque(&invalid_auto_events[1].event, &["agua"])
+        .unwrap();
+    assert_tracker_fact_opaque(&invalid_auto_events[2].event, &["basura"])
+        .unwrap();
     assert_tracker_fact_full(
         &invalid_auto_events[3].event,
         json!({
